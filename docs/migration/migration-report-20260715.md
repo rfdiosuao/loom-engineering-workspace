@@ -35,6 +35,7 @@ Excluded material remains in the legacy migration source. It was not deleted.
 - Phone Agent: `testDebugUnitTest` completed with `BUILD SUCCESSFUL`
 - Platform worktree smoke test: create, inspect, remove, and branch cleanup passed
 - Phone worktree smoke test: create, inspect, remove, and branch cleanup passed
+- Local default-branch push guard: block and explicit-bypass smoke tests passed
 - Staged sensitive-filename scan: no matches
 - Staged credential-pattern scan: no matches
 - Git whitespace check: passed
@@ -44,8 +45,11 @@ Excluded material remains in the legacy migration source. It was not deleted.
 - Vite reports one ineffective dynamic-import optimization involving the Tauri event API.
 - Pytest reports one collection warning for `TestableProcessService` because the class defines `__init__`.
 - Android compilation reports deprecated API usage and one comparator type warning.
+- The current GitHub account plan does not permit server-side branch protection on private repositories. GitHub returned HTTP 403 with an upgrade requirement.
 
 These warnings predate the workspace hub and do not block the verified builds. They should be handled through focused maintenance Issues rather than folded into workspace migration.
+
+The branch-protection limitation is mitigated with a versioned local `pre-push` Hook installed by `bootstrap.ps1`. It blocks direct pushes to `main` and `master` in the hub, platform, and Phone Agent repositories. GitHub Actions remains the remote verification gate.
 
 ## Parallel Development Readiness
 
