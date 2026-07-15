@@ -1,0 +1,51 @@
+name: Bug
+description: Report a reproducible LOOM engineering defect.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: dropdown
+    id: owner
+    attributes:
+      label: Owning repository
+      options:
+        - loom-engineering-workspace
+        - loom-luming-launcher
+        - lumiapkclaw
+        - unknown
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include device ID aliases and job IDs, but never include raw tokens or customer data.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Include sanitized logs, test names, campaign IDs, or screenshots stored outside Git.
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Regression
+      options:
+        - Unknown
+        - Yes
+        - No
+    validations:
+      required: true

@@ -1,0 +1,22 @@
+{
+  "schema": "loom.engineering.workspace.v1",
+  "repositories": {
+    "platform": {
+      "path": "apps/loom-platform",
+      "remote": "https://github.com/rfdiosuao/loom-luming-launcher.git",
+      "baselineBranch": "codex/workspace-baseline-20260715",
+      "verify": [
+        "npm --prefix openclaw_new_launcher run build",
+        "python -m pytest openclaw_new_launcher/python/tests -q"
+      ]
+    },
+    "phone": {
+      "path": "apps/loom-phone-agent",
+      "remote": "https://github.com/rfdiosuao/lumiapkclaw.git",
+      "baselineBranch": "codex/workspace-baseline-20260715",
+      "verify": [
+        ".\\gradlew.bat testDebugUnitTest"
+      ]
+    }
+  }
+}

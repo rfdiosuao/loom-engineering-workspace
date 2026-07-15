@@ -1,0 +1,54 @@
+name: Workspace CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  governance:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout engineering hub
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Validate JSON documents
+        shell: powershell
+        run: |
+          Get-Content -Raw .\workspace.json | ConvertFrom-Json | Out-Null
+          Get-Content -Raw .\LOOM.code-workspace | ConvertFrom-Json | Out-Null
+
+      - name: Parse PowerShell scripts
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem .\scripts\*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File):$($_.Extent.StartLineNumber) $($_.Message)" }
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Reject sensitive or generated filenames
+        shell: powershell
+        run: |
+          $pattern = '(?i)(^|/)(\.env($|\.)|local\.properties$|.*\.(jks|keystore|p12|pfx|pem|key|db|sqlite|apk|aab|log)$|credentials.*\.json$|.*token.*\.txt$)'
+          $blocked = @(git ls-files | Where-Object { $_ -match $pattern })
+          if ($blocked.Count -gt 0) {
+            $blocked | ForEach-Object { Write-Error "Blocked tracked path: $_" }
+            exit 1
+          }
+
+      - name: Check whitespace
+        shell: powershell
+        run: git show --check --format= HEAD

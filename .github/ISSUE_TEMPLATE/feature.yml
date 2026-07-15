@@ -1,0 +1,52 @@
+name: Feature
+description: Define one independently reviewable LOOM capability.
+title: "[Feature] "
+labels:
+  - feature
+body:
+  - type: dropdown
+    id: owner
+    attributes:
+      label: Owning repository
+      options:
+        - loom-engineering-workspace
+        - loom-luming-launcher
+        - lumiapkclaw
+        - cross-repository
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: User outcome
+      description: Describe the observable result, not an implementation activity.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: State what is included and explicitly excluded.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: List the commands, tests, screenshots, or device evidence that prove completion.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Contracts and dependencies
+      description: Name required contract versions and linked Issues or PRs.
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Ready for parallel development
+      options:
+        - label: This Issue can be owned by one worktree and one Agent.
+          required: true
+        - label: Sensitive or irreversible actions have explicit human-confirmation boundaries.
+          required: true

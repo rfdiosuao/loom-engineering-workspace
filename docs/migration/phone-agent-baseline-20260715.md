@@ -1,0 +1,165 @@
+# Phone Agent Baseline Inventory
+
+- Captured: 2026-07-15
+- Source: `D:\\Axiangmu\\AUSTART\\apkclaw\\Hermes-Agent-phone-codex-template-parameter-extraction`
+- Starting branch: `main`
+- Policy: preserve Android source, tests, build configuration, skills, and engineering documentation; exclude generated media and packages
+
+```text
+ M CHANGELOG.md
+ M README.md
+ M app/build.gradle.kts
+ M app/proguard-rules.pro
+ M app/src/main/AndroidManifest.xml
+ M app/src/main/java/com/apk/claw/android/AppViewModel.kt
+ M app/src/main/java/com/apk/claw/android/ClawApplication.kt
+ M app/src/main/java/com/apk/claw/android/TaskOrchestrator.kt
+ M app/src/main/java/com/apk/claw/android/agent/AgentCallback.kt
+ M app/src/main/java/com/apk/claw/android/agent/AgentConfig.kt
+ M app/src/main/java/com/apk/claw/android/agent/AgentService.kt
+ M app/src/main/java/com/apk/claw/android/agent/DefaultAgentService.kt
+ D app/src/main/java/com/apk/claw/android/agent/langchain/http/FileLoggingInterceptor.java
+ D app/src/main/java/com/apk/claw/android/agent/langchain/http/OkHttpClientAdapter.java
+ D app/src/main/java/com/apk/claw/android/agent/langchain/http/OkHttpClientBuilderAdapter.java
+ M app/src/main/java/com/apk/claw/android/agent/llm/AnthropicLlmClient.kt
+ M app/src/main/java/com/apk/claw/android/agent/llm/LlmClientFactory.kt
+ M app/src/main/java/com/apk/claw/android/agent/llm/OpenAiLlmClient.kt
+ M app/src/main/java/com/apk/claw/android/channel/ChannelManager.kt
+ M app/src/main/java/com/apk/claw/android/floating/FloatingCircleManager.kt
+ M app/src/main/java/com/apk/claw/android/server/AgentApiController.kt
+ M app/src/main/java/com/apk/claw/android/server/ConfigServer.kt
+ M app/src/main/java/com/apk/claw/android/server/ConfigServerManager.kt
+ M app/src/main/java/com/apk/claw/android/server/DeviceProfileApiController.kt
+ M app/src/main/java/com/apk/claw/android/server/MediaApiController.kt
+ M app/src/main/java/com/apk/claw/android/server/ToolApiController.kt
+ M app/src/main/java/com/apk/claw/android/server/WorkflowApiController.kt
+ M app/src/main/java/com/apk/claw/android/service/BootReceiver.kt
+ M app/src/main/java/com/apk/claw/android/service/ClawAccessibilityService.java
+ M app/src/main/java/com/apk/claw/android/service/ForegroundService.kt
+ M app/src/main/java/com/apk/claw/android/service/KeepAliveJobService.kt
+ M app/src/main/java/com/apk/claw/android/tool/BaseTool.kt
+ M app/src/main/java/com/apk/claw/android/tool/ToolRegistry.kt
+ M app/src/main/java/com/apk/claw/android/tool/impl/OpenAppTool.java
+ M app/src/main/java/com/apk/claw/android/tool/impl/mobile/TapTool.java
+ M app/src/main/java/com/apk/claw/android/ui/home/HomeActivity.kt
+ M app/src/main/java/com/apk/claw/android/ui/settings/SettingsActivity.kt
+ M app/src/main/java/com/apk/claw/android/ui/settings/SettingsViewModel.kt
+ M app/src/main/java/com/apk/claw/android/utils/KVUtils.kt
+ M app/src/main/java/com/apk/claw/android/widget/MenuItem.kt
+ M app/src/main/java/com/apk/claw/android/widget/PermissionCardView.kt
+ M app/src/main/java/com/apk/claw/android/workflow/WorkflowTemplateManager.kt
+ M app/src/main/res/drawable/ic_lumi_agent_launcher.xml
+ M app/src/main/res/drawable/ic_lumi_agent_mark.xml
+ M app/src/main/res/layout/activity_home.xml
+ M app/src/main/res/layout/activity_settings.xml
+ M app/src/main/res/layout/layout_floating_circle.xml
+ M app/src/main/res/layout/widget_menu_item.xml
+ M app/src/main/res/values-ja/strings.xml
+ M app/src/main/res/values-zh/strings.xml
+ M app/src/main/res/values/strings.xml
+ M skills/android-agent/SKILL.md
+ M skills/android-control/SKILL.md
+ M skills/phone-agent/SKILL.md
+ M skills/phone-master/SKILL.md
+?? AgentPhone_latest.apk.sha256.txt
+?? Screenshots/current-log-state.png
+?? Screenshots/floating-human-live-v6.49/
+?? Screenshots/floating-human-progress-1-v6.49.png
+?? Screenshots/floating-human-progress-2-v6.49.png
+?? Screenshots/floating-human-progress-3-v6.49.png
+?? Screenshots/floating-human-progress-4-v6.49.png
+?? Screenshots/floating-human-progress-chrome-v6.49.png
+?? Screenshots/floating-human-readable-idle-v6.49.png
+?? Screenshots/home-human-readable-v6.49.png
+?? Screenshots/log-demo-after-recreate-v6.49.png
+?? Screenshots/log-demo-complete-v6.49.png
+?? Screenshots/v650-idle-expanded.png
+?? Screenshots/v650-persisted-log-after-8s.png
+?? Screenshots/v651-merged-stage-log-after-8s.png
+?? Screenshots/v652-sequential-stage-before-expand.png
+?? Screenshots/v653-node-aware-tap-success.png
+?? app/src/main/java/com/apk/claw/android/AppStartupPolicy.kt
+?? app/src/main/java/com/apk/claw/android/TaskStartNavigationPolicy.kt
+?? app/src/main/java/com/apk/claw/android/agent/ActionFastExecutor.kt
+?? app/src/main/java/com/apk/claw/android/agent/ActionFastTransitionPolicy.kt
+?? app/src/main/java/com/apk/claw/android/agent/AgentExecutionPolicy.kt
+?? app/src/main/java/com/apk/claw/android/agent/AgentLoopEarlyStopPolicy.kt
+?? app/src/main/java/com/apk/claw/android/agent/ScreenObservationBuilder.kt
+?? app/src/main/java/com/apk/claw/android/channel/dingtalk/Android7DingTalkChannelHandler.kt
+?? app/src/main/java/com/apk/claw/android/collector/
+?? app/src/main/java/com/apk/claw/android/floating/FloatingInteractionPolicy.kt
+?? app/src/main/java/com/apk/claw/android/floating/FloatingProgressHistory.kt
+?? app/src/main/java/com/apk/claw/android/media/
+?? app/src/main/java/com/apk/claw/android/publish/
+?? app/src/main/java/com/apk/claw/android/rpa/
+?? app/src/main/java/com/apk/claw/android/server/AgentProgressLogBuilder.kt
+?? app/src/main/java/com/apk/claw/android/server/AgentTaskPublicSnapshot.kt
+?? app/src/main/java/com/apk/claw/android/server/AgentTaskQueuePolicy.kt
+?? app/src/main/java/com/apk/claw/android/server/ApiErrorPayload.kt
+?? app/src/main/java/com/apk/claw/android/server/CachedBodySession.kt
+?? app/src/main/java/com/apk/claw/android/server/CollectApiController.java
+?? app/src/main/java/com/apk/claw/android/server/ConfigServerAutoStartPolicy.kt
+?? app/src/main/java/com/apk/claw/android/server/ConfigServerStatusBuilder.kt
+?? app/src/main/java/com/apk/claw/android/server/CrashLogApiController.kt
+?? app/src/main/java/com/apk/claw/android/server/LumiSecurityController.kt
+?? app/src/main/java/com/apk/claw/android/server/PcPairingReadinessPolicy.kt
+?? app/src/main/java/com/apk/claw/android/server/PhoneAgentReportBuilder.kt
+?? app/src/main/java/com/apk/claw/android/server/PhoneEventStreamConnectionGate.kt
+?? app/src/main/java/com/apk/claw/android/server/PhoneEventStreamController.kt
+?? app/src/main/java/com/apk/claw/android/server/PhoneEventStreamInputStream.kt
+?? app/src/main/java/com/apk/claw/android/server/PhoneEventStreamResponse.kt
+?? app/src/main/java/com/apk/claw/android/server/PhoneRuntimeMetrics.kt
+?? app/src/main/java/com/apk/claw/android/server/PublishApiController.kt
+?? app/src/main/java/com/apk/claw/android/server/RpaApiController.kt
+?? app/src/main/java/com/apk/claw/android/server/VisionApiController.kt
+?? app/src/main/java/com/apk/claw/android/server/VisionSafetyGuard.kt
+?? app/src/main/java/com/apk/claw/android/server/WeChatAutoReplyApiController.kt
+?? app/src/main/java/com/apk/claw/android/service/AccessibilityStateInspector.kt
+?? app/src/main/java/com/apk/claw/android/service/ForegroundServiceStartPolicy.kt
+?? app/src/main/java/com/apk/claw/android/service/KeepAliveRecoveryPolicy.kt
+?? app/src/main/java/com/apk/claw/android/service/NodeAwareTapSelector.kt
+?? app/src/main/java/com/apk/claw/android/service/ScreenRecordService.kt
+?? app/src/main/java/com/apk/claw/android/tool/impl/mobile/CollectListItemsTool.java
+?? app/src/main/java/com/apk/claw/android/ui/settings/PublishRelayConfigActivity.kt
+?? app/src/main/java/com/apk/claw/android/utils/CrashReportStore.kt
+?? app/src/main/java/com/apk/claw/android/wechat/
+?? app/src/main/res/layout/activity_publish_relay_config.xml
+?? app/src/test/java/com/apk/claw/android/AppStartupPolicyTest.kt
+?? app/src/test/java/com/apk/claw/android/TaskStartNavigationPolicyTest.kt
+?? app/src/test/java/com/apk/claw/android/agent/
+?? app/src/test/java/com/apk/claw/android/floating/
+?? app/src/test/java/com/apk/claw/android/rpa/
+?? app/src/test/java/com/apk/claw/android/server/
+?? app/src/test/java/com/apk/claw/android/service/
+?? app/src/test/java/com/apk/claw/android/wechat/
+?? app/src/test/java/com/apk/claw/android/workflow/
+?? docs/APKCLAW_6.14_STABILITY_NOTES.md
+?? docs/APKCLAW_CAPABILITY_MATRIX_20260511.md
+?? docs/APKCLAW_LONG_RUNNING_STABILITY_FIRST_PRINCIPLES_RESEARCH_2026-07-01.md
+?? docs/APKCLAW_LONG_RUNNING_STABILITY_REVIEW_2026-07-01.md
+?? docs/APKCLAW_LOOM_E2E_ADVERSARIAL_TEST_REPORT_2026-07-03.md
+?? docs/APKCLAW_LOOM_LONG_CONNECTION.md
+?? docs/APKCLAW_OBSERVABILITY_SPEED_TEST_REPORT_2026-07-01.md
+?? docs/APKCLAW_PHONE_API_INTERFACE_FOR_HUB_2026-07-01.md
+?? docs/APKCLAW_REFERENCE_PROJECT_RESEARCH_AND_FAST_REF_2026-07-04.md
+?? docs/APKCLAW_RUNTIME_SPEED_TEST_REPORT_2026-07-01.md
+?? docs/APKCLAW_SPEED_ARCHITECTURE_AND_GOAL.md
+?? docs/APKCLAW_SPEED_STRESS_REPORT_2026-07-02.md
+?? docs/APKCLAW_SPEED_TEST_REPORT_2026-06-30.md
+?? docs/CYBER_DIARY_20260511.md
+?? docs/superpowers/plans/2026-06-30-apkclaw-speed-fast-path.md
+?? docs/superpowers/plans/2026-07-01-apkclaw-runtime-speed-pass.md
+?? screen-after-clear.png
+?? screen-after-token-save.png
+?? screen-api-token-saved.png
+?? screen-api-token.png
+?? screen-home-after-token.png
+?? screen-lan-on.png
+?? screen-lan-tap.png
+?? screen-pairing.png
+?? screen-settings-lan-visible.png
+?? screen-settings.png
+?? screen-token-blank.png
+?? screen-token-step.png
+?? screen-token-step2.png
+```

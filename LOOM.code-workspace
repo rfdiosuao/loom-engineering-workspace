@@ -1,0 +1,56 @@
+{
+  "folders": [
+    {
+      "name": "00 - LOOM Engineering Hub",
+      "path": "."
+    },
+    {
+      "name": "10 - LOOM Platform",
+      "path": "apps/loom-platform"
+    },
+    {
+      "name": "20 - Phone Agent",
+      "path": "apps/loom-phone-agent"
+    },
+    {
+      "name": "30 - Contracts",
+      "path": "packages/contracts"
+    },
+    {
+      "name": "40 - Skills",
+      "path": "packages/skills"
+    },
+    {
+      "name": "50 - Engineering Docs",
+      "path": "docs"
+    }
+  ],
+  "settings": {
+    "files.encoding": "utf8",
+    "files.eol": "\n",
+    "files.exclude": {
+      "**/.git": true,
+      "**/.cache": true,
+      "**/.gradle": true,
+      "**/.kotlin": true,
+      "**/__pycache__": true,
+      "**/build": true,
+      "**/dist": true,
+      "**/node_modules": true,
+      "**/target": true,
+      "artifacts": true,
+      "worktrees": true
+    },
+    "search.exclude": {
+      "**/.git": true,
+      "**/.cache": true,
+      "**/.gradle": true,
+      "**/build": true,
+      "**/dist": true,
+      "**/node_modules": true,
+      "**/target": true,
+      "artifacts": true,
+      "worktrees": true
+    }
+  }
+}

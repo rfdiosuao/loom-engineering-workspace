@@ -1,0 +1,75 @@
+# Local parallel checkouts and generated artifacts
+/worktrees/
+/artifacts/
+/tmp/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+local.properties
+**/local.properties
+*token*.txt
+*secret*.txt
+credentials*.json
+
+# Runtime state and local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+data/
+logs/
+*.log
+*.err
+*.out
+
+# Build and dependency output
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+target/
+**/target/
+.gradle/
+**/.gradle/
+.kotlin/
+**/.kotlin/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+**/.pytest_cache/
+.cache/
+**/.cache/
+
+# Release and media output
+*.apk
+*.aab
+*.zip
+*.7z
+*.tar
+*.gz
+*.mp4
+*.mov
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# IDE and OS state
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
