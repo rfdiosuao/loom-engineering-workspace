@@ -1,0 +1,11 @@
+{
+  "schema": "loom.matrix.screen.v1",
+  "deviceId": "LUMI-FIXTURE-01",
+  "capturedAt": "2026-07-15T14:30:00+08:00",
+  "screenHash": "sha256:fixture-screen-hash",
+  "mime": "image/jpeg",
+  "width": 1080,
+  "height": 2400,
+  "image": "ZmFrZS1zY3JlZW4=",
+  "notModified": false
+}

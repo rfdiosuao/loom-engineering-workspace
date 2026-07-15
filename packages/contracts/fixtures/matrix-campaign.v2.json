@@ -1,0 +1,24 @@
+{
+  "schema": "loom.matrix.campaign.v2",
+  "campaignId": "cmp_fixture_001",
+  "status": "queued",
+  "concurrency": 2,
+  "counts": {
+    "total": 1,
+    "queued": 1,
+    "running": 0,
+    "completed": 0,
+    "failed": 0,
+    "needsHuman": 0
+  },
+  "deviceTasks": [
+    {
+      "assignmentId": "asg_fixture_001",
+      "deviceTaskId": "dt_fixture_001",
+      "deviceId": "LUMI-FIXTURE-01",
+      "jobId": null,
+      "status": "queued",
+      "attempt": 0
+    }
+  ]
+}

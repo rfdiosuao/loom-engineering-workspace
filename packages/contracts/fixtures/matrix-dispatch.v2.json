@@ -1,0 +1,20 @@
+{
+  "schema": "loom.matrix.dispatch.v2",
+  "campaignId": "cmp_fixture_001",
+  "concurrency": 2,
+  "mode": "safe",
+  "profile": "standard",
+  "deviceAssignments": [
+    {
+      "assignmentId": "asg_fixture_001",
+      "deviceId": "LUMI-FIXTURE-01",
+      "prompt": "Read the fixture profile and return a structured summary without sending messages.",
+      "templateId": "fixture_read_only_v1",
+      "input": {
+        "recordId": "record_fixture_001"
+      },
+      "timeoutSec": 180,
+      "retryBudget": 1
+    }
+  ]
+}

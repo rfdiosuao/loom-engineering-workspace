@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.agent.message.v1",
+  "title": "LOOM Agent Message v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "messageId",
+    "sessionId",
+    "role",
+    "status",
+    "blocks",
+    "createdAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.agent.message.v1"
+    },
+    "messageId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "role": {
+      "enum": [
+        "user",
+        "assistant",
+        "system",
+        "tool"
+      ]
+    },
+    "status": {
+      "enum": [
+        "streaming",
+        "completed",
+        "failed"
+      ]
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/block"
+      }
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "block": {
+      "type": "object",
+      "required": [
+        "type",
+        "data"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "text",
+            "plan",
+            "tool",
+            "approval",
+            "matrix",
+            "error"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

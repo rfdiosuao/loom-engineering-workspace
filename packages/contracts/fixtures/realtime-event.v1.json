@@ -1,0 +1,18 @@
+{
+  "schema": "loom.realtime.event.v1",
+  "eventId": "evt_fixture_001",
+  "seq": 128,
+  "timestamp": "2026-07-15T14:30:00+08:00",
+  "topic": "matrix.assignment",
+  "entityId": "dt_fixture_001",
+  "type": "matrix.assignment.started",
+  "data": {
+    "campaignId": "cmp_fixture_001",
+    "assignmentId": "asg_fixture_001",
+    "deviceTaskId": "dt_fixture_001",
+    "deviceId": "LUMI-FIXTURE-01",
+    "jobId": "job_fixture_001",
+    "attempt": 1,
+    "status": "running"
+  }
+}
