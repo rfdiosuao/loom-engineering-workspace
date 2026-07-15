@@ -18,8 +18,12 @@ function Assert-Workspace {
 
 $root = Get-LoomWorkspaceRoot
 Assert-Workspace -Condition (Test-Path -LiteralPath (Join-Path $root 'workspace.json')) -Message 'workspace.json exists'
+Assert-Workspace -Condition (Test-Path -LiteralPath (Join-Path $root '.githooks\pre-push')) -Message 'versioned pre-push hook exists'
 Assert-Workspace -Condition (Test-LoomPathWithinRoot -Path (Join-Path $root 'apps')) -Message 'apps is inside workspace'
 Assert-Workspace -Condition (-not (Test-LoomPathWithinRoot -Path (Join-Path $root '..\outside'))) -Message 'outside path is rejected'
+$expectedHookPath = (Join-Path $root '.githooks').Replace('\', '/')
+$hubHookPath = (& git -C $root config --get core.hooksPath).Trim()
+Assert-Workspace -Condition ($hubHookPath -eq $expectedHookPath) -Message 'hub uses versioned Git hooks'
 
 foreach ($scriptFile in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File) {
     $tokens = $null
@@ -35,6 +39,8 @@ foreach ($name in Get-LoomRepositoryNames) {
     $origin = (& git -C $repo.Path remote get-url origin).Trim()
     Assert-Workspace -Condition ($origin -eq $repo.Remote) -Message "$name origin is private source of truth"
     Assert-Workspace -Condition (Test-LoomPathWithinRoot -Path $repo.WorktreeRoot) -Message "$name worktrees stay inside workspace"
+    $repositoryHookPath = (& git -C $repo.Path config --get core.hooksPath).Trim()
+    Assert-Workspace -Condition ($repositoryHookPath -eq $expectedHookPath) -Message "$name uses versioned Git hooks"
 }
 
 $spec = Get-LoomFeatureSpec -Repository platform -Issue 101 -Name 'Matrix Device Assignments'

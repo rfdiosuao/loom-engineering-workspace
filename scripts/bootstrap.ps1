@@ -12,6 +12,14 @@ $phone = Get-LoomRepository -Name 'phone'
 Assert-LoomGitRepository -Path $platform.Path
 Assert-LoomGitRepository -Path $phone.Path
 
+$hookPath = (Join-Path (Get-LoomWorkspaceRoot) '.githooks').Replace('\', '/')
+foreach ($gitPath in @((Get-LoomWorkspaceRoot), $platform.Path, $phone.Path)) {
+    & git -C $gitPath config core.hooksPath $hookPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to configure Git hooks for $gitPath"
+    }
+}
+
 Write-Host '[Platform dependencies]' -ForegroundColor Cyan
 & npm --prefix (Join-Path $platform.Path 'openclaw_new_launcher') ci
 if ($LASTEXITCODE -ne 0) {

@@ -39,6 +39,22 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: Verify default-branch push guard
+        shell: powershell
+        run: |
+          $gitExe = (Get-Command git).Source
+          $gitRoot = Split-Path (Split-Path $gitExe -Parent) -Parent
+          $sh = Join-Path $gitRoot 'bin\sh.exe'
+          $env:LOOM_ALLOW_MAIN_PUSH = '0'
+          $ErrorActionPreference = 'Continue'
+          'refs/heads/main 111 refs/heads/main 222' | & $sh ./.githooks/pre-push origin https://example.invalid/repo.git 2>&1 | Out-Null
+          $blockedExit = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($blockedExit -eq 0) { throw 'pre-push hook did not block main' }
+          $env:LOOM_ALLOW_MAIN_PUSH = '1'
+          'refs/heads/main 111 refs/heads/main 222' | & $sh ./.githooks/pre-push origin https://example.invalid/repo.git
+          if ($LASTEXITCODE -ne 0) { throw 'approved emergency bypass failed' }
+
       - name: Reject sensitive or generated filenames
         shell: powershell
         run: |

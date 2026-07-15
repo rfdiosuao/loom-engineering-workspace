@@ -49,6 +49,8 @@
 - 合同 PR 先合并，依赖它的实现 PR 再更新基线。
 - APK、截图、日志、数据库、Token、签名文件和本地配置禁止提交。
 
+当前 GitHub 套餐不支持私有仓库服务端分支保护。`bootstrap.ps1` 会为总控、平台和手机仓库安装版本化 `pre-push` Hook，默认阻止向 `main` 或 `master` 直接推送；GitHub Actions 继续承担远端检查。
+
 详细流程见 [并行开发手册](docs/runbooks/parallel-development.md)和[工作区架构图](docs/architecture/workspace-map.md)。
 
 ## 仓库边界
