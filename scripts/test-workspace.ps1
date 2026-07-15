@@ -42,6 +42,11 @@ foreach ($name in $requiredSchemas) {
     Assert-Workspace -Condition (-not [string]::IsNullOrWhiteSpace($document.'$id')) -Message "$name has an id"
 }
 
+$contractValidator = Join-Path $root 'packages\contracts\validate_contracts.py'
+Assert-Workspace -Condition (Test-Path -LiteralPath $contractValidator -PathType Leaf) -Message 'validate_contracts.py exists'
+& python -B $contractValidator
+Assert-Workspace -Condition ($LASTEXITCODE -eq 0) -Message 'contract schemas and fixtures validate'
+
 foreach ($scriptFile in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File) {
     $tokens = $null
     $parseErrors = $null
