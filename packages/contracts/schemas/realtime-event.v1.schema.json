@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.realtime.event.v1",
+  "title": "LOOM Realtime Event v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "eventId",
+    "seq",
+    "timestamp",
+    "topic",
+    "entityId",
+    "type",
+    "data"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.realtime.event.v1"
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entityId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

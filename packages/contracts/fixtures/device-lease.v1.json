@@ -1,0 +1,9 @@
+{
+  "schema": "loom.matrix.device_lease.v1",
+  "leaseId": "lease_fixture_001",
+  "deviceId": "LUMI-FIXTURE-01",
+  "holderType": "agent",
+  "holderId": "run_fixture_001",
+  "mode": "control",
+  "expiresAt": "2026-07-15T14:30:30+08:00"
+}

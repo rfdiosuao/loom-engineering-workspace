@@ -1,0 +1,11 @@
+{
+  "schema": "loom.agent.session.v1",
+  "sessionId": "session_fixture_001",
+  "title": "Fixture read-only review",
+  "status": "active",
+  "runtimeProfileId": "default",
+  "createdAt": "2026-07-15T14:00:00+08:00",
+  "updatedAt": "2026-07-15T14:30:00+08:00",
+  "lastMessagePreview": "Review the fixture records.",
+  "activeRunId": "run_fixture_001"
+}

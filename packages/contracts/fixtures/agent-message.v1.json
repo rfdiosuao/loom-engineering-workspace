@@ -1,0 +1,17 @@
+{
+  "schema": "loom.agent.message.v1",
+  "messageId": "message_fixture_001",
+  "sessionId": "session_fixture_001",
+  "role": "assistant",
+  "status": "completed",
+  "blocks": [
+    {
+      "type": "text",
+      "data": {
+        "text": "The fixture review completed without external writes."
+      }
+    }
+  ],
+  "createdAt": "2026-07-15T14:29:58+08:00",
+  "completedAt": "2026-07-15T14:30:00+08:00"
+}

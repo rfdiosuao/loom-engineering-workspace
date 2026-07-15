@@ -1,0 +1,23 @@
+{
+  "schema": "loom.agent.approval.v1",
+  "approvalId": "approval_fixture_001",
+  "sessionId": "session_fixture_001",
+  "runId": "run_fixture_001",
+  "toolCallId": "tool_call_fixture_001",
+  "capability": "loom.phone.publish",
+  "inputHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "actionSummary": "Publish a synthetic fixture note.",
+  "targets": {
+    "deviceIds": [
+      "LUMI-FIXTURE-01"
+    ]
+  },
+  "inputSummary": {
+    "contentType": "synthetic_fixture"
+  },
+  "risk": "outbound",
+  "riskReason": "Publishing is an external write and requires explicit approval.",
+  "status": "pending",
+  "requestedAt": "2026-07-15T14:29:59+08:00",
+  "expiresAt": "2026-07-15T14:34:59+08:00"
+}
