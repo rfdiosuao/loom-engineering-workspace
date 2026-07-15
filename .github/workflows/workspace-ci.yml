@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout engineering hub
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: false
 
