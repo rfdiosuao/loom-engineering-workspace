@@ -1,75 +1,92 @@
 # LOOM Engineering Workspace
 
-麓鸣 AI 矩阵获客工作台的私有工程总控仓库。这里负责看全局、定合同、开任务和管理并行 PR，应用源码仍由各自的私有仓库维护。
+麓鸣 AI 矩阵获客工作台的唯一工程主仓库。
 
-## 当前重点
+从 2026-07-22 起，平台端、手机 Agent、合同、Skills 和工程文档都在这个仓库里统一开发、统一开分支、统一提 PR。以前分散在多个私有仓库里的源码已经导入为普通目录，不再以 submodule 或子仓库方式参与日常开发。
 
-1. 稳定保存 LOOM 平台和手机 Agent 的最新核心代码。
-2. 多手机按设备分片、并发执行、取消链和全应用按钮门禁已经进入工程基线。
-3. 下一阶段：真机矩阵验收，并在招聘劳务场景验证 BOSS 直聘简历筛选闭环。
+## 唯一入口
 
-## 核心入口
-
-| 模块 | 路径 | 职责 | GitHub |
-| --- | --- | --- | --- |
-| LOOM 平台 | `apps/loom-platform` | 桌面总控、Matrix、模型、媒体、飞书和交付 | `rfdiosuao/loom-luming-launcher` |
-| 手机 Agent | `apps/loom-phone-agent` | Android Worker、RPA、视觉、长连接和设备 API | `rfdiosuao/lumiapkclaw` |
-| 跨端合同 | `packages/contracts` | 任务、事件、结果和错误 Schema | 本仓库 |
-| 业务 Skills | `packages/skills` | 招聘、获客和矩阵监督能力 | 本仓库 |
-| 工程文档 | `docs` | 架构、决策、计划和操作手册 | 本仓库 |
-
-## 先分清四个概念
-
-| 名称 | 是什么 | 是否单独发布 |
+| 内容 | 路径 | 职责 |
 | --- | --- | --- |
-| `loom-engineering-workspace` | 工程总控仓，保存合同、文档和协作脚本 | 否 |
-| `loom-luming-launcher` | Windows/macOS 桌面端主源码仓 | 是 |
-| `lumiapkclaw` | Android 手机 Agent 主源码仓 | 是 |
-| `worktrees/` | 本地并行开发目录，不是新仓库，也不会推送 | 否 |
+| LOOM 平台 | `apps/loom-platform` | 桌面端、矩阵工作台、智能体、媒体生成、模型账号、飞书与交付链路 |
+| 手机 Agent | `apps/loom-phone-agent` | Android 端、手机控制、RPA、视觉观察、设备 API 与事件回传 |
+| 跨端合同 | `packages/contracts` | 任务、设备、事件、结果与错误 Schema |
+| 业务 Skills | `packages/skills` | 麓鸣对外接入、招聘获客、矩阵监控等能力包 |
+| 工程文档 | `docs` | 架构、决策、迁移记录、开发 Wiki 与操作手册 |
 
-桌面端和手机端不合并成一个 Git 仓库。它们的构建工具、版本和发布节奏不同；总控仓通过 Submodule 固定已验证提交，通过 `packages/contracts` 管理跨端协议。
+本机推荐工作目录是 `D:\Axiangmu\LOOM-Workspace`。`AUSTART`、`U盘启动器`、`Downloads`、`artifacts` 和安装包输出目录都不是产品源码入口。
 
-本机唯一推荐入口是 `D:\Axiangmu\LOOM-Workspace`。`AUSTART`、`U盘启动器`、`artifacts` 和临时测试目录都不是 LOOM 产品源码入口，不应从这些目录创建产品 PR。
+## 现在只有一个 GitHub 仓库
 
-## 每天只用这四条命令
+```text
+rfdiosuao/loom-engineering-workspace
+|-- apps/loom-platform
+|-- apps/loom-phone-agent
+|-- packages/contracts
+|-- packages/skills
+|-- docs
+`-- scripts
+```
 
-首次克隆后先初始化本机依赖：
+日常规则很简单：
+
+- 一次克隆：只克隆 `rfdiosuao/loom-engineering-workspace`。
+- 一个根 `.git`：`apps/loom-platform` 和 `apps/loom-phone-agent` 不是子仓库。
+- 一个功能分支：跨平台和手机的功能也在同一个分支里完成。
+- 一个 PR：同一件事不要再拆成平台 PR、手机 PR、合同 PR。
+- `worktrees/` 只是本地并行 checkout，不是 GitHub 仓库。
+
+旧的 `loom-luming-launcher` 和 `lumiapkclaw` 只作为迁移来源与短期回滚参照保留。至少一个正式版本从本仓库完成构建、安装、回滚验证之前，不删除旧仓库，也不要从旧仓库继续开新产品 PR。
+
+## 常用命令
+
+首次进入仓库：
 
 ```powershell
 .\scripts\bootstrap.ps1
 ```
 
+查看当前状态：
+
 ```powershell
-# 看所有仓库、分支、脏文件和 worktree
 .\scripts\status.ps1
+```
 
-# 为一个 Issue 创建独立功能工作树
-.\scripts\new-feature.ps1 -Repository platform -Issue 101 -Name matrix-device-assignments
+创建功能 worktree：
 
-# 拉取所有私有仓库的远端状态
+```powershell
+.\scripts\new-feature.ps1 -Area platform -Issue 101 -Name matrix-device-assignments
+```
+
+可选区域包括 `platform`、`phone`、`contracts`、`skills`、`docs`、`cross-cutting`。这只是用于命名和说明改动范围，不会切换到另一个仓库。
+
+同步远端：
+
+```powershell
 .\scripts\sync.ps1
+```
 
-# 验证总工作区和两个核心仓库
+运行验证：
+
+```powershell
 .\scripts\verify.ps1
+.\scripts\verify.ps1 -Area platform
+.\scripts\verify.ps1 -Area phone
 ```
 
 ## 并行开发规则
 
-- 一个功能只对应一个 Issue 和一个 PR。
-- 一个 Agent 只进入一个 worktree，禁止多个 Agent 共用同一源码目录。
-- 分支统一使用 `codex/<issue>-<feature>`。
-- 跨平台修改拆成平台 PR、手机 PR和合同 PR，用同一个 Issue 关联。
-- 合同 PR 先合并，依赖它的实现 PR 再更新基线。
-- APK、截图、日志、数据库、Token、签名文件和本地配置禁止提交。
+- 一个 Issue 对应一个分支和一个 PR。
+- 一个 Agent 或工程师只进入自己的 worktree。
+- 分支统一使用 `codex/<issue>-<feature>` 或 `codex/<feature>`。
+- 禁止提交 Token、密钥、授权码、数据库、日志、截图、APK、安装包、模型输出和本地配置。
+- 合并前必须运行对应验证，并在 PR 里写清楚验证证据。
 
-当前 GitHub 套餐不支持私有仓库服务端分支保护。`bootstrap.ps1` 会为总控、平台和手机仓库安装版本化 `pre-push` Hook，默认阻止向 `main` 或 `master` 直接推送；GitHub Actions 继续承担远端检查。
+更多说明见：
 
-详细流程见[开发 Wiki](docs/DEVELOPMENT_WIKI.md)、[并行开发手册](docs/runbooks/parallel-development.md)、[仓库卫生手册](docs/runbooks/repository-hygiene.md)和[工作区架构图](docs/architecture/workspace-map.md)。
-
-## 仓库边界
-
-`rfdiosuao/lumi` 是公开展示和公开发布仓库，不承载麓鸣私有开发源码。工程开发只使用本仓库以及上表中的两个私有源码仓库。
-
-## 旧工作区
-
-迁移源 `D:\Axiangmu\AUSTART` 暂时完整保留。新工作区验证完成前，不删除、不清理、不重命名旧目录。
+- [开发 Wiki](docs/DEVELOPMENT_WIKI.md)
+- [工作区架构图](docs/architecture/workspace-map.md)
+- [并行开发手册](docs/runbooks/parallel-development.md)
+- [仓库卫生手册](docs/runbooks/repository-hygiene.md)
+- [单仓库决策 ADR 0002](docs/decisions/0002-single-repository-monorepo.md)
+- [2026-07-22 迁移记录](docs/migration/MONOREPO_CUTOVER_20260722.md)

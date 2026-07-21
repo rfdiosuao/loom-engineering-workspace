@@ -1,0 +1,118 @@
+name: Platform CI
+
+on:
+  pull_request:
+    paths:
+      - "apps/loom-platform/**"
+      - "packages/contracts/**"
+      - "packages/skills/**"
+      - "scripts/**"
+      - ".github/workflows/platform-ci.yml"
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - "apps/loom-platform/**"
+      - "packages/contracts/**"
+      - "packages/skills/**"
+      - "scripts/**"
+      - ".github/workflows/platform-ci.yml"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  checks:
+    runs-on: windows-latest
+    timeout-minutes: 50
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/loom-platform/openclaw_new_launcher/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Setup Rust
+        run: |
+          rustup default stable
+          rustup show
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/loom-platform/openclaw_new_launcher/src-tauri/target
+          key: ${{ runner.os }}-cargo-platform-${{ hashFiles('apps/loom-platform/openclaw_new_launcher/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-platform-
+            ${{ runner.os }}-cargo-
+
+      - name: Install frontend dependencies
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm ci
+
+      - name: Guard tracked artifacts
+        run: |
+          $base = if ("${{ github.event_name }}" -eq "pull_request") { "origin/${{ github.base_ref }}" } else { "HEAD^" }
+          $added = git diff --name-only --diff-filter=A "$base...HEAD" -- `
+            apps/loom-platform/release `
+            apps/loom-platform/openclaw_new_launcher/node_modules `
+            apps/loom-platform/openclaw_new_launcher/src-tauri/target `
+            apps/loom-platform/license_server/private_key.b64 `
+            apps/loom-platform/license_server/license.db `
+            apps/loom-platform/license_server/admin_token.txt
+          if ($added) {
+            Write-Host "New forbidden tracked artifacts:"
+            $added | ForEach-Object { Write-Host "  - $_" }
+            exit 1
+          }
+
+      - name: Install Python dependencies
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: python -m pip install -r python\requirements.txt
+
+      - name: Build bundled Skill library
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File apps\loom-platform\scripts\build-luming-skills-library.ps1
+
+      - name: Build frontend
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm run build
+
+      - name: Run frontend contract tests
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm run test:platform-contracts
+
+      - name: Run Node contract tests
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm run test:node-contracts
+
+      - name: Run Python tests
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: python -m pytest python/tests -q
+
+      - name: Check Rust
+        working-directory: apps/loom-platform/openclaw_new_launcher/src-tauri
+        run: cargo check

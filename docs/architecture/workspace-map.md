@@ -3,58 +3,52 @@
 ## Repository Topology
 
 ```text
-rfdiosuao/loom-engineering-workspace   # engineering hub
-|-- apps/loom-platform       -> rfdiosuao/loom-luming-launcher
-|-- apps/loom-phone-agent    -> rfdiosuao/lumiapkclaw
-|-- packages/contracts       # cross-repository schemas
-|-- packages/skills          # shared business skills
-|-- docs                     # engineering wiki and decisions
-`-- worktrees                # ignored local checkouts, never pushed
+rfdiosuao/loom-engineering-workspace
+|-- apps/loom-platform        # Windows/macOS desktop, Python bridge, Matrix, Agent UI
+|-- apps/loom-phone-agent     # Android phone Agent and device-side execution
+|-- packages/contracts        # shared schemas and fixtures
+|-- packages/skills           # LOOM skills and external Agent onboarding material
+|-- docs                      # engineering wiki, decisions, runbooks and migration logs
+|-- scripts                   # local workflow automation
+`-- worktrees                 # ignored local checkouts, never pushed
 ```
 
-These are three source repositories with explicit ownership, not a nested monorepo. Git worktrees are additional checkouts of an existing repository; they do not create more GitHub repositories.
+This is now one Git repository. There are no submodules, gitlinks, or nested `.git` directories under `apps/`.
+
+## Ownership Boundaries
+
+The platform owns campaign planning, dispatch, supervision, cross-device state, deduplication, result aggregation, model/media orchestration, operator UI, and commercial license gates.
+
+The phone Agent owns execution on one device, screen observation, deterministic actions, phone-local progress events, device recovery, and bounded phone-side safety behavior.
+
+Cross-component payloads are versioned in `packages/contracts`. Platform and phone code should depend on these contracts rather than copying private classes from each other.
+
+## Development Flow
 
 ```text
 GitHub Issue
     |
     v
-LOOM Engineering Hub
-    |-- versioned contracts
-    |-- plans and architecture decisions
-    |-- status, sync, verify and worktree automation
+one branch in loom-engineering-workspace
     |
-    |-- LOOM Platform private repository
-    |      |-- React and Tauri desktop application
-    |      |-- Python control plane
-    |      |-- Matrix scheduler and device registry
-    |      `-- media, model, Feishu and delivery services
+    |-- platform changes under apps/loom-platform
+    |-- phone changes under apps/loom-phone-agent
+    |-- contract changes under packages/contracts
+    |-- skill changes under packages/skills
+    `-- docs and scripts as needed
     |
-    `-- Phone Agent private repository
-           |-- Android application
-           |-- deterministic and vision RPA
-           |-- phone event stream and device APIs
-           `-- phone-side safety and recovery
+    v
+one pull request
 ```
 
-## Ownership Boundaries
+The `workspace.json` file is the machine-readable source of component paths, verification commands, and the canonical repository URL.
 
-The platform owns campaign planning, dispatch, supervision, cross-device state, deduplication, result aggregation, and operator UI. The phone Agent owns execution on one device, screen observation, deterministic actions, phone-local progress events, and bounded recovery.
+## Active Baseline
 
-Cross-repository payloads are versioned in `packages/contracts`. Neither repository copies an unversioned private data class from the other.
+| Component | Imported source |
+| --- | --- |
+| Platform | validated snapshot from `codex/18-stability-spine` plus local 2.2.0 changes |
+| Phone Agent | validated phone PR snapshot from `lumiapkclaw` |
+| Contracts and Skills | existing engineering workspace content |
 
-## Active Baselines
-
-| Repository | Development baseline | Default branch status |
-| --- | --- | --- |
-| Platform | `codex/18-stability-spine` | `main` is not yet the active product line |
-| Phone Agent | `codex/workspace-baseline-20260715` | migrate only after phone PR validation |
-
-`workspace.json` is the machine-readable source for these baselines. Do not guess a base branch from the GitHub default branch.
-
-## First Product PR Series
-
-1. Contract PR: per-device assignment, job state, event, result, and error schemas.
-2. Platform PR: bounded-concurrency Matrix scheduler and per-device dispatch.
-3. Phone PR: assignment acknowledgement and progress-event compatibility.
-4. Platform UI PR: live fleet progress, targeted retry, and exception isolation.
-5. Vertical demo PR: BOSS resume-screening queue partitioning and result aggregation.
+For exact source commits, see [2026-07-22 cutover record](../migration/MONOREPO_CUTOVER_20260722.md).

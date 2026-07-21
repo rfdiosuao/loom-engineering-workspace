@@ -8,17 +8,31 @@ function Get-LoomWorkspaceRoot {
     return $script:LoomWorkspaceRoot
 }
 
+function Get-LoomSharedWorkspaceRoot {
+    $commonDir = (& git -C $script:LoomWorkspaceRoot rev-parse --path-format=absolute --git-common-dir 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commonDir)) {
+        return $script:LoomWorkspaceRoot
+    }
+
+    $commonPath = [System.IO.Path]::GetFullPath($commonDir.Trim())
+    return [System.IO.Path]::GetFullPath((Split-Path $commonPath -Parent))
+}
+
 function Get-LoomWorkspaceConfig {
     if (-not (Test-Path -LiteralPath $script:LoomManifestPath -PathType Leaf)) {
         throw "Workspace manifest not found: $script:LoomManifestPath"
     }
 
-    return Get-Content -LiteralPath $script:LoomManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $config = Get-Content -LiteralPath $script:LoomManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($config.schema -ne 'loom.engineering.monorepo.v2') {
+        throw "Unsupported workspace schema: $($config.schema)"
+    }
+    return $config
 }
 
-function Get-LoomRepositoryNames {
+function Get-LoomComponentNames {
     $config = Get-LoomWorkspaceConfig
-    return @($config.repositories.PSObject.Properties.Name)
+    return @($config.components.PSObject.Properties.Name)
 }
 
 function Test-LoomPathWithinRoot {
@@ -34,33 +48,41 @@ function Test-LoomPathWithinRoot {
     return $candidate.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-function Get-LoomRepository {
+function Get-LoomComponent {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name
     )
 
     $config = Get-LoomWorkspaceConfig
-    $property = $config.repositories.PSObject.Properties[$Name]
+    $property = $config.components.PSObject.Properties[$Name]
     if ($null -eq $property) {
-        $valid = (Get-LoomRepositoryNames) -join ', '
-        throw "Unknown repository '$Name'. Valid values: $valid"
+        $valid = (Get-LoomComponentNames) -join ', '
+        throw "Unknown component '$Name'. Valid values: $valid"
     }
 
     $entry = $property.Value
     $path = [System.IO.Path]::GetFullPath((Join-Path $script:LoomWorkspaceRoot $entry.path))
     if (-not (Test-LoomPathWithinRoot -Path $path)) {
-        throw "Repository path escapes workspace: $path"
+        throw "Component path escapes workspace: $path"
     }
 
     return [PSCustomObject]@{
         Name = $Name
+        RelativePath = [string]$entry.path
         Path = $path
-        Remote = [string]$entry.remote
-        BaselineBranch = [string]$entry.baselineBranch
-        WorktreeRoot = [System.IO.Path]::GetFullPath((Join-Path $script:LoomWorkspaceRoot "worktrees\$Name"))
-        Verify = @($entry.verify)
+        Description = [string]$entry.description
     }
+}
+
+# Compatibility aliases for older local automation. These now return monorepo components.
+function Get-LoomRepositoryNames {
+    return @(Get-LoomComponentNames)
+}
+
+function Get-LoomRepository {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    return Get-LoomComponent -Name $Name
 }
 
 function Assert-LoomGitRepository {
@@ -100,7 +122,9 @@ function ConvertTo-LoomFeatureSlug {
 function Get-LoomFeatureSpec {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Repository,
+        [Alias('Repository')]
+        [ValidateSet('platform', 'phone', 'contracts', 'skills', 'docs', 'cross-cutting')]
+        [string]$Area,
 
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, 2147483647)]
@@ -112,24 +136,26 @@ function Get-LoomFeatureSpec {
         [string]$BaseBranch
     )
 
-    $repo = Get-LoomRepository -Name $Repository
+    $config = Get-LoomWorkspaceConfig
     $slug = ConvertTo-LoomFeatureSlug -Name $Name
     if ([string]::IsNullOrWhiteSpace($BaseBranch)) {
-        $BaseBranch = $repo.BaselineBranch
+        $BaseBranch = [string]$config.defaultBranch
     }
 
     $leaf = "$Issue-$slug"
-    $worktreePath = [System.IO.Path]::GetFullPath((Join-Path $repo.WorktreeRoot $leaf))
-    if (-not (Test-LoomPathWithinRoot -Path $worktreePath)) {
-        throw "Worktree path escapes workspace: $worktreePath"
+    $sharedRoot = Get-LoomSharedWorkspaceRoot
+    $relativeWorktreeRoot = ([string]$config.worktreeRoot).Replace('/', '\')
+    $worktreePath = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $sharedRoot $relativeWorktreeRoot) $leaf))
+    if (-not (Test-LoomPathWithinRoot -Path $worktreePath -Root $sharedRoot)) {
+        throw "Worktree path escapes shared workspace: $worktreePath"
     }
 
     return [PSCustomObject]@{
-        Repository = $repo.Name
-        RepositoryPath = $repo.Path
+        Area = $Area
+        RepositoryPath = $script:LoomWorkspaceRoot
         BaseBranch = $BaseBranch
         Branch = "codex/$leaf"
-        RelativeWorktreePath = "worktrees\$($repo.Name)\$leaf"
+        RelativeWorktreePath = "$relativeWorktreeRoot\$leaf"
         WorktreePath = $worktreePath
     }
 }

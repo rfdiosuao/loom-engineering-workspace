@@ -1,6 +1,6 @@
 # ADR 0001: Private Multi-Repository Engineering Workspace
 
-- Status: Accepted
+- Status: Superseded by [ADR 0002](0002-single-repository-monorepo.md)
 - Date: 2026-07-15
 
 ## Context
@@ -17,3 +17,7 @@ Use a private engineering hub with the platform and Phone Agent linked as indepe
 - Cross-repository work requires a versioned contract and linked PRs.
 - A fresh clone requires private GitHub access and submodule initialization.
 - The legacy `AUSTART` checkout remains available until migration verification is complete.
+
+## Supersession
+
+On 2026-07-22 this approach was replaced by a single private monorepo. The old decision remains as historical context for why the engineering workspace was first separated from public distribution material.

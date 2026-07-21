@@ -1,4 +1,4 @@
-name: Release
+name: Platform Release
 
 on:
   push:
@@ -19,11 +19,11 @@ on:
         required: false
         type: string
       phone_agent_version:
-        description: "Optional phone agent versionName, for example 6.23"
+        description: "Optional phone agent versionName, for example 6.60"
         required: false
         type: string
       phone_agent_version_code:
-        description: "Optional phone agent versionCode, for example 830"
+        description: "Optional phone agent versionCode, for example 930"
         required: false
         type: string
 
@@ -34,30 +34,30 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
+  windows:
     name: Windows release build
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 70
 
     defaults:
       run:
         shell: pwsh
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout monorepo
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: openclaw_new_launcher/package-lock.json
+          cache-dependency-path: apps/loom-platform/openclaw_new_launcher/package-lock.json
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -67,38 +67,41 @@ jobs:
           rustup show
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            openclaw_new_launcher/src-tauri/target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('openclaw_new_launcher/src-tauri/Cargo.lock') }}
+            apps/loom-platform/openclaw_new_launcher/src-tauri/target
+          key: ${{ runner.os }}-cargo-platform-release-${{ hashFiles('apps/loom-platform/openclaw_new_launcher/src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-release-
+            ${{ runner.os }}-cargo-platform-release-
             ${{ runner.os }}-cargo-
 
       - name: Install frontend dependencies
-        working-directory: openclaw_new_launcher
+        working-directory: apps/loom-platform/openclaw_new_launcher
         run: npm ci
 
       - name: Verify source text
+        working-directory: apps/loom-platform
         run: powershell -ExecutionPolicy Bypass -File scripts\verify-source-text.ps1
 
       - name: Verify source secrets
+        working-directory: apps/loom-platform
         run: powershell -ExecutionPolicy Bypass -File scripts\verify-release-secrets.ps1 -Source
 
       - name: Verify version consistency
+        working-directory: apps/loom-platform
         env:
           RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
         run: powershell -ExecutionPolicy Bypass -File scripts\verify-version-consistency.ps1 -TagName $env:RELEASE_TAG
 
       - name: Build frontend
-        working-directory: openclaw_new_launcher
+        working-directory: apps/loom-platform/openclaw_new_launcher
         run: npm run build
 
       - name: Check Rust
-        working-directory: openclaw_new_launcher/src-tauri
+        working-directory: apps/loom-platform/openclaw_new_launcher/src-tauri
         run: cargo check
 
       - name: Import Windows code-signing certificate
@@ -120,8 +123,9 @@ jobs:
           "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build signed protected NSIS
-        working-directory: openclaw_new_launcher
+        working-directory: apps/loom-platform/openclaw_new_launcher
         run: |
+          # Canonical bundle root: apps/loom-platform/openclaw_new_launcher/src-tauri/target/release/bundle
           npm run package:protected:nsis
           if ($LASTEXITCODE -ne 0) {
             throw "Protected NSIS build failed with exit code $LASTEXITCODE"
@@ -155,6 +159,7 @@ jobs:
             Set-Content -LiteralPath "$outputPath.sha256.txt" -Encoding ASCII
 
       - name: Smoke-test the exact complete installer
+        working-directory: apps/loom-platform
         run: |
           $version = node -p "require('./openclaw_new_launcher/package.json').version"
           $installer = Join-Path $PWD "ci_release_nsis\LOOM-$version-setup.exe"
@@ -171,6 +176,7 @@ jobs:
             -InstallPaths $paths
 
       - name: Prepare portable seed
+        working-directory: apps/loom-platform
         env:
           GH_TOKEN: ${{ github.token }}
           PORTABLE_SEED_TAG: ${{ inputs.portable_seed_tag || '' }}
@@ -218,37 +224,15 @@ jobs:
             Select-Object -First 1
 
           if (-not $seedDir) {
-            Write-Warning "Downloaded seed zip does not look like an OpenClaw portable package: $($seedZip.FullName). The portable build will bootstrap runtime dependencies instead."
+            Write-Warning "Downloaded seed zip does not look like a LOOM portable package: $($seedZip.FullName). The portable build will bootstrap runtime dependencies instead."
             "PORTABLE_SEED_DIR=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             return
           }
 
           "PORTABLE_SEED_DIR=$($seedDir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Portable seed: $($seedZip.Name) -> $($seedDir.FullName)"
-
-      - name: Prepare phone agent APK
-        env:
-          PHONE_AGENT_APK_URL: ${{ inputs.phone_agent_apk_url || vars.PHONE_AGENT_APK_URL || '' }}
-          PHONE_AGENT_APK_SHA256: ${{ vars.PHONE_AGENT_APK_SHA256 || '' }}
-        run: |
-          $apkPath = Join-Path $PWD "openclaw_new_launcher\AgentPhone_latest.apk"
-          if (-not [string]::IsNullOrWhiteSpace($env:PHONE_AGENT_APK_URL)) {
-            Write-Host "Downloading AgentPhone_latest.apk from configured URL..."
-            Invoke-WebRequest -Uri $env:PHONE_AGENT_APK_URL -OutFile $apkPath
-          }
-
-          if (-not (Test-Path -LiteralPath $apkPath)) {
-            Write-Warning "AgentPhone_latest.apk is missing. Portable package will be built without bundled phone APK."
-            return
-          }
-
-          $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $apkPath
-          Write-Host "AgentPhone_latest.apk SHA256: $($hash.Hash)"
-          if (-not [string]::IsNullOrWhiteSpace($env:PHONE_AGENT_APK_SHA256) -and $hash.Hash -ne $env:PHONE_AGENT_APK_SHA256) {
-            throw "AgentPhone_latest.apk SHA256 mismatch. Expected $env:PHONE_AGENT_APK_SHA256, got $($hash.Hash)."
-          }
 
       - name: Build portable package
+        working-directory: apps/loom-platform
         env:
           RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
           PHONE_AGENT_VERSION: ${{ inputs.phone_agent_version || vars.PHONE_AGENT_VERSION || '' }}
@@ -278,6 +262,7 @@ jobs:
           & powershell @args
 
       - name: Collect release assets
+        working-directory: apps/loom-platform
         run: |
           $artifactDir = Join-Path $PWD "ci_artifacts"
           New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
@@ -296,220 +281,27 @@ jobs:
               Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $artifactDir $_.Name) -Force
             }
 
-          $files = @(Get-ChildItem -LiteralPath $artifactDir -File)
-          if ($files.Count -eq 0) {
-            throw "No release assets were collected"
-          }
-
-          foreach ($file in ($files | Where-Object { $_.Name -notlike "*.sha256.txt" })) {
+          foreach ($file in (Get-ChildItem -LiteralPath $artifactDir -File | Where-Object { $_.Name -notlike "*.sha256.txt" })) {
             $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName
             "$($hash.Hash)  $($file.Name)" | Set-Content -LiteralPath "$($file.FullName).sha256.txt" -Encoding ASCII
           }
 
-      - name: Generate Chinese release notes
-        env:
-          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
-        run: |
-          $artifactDir = Join-Path $PWD "ci_artifacts"
-          $releaseDir = Join-Path $PWD "ci_release"
-          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
-          $bodyPath = Join-Path $releaseDir "RELEASE_BODY.md"
-          $commit = git rev-parse --short HEAD
-
-          $assetLines = Get-ChildItem -LiteralPath $artifactDir -File |
-            Where-Object { $_.Name -notlike "*.sha256.txt" } |
-            Sort-Object Name |
-            ForEach-Object {
-              $hashFile = "$($_.FullName).sha256.txt"
-              $hashText = if (Test-Path -LiteralPath $hashFile) { (Get-Content -LiteralPath $hashFile -Raw).Trim() } else { "未生成 SHA256" }
-              "- `$($_.Name)`：$hashText"
-            }
-
-          $body = @(
-            "OpenClaw 启动器发布 $env:RELEASE_TAG",
-            "",
-            "构建提交：$commit",
-            "",
-            "更新内容：",
-            "- 本次发布由 GitHub Actions 自动构建并上传安装包、便携包和 SHA256 校验文件。",
-            "- 便携包发布前已执行 ``verify-release.ps1``，检查文件完整性、运行时上下文和敏感配置残留。",
-            "- 如果配置了 ``PHONE_AGENT_APK_URL``，手机 Agent 附件会随便携包进入 ``OpenClawFiles\releases\agent-phone``；未配置时主包仍正常发布。",
-            "",
-            "附件校验：",
-            $($assetLines -join "`n"),
-            "",
-            "使用说明：",
-            "- 普通安装优先下载安装包。",
-            "- U 盘免安装交付请下载 ``LOOM-Portable-*.zip``，解压后运行 ``LOOM.exe``。",
-            "- 下载后建议对照 ``.sha256.txt`` 校验文件完整性。"
-          ) -join "`n"
-          Set-Content -LiteralPath $bodyPath -Value $body -Encoding UTF8
-
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: github-release-assets
-          path: ci_artifacts/*
+          name: platform-release-assets
+          path: apps/loom-platform/ci_artifacts/*
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag_name || github.ref_name }}
-          name: Lumi / OpenClaw ${{ inputs.tag_name || github.ref_name }}
+          name: LOOM ${{ inputs.tag_name || github.ref_name }}
           draft: false
           prerelease: false
           make_latest: true
-          generate_release_notes: false
-          body_path: ci_release/RELEASE_BODY.md
+          generate_release_notes: true
           files: |
-            ci_artifacts/*.exe
-            ci_artifacts/*.msi
-            ci_artifacts/*.zip
-            ci_artifacts/*.sha256.txt
-
-  macos:
-    name: macOS release build
-    needs: build
-    runs-on: macos-latest
-    timeout-minutes: 60
-
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: openclaw_new_launcher/package-lock.json
-
-      - name: Setup Rust
-        run: |
-          rustup default stable
-          rustup show
-
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            openclaw_new_launcher/src-tauri/target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('openclaw_new_launcher/src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
-            ${{ runner.os }}-cargo-
-
-      - name: Install frontend dependencies
-        working-directory: openclaw_new_launcher
-        run: npm ci
-
-      - name: Verify version consistency
-        env:
-          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
-        run: |
-          version="$(node -p "require('./openclaw_new_launcher/package.json').version")"
-          expected="v${version}"
-          if [ "$RELEASE_TAG" != "$expected" ]; then
-            echo "Release tag mismatch: $RELEASE_TAG, expected $expected"
-            exit 1
-          fi
-          echo "Version consistency check passed: $version"
-
-      - name: Build frontend
-        working-directory: openclaw_new_launcher
-        run: npm run build
-
-      - name: Check Rust
-        working-directory: openclaw_new_launcher/src-tauri
-        run: cargo check
-
-      - name: Build macOS bundles
-        working-directory: openclaw_new_launcher
-        run: npm run tauri -- build --bundles app,dmg
-
-      - name: Collect macOS release assets
-        run: |
-          set -euo pipefail
-          artifact_dir="$PWD/ci_artifacts"
-          bundle_dir="$PWD/openclaw_new_launcher/src-tauri/target/release/bundle"
-          version="$(node -p "require('./openclaw_new_launcher/package.json').version")"
-          mkdir -p "$artifact_dir"
-
-          dmg_path="$(find "$bundle_dir" -type f -name "*.dmg" | head -n 1 || true)"
-          if [ -z "$dmg_path" ]; then
-            echo "No macOS dmg was produced under $bundle_dir"
-            exit 1
-          fi
-          cp "$dmg_path" "$artifact_dir/OpenClaw-macOS-v${version}.dmg"
-
-          app_path="$(find "$bundle_dir" -type d -name "*.app" | head -n 1 || true)"
-          if [ -z "$app_path" ]; then
-            echo "No macOS app bundle was produced under $bundle_dir"
-            exit 1
-          fi
-          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$artifact_dir/OpenClaw-macOS-v${version}.app.zip"
-
-          for file in "$artifact_dir"/*; do
-            if [ -f "$file" ] && [[ "$file" != *.sha256.txt ]]; then
-              shasum -a 256 "$file" | sed "s#  $artifact_dir/#  #" > "$file.sha256.txt"
-            fi
-          done
-
-      - name: Upload macOS workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-release-assets
-          path: ci_artifacts/*
-
-      - name: Upload macOS assets to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
-        run: |
-          set -euo pipefail
-          gh release upload "$RELEASE_TAG" ci_artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
-
-          mkdir -p ci_release
-          body_path="ci_release/RELEASE_BODY.md"
-          commit="$(git rev-parse --short HEAD)"
-          assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | sort_by(.name) | .[].name')"
-
-          {
-            echo "OpenClaw Launcher $RELEASE_TAG"
-            echo ""
-            echo "Build commit: $commit"
-            echo ""
-            echo "本次发布由 GitHub Actions 自动构建 Windows 与 macOS 产物。"
-            echo "This release was built by GitHub Actions for both Windows and macOS."
-            echo ""
-            echo "Assets:"
-            while IFS= read -r asset; do
-              [ -n "$asset" ] && echo "- \`$asset\`"
-            done <<< "$assets"
-            echo ""
-            echo "Windows:"
-            echo "- Use the installer assets for normal installation."
-            echo "- Use \`LOOM-Portable-*.zip\` for portable USB-style delivery."
-            echo ""
-            echo "macOS:"
-            echo "- Use \`OpenClaw-macOS-*.dmg\` for normal installation."
-            echo "- Use \`OpenClaw-macOS-*.app.zip\` when you need the raw app bundle."
-            echo ""
-            echo "Security:"
-            echo "- Check the matching \`.sha256.txt\` file after downloading."
-            echo "- Customer license files, install IDs, API keys, and local account caches are not bundled."
-          } > "$body_path"
-
-          gh release edit "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Lumi / OpenClaw $RELEASE_TAG" \
-            --notes-file "$body_path" \
-            --latest
+            apps/loom-platform/ci_artifacts/*.exe
+            apps/loom-platform/ci_artifacts/*.zip
+            apps/loom-platform/ci_artifacts/*.sha256.txt

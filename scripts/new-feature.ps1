@@ -1,8 +1,9 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('platform', 'phone')]
-    [string]$Repository,
+    [Alias('Repository')]
+    [ValidateSet('platform', 'phone', 'contracts', 'skills', 'docs', 'cross-cutting')]
+    [string]$Area,
 
     [Parameter(Mandatory = $true)]
     [ValidateRange(1, 2147483647)]
@@ -22,23 +23,23 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'workspace-core.ps1')
 
-$repo = Get-LoomRepository -Name $Repository
-$spec = Get-LoomFeatureSpec -Repository $Repository -Issue $Issue -Name $Name -BaseBranch $BaseBranch
-Assert-LoomGitRepository -Path $repo.Path
+$root = Get-LoomWorkspaceRoot
+$spec = Get-LoomFeatureSpec -Area $Area -Issue $Issue -Name $Name -BaseBranch $BaseBranch
+Assert-LoomGitRepository -Path $root
 
-$relativeWorktree = $spec.RelativeWorktreePath
-& git -C (Get-LoomWorkspaceRoot) check-ignore --quiet -- $relativeWorktree
+$ignoreProbe = ($spec.RelativeWorktreePath -replace '\\', '/')
+& git -C $root check-ignore --quiet -- $ignoreProbe
 if ($LASTEXITCODE -ne 0) {
-    throw "Worktree path is not ignored by the hub repository: $relativeWorktree"
+    throw "Worktree path is not ignored by the monorepo: $ignoreProbe"
 }
 
 if (-not $DryRun) {
-    $dirty = @(& git -C $repo.Path status --porcelain)
+    $dirty = @(& git -C $root status --porcelain)
     if ($dirty.Count -ne 0) {
-        throw "Repository checkout is not clean: $($repo.Path)"
+        throw "Monorepo checkout is not clean: $root"
     }
 
-    & git -C $repo.Path show-ref --verify --quiet "refs/heads/$($spec.Branch)"
+    & git -C $root show-ref --verify --quiet "refs/heads/$($spec.Branch)"
     if ($LASTEXITCODE -eq 0) {
         throw "Local branch already exists: $($spec.Branch)"
     }
@@ -47,7 +48,7 @@ if (-not $DryRun) {
         throw "Worktree path already exists: $($spec.WorktreePath)"
     }
 
-    & git -C $repo.Path fetch origin $spec.BaseBranch
+    & git -C $root fetch origin $spec.BaseBranch
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to fetch origin/$($spec.BaseBranch)"
     }
@@ -55,7 +56,7 @@ if (-not $DryRun) {
     $parent = Split-Path -Parent $spec.WorktreePath
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     if ($PSCmdlet.ShouldProcess($spec.WorktreePath, "Create $($spec.Branch) from origin/$($spec.BaseBranch)")) {
-        & git -C $repo.Path worktree add -b $spec.Branch $spec.WorktreePath "origin/$($spec.BaseBranch)"
+        & git -C $root worktree add -b $spec.Branch $spec.WorktreePath "origin/$($spec.BaseBranch)"
         if ($LASTEXITCODE -ne 0) {
             throw "Git worktree creation failed: $($spec.WorktreePath)"
         }
@@ -63,9 +64,9 @@ if (-not $DryRun) {
 }
 
 $result = [PSCustomObject]@{
-    schema = 'loom.engineering.feature_worktree.v1'
+    schema = 'loom.engineering.feature_worktree.v2'
     dryRun = [bool]$DryRun
-    repository = $spec.Repository
+    area = $spec.Area
     baseBranch = $spec.BaseBranch
     branch = $spec.Branch
     worktreePath = $spec.WorktreePath
@@ -74,7 +75,7 @@ $result = [PSCustomObject]@{
 if ($Json) {
     $result | ConvertTo-Json -Depth 4
 } else {
-    Write-Host "Repository : $($result.repository)"
+    Write-Host "Area       : $($result.area)"
     Write-Host "Base       : $($result.baseBranch)"
     Write-Host "Branch     : $($result.branch)"
     Write-Host "Worktree   : $($result.worktreePath)"

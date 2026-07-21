@@ -1,22 +1,28 @@
 {
-  "schema": "loom.engineering.workspace.v1",
-  "repositories": {
+  "schema": "loom.engineering.monorepo.v2",
+  "repository": "https://github.com/rfdiosuao/loom-engineering-workspace.git",
+  "defaultBranch": "main",
+  "worktreeRoot": "worktrees/features",
+  "components": {
     "platform": {
       "path": "apps/loom-platform",
-      "remote": "https://github.com/rfdiosuao/loom-luming-launcher.git",
-      "baselineBranch": "codex/18-stability-spine",
-      "verify": [
-        "npm --prefix openclaw_new_launcher run build",
-        "python -m pytest openclaw_new_launcher/python/tests -q"
-      ]
+      "description": "LOOM desktop platform, control plane, Matrix, Agent and media services"
     },
     "phone": {
       "path": "apps/loom-phone-agent",
-      "remote": "https://github.com/rfdiosuao/lumiapkclaw.git",
-      "baselineBranch": "codex/workspace-baseline-20260715",
-      "verify": [
-        ".\\gradlew.bat testDebugUnitTest"
-      ]
+      "description": "Android phone Agent, deterministic RPA and device APIs"
+    },
+    "contracts": {
+      "path": "packages/contracts",
+      "description": "Cross-component task, event, result and error contracts"
+    },
+    "skills": {
+      "path": "packages/skills",
+      "description": "Shared LOOM business skills"
+    },
+    "docs": {
+      "path": "docs",
+      "description": "Engineering wiki, architecture decisions and runbooks"
     }
   }
 }

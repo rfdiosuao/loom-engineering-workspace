@@ -8,11 +8,12 @@ import unittest
 
 PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LAUNCHER_ROOT = os.path.dirname(PYTHON_DIR)
-GIT_ROOT = os.path.dirname(LAUNCHER_ROOT)
-CI_WORKFLOW = os.path.join(GIT_ROOT, ".github", "workflows", "ci.yml")
-RELEASE_WORKFLOW = os.path.join(GIT_ROOT, ".github", "workflows", "release.yml")
-CI_SCRIPT = os.path.join(GIT_ROOT, "scripts", "ci-check.ps1")
-SMOKE_SCRIPT = os.path.join(GIT_ROOT, "scripts", "smoke-test-tauri-nsis.ps1")
+PLATFORM_ROOT = os.path.dirname(LAUNCHER_ROOT)
+MONOREPO_ROOT = os.path.dirname(os.path.dirname(PLATFORM_ROOT))
+CI_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "platform-ci.yml")
+RELEASE_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "platform-release.yml")
+CI_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "ci-check.ps1")
+SMOKE_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "smoke-test-tauri-nsis.ps1")
 PROTECTED_TAURI_CONFIG = os.path.join(LAUNCHER_ROOT, "src-tauri", "tauri.protected.conf.json")
 
 
