@@ -92,7 +92,7 @@ jobs:
 
       - name: Install Python dependencies
         working-directory: apps/loom-platform/openclaw_new_launcher
-        run: python -m pip install -r python\requirements.txt
+        run: python -m pip install -r python\requirements.txt pytest
 
       - name: Build bundled Skill library
         run: powershell -NoProfile -ExecutionPolicy Bypass -File apps\loom-platform\scripts\build-luming-skills-library.ps1

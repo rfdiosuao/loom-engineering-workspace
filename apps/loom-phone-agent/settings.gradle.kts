@@ -1,6 +1,5 @@
 pluginManagement {
     repositories {
-        maven(url = "https://maven.aliyun.com/repository/public")
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -10,6 +9,7 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
+        maven(url = "https://maven.aliyun.com/repository/public")
         maven(url = "https://jitpack.io")
     }
 }
@@ -19,9 +19,9 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        maven(url = "https://maven.aliyun.com/repository/public")
         google()
         mavenCentral()
+        maven(url = "https://maven.aliyun.com/repository/public")
         maven(url = "https://jitpack.io")
     }
 }
