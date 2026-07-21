@@ -1,0 +1,1033 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>麓鸣AI矩阵获客工作台 - 超级矩阵工作台 Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --app-bg: #07131b;
+      --sidebar: #071b24;
+      --panel: #0a1b26;
+      --panel-2: #0d222e;
+      --input: #071822;
+      --line: rgba(205, 235, 242, 0.11);
+      --line-strong: rgba(55, 230, 208, 0.32);
+      --text: #f4f9f8;
+      --muted: #96aab3;
+      --subtle: #607680;
+      --cyan: #37e6d0;
+      --cyan-soft: rgba(55, 230, 208, 0.10);
+      --green: #35d39f;
+      --amber: #e2b85e;
+      --red: #e36172;
+      --blue: #65b7ff;
+      --sidebar-width: 72px;
+      --titlebar-height: 38px;
+      --radius: 8px;
+      --font: "HarmonyOS Sans SC", "MiSans", "Alibaba PuHuiTi", "Microsoft YaHei UI", system-ui, sans-serif;
+      --mono: "Cascadia Mono", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--app-bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+
+    button, input, textarea, select { font: inherit; }
+    button { color: inherit; }
+
+    button:focus-visible,
+    input:focus-visible,
+    textarea:focus-visible,
+    select:focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 2px;
+    }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(151, 177, 186, 0.24); }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(55, 230, 208, 0.45); }
+
+    .titlebar {
+      height: var(--titlebar-height);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      background: #061119;
+      padding: 0 12px;
+      user-select: none;
+    }
+
+    .titlebar-brand,
+    .titlebar-actions,
+    .row { display: flex; align-items: center; }
+
+    .titlebar-brand { gap: 9px; min-width: 0; }
+    .titlebar-brand img { width: 22px; height: 22px; border-radius: 5px; }
+    .titlebar-name { font-size: 12px; font-weight: 900; letter-spacing: 0; }
+    .titlebar-version { color: var(--subtle); font: 10px var(--mono); }
+    .titlebar-actions { gap: 4px; }
+
+    .window-button,
+    .icon-button {
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .window-button { width: 34px; height: 28px; color: #8096a0; }
+    .window-button:hover { color: white; background: rgba(255, 255, 255, 0.05); }
+    .window-button.danger:hover { background: var(--red); }
+
+    .app-shell {
+      height: calc(100% - var(--titlebar-height));
+      display: grid;
+      grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+      min-height: 0;
+    }
+
+    .sidebar {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid rgba(55, 230, 208, 0.12);
+      background: var(--sidebar);
+      box-shadow: inset -1px 0 rgba(55, 230, 208, 0.05);
+      position: relative;
+      z-index: 2;
+    }
+
+    .sidebar::after {
+      content: "";
+      pointer-events: none;
+      position: absolute;
+      inset: 0 0 0 auto;
+      width: 22px;
+      background: linear-gradient(90deg, transparent, rgba(55, 230, 208, 0.05));
+    }
+
+    .sidebar-logo {
+      height: 66px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+
+    .sidebar-logo img {
+      width: 40px;
+      height: 40px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      box-shadow: 0 14px 30px rgba(0, 0, 0, 0.34);
+    }
+
+    .nav-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 0 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .nav-button {
+      position: relative;
+      min-height: 62px;
+      border: 0;
+      border-radius: var(--radius);
+      background: transparent;
+      color: rgba(255, 255, 255, 0.58);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: 140ms ease;
+    }
+
+    .nav-button:hover { background: rgba(255, 255, 255, 0.05); color: white; }
+    .nav-button.active {
+      background: rgba(255, 255, 255, 0.075);
+      color: var(--cyan);
+      box-shadow: inset 0 0 0 1px rgba(55, 230, 208, 0.15);
+    }
+
+    .nav-button.active::after {
+      content: "";
+      position: absolute;
+      right: -8px;
+      top: 9px;
+      width: 3px;
+      height: 42px;
+      border-radius: 3px 0 0 3px;
+      background: var(--cyan);
+    }
+
+    .nav-button svg { width: 22px; height: 22px; stroke-width: 1.8; }
+    .nav-button span { font-size: 11px; font-weight: 900; line-height: 1; }
+
+    .sidebar-tools {
+      flex: 0 0 auto;
+      padding: 10px 8px 14px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 9px;
+      border-top: 1px solid var(--line);
+    }
+
+    .service-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px rgba(53, 211, 159, 0.7); }
+    .sidebar-tools .icon-button { width: 40px; height: 40px; border-radius: var(--radius); color: #78919c; cursor: pointer; }
+    .sidebar-tools .icon-button:hover { background: rgba(255,255,255,.05); color: white; }
+
+    .workspace {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      background: var(--app-bg);
+      overflow: hidden;
+    }
+
+    .command-header {
+      flex: 0 0 auto;
+      padding: 10px 12px 9px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(9, 23, 34, 0.98);
+    }
+
+    .command-top {
+      display: grid;
+      grid-template-columns: minmax(200px, auto) minmax(360px, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .page-title { min-width: 0; }
+    .eyebrow { color: rgba(164, 238, 239, 0.66); font-size: 9px; font-weight: 900; letter-spacing: .2em; }
+    .page-title h1 { margin: 2px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: 0; }
+
+    .command-box {
+      height: 42px;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(55, 230, 208, 0.24);
+      border-radius: var(--radius);
+      background: #071923;
+      padding: 0 5px 0 11px;
+      box-shadow: inset 0 1px rgba(255,255,255,.02);
+    }
+
+    .command-box svg { width: 18px; height: 18px; color: var(--cyan); }
+    .command-box input { min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: white; font-size: 12px; }
+    .command-box input::placeholder { color: #657b85; }
+
+    .scope-select {
+      height: 32px;
+      max-width: 112px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255,255,255,.035);
+      color: #bfd0d5;
+      padding: 0 23px 0 8px;
+      font-size: 10px;
+      outline: 0;
+    }
+
+    .primary-button,
+    .quiet-button,
+    .danger-button {
+      min-height: 32px;
+      border-radius: var(--radius);
+      border: 1px solid transparent;
+      padding: 0 12px;
+      font-size: 11px;
+      font-weight: 900;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: 140ms ease;
+      white-space: nowrap;
+    }
+
+    .primary-button { color: #031512; background: var(--cyan); border-color: rgba(92,255,229,.58); }
+    .primary-button:hover { background: #66f3df; transform: translateY(-1px); }
+    .quiet-button { color: #bfd0d5; background: rgba(255,255,255,.035); border-color: var(--line); }
+    .quiet-button:hover { color: white; border-color: rgba(55,230,208,.3); background: var(--cyan-soft); }
+    .danger-button { color: #ffc4cc; background: rgba(227,97,114,.1); border-color: rgba(227,97,114,.28); }
+    .danger-button:hover { color: white; background: rgba(227,97,114,.22); }
+    button:disabled { cursor: not-allowed; opacity: .42; transform: none !important; }
+
+    .header-actions { display: flex; align-items: center; gap: 7px; }
+    .live-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid rgba(53,211,159,.22); border-radius: 999px; padding: 5px 8px; color: #a5f7d6; font-size: 10px; font-weight: 900; background: rgba(53,211,159,.08); }
+    .live-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 1.8s ease-in-out infinite; }
+
+    .metrics-strip {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .metric {
+      min-width: 0;
+      border: 1px solid rgba(255,255,255,.07);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,.035);
+      padding: 5px 7px;
+    }
+
+    .metric-label { color: #5d7580; font-size: 9px; font-weight: 800; }
+    .metric-value { margin-top: 2px; color: white; font-size: 13px; line-height: 1.1; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .metric-value.green { color: #8ff2ca; }
+    .metric-value.cyan { color: #9af4e8; }
+    .metric-value.amber { color: #f0ce87; }
+    .metric-value.red { color: #ff9cab; }
+    .metric-value.blue { color: #9fd2ff; }
+
+    .control-layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 154px minmax(430px, 1fr) 342px;
+      gap: 10px;
+      padding: 10px 12px 12px;
+      overflow: hidden;
+    }
+
+    .panel {
+      min-width: 0;
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(10, 27, 38, 0.76);
+      overflow: hidden;
+      box-shadow: 0 18px 48px rgba(0,0,0,.14);
+    }
+
+    .panel-header {
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(255,255,255,.07);
+      background: rgba(255,255,255,.012);
+    }
+
+    .panel-kicker { color: rgba(155, 238, 237, .62); font-size: 9px; font-weight: 900; letter-spacing: .18em; }
+    .panel-title { margin-top: 2px; font-size: 13px; font-weight: 900; }
+
+    .group-rail { display: flex; flex-direction: column; }
+    .group-list { min-height: 0; overflow-y: auto; padding: 8px; }
+    .group-button {
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      background: transparent;
+      color: #8fa5ae;
+      cursor: pointer;
+      padding: 9px 8px;
+      margin-bottom: 4px;
+      text-align: left;
+      transition: 140ms ease;
+    }
+
+    .group-button:hover { background: rgba(255,255,255,.035); color: white; }
+    .group-button.active { color: #c9fff6; border-color: rgba(55,230,208,.18); background: rgba(55,230,208,.09); }
+    .group-name { display: flex; justify-content: space-between; gap: 4px; font-size: 11px; font-weight: 900; }
+    .group-count { color: var(--subtle); font: 10px var(--mono); }
+    .group-progress { margin-top: 7px; height: 2px; border-radius: 2px; background: rgba(255,255,255,.07); overflow: hidden; }
+    .group-progress span { display: block; height: 100%; background: var(--green); }
+
+    .rail-footer { margin-top: auto; padding: 10px; border-top: 1px solid var(--line); }
+    .rail-footer .quiet-button { width: 100%; }
+
+    .phone-wall-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    .wall-tools { display: flex; align-items: center; gap: 7px; }
+    .search-box { position: relative; }
+    .search-box svg { position: absolute; left: 8px; top: 50%; width: 13px; height: 13px; transform: translateY(-50%); color: #66808b; }
+    .search-box input { width: 138px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--input); color: white; padding: 0 8px 0 27px; font-size: 10px; }
+
+    .zoom-control { display: flex; align-items: center; gap: 7px; color: #8299a2; font-size: 10px; }
+    .zoom-control input { width: 72px; accent-color: var(--cyan); }
+    .zoom-name { width: 24px; color: #b6cad0; font-weight: 900; }
+
+    .phone-grid-wrap {
+      min-height: 0;
+      overflow: auto;
+      padding: 10px;
+      background-image:
+        linear-gradient(rgba(136, 181, 190, .025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(136, 181, 190, .02) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+
+    .phone-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(138px, 1fr));
+      align-items: start;
+      gap: 10px;
+      transition: 180ms ease;
+    }
+
+    .phone-grid[data-zoom="dense"] { grid-template-columns: repeat(auto-fill, minmax(94px, 1fr)); gap: 8px; }
+    .phone-grid[data-zoom="focus"] { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+
+    .device-tile {
+      min-width: 0;
+      min-height: 0;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,.026);
+      padding: 8px;
+      cursor: pointer;
+      text-align: left;
+      transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+      position: relative;
+    }
+
+    .device-tile:hover { border-color: rgba(55,230,208,.34); background: rgba(55,230,208,.045); transform: translateY(-1px); }
+    .device-tile.selected { border-color: rgba(55,230,208,.62); box-shadow: 0 0 0 2px rgba(55,230,208,.12), 0 14px 28px rgba(0,0,0,.18); }
+    .device-tile[data-status="error"] { border-color: rgba(227,97,114,.28); }
+    .device-tile[data-status="waiting"] { border-color: rgba(226,184,94,.24); }
+    .device-tile[data-status="offline"] { opacity: .62; filter: saturate(.35); }
+
+    .tile-head { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-bottom: 7px; }
+    .device-name { min-width: 0; display: flex; align-items: center; gap: 5px; font: 900 10px var(--mono); }
+    .device-name span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
+    .device-tile[data-status="running"] .status-dot { background: var(--blue); box-shadow: 0 0 10px rgba(101,183,255,.7); animation: pulse 1.4s ease-in-out infinite; }
+    .device-tile[data-status="waiting"] .status-dot { background: var(--amber); }
+    .device-tile[data-status="error"] .status-dot { background: var(--red); }
+    .device-tile[data-status="offline"] .status-dot { background: #75868c; }
+    .tile-state { border: 1px solid rgba(255,255,255,.1); border-radius: 999px; padding: 2px 5px; color: #a7bbc2; font-size: 8px; font-weight: 900; white-space: nowrap; }
+
+    .mini-phone {
+      width: min(84%, 118px);
+      aspect-ratio: 9 / 19.5;
+      margin: 0 auto;
+      border: 2px solid #33454e;
+      border-radius: 15px;
+      padding: 4px;
+      background: #02070a;
+      box-shadow: 0 9px 20px rgba(0,0,0,.3), inset 0 0 0 1px rgba(255,255,255,.04);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .mini-phone::before {
+      content: "";
+      position: absolute;
+      z-index: 2;
+      top: 6px;
+      left: 50%;
+      width: 28%;
+      height: 4px;
+      border-radius: 4px;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,.74);
+    }
+
+    .phone-screen,
+    .focus-screen img { width: 100%; height: 100%; object-fit: cover; object-position: center top; display: block; }
+    .phone-screen { border-radius: 11px; background: #0b1720; }
+    .screen-stale { position: absolute; inset: auto 6px 7px; z-index: 3; border: 1px solid rgba(226,184,94,.32); border-radius: 4px; background: rgba(22,16,4,.86); color: #f2d69b; padding: 3px 4px; text-align: center; font-size: 7px; font-weight: 900; }
+
+    .tile-task { margin-top: 7px; color: #eef7f6; font-size: 10px; line-height: 1.35; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tile-meta { margin-top: 3px; display: flex; justify-content: space-between; gap: 5px; color: #718790; font-size: 8px; }
+    .tile-progress { height: 3px; margin-top: 6px; border-radius: 3px; overflow: hidden; background: rgba(255,255,255,.08); }
+    .tile-progress span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+    .device-tile[data-status="running"] .tile-progress span { background: var(--blue); }
+    .device-tile[data-status="waiting"] .tile-progress span { background: var(--amber); }
+    .device-tile[data-status="error"] .tile-progress span { background: var(--red); }
+
+    .phone-grid[data-zoom="dense"] .device-tile { padding: 6px; }
+    .phone-grid[data-zoom="dense"] .mini-phone { width: min(78%, 72px); border-radius: 10px; padding: 3px; }
+    .phone-grid[data-zoom="dense"] .phone-screen { border-radius: 7px; }
+    .phone-grid[data-zoom="dense"] .tile-task { font-size: 8px; }
+    .phone-grid[data-zoom="dense"] .tile-meta span:last-child,
+    .phone-grid[data-zoom="dense"] .tile-state { display: none; }
+    .phone-grid[data-zoom="focus"] .mini-phone { width: min(84%, 150px); }
+    .phone-grid[data-zoom="focus"] .tile-task { font-size: 11px; }
+
+    .inspector { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+    .inspector-header { align-items: flex-start; }
+    .selected-device-line { display: flex; align-items: center; gap: 7px; }
+    .selected-device-line strong { font: 900 13px var(--mono); }
+    .selected-device-sub { margin-top: 3px; color: #718791; font-size: 9px; }
+
+    .mode-switch {
+      flex: 0 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 3px;
+      width: 148px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(0,0,0,.2);
+    }
+
+    .mode-button { min-height: 28px; border: 0; border-radius: 5px; background: transparent; color: #7e949d; cursor: pointer; font-size: 10px; font-weight: 900; }
+    .mode-button.active { color: #07221d; background: var(--cyan); }
+    .mode-button.manual.active { color: #221a06; background: var(--amber); }
+
+    .device-stage {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(132px, 162px) minmax(0, 1fr);
+      gap: 9px;
+      padding: 9px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .focus-phone {
+      width: 100%;
+      max-width: 162px;
+      margin: 0 auto;
+      aspect-ratio: 9 / 19.5;
+      border: 2px solid #3b4f58;
+      border-radius: 20px;
+      padding: 5px;
+      background: #02070a;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 16px 36px rgba(0,0,0,.32);
+    }
+
+    .focus-phone::before { content: ""; position: absolute; z-index: 3; left: 50%; top: 8px; width: 32%; height: 5px; border-radius: 5px; transform: translateX(-50%); background: rgba(0,0,0,.8); }
+    .focus-screen { width: 100%; height: 100%; border-radius: 15px; overflow: hidden; background: #0b1720; position: relative; cursor: default; }
+    .focus-screen.manual { cursor: crosshair; box-shadow: inset 0 0 0 2px rgba(226,184,94,.62); }
+    .focus-screen::after { content: "仅查看"; position: absolute; right: 5px; bottom: 5px; border: 1px solid rgba(55,230,208,.25); border-radius: 4px; background: rgba(3,14,18,.72); color: #a8f7eb; padding: 2px 4px; font-size: 7px; font-weight: 900; }
+    .focus-screen.manual::after { content: "人工接管"; color: #ffe4a9; border-color: rgba(226,184,94,.4); }
+
+    .tap-ripple { position: absolute; width: 24px; height: 24px; margin: -12px 0 0 -12px; border: 2px solid var(--amber); border-radius: 50%; pointer-events: none; animation: tap .55s ease-out forwards; }
+
+    .manual-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; align-content: start; }
+    .manual-control { min-height: 36px; border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,.025); color: #879ca5; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 9px; font-weight: 900; }
+    .manual-control svg { width: 14px; height: 14px; }
+    .manual-control.enabled { color: #f3dfb5; border-color: rgba(226,184,94,.22); background: rgba(226,184,94,.07); }
+    .manual-control.enabled:hover { border-color: rgba(226,184,94,.5); background: rgba(226,184,94,.13); }
+
+    .device-facts { margin-top: 8px; display: grid; gap: 5px; }
+    .fact { display: flex; justify-content: space-between; gap: 5px; padding-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,.05); color: #778e97; font-size: 9px; }
+    .fact strong { color: #cbd8dc; font-weight: 900; }
+
+    .agent-console { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+    .console-tabs { display: flex; align-items: center; gap: 2px; padding: 7px 8px 0; }
+    .console-tab { min-height: 28px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #718890; cursor: pointer; padding: 0 8px; font-size: 10px; font-weight: 900; }
+    .console-tab.active { color: #bffcf3; border-color: var(--cyan); }
+
+    .timeline { min-height: 0; overflow-y: auto; padding: 8px 10px; }
+    .timeline-item { position: relative; padding: 0 0 9px 17px; color: #80959d; font-size: 9px; line-height: 1.45; }
+    .timeline-item::before { content: ""; position: absolute; left: 2px; top: 3px; width: 7px; height: 7px; border: 2px solid var(--panel); border-radius: 50%; background: #617780; box-shadow: 0 0 0 1px rgba(255,255,255,.12); }
+    .timeline-item::after { content: ""; position: absolute; left: 5px; top: 13px; bottom: -1px; width: 1px; background: rgba(255,255,255,.09); }
+    .timeline-item:last-child::after { display: none; }
+    .timeline-item.done::before { background: var(--green); }
+    .timeline-item.running::before { background: var(--blue); animation: pulse 1.2s ease infinite; }
+    .timeline-item.waiting::before { background: var(--amber); }
+    .timeline-title { display: flex; justify-content: space-between; gap: 6px; color: #dbe8e9; font-size: 10px; font-weight: 900; }
+    .timeline-time { color: #5d737c; font: 8px var(--mono); font-weight: 400; }
+    .timeline-copy { margin-top: 2px; }
+
+    .agent-input { padding: 8px; border-top: 1px solid var(--line); background: rgba(0,0,0,.12); }
+    .agent-input textarea { width: 100%; height: 48px; resize: none; border: 1px solid var(--line); border-radius: 6px; background: var(--input); color: white; padding: 7px 8px; font-size: 10px; line-height: 1.45; outline: 0; }
+    .agent-input textarea::placeholder { color: #5f747d; }
+    .agent-actions { margin-top: 6px; display: flex; align-items: center; gap: 5px; }
+    .agent-actions .primary-button { margin-left: auto; }
+
+    .status-note { margin: 8px 8px 0; border: 1px solid rgba(101,183,255,.2); border-radius: 6px; background: rgba(101,183,255,.07); color: #a8d7ff; padding: 6px 8px; font-size: 9px; line-height: 1.45; }
+    .status-note.manual { border-color: rgba(226,184,94,.28); background: rgba(226,184,94,.08); color: #f4d99e; }
+
+    .toast-stack { position: fixed; z-index: 50; top: 50px; right: 14px; width: min(360px, calc(100vw - 28px)); display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+    .toast { pointer-events: auto; border: 1px solid rgba(55,230,208,.28); border-radius: var(--radius); background: #0b2b33; color: #dcfffa; padding: 9px 11px; box-shadow: 0 18px 44px rgba(0,0,0,.36); font-size: 11px; font-weight: 800; animation: toast-in .18s ease-out both; }
+    .toast.warning { border-color: rgba(226,184,94,.38); background: #302813; color: #ffe5aa; }
+    .toast.danger { border-color: rgba(227,97,114,.42); background: #35151d; color: #ffd3d9; }
+
+    .empty-state { grid-column: 1 / -1; min-height: 210px; display: flex; align-items: center; justify-content: center; border: 1px dashed var(--line); border-radius: var(--radius); color: var(--muted); font-size: 12px; text-align: center; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.84); } }
+    @keyframes tap { from { opacity: 1; transform: scale(.45); } to { opacity: 0; transform: scale(1.8); } }
+    @keyframes toast-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
+
+    @media (max-width: 1180px) {
+      .control-layout { grid-template-columns: 132px minmax(360px, 1fr) 312px; }
+      .device-stage { grid-template-columns: 132px minmax(0, 1fr); }
+      .metrics-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .command-top { grid-template-columns: 190px minmax(320px, 1fr) auto; }
+    }
+
+    @media (max-width: 940px) {
+      .control-layout { grid-template-columns: minmax(380px, 1fr) 300px; }
+      .group-rail { display: none; }
+      .header-actions .live-chip { display: none; }
+      .command-top { grid-template-columns: 160px minmax(280px, 1fr) auto; }
+      .page-title h1 { font-size: 15px; }
+    }
+
+    @media (max-height: 760px) {
+      .metrics-strip { display: none; }
+      .command-header { padding-bottom: 10px; }
+      .focus-phone { max-width: 132px; }
+      .device-stage { grid-template-columns: 132px minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="titlebar">
+    <div class="titlebar-brand">
+      <img src="../public/logo.png" alt="麓鸣" />
+      <span class="titlebar-name">麓鸣AI矩阵获客工作台</span>
+      <span class="titlebar-version">UI DEMO / 2.1.81</span>
+    </div>
+    <div class="titlebar-actions" aria-label="窗口操作">
+      <button class="window-button" title="最小化" aria-label="最小化"><i data-lucide="minus"></i></button>
+      <button class="window-button" title="最大化" aria-label="最大化"><i data-lucide="square"></i></button>
+      <button class="window-button danger" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button>
+    </div>
+  </div>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-logo"><img src="../public/logo.png" alt="麓鸣" /></div>
+      <nav class="nav-list" aria-label="主导航">
+        <button class="nav-button" title="总览"><i data-lucide="rocket"></i><span>总览</span></button>
+        <button class="nav-button" title="安装"><i data-lucide="package-open"></i><span>安装</span></button>
+        <button class="nav-button" title="创作"><i data-lucide="wand-sparkles"></i><span>创作</span></button>
+        <button class="nav-button" title="获客"><i data-lucide="scan-search"></i><span>获客</span></button>
+        <button class="nav-button" title="智能体"><i data-lucide="message-square-more"></i><span>智能体</span></button>
+        <button class="nav-button active" title="工作台"><i data-lucide="layout-grid"></i><span>工作台</span></button>
+        <button class="nav-button" title="模型账号"><i data-lucide="circle-user-round"></i><span>模型账号</span></button>
+        <button class="nav-button" title="其他"><i data-lucide="list-tree"></i><span>其他</span></button>
+      </nav>
+      <div class="sidebar-tools">
+        <span class="service-dot" title="核心服务运行中"></span>
+        <button class="icon-button" title="系统设置" aria-label="系统设置"><i data-lucide="settings"></i></button>
+        <button class="icon-button" title="模型账号" aria-label="模型账号"><i data-lucide="log-in"></i></button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="command-header">
+        <div class="command-top">
+          <div class="page-title">
+            <div class="eyebrow">STUDIO MODE / PHONE MATRIX</div>
+            <h1>超级矩阵工作台</h1>
+          </div>
+
+          <div class="command-box">
+            <i data-lucide="sparkles"></i>
+            <input id="globalCommand" value="让招聘组筛选今天的新简历，符合条件的进入待沟通队列" aria-label="中枢任务指令" />
+            <select id="scopeSelect" class="scope-select" aria-label="任务范围">
+              <option value="all">全部设备</option>
+              <option value="recruit" selected>招聘组</option>
+              <option value="sales">销售组</option>
+              <option value="selected">当前选中</option>
+            </select>
+          </div>
+
+          <div class="header-actions">
+            <span class="live-chip">事件流在线</span>
+            <button id="dispatchButton" class="primary-button"><i data-lucide="send"></i>执行任务</button>
+            <button id="emergencyButton" class="danger-button"><i data-lucide="octagon-x"></i>急停</button>
+          </div>
+        </div>
+
+        <div class="metrics-strip" aria-label="矩阵指标">
+          <div class="metric"><div class="metric-label">中枢</div><div class="metric-value blue">Codex</div></div>
+          <div class="metric"><div class="metric-label">CLI / MCP</div><div class="metric-value green">可调度</div></div>
+          <div class="metric"><div class="metric-label">在线手机</div><div class="metric-value green" id="onlineMetric">9 / 12</div></div>
+          <div class="metric"><div class="metric-label">运行中</div><div class="metric-value blue" id="runningMetric">4</div></div>
+          <div class="metric"><div class="metric-label">等待确认</div><div class="metric-value amber">2</div></div>
+          <div class="metric"><div class="metric-label">今日完成</div><div class="metric-value green">148</div></div>
+          <div class="metric"><div class="metric-label">异常</div><div class="metric-value red">1</div></div>
+          <div class="metric"><div class="metric-label">默认模型</div><div class="metric-value cyan">qwen3.7-plus</div></div>
+        </div>
+      </header>
+
+      <div class="control-layout">
+        <section class="panel group-rail">
+          <div class="panel-header">
+            <div><div class="panel-kicker">GROUPS</div><div class="panel-title">设备分组</div></div>
+          </div>
+          <div class="group-list" id="groupList"></div>
+          <div class="rail-footer"><button class="quiet-button" id="selectVisible"><i data-lucide="check-check"></i>选择当前组</button></div>
+        </section>
+
+        <section class="panel phone-wall-panel">
+          <div class="panel-header">
+            <div><div class="panel-kicker">LIVE PHONE WALL</div><div class="panel-title">真实手机矩阵</div></div>
+            <div class="wall-tools">
+              <div class="search-box"><i data-lucide="search"></i><input id="deviceSearch" placeholder="搜索设备" aria-label="搜索设备" /></div>
+              <div class="zoom-control" title="调整手机墙密度">
+                <i data-lucide="gallery-thumbnails"></i>
+                <input id="zoomRange" type="range" min="0" max="2" value="1" step="1" aria-label="手机墙缩放" />
+                <span class="zoom-name" id="zoomName">标准</span>
+              </div>
+              <button class="quiet-button" id="refreshWall" title="刷新全部截图"><i data-lucide="refresh-cw"></i>刷新</button>
+            </div>
+          </div>
+          <div class="phone-grid-wrap">
+            <div class="phone-grid" id="phoneGrid" data-zoom="standard"></div>
+          </div>
+        </section>
+
+        <aside class="panel inspector">
+          <div class="panel-header inspector-header">
+            <div>
+              <div class="panel-kicker">DEVICE INSPECTOR</div>
+              <div class="selected-device-line"><span class="status-dot"></span><strong id="selectedName">LUMI-P01</strong></div>
+              <div class="selected-device-sub" id="selectedSub">招聘一组 / 在线 / 画面刚刚更新</div>
+            </div>
+            <div class="mode-switch" role="tablist" aria-label="控制模式">
+              <button class="mode-button active" id="aiMode" role="tab">AI 控制</button>
+              <button class="mode-button manual" id="manualMode" role="tab">人工接管</button>
+            </div>
+          </div>
+
+          <div class="device-stage">
+            <div class="focus-phone">
+              <div class="focus-screen" id="focusScreen">
+                <img id="focusImage" src="../tmp-current-phone.png" alt="选中手机实时画面" />
+              </div>
+            </div>
+
+            <div>
+              <div class="manual-controls" aria-label="人工控制工具">
+                <button class="manual-control" data-action="返回"><i data-lucide="corner-up-left"></i>返回</button>
+                <button class="manual-control" data-action="主页"><i data-lucide="house"></i>主页</button>
+                <button class="manual-control" data-action="最近任务"><i data-lucide="panels-top-left"></i>最近</button>
+                <button class="manual-control" data-action="输入文字"><i data-lucide="keyboard"></i>输入</button>
+                <button class="manual-control" data-action="截图"><i data-lucide="camera"></i>截图</button>
+                <button class="manual-control" data-action="旋转屏幕"><i data-lucide="rotate-cw"></i>旋转</button>
+              </div>
+              <div class="device-facts">
+                <div class="fact"><span>当前任务</span><strong id="factTask">筛选候选人</strong></div>
+                <div class="fact"><span>执行进度</span><strong id="factProgress">62%</strong></div>
+                <div class="fact"><span>电量</span><strong id="factBattery">86%</strong></div>
+                <div class="fact"><span>网络</span><strong id="factNetwork">Wi-Fi / 32ms</strong></div>
+                <div class="fact"><span>设备租约</span><strong id="factLease">Agent 持有</strong></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="agent-console">
+            <div>
+              <div class="console-tabs">
+                <button class="console-tab active">执行步骤</button>
+                <button class="console-tab">证据</button>
+                <button class="console-tab">异常</button>
+              </div>
+              <div class="status-note" id="modeNote">AI 正在控制此设备。点击手机画面不会发送操作，切换到人工接管后才能直接控制。</div>
+            </div>
+            <div class="timeline" id="timeline"></div>
+            <div class="agent-input">
+              <textarea id="agentCommand" placeholder="给当前手机追加指令，例如：只保留有工厂经验的候选人"></textarea>
+              <div class="agent-actions">
+                <button class="quiet-button" id="pauseButton"><i data-lucide="pause"></i>暂停</button>
+                <button class="quiet-button" id="retryButton"><i data-lucide="rotate-ccw"></i>重试</button>
+                <button class="primary-button" id="sendAgentButton"><i data-lucide="send"></i>发送</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script>
+    const screenshots = {
+      douyin: "../tmp-current-phone.png",
+      agent: "../tmp-cursor-preview-phone.png",
+      browser: "../phone-self-update-screen.png",
+      tap: "../../apkclaw/Hermes-Agent-phone-codex-template-parameter-extraction/Screenshots/v653-node-aware-tap-success.png",
+      home: "../../apkclaw/Hermes-Agent-phone-codex-template-parameter-extraction/Screenshots/home-human-readable-v6.49.png",
+      progress: "../../apkclaw/Hermes-Agent-phone-codex-template-parameter-extraction/Screenshots/floating-human-progress-chrome-v6.49.png"
+    };
+
+    const devices = [
+      { id: "LUMI-P01", group: "招聘一组", status: "running", state: "执行中", image: screenshots.douyin, task: "筛选候选人 37/60", progress: 62, updated: "刚刚", battery: 86, network: "Wi-Fi / 32ms", stale: false },
+      { id: "LUMI-P02", group: "招聘一组", status: "running", state: "执行中", image: screenshots.agent, task: "读取简历详情", progress: 38, updated: "3秒前", battery: 71, network: "5G / 48ms", stale: false },
+      { id: "LUMI-P03", group: "招聘一组", status: "waiting", state: "待确认", image: screenshots.browser, task: "等待确认外发消息", progress: 74, updated: "8秒前", battery: 64, network: "Wi-Fi / 41ms", stale: false },
+      { id: "LUMI-P04", group: "招聘二组", status: "idle", state: "空闲", image: screenshots.home, task: "等待新任务", progress: 0, updated: "12秒前", battery: 93, network: "Wi-Fi / 28ms", stale: false },
+      { id: "LUMI-P05", group: "招聘二组", status: "running", state: "执行中", image: screenshots.progress, task: "整理候选人标签", progress: 48, updated: "刚刚", battery: 58, network: "5G / 55ms", stale: false },
+      { id: "LUMI-P06", group: "销售组", status: "idle", state: "空闲", image: screenshots.tap, task: "等待任务", progress: 0, updated: "21秒前", battery: 80, network: "Wi-Fi / 34ms", stale: false },
+      { id: "LUMI-P07", group: "销售组", status: "error", state: "异常", image: screenshots.agent, task: "无障碍服务已断开", progress: 27, updated: "46秒前", battery: 49, network: "5G / 87ms", stale: true },
+      { id: "LUMI-P08", group: "内容运营", status: "running", state: "执行中", image: screenshots.douyin, task: "读取视频评论", progress: 81, updated: "2秒前", battery: 68, network: "Wi-Fi / 30ms", stale: false },
+      { id: "LUMI-P09", group: "内容运营", status: "waiting", state: "待确认", image: screenshots.browser, task: "等待发布确认", progress: 92, updated: "9秒前", battery: 75, network: "Wi-Fi / 36ms", stale: false },
+      { id: "LUMI-P10", group: "设备维护", status: "idle", state: "空闲", image: screenshots.home, task: "设备巡检完成", progress: 100, updated: "31秒前", battery: 96, network: "USB / 12ms", stale: false },
+      { id: "LUMI-P11", group: "设备维护", status: "offline", state: "离线", image: screenshots.agent, task: "设备未连接", progress: 0, updated: "5分钟前", battery: 0, network: "未连接", stale: true },
+      { id: "LUMI-P12", group: "测试组", status: "offline", state: "离线", image: screenshots.tap, task: "ADB 通道不可用", progress: 0, updated: "12分钟前", battery: 32, network: "未连接", stale: true }
+    ];
+
+    const timelineTemplates = {
+      running: [
+        ["done", "设备已分配", "中枢锁定设备并创建执行租约", "10:31:02"],
+        ["done", "读取当前页面", "已获取最新截图和无障碍节点", "10:31:04"],
+        ["running", "筛选候选人", "正在核对工作经验与到岗条件", "进行中"],
+        ["waiting", "写入待沟通队列", "完成筛选后自动进入下一步", "等待"]
+      ],
+      waiting: [
+        ["done", "任务步骤已完成", "已生成待发送内容", "10:29:44"],
+        ["waiting", "等待人工确认", "外发消息不会自动发送", "等待"],
+        ["", "继续执行", "确认后写入任务结果", "未开始"]
+      ],
+      error: [
+        ["done", "任务已启动", "设备租约创建成功", "10:24:11"],
+        ["running", "恢复无障碍服务", "检测到服务绑定已失效", "诊断中"],
+        ["waiting", "等待设备恢复", "恢复后将从检查点继续", "等待"]
+      ],
+      idle: [
+        ["done", "设备巡检", "网络、无障碍和截图能力正常", "10:30:08"],
+        ["", "等待中枢任务", "设备当前可立即分配", "空闲"]
+      ],
+      offline: [
+        ["waiting", "设备离线", "等待 ADB 或局域网连接恢复", "离线"],
+        ["", "执行已暂停", "不会继续派发手机操作", "暂停"]
+      ]
+    };
+
+    let activeGroup = "全部设备";
+    let selectedId = "LUMI-P01";
+    let controlMode = "ai";
+    let zoomMode = "standard";
+    let paused = false;
+
+    const groupOrder = ["全部设备", "招聘一组", "招聘二组", "销售组", "内容运营", "设备维护", "测试组", "异常设备"];
+    const zoomModes = [
+      { key: "dense", label: "总览" },
+      { key: "standard", label: "标准" },
+      { key: "focus", label: "巡视" }
+    ];
+
+    function iconRefresh() {
+      if (window.lucide) window.lucide.createIcons({ attrs: { "stroke-width": 1.8 } });
+    }
+
+    function toast(message, tone = "info") {
+      const stack = document.getElementById("toastStack");
+      const node = document.createElement("div");
+      node.className = `toast ${tone === "info" ? "" : tone}`;
+      node.textContent = message;
+      stack.appendChild(node);
+      window.setTimeout(() => node.remove(), 2800);
+    }
+
+    function statusDevices(group) {
+      if (group === "全部设备") return devices;
+      if (group === "异常设备") return devices.filter(device => device.status === "error" || device.status === "offline");
+      return devices.filter(device => device.group === group);
+    }
+
+    function visibleDevices() {
+      const query = document.getElementById("deviceSearch").value.trim().toLowerCase();
+      return statusDevices(activeGroup).filter(device => {
+        const source = `${device.id} ${device.group} ${device.task} ${device.state}`.toLowerCase();
+        return !query || source.includes(query);
+      });
+    }
+
+    function renderGroups() {
+      const list = document.getElementById("groupList");
+      list.innerHTML = groupOrder.map(group => {
+        const items = statusDevices(group);
+        const online = items.filter(item => item.status !== "offline").length;
+        const ratio = items.length ? Math.round(online / items.length * 100) : 0;
+        return `
+          <button class="group-button ${activeGroup === group ? "active" : ""}" data-group="${group}">
+            <span class="group-name"><span>${group}</span><span class="group-count">${online}/${items.length}</span></span>
+            <span class="group-progress"><span style="width:${ratio}%"></span></span>
+          </button>`;
+      }).join("");
+      list.querySelectorAll(".group-button").forEach(button => button.addEventListener("click", () => {
+        activeGroup = button.dataset.group;
+        renderGroups();
+        renderDevices();
+      }));
+    }
+
+    function renderDevices() {
+      const grid = document.getElementById("phoneGrid");
+      const items = visibleDevices();
+      grid.dataset.zoom = zoomMode;
+      if (!items.length) {
+        grid.innerHTML = `<div class="empty-state">没有符合当前筛选条件的设备</div>`;
+        return;
+      }
+      grid.innerHTML = items.map(device => `
+        <button class="device-tile ${selectedId === device.id ? "selected" : ""}" data-id="${device.id}" data-status="${device.status}">
+          <div class="tile-head">
+            <span class="device-name"><span class="status-dot"></span><span>${device.id}</span></span>
+            <span class="tile-state">${device.state}</span>
+          </div>
+          <div class="mini-phone">
+            <img class="phone-screen" src="${device.image}" alt="${device.id} 最新截图" onerror="this.style.display='none'" />
+            ${device.stale ? `<span class="screen-stale">画面已过期</span>` : ""}
+          </div>
+          <div class="tile-task">${device.task}</div>
+          <div class="tile-meta"><span>${device.group}</span><span>${device.updated}</span></div>
+          <div class="tile-progress"><span style="width:${device.progress}%"></span></div>
+        </button>`).join("");
+      grid.querySelectorAll(".device-tile").forEach(tile => tile.addEventListener("click", () => selectDevice(tile.dataset.id)));
+    }
+
+    function selectDevice(id) {
+      const device = devices.find(item => item.id === id);
+      if (!device) return;
+      selectedId = id;
+      document.getElementById("selectedName").textContent = device.id;
+      document.getElementById("selectedSub").textContent = `${device.group} / ${device.state} / 画面${device.updated}更新`;
+      document.getElementById("focusImage").src = device.image;
+      document.getElementById("factTask").textContent = device.task;
+      document.getElementById("factProgress").textContent = `${device.progress}%`;
+      document.getElementById("factBattery").textContent = device.battery ? `${device.battery}%` : "未知";
+      document.getElementById("factNetwork").textContent = device.network;
+      renderTimeline(device.status);
+      renderDevices();
+      if (device.status === "offline") toast(`${device.id} 当前离线，控制操作已禁用`, "warning");
+    }
+
+    function renderTimeline(status) {
+      const items = timelineTemplates[status] || timelineTemplates.idle;
+      document.getElementById("timeline").innerHTML = items.map(item => `
+        <div class="timeline-item ${item[0]}">
+          <div class="timeline-title"><span>${item[1]}</span><span class="timeline-time">${item[3]}</span></div>
+          <div class="timeline-copy">${item[2]}</div>
+        </div>`).join("");
+    }
+
+    function setMode(mode) {
+      controlMode = mode;
+      const manual = mode === "manual";
+      document.getElementById("aiMode").classList.toggle("active", !manual);
+      document.getElementById("manualMode").classList.toggle("active", manual);
+      document.getElementById("focusScreen").classList.toggle("manual", manual);
+      document.querySelectorAll(".manual-control").forEach(button => button.classList.toggle("enabled", manual));
+      const note = document.getElementById("modeNote");
+      note.classList.toggle("manual", manual);
+      note.textContent = manual
+        ? "人工接管已启用。Agent 已暂停并释放设备租约，点击手机画面会发送真实坐标。"
+        : "AI 正在控制此设备。点击手机画面不会发送操作，切换到人工接管后才能直接控制。";
+      document.getElementById("factLease").textContent = manual ? "人工持有" : "Agent 持有";
+      toast(manual ? `${selectedId} 已切换人工接管，Agent 已暂停` : `${selectedId} 已重新观察屏幕并恢复 AI 控制`, manual ? "warning" : "info");
+    }
+
+    document.getElementById("aiMode").addEventListener("click", () => setMode("ai"));
+    document.getElementById("manualMode").addEventListener("click", () => setMode("manual"));
+
+    document.getElementById("focusScreen").addEventListener("click", event => {
+      if (controlMode !== "manual") {
+        toast("当前为 AI 控制模式，画面点击不会发送到手机");
+        return;
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      const x = Math.round((event.clientX - rect.left) / rect.width * 1080);
+      const y = Math.round((event.clientY - rect.top) / rect.height * 2400);
+      const ripple = document.createElement("span");
+      ripple.className = "tap-ripple";
+      ripple.style.left = `${event.clientX - rect.left}px`;
+      ripple.style.top = `${event.clientY - rect.top}px`;
+      event.currentTarget.appendChild(ripple);
+      window.setTimeout(() => ripple.remove(), 600);
+      toast(`已向 ${selectedId} 发送点击坐标 (${x}, ${y})`, "warning");
+    });
+
+    document.querySelectorAll(".manual-control").forEach(button => button.addEventListener("click", () => {
+      if (controlMode !== "manual") {
+        toast("请先切换到人工接管", "warning");
+        return;
+      }
+      toast(`已向 ${selectedId} 发送“${button.dataset.action}”操作`, "warning");
+    }));
+
+    document.getElementById("zoomRange").addEventListener("input", event => {
+      const value = zoomModes[Number(event.target.value)];
+      zoomMode = value.key;
+      document.getElementById("zoomName").textContent = value.label;
+      renderDevices();
+    });
+
+    document.getElementById("deviceSearch").addEventListener("input", renderDevices);
+
+    document.getElementById("refreshWall").addEventListener("click", event => {
+      event.currentTarget.querySelector("svg")?.classList.add("spin");
+      devices.forEach(device => { if (device.status !== "offline") device.updated = "刚刚"; });
+      renderDevices();
+      selectDevice(selectedId);
+      toast("已刷新 9 台在线手机的最新画面");
+    });
+
+    document.getElementById("selectVisible").addEventListener("click", () => toast(`已选择${activeGroup === "全部设备" ? "全部在线设备" : activeGroup}，可由中枢统一调度`));
+
+    document.getElementById("dispatchButton").addEventListener("click", () => {
+      const command = document.getElementById("globalCommand").value.trim();
+      if (!command) return toast("请先输入中枢任务", "warning");
+      const scope = document.getElementById("scopeSelect").selectedOptions[0].textContent;
+      toast(`任务已提交给 ${scope}，中枢正在生成执行计划`);
+    });
+
+    document.getElementById("emergencyButton").addEventListener("click", () => {
+      paused = true;
+      document.getElementById("runningMetric").textContent = "0";
+      toast("演示急停：已暂停全部任务，未继续派发手机操作", "danger");
+    });
+
+    document.getElementById("pauseButton").addEventListener("click", event => {
+      paused = !paused;
+      event.currentTarget.innerHTML = paused ? '<i data-lucide="play"></i>继续' : '<i data-lucide="pause"></i>暂停';
+      iconRefresh();
+      toast(paused ? `${selectedId} 已在安全检查点暂停` : `${selectedId} 已重新观察屏幕后继续执行`);
+    });
+
+    document.getElementById("retryButton").addEventListener("click", () => toast(`${selectedId} 将从最近检查点重试`));
+    document.getElementById("sendAgentButton").addEventListener("click", () => {
+      const input = document.getElementById("agentCommand");
+      const value = input.value.trim();
+      if (!value) return toast("请输入要追加给当前手机的指令", "warning");
+      const timeline = document.getElementById("timeline");
+      const node = document.createElement("div");
+      node.className = "timeline-item running";
+      node.innerHTML = `<div class="timeline-title"><span>追加指令</span><span class="timeline-time">刚刚</span></div><div class="timeline-copy"></div>`;
+      node.querySelector(".timeline-copy").textContent = value;
+      timeline.appendChild(node);
+      timeline.scrollTop = timeline.scrollHeight;
+      input.value = "";
+      toast(`指令已发送给 ${selectedId}`);
+    });
+
+    document.querySelectorAll(".nav-button:not(.active), .sidebar-tools .icon-button").forEach(button => button.addEventListener("click", () => toast("这是独立 UI Demo，当前只演示超级矩阵工作台页面")));
+    document.querySelectorAll(".window-button").forEach(button => button.addEventListener("click", () => toast("HTML Demo 不执行窗口系统操作")));
+
+    renderGroups();
+    renderDevices();
+    selectDevice(selectedId);
+    iconRefresh();
+  </script>
+</body>
+</html>

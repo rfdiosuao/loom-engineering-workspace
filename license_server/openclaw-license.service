@@ -1,0 +1,21 @@
+[Unit]
+Description=OpenClaw License Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/openclaw-license
+EnvironmentFile=-/opt/openclaw-license/openclaw-license.env
+Environment=LICENSE_HOST=0.0.0.0
+Environment=LICENSE_PORT=18791
+Environment=LICENSE_DB=/opt/openclaw-license/license.db
+Environment=LICENSE_PRIVATE_KEY_FILE=/opt/openclaw-license/private_key.b64
+Environment=LICENSE_ADMIN_TOKEN_FILE=/opt/openclaw-license/admin_token.txt
+Environment=LICENSE_LOGO_FILE=/opt/openclaw-license/logo.ico
+ExecStart=/opt/openclaw-license/venv/bin/python /opt/openclaw-license/server.py serve
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

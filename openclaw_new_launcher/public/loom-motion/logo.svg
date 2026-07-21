@@ -1,0 +1,98 @@
+<svg id="loom-luming-logo" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="麓鸣AI矩阵获客工作台 logo">
+  <defs>
+    <linearGradient id="mountainGradient" x1="224" y1="170" x2="822" y2="735" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B9F7FF"/>
+      <stop offset="0.34" stop-color="#24C6DC"/>
+      <stop offset="0.67" stop-color="#037287"/>
+      <stop offset="1" stop-color="#042632"/>
+    </linearGradient>
+    <linearGradient id="ridgeGradient" x1="490" y1="381" x2="912" y2="676" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C9FAFF"/>
+      <stop offset="0.42" stop-color="#20C2D9"/>
+      <stop offset="1" stop-color="#053747"/>
+    </linearGradient>
+    <linearGradient id="ribbonGradient" x1="124" y1="651" x2="917" y2="651" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18B9D1"/>
+      <stop offset="0.45" stop-color="#D9FEFF"/>
+      <stop offset="0.67" stop-color="#26D0E2"/>
+      <stop offset="1" stop-color="#0B6374"/>
+    </linearGradient>
+    <radialGradient id="coreGradient" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(538 534) rotate(90) scale(83)">
+      <stop stop-color="#FFF7C2"/>
+      <stop offset="0.34" stop-color="#FFD36A"/>
+      <stop offset="0.72" stop-color="#D98B18" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#FFD36A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="waveGradient" x1="282" y1="749" x2="742" y2="749" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1BCDE5" stop-opacity="0"/>
+      <stop offset="0.34" stop-color="#27E2F5"/>
+      <stop offset="0.5" stop-color="#FFD36A"/>
+      <stop offset="0.66" stop-color="#27E2F5"/>
+      <stop offset="1" stop-color="#1BCDE5" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.17 0 0 0 0 0.88 0 0 0 0 0.95 0 0 0 0.55 0" result="cyanGlow"/>
+      <feMerge>
+        <feMergeNode in="cyanGlow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="goldGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="13" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 1 0 0 0 0 0.72 0 0 0 0 0.2 0 0 0 0.75 0" result="warmGlow"/>
+      <feMerge>
+        <feMergeNode in="warmGlow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect id="background" width="1024" height="1024" fill="#071B24"/>
+
+  <g id="logo-art" transform="translate(61.44 61.44) scale(0.88)">
+  <g id="mark" filter="url(#softGlow)">
+    <g id="resonance-rings" stroke="#FFD36A" stroke-width="5" stroke-linecap="round" opacity="0.86">
+      <path id="ring-1" pathLength="1" d="M475 548C487 494 558 475 594 516"/>
+      <path id="ring-2" pathLength="1" d="M445 548C459 462 575 430 632 501"/>
+      <path id="ring-3" pathLength="1" d="M414 548C436 429 594 385 675 487"/>
+      <path id="ring-4" pathLength="1" d="M383 548C414 398 617 340 716 471"/>
+    </g>
+
+    <g id="mountain-body">
+      <path id="mountain-left" d="M130 655C237 603 310 516 365 384C399 302 421 208 472 181C512 161 564 188 585 266C604 338 598 409 637 462C665 499 712 487 742 437C774 385 812 382 850 427C883 466 897 516 946 549C973 567 998 596 1010 635C899 580 811 565 735 604C648 649 577 693 455 684C335 675 222 648 130 655Z" fill="url(#mountainGradient)"/>
+      <path id="mountain-shadow" d="M516 255C555 334 533 439 470 509C433 549 448 606 530 633C630 665 730 619 817 535C771 556 728 592 667 580C597 566 568 507 595 437C620 371 586 291 516 255Z" fill="#041D28" opacity="0.55"/>
+      <path id="mountain-highlight" d="M154 651C274 579 329 492 382 365C417 282 441 205 478 185C515 166 560 193 578 269" stroke="#E2FDFF" stroke-width="12" stroke-linecap="round" opacity="0.86"/>
+    </g>
+
+    <path id="ridge-right" d="M515 617C566 534 624 512 693 579C759 643 843 617 927 653C817 724 677 710 545 670C476 649 423 666 332 702C406 648 468 640 515 617Z" fill="url(#ridgeGradient)"/>
+    <path id="ridge-highlight" d="M625 505C675 527 708 604 773 623C820 637 875 616 930 652" stroke="#EAFDFF" stroke-width="10" stroke-linecap="round" opacity="0.82"/>
+    <path id="base-ribbon" pathLength="1" d="M128 647C261 623 382 592 510 638C642 686 787 704 912 643" stroke="url(#ribbonGradient)" stroke-width="28" stroke-linecap="round"/>
+
+    <g id="gold-core" filter="url(#goldGlow)">
+      <circle cx="538" cy="534" r="78" fill="url(#coreGradient)"/>
+      <circle cx="538" cy="534" r="22" fill="#FFE8A3"/>
+      <circle cx="538" cy="534" r="9" fill="#FFFFFF"/>
+    </g>
+  </g>
+
+  <g id="sound-wave" fill="url(#waveGradient)">
+    <rect x="285" y="740" width="7" height="18" rx="3.5"/>
+    <rect x="310" y="735" width="8" height="28" rx="4"/>
+    <rect x="337" y="724" width="9" height="50" rx="4.5"/>
+    <rect x="365" y="711" width="10" height="77" rx="5"/>
+    <rect x="394" y="697" width="11" height="104" rx="5.5"/>
+    <rect x="425" y="680" width="12" height="138" rx="6"/>
+    <rect x="461" y="651" width="13" height="197" rx="6.5"/>
+    <rect x="499" y="682" width="12" height="134" rx="6"/>
+    <rect x="531" y="643" width="14" height="216" rx="7"/>
+    <rect x="570" y="680" width="12" height="137" rx="6"/>
+    <rect x="602" y="696" width="11" height="106" rx="5.5"/>
+    <rect x="632" y="711" width="10" height="76" rx="5"/>
+    <rect x="660" y="724" width="9" height="50" rx="4.5"/>
+    <rect x="687" y="735" width="8" height="28" rx="4"/>
+    <rect x="713" y="740" width="7" height="18" rx="3.5"/>
+    <rect x="737" y="744" width="6" height="10" rx="3"/>
+  </g>
+  </g>
+</svg>

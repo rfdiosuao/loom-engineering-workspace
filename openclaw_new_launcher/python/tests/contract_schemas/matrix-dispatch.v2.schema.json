@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.matrix.dispatch.v2",
+  "title": "LOOM Matrix Dispatch v2",
+  "type": "object",
+  "required": [
+    "schema",
+    "campaignId",
+    "concurrency",
+    "deviceAssignments"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.matrix.dispatch.v2"
+    },
+    "campaignId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "mode": {
+      "enum": [
+        "observe",
+        "safe",
+        "full"
+      ]
+    },
+    "profile": {
+      "enum": [
+        "fast",
+        "standard",
+        "deep"
+      ]
+    },
+    "deviceAssignments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/assignment"
+      }
+    }
+  },
+  "$defs": {
+    "assignment": {
+      "type": "object",
+      "required": [
+        "assignmentId",
+        "deviceId",
+        "input",
+        "timeoutSec",
+        "retryBudget"
+      ],
+      "properties": {
+        "assignmentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "templateId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "timeoutSec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retryBudget": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "prompt"
+          ],
+          "not": {
+            "required": [
+              "templateId"
+            ]
+          }
+        },
+        {
+          "required": [
+            "templateId"
+          ],
+          "not": {
+            "required": [
+              "prompt"
+            ]
+          }
+        },
+        {
+          "required": [
+            "prompt",
+            "templateId"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

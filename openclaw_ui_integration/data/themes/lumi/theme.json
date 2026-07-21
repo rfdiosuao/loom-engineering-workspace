@@ -1,0 +1,77 @@
+{
+  "name": "Lumi Obsidian Gold",
+  "colors": {
+    "app_bg": "#05060A",
+    "sidebar_bg": "#070912",
+    "surface": "#090B12",
+    "surface_alt": "#0F1420",
+    "surface_deep": "#171D2B",
+    "surface_deeper": "#05070D",
+    "hover": "#171B28",
+    "input": "#0B1020",
+    "border": "rgba(215, 181, 109, 0.22)",
+    "border_strong": "rgba(215, 181, 109, 0.58)",
+    "text": "#F7F1E3",
+    "text_muted": "#A9B2C3",
+    "text_subtle": "#69758B",
+    "accent": "#D7B56D",
+    "accent_hover": "#F1D99A",
+    "accent_soft": "rgba(215, 181, 109, 0.16)",
+    "accent_ink": "#2B1D05",
+    "success": "#38D996",
+    "warning": "#FFB454",
+    "danger": "#FF4D6D",
+    "danger_hover": "#FF6E86",
+    "terminal_bg": "#05070D",
+    "terminal_header": "#0D1320",
+    "terminal_text": "#37E6D0"
+  },
+  "modes": {
+    "light": {
+      "app_bg": "#F6F3EC",
+      "sidebar_bg": "#FBF8F0",
+      "surface": "#FFFCF5",
+      "surface_alt": "#F4EFE4",
+      "surface_deep": "#24211B",
+      "surface_deeper": "#14110D",
+      "hover": "#EEE5D5",
+      "input": "#FFF9EF",
+      "border": "rgba(151, 119, 58, 0.22)",
+      "border_strong": "rgba(187, 146, 68, 0.48)",
+      "text": "#201B12",
+      "text_muted": "#756B5B",
+      "text_subtle": "#A59A88",
+      "accent": "#B98936",
+      "accent_hover": "#D6A64A",
+      "accent_soft": "rgba(214, 180, 106, 0.18)",
+      "accent_ink": "#6E4D12",
+      "success": "#0F9F6E",
+      "warning": "#D88915",
+      "danger": "#E54764",
+      "danger_hover": "#FF5E78",
+      "terminal_bg": "#0A0C12",
+      "terminal_header": "#111827",
+      "terminal_text": "#37E6D0"
+    }
+  },
+  "fonts": {
+    "display": ["Microsoft YaHei UI", 21, "bold"],
+    "title": ["Microsoft YaHei UI", 14, "bold"],
+    "section": ["Microsoft YaHei UI", 10, "bold"],
+    "body": ["Microsoft YaHei UI", 10, "normal"],
+    "small": ["Microsoft YaHei UI", 9, "normal"],
+    "mono": ["Cascadia Mono", 10, "normal"]
+  },
+  "brand": {
+    "name": "Lumi",
+    "subtitle": "AI Creative Console",
+    "app_user_model_id": "Lumi.Launcher",
+    "terminal_header": "Lumi Console",
+    "logoUrl": "logo.png"
+  },
+  "window": {
+    "title": "Lumi - AI Creative Console",
+    "width": 1200,
+    "height": 800
+  }
+}

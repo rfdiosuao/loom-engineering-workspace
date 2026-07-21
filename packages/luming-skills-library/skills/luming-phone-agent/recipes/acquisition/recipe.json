@@ -1,0 +1,54 @@
+{
+  "schema": "loom.phone-agent.recipe.v1",
+  "recipeId": "acquisition",
+  "name": "Authorized Acquisition Research",
+  "aliases": [
+    "acquisition",
+    "lead research"
+  ],
+  "status": "draft",
+  "app": {
+    "packageName": "user-selected",
+    "versionRange": "unverified",
+    "entryPage": "user-authorized discovery surface"
+  },
+  "goal": "Prepare minimized lead summaries and execute task-authorized outbound from visible authorized information",
+  "mode": "single",
+  "prerequisites": [
+    "user-authorized public or visible source",
+    "defined demand-signal criteria",
+    "one healthy selected phone"
+  ],
+  "steps": [
+    {
+      "stepId": "review-authorized-signals",
+      "action": "Review visible authorized demand signals without collecting private contact data",
+      "requiresConfirmation": false,
+      "verification": "unknown",
+      "evidence": []
+    },
+    {
+      "stepId": "execute-authorized-outbound",
+      "action": "Publish, comment, or private-message automatically within the task outbound policy",
+      "requiresConfirmation": false,
+      "verification": "unknown",
+      "evidence": []
+    }
+  ],
+  "safety": {
+    "requiresHumanReview": false,
+    "stopBefore": [
+      "untargeted unsolicited bulk outreach",
+      "hidden API access",
+      "security or ownership change",
+      "platform risk bypass"
+    ]
+  },
+  "verification": {
+    "successCount": 0,
+    "lastSuccessfulRun": null
+  },
+  "source": {
+    "kind": "builtin"
+  }
+}

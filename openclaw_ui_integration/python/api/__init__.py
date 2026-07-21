@@ -1,0 +1,1 @@
+"""FastAPI bridge route package."""

@@ -1,0 +1,173 @@
+﻿{
+  "schemaVersion": 1,
+  "product": "LOOM",
+  "channel": "stable",
+  "version": "2.2.0",
+  "publishedAt": "2026-06-28T00:00:00+08:00",
+  "minLauncherVersion": "2.1.15",
+  "signature": {
+    "algorithm": "ed25519",
+    "value": "replace-with-base64-ed25519-signature"
+  },
+  "components": [
+    {
+      "id": "codex-desktop",
+      "name": "Codex",
+      "version": "26.602.71036",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "installer",
+      "size": 120000000,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "urls": [
+        "https://download.heang.top/openclaw/v2.2.0/agents/codex-desktop-windows-x64.exe",
+        "https://get.microsoft.com/installer/download/9PLM9XGG6VKS"
+      ],
+      "installPath": "agents/codex",
+      "entry": "Codex-Installer.exe",
+      "officialUrl": "https://get.microsoft.com/installer/download/9PLM9XGG6VKS",
+      "category": "agent",
+      "description": "OpenAI coding agent desktop installer.",
+      "rollback": {
+        "keepPrevious": true,
+        "backupName": "codex.previous"
+      }
+    },
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "version": "2.1.169",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "size": 80000000,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "urls": [
+        "https://download.heang.top/openclaw/v2.2.0/agents/claude-code-2.1.169.tgz",
+        "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.169.tgz"
+      ],
+      "installPath": "agents/claude-code",
+      "entry": "claude-code-2.1.169.tgz",
+      "officialUrl": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.169.tgz",
+      "category": "agent",
+      "description": "Anthropic command-line coding agent package.",
+      "rollback": {
+        "keepPrevious": true,
+        "backupName": "claude-code.previous"
+      }
+    },
+    {
+      "id": "opencode",
+      "name": "opencode",
+      "version": "2026.6.28",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "zip",
+      "size": 60000000,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "urls": [
+        "https://download.heang.top/openclaw/v2.2.0/agents/opencode-windows-x64.zip",
+        "https://github.com/sst/opencode/releases"
+      ],
+      "installPath": "agents/opencode",
+      "entry": "opencode.exe",
+      "officialUrl": "https://github.com/sst/opencode/releases",
+      "category": "agent",
+      "description": "Terminal-first AI coding agent.",
+      "rollback": {
+        "keepPrevious": true,
+        "backupName": "opencode.previous"
+      }
+    },
+    {
+      "id": "openclaw-companion",
+      "name": "兼容运行时",
+      "version": "2026.6.1",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "installer",
+      "size": 180000000,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "urls": [
+        "https://download.heang.top/openclaw/v2.2.0/agents/openclaw-companion-setup-x64.exe",
+        "https://github.com/openclaw/openclaw/releases/download/v2026.6.1/OpenClawCompanion-Setup-x64.exe"
+      ],
+      "installPath": "agents/openclaw",
+      "entry": "OpenClawCompanion-Setup-x64.exe",
+      "officialUrl": "https://github.com/openclaw/openclaw/releases/download/v2026.6.1/OpenClawCompanion-Setup-x64.exe",
+      "category": "agent",
+      "description": "Optional compatibility runtime for legacy automation workflows.",
+      "rollback": {
+        "keepPrevious": true,
+        "backupName": "openclaw.previous"
+      }
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes",
+      "version": "0.16.0",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "installer",
+      "size": 150000000,
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "urls": [
+        "https://download.heang.top/openclaw/v2.2.0/agents/hermes-setup-windows-x64.exe",
+        "https://hermes-assets.nousresearch.com/Hermes-Setup.exe?build=8d71c3891970"
+      ],
+      "installPath": "agents/hermes",
+      "entry": "Hermes-Setup.exe",
+      "officialUrl": "https://hermes-assets.nousresearch.com/Hermes-Setup.exe?build=8d71c3891970",
+      "category": "agent",
+      "description": "Hermes desktop agent installer.",
+      "rollback": {
+        "keepPrevious": true,
+        "backupName": "hermes.previous"
+      }
+    },
+    {
+      "id": "desktop-rpa",
+      "name": "Desktop RPA",
+      "version": "1.0.0",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "zip",
+      "size": 50000000,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "urls": [
+        "https://download.heang.top/openclaw/v2.2.0/desktop-rpa-windows-x64.zip",
+        "https://github.com/openclaw/openclaw/releases/download/v2.2.0/desktop-rpa-windows-x64.zip"
+      ],
+      "installPath": "desktop-rpa",
+      "entry": "Luminode.exe",
+      "healthCheck": {
+        "kind": "http",
+        "url": "http://127.0.0.1:18080/health",
+        "timeoutMs": 3000
+      },
+      "rollback": {
+        "keepPrevious": true,
+        "backupName": "desktop-rpa.previous"
+      }
+    },
+    {
+      "id": "templates-and-skills",
+      "name": "Templates And Skills",
+      "version": "2026.6.28",
+      "platform": "all",
+      "arch": "all",
+      "type": "zip",
+      "size": 12000000,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "urls": [
+        "https://download.heang.top/openclaw/v2.2.0/templates-and-skills.zip",
+        "https://github.com/openclaw/openclaw/releases/download/v2.2.0/templates-and-skills.zip"
+      ],
+      "installPath": "templates-and-skills",
+      "rollback": {
+        "keepPrevious": true,
+        "backupName": "templates-and-skills.previous"
+      }
+    }
+  ]
+}

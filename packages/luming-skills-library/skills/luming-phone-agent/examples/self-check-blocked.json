@@ -1,0 +1,15 @@
+{
+  "schema": "loom.phone-agent.self-check-blocked.v1",
+  "status": "blocked",
+  "healthy": false,
+  "requiresHumanReview": true,
+  "blockers": [
+    {
+      "type": "phone_connection_missing",
+      "impact": "No controllable phone is available for discovery.",
+      "requiredAction": "Restore the approved phone connection configuration.",
+      "evidence": ["phone-status: no connected devices"]
+    }
+  ],
+  "resumeFrom": "PHONE_DISCOVERY"
+}

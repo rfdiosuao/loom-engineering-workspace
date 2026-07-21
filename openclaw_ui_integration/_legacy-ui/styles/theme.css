@@ -1,0 +1,76 @@
+:root {
+  --color-app-bg: #07080D;
+  --color-sidebar-bg: #0A0C14;
+  --color-surface: #0D0F18;
+  --color-surface-alt: #10141E;
+  --color-surface-deep: #151A25;
+  --color-surface-deeper: #05070D;
+  --color-hover: #1A1F2E;
+  --color-input: #0B1020;
+  --color-border: rgba(216, 184, 102, 0.14);
+  --color-border-strong: rgba(216, 184, 102, 0.38);
+  --color-text: #F7F1E3;
+  --color-text-muted: #A9B2C3;
+  --color-text-subtle: #63708A;
+  --color-accent: #D8B866;
+  --color-accent-hover: #E6C978;
+  --color-accent-soft: rgba(216, 184, 102, 0.10);
+  --color-accent-ink: #2B1D05;
+  --color-success: #3FE08F;
+  --color-warning: #FFB454;
+  --color-danger: #FF4D6D;
+  --color-danger-hover: #FF6E86;
+  --color-terminal-bg: #05070D;
+  --color-terminal-header: #0D1320;
+  --color-terminal-text: #37E6D0;
+
+  --font-display: 'Microsoft YaHei UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', Consolas, monospace;
+  --brand-name: 'OpenClaw';
+  --brand-subtitle: 'AI Creative Console';
+}
+
+:root[data-theme-mode='light'] {
+  --color-app-bg: #F6F3EC;
+  --color-sidebar-bg: #FBF8F0;
+  --color-surface: #FFFCF5;
+  --color-surface-alt: #F4EFE4;
+  --color-surface-deep: #24211B;
+  --color-surface-deeper: #14110D;
+  --color-hover: #EEE5D5;
+  --color-input: #FFF9EF;
+  --color-border: rgba(151, 119, 58, 0.22);
+  --color-border-strong: rgba(187, 146, 68, 0.48);
+  --color-text: #201B12;
+  --color-text-muted: #756B5B;
+  --color-text-subtle: #A59A88;
+  --color-accent: #B98936;
+  --color-accent-hover: #D6A64A;
+  --color-accent-soft: rgba(214, 180, 106, 0.18);
+  --color-accent-ink: #6E4D12;
+  --color-success: #0F9F6E;
+  --color-warning: #D88915;
+  --color-danger: #E54764;
+  --color-danger-hover: #FF5E78;
+  --color-terminal-bg: #0A0C12;
+  --color-terminal-header: #111827;
+  --color-terminal-text: #37E6D0;
+}
+
+body {
+  background: var(--color-app-bg);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 55% 44% at 88% 0%, rgba(216, 184, 102, 0.065), transparent),
+    radial-gradient(ellipse 36% 28% at 8% 96%, rgba(55, 230, 208, 0.025), transparent),
+    linear-gradient(rgba(216, 184, 102, 0.014) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(216, 184, 102, 0.012) 1px, transparent 1px);
+  background-size: auto, auto, 52px 52px, 52px 52px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.6), transparent 75%);
+}

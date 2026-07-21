@@ -1,0 +1,10 @@
+{
+  "id": "openclaw-meeting-notes",
+  "name": "openclaw-meeting-notes",
+  "displayName": "Meeting Notes",
+  "version": "1.0.0",
+  "description": "Turn meeting transcripts, call notes, chat logs, or raw discussion notes into concise minutes, decisions, action items, owners, deadlines, and follow-up messages. Use for meeting minutes, meeting summaries, action-item extraction, Chinese office meeting notes, and project sync recaps.",
+  "category": "Office",
+  "runtime": "openclaw-workspace",
+  "icon": "MN"
+}

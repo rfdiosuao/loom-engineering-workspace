@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>麓鸣AI矩阵获客工作台 Logo Motion</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --p2m-bg: #071b24;
+      --p2m-panel: #0c2530;
+      --p2m-line: rgba(188, 245, 255, 0.18);
+      --p2m-text: #dffaff;
+      --p2m-muted: #8fb9c4;
+      --p2m-gold: #ffd36a;
+      --p2m-duration: 1800ms;
+      --p2m-ease-enter: cubic-bezier(0.34, 0, 0.14, 1);
+      --p2m-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+      --p2m-ease-settle: cubic-bezier(0.16, 1, 0.3, 1);
+      font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--p2m-bg);
+      color: var(--p2m-text);
+      display: grid;
+      grid-template-rows: 1fr auto;
+    }
+    main {
+      width: min(1120px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 24px;
+    }
+    .stage {
+      min-height: min(680px, 70vh);
+      display: grid;
+      place-items: center;
+    }
+    #logo-root {
+      width: min(716px, 82vw, 68vh);
+      aspect-ratio: 1;
+    }
+    #logo-root svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #logo-root svg * {
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 14px;
+      border-top: 1px solid var(--p2m-line);
+      border-bottom: 1px solid var(--p2m-line);
+    }
+    button, input[type="range"] {
+      accent-color: var(--p2m-gold);
+    }
+    button {
+      min-height: 36px;
+      border: 1px solid var(--p2m-line);
+      background: #0d2a36;
+      color: var(--p2m-text);
+      border-radius: 8px;
+      padding: 0 14px;
+      cursor: pointer;
+    }
+    button[aria-pressed="true"] {
+      border-color: rgba(255, 211, 106, 0.72);
+      color: #ffe9a6;
+    }
+    label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--p2m-muted);
+      font-size: 14px;
+    }
+    .principles, .atoms {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 18px auto 0;
+    }
+    .principles span {
+      border: 1px solid var(--p2m-line);
+      color: var(--p2m-muted);
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+    .principles span.active {
+      border-color: rgba(255, 211, 106, 0.74);
+      color: #ffe39b;
+    }
+    .atom {
+      width: 148px;
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--p2m-line);
+      border-radius: 8px;
+      background: #081f29;
+      overflow: hidden;
+    }
+    .atom svg {
+      width: 84%;
+      height: 84%;
+      display: block;
+    }
+    footer {
+      color: var(--p2m-muted);
+      text-align: center;
+      font-size: 12px;
+      padding: 14px;
+    }
+    .qa-mode .controls,
+    .qa-mode .principles,
+    .qa-mode .atoms,
+    .qa-mode footer { display: none; }
+    .qa-mode main {
+      width: 100vw;
+      height: 100vh;
+      padding: 0;
+      display: grid;
+      place-items: center;
+    }
+    .qa-mode .stage { min-height: 100vh; }
+    .qa-mode #logo-root { width: min(716px, 86vmin); }
+
+    @media (prefers-reduced-motion: no-preference) {
+      #logo-root #mark {
+        animation: mark-arrive var(--p2m-duration) var(--p2m-ease-enter) both;
+      }
+      #logo-root #mountain-left,
+      #logo-root #mountain-shadow,
+      #logo-root #mountain-highlight {
+        animation: mountain-rise var(--p2m-duration) var(--p2m-ease-out) both;
+      }
+      #logo-root #ridge-right,
+      #logo-root #ridge-highlight {
+        animation: ridge-follow var(--p2m-duration) var(--p2m-ease-out) both;
+      }
+      #logo-root #base-ribbon {
+        stroke-dasharray: 1;
+        stroke-dashoffset: 1;
+        animation: ribbon-draw var(--p2m-duration) var(--p2m-ease-enter) both;
+      }
+      #logo-root #ring-1,
+      #logo-root #ring-2,
+      #logo-root #ring-3,
+      #logo-root #ring-4 {
+        stroke-dasharray: 1;
+        stroke-dashoffset: 1;
+        animation: ring-draw var(--p2m-duration) var(--p2m-ease-out) both;
+      }
+      #logo-root #ring-2 { animation-delay: 40ms; }
+      #logo-root #ring-3 { animation-delay: 90ms; }
+      #logo-root #ring-4 { animation-delay: 140ms; }
+      #logo-root #gold-core {
+        animation: core-bloom var(--p2m-duration) var(--p2m-ease-settle) both;
+      }
+      #logo-root #sound-wave rect {
+        transform-origin: center;
+        animation: wave-rise var(--p2m-duration) var(--p2m-ease-out) both;
+      }
+      #logo-root #sound-wave rect:nth-child(1),
+      #logo-root #sound-wave rect:nth-child(16) { animation-delay: 250ms; }
+      #logo-root #sound-wave rect:nth-child(2),
+      #logo-root #sound-wave rect:nth-child(15) { animation-delay: 290ms; }
+      #logo-root #sound-wave rect:nth-child(3),
+      #logo-root #sound-wave rect:nth-child(14) { animation-delay: 330ms; }
+      #logo-root #sound-wave rect:nth-child(4),
+      #logo-root #sound-wave rect:nth-child(13) { animation-delay: 370ms; }
+      #logo-root #sound-wave rect:nth-child(5),
+      #logo-root #sound-wave rect:nth-child(12) { animation-delay: 410ms; }
+      #logo-root #sound-wave rect:nth-child(6),
+      #logo-root #sound-wave rect:nth-child(11) { animation-delay: 450ms; }
+      #logo-root #sound-wave rect:nth-child(7),
+      #logo-root #sound-wave rect:nth-child(10) { animation-delay: 490ms; }
+      #logo-root #sound-wave rect:nth-child(8),
+      #logo-root #sound-wave rect:nth-child(9) { animation-delay: 530ms; }
+      .atom-pulse #atom-core { animation: atom-pulse 1800ms cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+      .atom-wave rect { transform-origin: center; animation: atom-wave 1100ms cubic-bezier(0.16, 1, 0.3, 1) infinite alternate; }
+      .atom-orbit #atom-rings { animation: atom-orbit 2600ms linear infinite; transform-origin: 52% 52%; }
+    }
+
+    @keyframes mark-arrive {
+      0% { opacity: 0; transform: translateY(34px) scale(0.94); filter: blur(8px); }
+      18% { opacity: 0.16; transform: translateY(42px) scale(0.91); filter: blur(10px); }
+      62% { opacity: 1; transform: translateY(-6px) scale(1.018); filter: blur(0); }
+      78% { transform: translateY(2px) scale(0.995); }
+      100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+    }
+    @keyframes mountain-rise {
+      0%, 18% { opacity: 0; transform: translateY(34px) scale(0.96); }
+      58% { opacity: 1; transform: translateY(-5px) scale(1.01); }
+      100% { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes ridge-follow {
+      0%, 28% { opacity: 0; transform: translateX(28px) translateY(22px) scale(0.96); }
+      66% { opacity: 1; transform: translateX(-4px) translateY(-3px) scale(1.006); }
+      100% { opacity: 1; transform: translateX(0) translateY(0) scale(1); }
+    }
+    @keyframes ribbon-draw {
+      0%, 24% { opacity: 0; stroke-dashoffset: 1; }
+      32% { opacity: 1; stroke-dashoffset: 1; }
+      76% { opacity: 1; stroke-dashoffset: 0; }
+      100% { opacity: 1; stroke-dashoffset: 0; }
+    }
+    @keyframes ring-draw {
+      0%, 34% { opacity: 0; stroke-dashoffset: 1; }
+      43% { opacity: 0.94; }
+      74% { stroke-dashoffset: 0; opacity: 0.86; }
+      100% { stroke-dashoffset: 0; opacity: 0.86; }
+    }
+    @keyframes core-bloom {
+      0%, 30% { opacity: 0; transform: scale(0.35); }
+      52% { opacity: 1; transform: scale(1.16); }
+      75% { transform: scale(0.96); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+    @keyframes wave-rise {
+      0%, 36% { opacity: 0; transform: scaleY(0.05); }
+      58% { opacity: 1; transform: scaleY(1.16); }
+      78% { transform: scaleY(0.92); }
+      100% { opacity: 1; transform: scaleY(1); }
+    }
+    @keyframes atom-pulse {
+      0%, 100% { transform: scale(0.92); opacity: 0.75; }
+      48% { transform: scale(1.18); opacity: 1; }
+    }
+    @keyframes atom-wave {
+      0% { transform: scaleY(0.25); opacity: 0.55; }
+      100% { transform: scaleY(1); opacity: 1; }
+    }
+    @keyframes atom-orbit {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="stage">
+      <div id="logo-root" aria-label="麓鸣AI矩阵获客工作台 animated logo">
+        <svg id="loom-luming-logo" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="麓鸣AI矩阵获客工作台 logo">
+          <defs>
+            <linearGradient id="mountainGradient" x1="224" y1="170" x2="822" y2="735" gradientUnits="userSpaceOnUse"><stop stop-color="#B9F7FF"/><stop offset="0.34" stop-color="#24C6DC"/><stop offset="0.67" stop-color="#037287"/><stop offset="1" stop-color="#042632"/></linearGradient>
+            <linearGradient id="ridgeGradient" x1="490" y1="381" x2="912" y2="676" gradientUnits="userSpaceOnUse"><stop stop-color="#C9FAFF"/><stop offset="0.42" stop-color="#20C2D9"/><stop offset="1" stop-color="#053747"/></linearGradient>
+            <linearGradient id="ribbonGradient" x1="124" y1="651" x2="917" y2="651" gradientUnits="userSpaceOnUse"><stop stop-color="#18B9D1"/><stop offset="0.45" stop-color="#D9FEFF"/><stop offset="0.67" stop-color="#26D0E2"/><stop offset="1" stop-color="#0B6374"/></linearGradient>
+            <radialGradient id="coreGradient" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(538 534) rotate(90) scale(83)"><stop stop-color="#FFF7C2"/><stop offset="0.34" stop-color="#FFD36A"/><stop offset="0.72" stop-color="#D98B18" stop-opacity="0.45"/><stop offset="1" stop-color="#FFD36A" stop-opacity="0"/></radialGradient>
+            <linearGradient id="waveGradient" x1="282" y1="749" x2="742" y2="749" gradientUnits="userSpaceOnUse"><stop stop-color="#1BCDE5" stop-opacity="0"/><stop offset="0.34" stop-color="#27E2F5"/><stop offset="0.5" stop-color="#FFD36A"/><stop offset="0.66" stop-color="#27E2F5"/><stop offset="1" stop-color="#1BCDE5" stop-opacity="0"/></linearGradient>
+            <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="10" result="blur"/><feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.17 0 0 0 0 0.88 0 0 0 0 0.95 0 0 0 0.55 0" result="cyanGlow"/><feMerge><feMergeNode in="cyanGlow"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+            <filter id="goldGlow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="13" result="blur"/><feColorMatrix in="blur" type="matrix" values="0 0 0 0 1 0 0 0 0 0.72 0 0 0 0 0.2 0 0 0 0.75 0" result="warmGlow"/><feMerge><feMergeNode in="warmGlow"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          </defs>
+          <rect id="background" width="1024" height="1024" fill="#071B24"/>
+          <g id="logo-art" transform="translate(61.44 61.44) scale(0.88)">
+          <g id="mark" filter="url(#softGlow)">
+            <g id="resonance-rings" stroke="#FFD36A" stroke-width="5" stroke-linecap="round" opacity="0.86">
+              <path id="ring-1" pathLength="1" d="M475 548C487 494 558 475 594 516"/>
+              <path id="ring-2" pathLength="1" d="M445 548C459 462 575 430 632 501"/>
+              <path id="ring-3" pathLength="1" d="M414 548C436 429 594 385 675 487"/>
+              <path id="ring-4" pathLength="1" d="M383 548C414 398 617 340 716 471"/>
+            </g>
+            <g id="mountain-body">
+              <path id="mountain-left" d="M130 655C237 603 310 516 365 384C399 302 421 208 472 181C512 161 564 188 585 266C604 338 598 409 637 462C665 499 712 487 742 437C774 385 812 382 850 427C883 466 897 516 946 549C973 567 998 596 1010 635C899 580 811 565 735 604C648 649 577 693 455 684C335 675 222 648 130 655Z" fill="url(#mountainGradient)"/>
+              <path id="mountain-shadow" d="M516 255C555 334 533 439 470 509C433 549 448 606 530 633C630 665 730 619 817 535C771 556 728 592 667 580C597 566 568 507 595 437C620 371 586 291 516 255Z" fill="#041D28" opacity="0.55"/>
+              <path id="mountain-highlight" d="M154 651C274 579 329 492 382 365C417 282 441 205 478 185C515 166 560 193 578 269" stroke="#E2FDFF" stroke-width="12" stroke-linecap="round" opacity="0.86"/>
+            </g>
+            <path id="ridge-right" d="M515 617C566 534 624 512 693 579C759 643 843 617 927 653C817 724 677 710 545 670C476 649 423 666 332 702C406 648 468 640 515 617Z" fill="url(#ridgeGradient)"/>
+            <path id="ridge-highlight" d="M625 505C675 527 708 604 773 623C820 637 875 616 930 652" stroke="#EAFDFF" stroke-width="10" stroke-linecap="round" opacity="0.82"/>
+            <path id="base-ribbon" pathLength="1" d="M128 647C261 623 382 592 510 638C642 686 787 704 912 643" stroke="url(#ribbonGradient)" stroke-width="28" stroke-linecap="round"/>
+            <g id="gold-core" filter="url(#goldGlow)"><circle cx="538" cy="534" r="78" fill="url(#coreGradient)"/><circle cx="538" cy="534" r="22" fill="#FFE8A3"/><circle cx="538" cy="534" r="9" fill="#FFFFFF"/></g>
+          </g>
+          <g id="sound-wave" fill="url(#waveGradient)">
+            <rect x="285" y="740" width="7" height="18" rx="3.5"/><rect x="310" y="735" width="8" height="28" rx="4"/><rect x="337" y="724" width="9" height="50" rx="4.5"/><rect x="365" y="711" width="10" height="77" rx="5"/><rect x="394" y="697" width="11" height="104" rx="5.5"/><rect x="425" y="680" width="12" height="138" rx="6"/><rect x="461" y="651" width="13" height="197" rx="6.5"/><rect x="499" y="682" width="12" height="134" rx="6"/><rect x="531" y="643" width="14" height="216" rx="7"/><rect x="570" y="680" width="12" height="137" rx="6"/><rect x="602" y="696" width="11" height="106" rx="5.5"/><rect x="632" y="711" width="10" height="76" rx="5"/><rect x="660" y="724" width="9" height="50" rx="4.5"/><rect x="687" y="735" width="8" height="28" rx="4"/><rect x="713" y="740" width="7" height="18" rx="3.5"/><rect x="737" y="744" width="6" height="10" rx="3"/>
+          </g>
+          </g>
+        </svg>
+      </div>
+    </section>
+    <section class="controls" aria-label="Playback controls">
+      <button id="replay" type="button">Replay</button>
+      <button id="slow" type="button" aria-pressed="false">Slow</button>
+      <label>Speed <input id="speed" type="range" min="0.25" max="1.5" step="0.05" value="0.6"></label>
+    </section>
+    <section class="principles" aria-label="Animation principles">
+      <span data-phase="staging">Staging</span>
+      <span data-phase="anticipation">Anticipation</span>
+      <span data-phase="slow">Slow In/Out</span>
+      <span data-phase="overlap">Overlapping Action</span>
+      <span data-phase="appeal">Appeal</span>
+    </section>
+    <section class="atoms" aria-label="Atomic motion studies">
+      <div class="atom atom-pulse"><svg viewBox="0 0 1024 1024" aria-label="pulse atom"><rect width="1024" height="1024" fill="#071B24"/><circle id="atom-core" cx="512" cy="512" r="92" fill="#FFD36A"/></svg></div>
+      <div class="atom atom-wave"><svg viewBox="0 0 1024 1024" aria-label="wave atom"><rect width="1024" height="1024" fill="#071B24"/><g fill="url(#miniWave)"><rect x="330" y="450" width="26" height="124" rx="13"/><rect x="390" y="390" width="30" height="244" rx="15"/><rect x="462" y="330" width="32" height="364" rx="16"/><rect x="532" y="380" width="30" height="264" rx="15"/><rect x="600" y="445" width="26" height="134" rx="13"/></g><defs><linearGradient id="miniWave" x1="330" y1="512" x2="626" y2="512"><stop stop-color="#26D0E2"/><stop offset="0.5" stop-color="#FFD36A"/><stop offset="1" stop-color="#26D0E2"/></linearGradient></defs></svg></div>
+      <div class="atom atom-orbit"><svg viewBox="0 0 1024 1024" aria-label="orbit atom"><rect width="1024" height="1024" fill="#071B24"/><g id="atom-rings" fill="none" stroke="#FFD36A" stroke-width="14" stroke-linecap="round"><path d="M312 538C352 342 630 286 742 462"/><path d="M382 542C412 420 588 385 664 494"/></g><circle cx="512" cy="512" r="70" fill="#28D6E8"/></svg></div>
+    </section>
+  </main>
+  <footer>麓鸣AI矩阵获客工作台 motion study</footer>
+  <script>
+    const DURATION = 2400;
+    const params = new URLSearchParams(location.search);
+    const embedMode = params.has("embed");
+    const loopMode = params.has("loop") && !params.has("static") && !params.has("t");
+    const motionMode = params.get("motion") || "";
+    const readyNonce = params.get("nonce") || "";
+    const qaMode = embedMode || params.has("t") || params.has("static") || params.has("qa");
+    if (qaMode) document.body.classList.add("qa-mode");
+
+    const root = document.getElementById("logo-root");
+    const speed = document.getElementById("speed");
+    const replay = document.getElementById("replay");
+    const slow = document.getElementById("slow");
+    let slowMode = false;
+    let loopTimer = 0;
+
+    if (motionMode === "calm") {
+      speed.value = "0.72";
+    }
+
+    function mainAnimations() {
+      return root.getAnimations({ subtree: true });
+    }
+
+    function setRate(rate) {
+      for (const animation of mainAnimations()) animation.playbackRate = rate;
+    }
+
+    function seek(ms) {
+      for (const animation of mainAnimations()) {
+        animation.pause();
+        animation.currentTime = Math.max(0, Math.min(DURATION, ms));
+      }
+      updatePrinciples(ms);
+    }
+
+    function updatePrinciples(ms) {
+      const active = ms < 320 ? "anticipation" : ms < 820 ? "staging" : ms < 1360 ? "overlap" : "appeal";
+      document.querySelectorAll(".principles span").forEach((pill) => {
+        pill.classList.toggle("active", pill.dataset.phase === active || (active === "overlap" && pill.dataset.phase === "slow"));
+      });
+    }
+
+    function applyDefaultSpeed() {
+      setRate(slowMode ? 0.25 : Number(speed.value));
+    }
+
+    function replayMotion() {
+      for (const animation of mainAnimations()) {
+        animation.cancel();
+        animation.play();
+      }
+      requestAnimationFrame(applyDefaultSpeed);
+    }
+
+    function notifyReady() {
+      document.body.classList.add("motion-ready");
+      window.__p2mReady = true;
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({
+          type: "loom-motion-ready",
+          source: "loom-motion-vector-v1",
+          nonce: readyNonce,
+        }, "*");
+      }
+    }
+
+    function startLoop() {
+      if (!loopMode || loopTimer) return;
+      const rate = Math.max(0.1, slowMode ? 0.25 : Number(speed.value));
+      const interval = Math.ceil(DURATION / rate) + 420;
+      loopTimer = window.setInterval(replayMotion, interval);
+    }
+
+    replay.addEventListener("click", replayMotion);
+
+    slow.addEventListener("click", () => {
+      slowMode = !slowMode;
+      slow.setAttribute("aria-pressed", String(slowMode));
+      applyDefaultSpeed();
+    });
+
+    speed.addEventListener("input", () => {
+      if (!slowMode) applyDefaultSpeed();
+    });
+
+    root.addEventListener("click", replayMotion);
+
+    requestAnimationFrame(() => {
+      if (params.has("static")) {
+        seek(DURATION);
+      } else if (params.has("t")) {
+        seek(Number(params.get("t")) || 0);
+      } else {
+        applyDefaultSpeed();
+        startLoop();
+      }
+      notifyReady();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "schema": "loom.phone-agent.recipe-sync-result.v1",
+  "recipeId": "example-visible-demand-draft",
+  "status": "synced",
+  "sourceAndInstallMatch": true,
+  "requiresHumanReview": false,
+  "hashes": {
+    "source": "sha256:example-source",
+    "installed": "sha256:example-source"
+  },
+  "resumeFrom": null
+}

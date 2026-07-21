@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.local/schemas/phone-agent/recipe-index.schema.json",
+  "title": "LOOM Phone Agent Recipe Index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "recipes"],
+  "properties": {
+    "schema": {
+      "const": "loom.phone-agent.recipe-index.v1"
+    },
+    "recipes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recipeId",
+        "name",
+        "aliases",
+        "status",
+        "app",
+        "goal",
+        "mode",
+        "path",
+        "verification"
+      ],
+      "properties": {
+        "recipeId": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "status": {
+          "enum": ["draft", "verified", "stale", "blocked"]
+        },
+        "app": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["packageName", "versionRange", "entryPage"],
+          "properties": {
+            "packageName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "versionRange": {
+              "type": "string",
+              "minLength": 1
+            },
+            "entryPage": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "enum": ["single", "matrix"]
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^recipes/[a-z0-9]+(?:-[a-z0-9]+)*/recipe\\.json$"
+        },
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["successCount"],
+          "properties": {
+            "successCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "lastSuccessfulRun": {
+              "type": ["string", "null"],
+              "format": "date-time"
+            }
+          }
+        }
+      }
+    }
+  }
+}

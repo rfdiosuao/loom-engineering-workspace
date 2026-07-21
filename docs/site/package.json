@@ -1,0 +1,14 @@
+{
+  "name": "openclaw-docs-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress --host 127.0.0.1 --port 5500",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview --host 127.0.0.1 --port 5501"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}

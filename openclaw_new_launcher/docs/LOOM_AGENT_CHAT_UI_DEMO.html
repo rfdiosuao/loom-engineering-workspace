@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>麓鸣AI矩阵获客工作台 - 中枢智能体 Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07131b;
+      --sidebar: #071b24;
+      --panel: #0a1b26;
+      --panel-2: #0c202b;
+      --input: #071822;
+      --line: rgba(205,235,242,.11);
+      --line-strong: rgba(55,230,208,.3);
+      --text: #f2f8f7;
+      --muted: #91a6af;
+      --subtle: #5f7680;
+      --cyan: #37e6d0;
+      --cyan-soft: rgba(55,230,208,.09);
+      --green: #35d39f;
+      --blue: #65b7ff;
+      --amber: #e2b85e;
+      --red: #e36172;
+      --radius: 8px;
+      --font: "HarmonyOS Sans SC", "MiSans", "Alibaba PuHuiTi", "Microsoft YaHei UI", system-ui, sans-serif;
+      --mono: "Cascadia Mono", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); }
+    button, input, textarea, select { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(147,176,186,.23); }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(55,230,208,.42); }
+
+    .titlebar {
+      height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--line);
+      background: #061119;
+      user-select: none;
+    }
+
+    .titlebar-brand, .titlebar-actions, .row { display: flex; align-items: center; }
+    .titlebar-brand { gap: 9px; min-width: 0; }
+    .titlebar-brand img { width: 22px; height: 22px; border-radius: 5px; }
+    .titlebar-name { font-size: 12px; font-weight: 900; }
+    .titlebar-version { color: var(--subtle); font: 10px var(--mono); }
+    .titlebar-actions { gap: 4px; }
+    .window-button, .icon-button { border: 0; background: transparent; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+    .window-button { width: 34px; height: 28px; color: #8096a0; }
+    .window-button:hover { color: white; background: rgba(255,255,255,.05); }
+    .window-button.danger:hover { background: var(--red); }
+
+    .app-shell { height: calc(100% - 38px); display: grid; grid-template-columns: 72px minmax(0,1fr); min-height: 0; }
+
+    .sidebar {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid rgba(55,230,208,.12);
+      background: var(--sidebar);
+      box-shadow: inset -1px 0 rgba(55,230,208,.05);
+      position: relative;
+      z-index: 2;
+    }
+
+    .sidebar::after { content: ""; pointer-events: none; position: absolute; inset: 0 0 0 auto; width: 22px; background: linear-gradient(90deg,transparent,rgba(55,230,208,.05)); }
+    .sidebar-logo { height: 66px; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+    .sidebar-logo img { width: 40px; height: 40px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; box-shadow: 0 14px 30px rgba(0,0,0,.34); }
+    .nav-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .nav-button { position: relative; min-height: 62px; border: 0; border-radius: var(--radius); background: transparent; color: rgba(255,255,255,.58); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; transition: 140ms ease; }
+    .nav-button:hover { background: rgba(255,255,255,.05); color: white; }
+    .nav-button.active { color: var(--cyan); background: rgba(255,255,255,.075); box-shadow: inset 0 0 0 1px rgba(55,230,208,.15); }
+    .nav-button.active::after { content: ""; position: absolute; right: -8px; top: 9px; width: 3px; height: 42px; border-radius: 3px 0 0 3px; background: var(--cyan); }
+    .nav-button svg { width: 22px; height: 22px; stroke-width: 1.8; }
+    .nav-button span { font-size: 11px; line-height: 1; font-weight: 900; }
+    .sidebar-tools { flex: 0 0 auto; padding: 10px 8px 14px; border-top: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 9px; }
+    .sidebar-tools .icon-button { width: 40px; height: 40px; border-radius: var(--radius); color: #78919c; }
+    .sidebar-tools .icon-button:hover { color: white; background: rgba(255,255,255,.05); }
+    .service-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px rgba(53,211,159,.7); }
+
+    .workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: 66px minmax(0,1fr); overflow: hidden; }
+
+    .agent-header {
+      display: grid;
+      grid-template-columns: minmax(250px,1fr) auto auto;
+      align-items: center;
+      gap: 14px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(9,23,34,.98);
+    }
+
+    .agent-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .agent-avatar { width: 40px; height: 40px; flex: 0 0 auto; border: 1px solid rgba(55,230,208,.25); border-radius: 8px; background: #08232b; padding: 5px; box-shadow: 0 10px 22px rgba(0,0,0,.24); }
+    .agent-avatar img { width: 100%; height: 100%; border-radius: 4px; object-fit: cover; }
+    .agent-name-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .agent-name { font-size: 16px; font-weight: 900; white-space: nowrap; }
+    .online-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid rgba(53,211,159,.2); border-radius: 999px; background: rgba(53,211,159,.08); color: #9bf1cf; padding: 3px 6px; font-size: 9px; font-weight: 900; }
+    .online-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 1.8s ease infinite; }
+    .agent-subtitle { margin-top: 3px; color: #6f8790; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .runtime-chips { display: flex; align-items: center; gap: 6px; }
+    .runtime-chip { border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,.025); padding: 5px 7px; color: #90a5ad; font-size: 9px; white-space: nowrap; }
+    .runtime-chip strong { color: #dbe7e8; font-weight: 900; }
+    .runtime-chip.auto strong { color: #9bf1cf; }
+
+    .header-actions { display: flex; align-items: center; gap: 6px; }
+    .primary-button, .quiet-button, .danger-button {
+      min-height: 32px;
+      border-radius: var(--radius);
+      padding: 0 11px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-size: 10px;
+      font-weight: 900;
+      white-space: nowrap;
+      transition: 140ms ease;
+    }
+    .primary-button { color: #031512; background: var(--cyan); border-color: rgba(92,255,229,.58); }
+    .primary-button:hover { background: #66f3df; transform: translateY(-1px); }
+    .quiet-button { color: #b8cbd0; background: rgba(255,255,255,.03); border-color: var(--line); }
+    .quiet-button:hover, .quiet-button.active { color: white; border-color: rgba(55,230,208,.3); background: var(--cyan-soft); }
+    .danger-button { color: #ffc6ce; background: rgba(227,97,114,.09); border-color: rgba(227,97,114,.25); }
+    .danger-button:hover { background: rgba(227,97,114,.2); }
+    .primary-button svg, .quiet-button svg, .danger-button svg { width: 14px; height: 14px; }
+
+    .agent-layout { min-height: 0; display: grid; grid-template-columns: 210px minmax(520px,1fr) 310px; overflow: hidden; }
+    .agent-layout.debug-closed { grid-template-columns: 210px minmax(520px,1fr); }
+    .agent-layout.debug-closed .debug-panel { display: none; }
+
+    .history-panel { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0,1fr) auto; border-right: 1px solid var(--line); background: #081820; }
+    .history-top { padding: 10px; }
+    .new-chat { width: 100%; min-height: 36px; border: 1px solid rgba(55,230,208,.25); border-radius: var(--radius); background: rgba(55,230,208,.09); color: #c8fff7; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 11px; font-weight: 900; }
+    .new-chat:hover { background: rgba(55,230,208,.15); }
+    .new-chat svg { width: 15px; height: 15px; }
+    .history-search { position: relative; padding: 0 10px 8px; }
+    .history-search svg { position: absolute; left: 18px; top: 50%; width: 13px; height: 13px; transform: translateY(-65%); color: #5d747e; }
+    .history-search input { width: 100%; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--input); color: white; padding: 0 8px 0 27px; font-size: 10px; }
+    .history-list { min-height: 0; overflow-y: auto; padding: 0 7px 10px; }
+    .history-group { padding: 8px 6px 5px; color: #58707a; font-size: 9px; font-weight: 900; letter-spacing: .1em; }
+    .history-item { width: 100%; min-height: 54px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: #8499a1; cursor: pointer; padding: 8px; margin-bottom: 3px; text-align: left; transition: 140ms ease; }
+    .history-item:hover { color: white; background: rgba(255,255,255,.03); }
+    .history-item.active { color: white; border-color: rgba(55,230,208,.17); background: rgba(55,230,208,.08); }
+    .history-title { display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 900; }
+    .history-title span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .history-status { width: 6px; height: 6px; margin-left: auto; flex: 0 0 auto; border-radius: 50%; background: #71858c; }
+    .history-status.running { background: var(--blue); box-shadow: 0 0 8px rgba(101,183,255,.58); }
+    .history-status.done { background: var(--green); }
+    .history-status.waiting { background: var(--amber); }
+    .history-meta { margin-top: 5px; display: flex; justify-content: space-between; gap: 6px; color: #566d76; font-size: 8px; }
+    .history-footer { padding: 9px 10px; border-top: 1px solid var(--line); }
+    .memory-state { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: #718890; font-size: 9px; }
+    .memory-state strong { color: #a5f1d2; font-weight: 900; }
+
+    .chat-panel { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr) auto; background: var(--bg); }
+    .chat-stream { min-height: 0; overflow-y: auto; padding: 18px clamp(18px,3vw,48px) 24px; scroll-behavior: smooth; }
+    .chat-inner { width: min(860px,100%); margin: 0 auto; }
+    .conversation-date { margin-bottom: 18px; color: #526a74; font: 9px var(--mono); text-align: center; }
+    .message { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 9px; margin-bottom: 18px; animation: message-in .18s ease-out both; }
+    .message.user { grid-template-columns: minmax(0,1fr) 30px; }
+    .message-avatar { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 7px; background: #0c2730; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .message-avatar img { width: 22px; height: 22px; border-radius: 4px; }
+    .message-avatar.user-avatar { color: #d7f8f1; background: #123e3b; font-size: 10px; font-weight: 900; }
+    .message-body { min-width: 0; }
+    .message.user .message-body { display: flex; justify-content: flex-end; }
+    .message.user .message-avatar { grid-column: 2; grid-row: 1; }
+    .message.user .message-body { grid-column: 1; grid-row: 1; }
+    .message-name { margin-bottom: 5px; color: #728892; font-size: 9px; font-weight: 900; }
+    .message-copy { color: #dce8e9; font-size: 12px; line-height: 1.72; }
+    .message-copy p { margin: 0 0 8px; }
+    .message-copy p:last-child { margin-bottom: 0; }
+    .user-bubble { width: fit-content; max-width: min(680px,90%); border: 1px solid rgba(55,230,208,.18); border-radius: 8px 3px 8px 8px; background: #0c3438; color: #efffff; padding: 9px 11px; font-size: 12px; line-height: 1.65; }
+
+    .agent-answer { border-left: 2px solid rgba(55,230,208,.36); padding-left: 12px; }
+    .decision-line { display: flex; align-items: center; gap: 7px; margin: 9px 0; }
+    .decision-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid rgba(53,211,159,.2); border-radius: 999px; background: rgba(53,211,159,.07); color: #a4f2d3; padding: 4px 7px; font-size: 9px; font-weight: 900; }
+    .decision-chip svg { width: 12px; height: 12px; }
+    .decision-note { color: #687f88; font-size: 9px; }
+
+    .plan-list { margin: 10px 0 0; border-top: 1px solid var(--line); }
+    .plan-row { display: grid; grid-template-columns: 22px minmax(0,1fr) auto; align-items: center; gap: 7px; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.055); }
+    .plan-number { width: 20px; height: 20px; border: 1px solid rgba(55,230,208,.2); border-radius: 5px; color: #9eece1; display: flex; align-items: center; justify-content: center; font: 9px var(--mono); }
+    .plan-title { color: #d6e3e4; font-size: 10px; font-weight: 900; }
+    .plan-desc { margin-top: 2px; color: #647b84; font-size: 9px; }
+    .plan-state { color: #90a6ae; font-size: 8px; font-weight: 900; }
+    .plan-state.done { color: #8be8c1; }
+    .plan-state.running { color: #9fd2ff; }
+
+    .tool-call { margin: 9px 0; min-height: 34px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,.022); padding: 6px 8px; color: #849aa3; font-size: 9px; }
+    .tool-call svg { width: 13px; height: 13px; color: var(--cyan); }
+    .tool-call code { color: #b8f8ed; font: 9px var(--mono); }
+    .tool-call span:last-child { margin-left: auto; color: #65907f; font: 8px var(--mono); }
+
+    .run-attachment { margin-top: 10px; border: 1px solid rgba(55,230,208,.18); border-radius: var(--radius); background: rgba(8,28,37,.72); overflow: hidden; }
+    .run-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+    .run-kicker { color: #6f8992; font: 8px var(--mono); letter-spacing: .08em; }
+    .run-title { margin-top: 3px; color: white; font-size: 11px; font-weight: 900; }
+    .run-status { display: inline-flex; align-items: center; gap: 5px; color: #a8d8ff; font-size: 9px; font-weight: 900; }
+    .run-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); animation: pulse 1.3s ease infinite; }
+    .run-body { display: grid; grid-template-columns: minmax(0,1fr) 176px; gap: 12px; padding: 10px; }
+    .run-progress-line { display: flex; justify-content: space-between; gap: 8px; color: #81969f; font-size: 9px; }
+    .run-progress-line strong { color: #dce9ea; font-weight: 900; }
+    .run-progress { height: 4px; margin-top: 6px; border-radius: 4px; overflow: hidden; background: rgba(255,255,255,.08); }
+    .run-progress span { display: block; width: 62%; height: 100%; border-radius: inherit; background: var(--blue); }
+    .run-stats { margin-top: 9px; display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; }
+    .run-stat { border-right: 1px solid var(--line); }
+    .run-stat:last-child { border-right: 0; }
+    .run-stat-label { color: #5f7780; font-size: 8px; }
+    .run-stat-value { margin-top: 2px; color: #dce9e9; font: 900 11px var(--mono); }
+    .evidence-strip { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; }
+    .evidence-phone { aspect-ratio: 9/18; min-width: 0; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; background: #02080b; overflow: hidden; cursor: pointer; padding: 0; }
+    .evidence-phone:hover { border-color: rgba(55,230,208,.5); }
+    .evidence-phone img { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; }
+    .run-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; padding: 0 10px 10px; }
+
+    .chat-composer { border-top: 1px solid var(--line); background: rgba(8,24,32,.98); padding: 10px clamp(18px,3vw,48px) 11px; }
+    .composer-inner { width: min(860px,100%); margin: 0 auto; border: 1px solid rgba(55,230,208,.22); border-radius: var(--radius); background: #071a23; box-shadow: 0 12px 32px rgba(0,0,0,.18); }
+    .composer-inner textarea { width: 100%; height: 54px; resize: none; border: 0; outline: 0; background: transparent; color: white; padding: 10px 11px 4px; font-size: 11px; line-height: 1.5; }
+    .composer-inner textarea::placeholder { color: #5c727b; }
+    .composer-toolbar { min-height: 38px; display: flex; align-items: center; gap: 3px; padding: 4px 5px 5px; }
+    .composer-icon { width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: #718891; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+    .composer-icon:hover { color: white; background: rgba(255,255,255,.05); }
+    .composer-icon svg { width: 15px; height: 15px; }
+    .scope-chip { margin-left: 4px; border: 1px solid rgba(55,230,208,.16); border-radius: 999px; background: rgba(55,230,208,.06); color: #97cec6; padding: 4px 7px; font-size: 8px; font-weight: 900; }
+    .send-button { width: 32px; height: 30px; margin-left: auto; border: 1px solid rgba(91,255,230,.56); border-radius: 6px; background: var(--cyan); color: #031512; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+    .send-button:hover { background: #66f3df; }
+    .send-button svg { width: 15px; height: 15px; }
+    .composer-context { margin-top: 6px; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #526a74; font-size: 8px; }
+    .context-resources { display: flex; gap: 9px; }
+    .context-resources strong { color: #7f969f; font-weight: 900; }
+
+    .debug-panel { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0,1fr) auto; border-left: 1px solid var(--line); background: #081820; }
+    .debug-header { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+    .debug-kicker { color: rgba(155,238,237,.62); font-size: 8px; font-weight: 900; letter-spacing: .18em; }
+    .debug-title { margin-top: 2px; font-size: 12px; font-weight: 900; }
+    .debug-live { display: inline-flex; align-items: center; gap: 5px; color: #8bd8ff; font-size: 8px; font-weight: 900; }
+    .debug-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); animation: pulse 1.3s ease infinite; }
+    .debug-tabs { display: grid; grid-template-columns: repeat(3,1fr); padding: 6px 8px 0; }
+    .debug-tab { min-height: 30px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #687f88; cursor: pointer; font-size: 9px; font-weight: 900; }
+    .debug-tab.active { color: #baf8ee; border-color: var(--cyan); }
+    .debug-content { min-height: 0; overflow-y: auto; padding: 8px; }
+    .trace-item { width: 100%; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #80959e; cursor: pointer; padding: 7px; margin-bottom: 4px; text-align: left; }
+    .trace-item:hover, .trace-item.active { border-color: rgba(55,230,208,.15); background: rgba(55,230,208,.055); }
+    .trace-head { display: flex; align-items: center; gap: 6px; }
+    .trace-icon { width: 18px; height: 18px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.08); border-radius: 5px; display: flex; align-items: center; justify-content: center; color: #86d8cc; }
+    .trace-icon svg { width: 11px; height: 11px; }
+    .trace-name { min-width: 0; color: #d7e3e4; font: 9px var(--mono); font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .trace-duration { margin-left: auto; color: #58707a; font: 8px var(--mono); }
+    .trace-copy { margin: 4px 0 0 24px; color: #617780; font-size: 8px; line-height: 1.4; }
+    .trace-detail { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+    .trace-detail-title { color: #75909a; font-size: 8px; font-weight: 900; }
+    .trace-json { margin: 6px 0 0; border: 1px solid rgba(255,255,255,.07); border-radius: 6px; background: #051219; color: #8fc8c0; padding: 8px; font: 8px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+    .debug-section-title { margin: 2px 0 7px; color: #738b94; font-size: 8px; font-weight: 900; letter-spacing: .1em; }
+    .prompt-block { border: 1px solid var(--line); border-radius: 6px; background: #06151c; color: #9bb0b7; padding: 8px; font: 8px/1.6 var(--mono); white-space: pre-wrap; }
+    .config-row { display: grid; grid-template-columns: 84px minmax(0,1fr); gap: 7px; padding: 7px 2px; border-bottom: 1px solid rgba(255,255,255,.055); font-size: 8px; }
+    .config-key { color: #617983; }
+    .config-value { color: #c2d1d4; font-weight: 900; overflow-wrap: anywhere; }
+    .capability-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+    .capability-chip { border: 1px solid rgba(55,230,208,.14); border-radius: 999px; background: rgba(55,230,208,.05); color: #91c8c0; padding: 4px 6px; font: 8px var(--mono); }
+    .debug-footer { padding: 8px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+
+    .toast-stack { position: fixed; z-index: 50; top: 50px; right: 14px; width: min(360px,calc(100vw - 28px)); display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+    .toast { pointer-events: auto; border: 1px solid rgba(55,230,208,.28); border-radius: var(--radius); background: #0b2b33; color: #dcfffa; padding: 9px 11px; box-shadow: 0 18px 44px rgba(0,0,0,.36); font-size: 11px; font-weight: 800; animation: toast-in .18s ease-out both; }
+    .toast.warning { border-color: rgba(226,184,94,.38); background: #302813; color: #ffe5aa; }
+    .toast.danger { border-color: rgba(227,97,114,.42); background: #35151d; color: #ffd3d9; }
+
+    @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.84); } }
+    @keyframes message-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes toast-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
+
+    @media (max-width: 1240px) {
+      .agent-layout { grid-template-columns: 188px minmax(430px,1fr) 286px; }
+      .agent-layout.debug-closed { grid-template-columns: 188px minmax(430px,1fr); }
+      .runtime-chip:nth-child(n+3) { display: none; }
+      .run-body { grid-template-columns: minmax(0,1fr) 150px; }
+    }
+
+    @media (max-width: 1020px) {
+      .agent-layout { grid-template-columns: 180px minmax(430px,1fr); }
+      .debug-panel { display: none; }
+      .header-actions .quiet-button:first-child { display: none; }
+      .agent-header { grid-template-columns: minmax(240px,1fr) auto; }
+      .runtime-chips { display: none; }
+    }
+
+    @media (max-height: 720px) {
+      .workspace { grid-template-rows: 58px minmax(0,1fr); }
+      .agent-header { padding-top: 5px; padding-bottom: 5px; }
+      .chat-stream { padding-top: 12px; }
+      .message { margin-bottom: 13px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="titlebar">
+    <div class="titlebar-brand">
+      <img src="../public/logo.png" alt="麓鸣" />
+      <span class="titlebar-name">麓鸣AI矩阵获客工作台</span>
+      <span class="titlebar-version">AGENT UI DEMO / 2.1.81</span>
+    </div>
+    <div class="titlebar-actions" aria-label="窗口操作">
+      <button class="window-button" title="最小化"><i data-lucide="minus"></i></button>
+      <button class="window-button" title="最大化"><i data-lucide="square"></i></button>
+      <button class="window-button danger" title="关闭"><i data-lucide="x"></i></button>
+    </div>
+  </div>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-logo"><img src="../public/logo.png" alt="麓鸣" /></div>
+      <nav class="nav-list" aria-label="主导航">
+        <button class="nav-button" title="总览"><i data-lucide="rocket"></i><span>总览</span></button>
+        <button class="nav-button" title="安装"><i data-lucide="package-open"></i><span>安装</span></button>
+        <button class="nav-button" title="创作"><i data-lucide="wand-sparkles"></i><span>创作</span></button>
+        <button class="nav-button" title="获客"><i data-lucide="scan-search"></i><span>获客</span></button>
+        <button class="nav-button active" title="智能体"><i data-lucide="message-square-more"></i><span>智能体</span></button>
+        <button class="nav-button" id="workbenchNav" title="工作台"><i data-lucide="layout-grid"></i><span>工作台</span></button>
+        <button class="nav-button" title="模型账号"><i data-lucide="circle-user-round"></i><span>模型账号</span></button>
+        <button class="nav-button" title="其他"><i data-lucide="list-tree"></i><span>其他</span></button>
+      </nav>
+      <div class="sidebar-tools">
+        <span class="service-dot" title="核心服务运行中"></span>
+        <button class="icon-button" title="系统设置"><i data-lucide="settings"></i></button>
+        <button class="icon-button" title="模型账号"><i data-lucide="log-in"></i></button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="agent-header">
+        <div class="agent-identity">
+          <div class="agent-avatar"><img src="../public/logo.png" alt="麓鸣中枢" /></div>
+          <div style="min-width:0">
+            <div class="agent-name-row"><span class="agent-name">麓鸣中枢</span><span class="online-chip">在线</span></div>
+            <div class="agent-subtitle">理解目标、调用 Skills / MCP / CLI，并监督手机矩阵完成任务</div>
+          </div>
+        </div>
+
+        <div class="runtime-chips">
+          <span class="runtime-chip">模型 <strong>qwen3.7-plus</strong></span>
+          <span class="runtime-chip auto">权限 <strong>自动执行</strong></span>
+          <span class="runtime-chip">上下文 <strong>32K</strong></span>
+          <span class="runtime-chip">记忆 <strong>已启用</strong></span>
+        </div>
+
+        <div class="header-actions">
+          <button class="quiet-button" id="configButton"><i data-lucide="sliders-horizontal"></i>配置</button>
+          <button class="quiet-button active" id="debugToggle"><i data-lucide="bug"></i>调试</button>
+          <button class="primary-button" id="newChatTop"><i data-lucide="square-pen"></i>新对话</button>
+        </div>
+      </header>
+
+      <div class="agent-layout" id="agentLayout">
+        <aside class="history-panel">
+          <div class="history-top"><button class="new-chat" id="newChat"><i data-lucide="plus"></i>新建对话</button></div>
+          <div class="history-search"><i data-lucide="search"></i><input id="historySearch" placeholder="搜索对话" /></div>
+          <div class="history-list" id="historyList">
+            <div class="history-group">今天</div>
+            <button class="history-item active" data-title="招聘简历自动筛选">
+              <div class="history-title"><span>招聘简历自动筛选</span><span class="history-status running"></span></div>
+              <div class="history-meta"><span>5 台手机执行中</span><span>刚刚</span></div>
+            </button>
+            <button class="history-item" data-title="销售线索整理">
+              <div class="history-title"><span>销售线索整理</span><span class="history-status done"></span></div>
+              <div class="history-meta"><span>已输出 126 条</span><span>10:12</span></div>
+            </button>
+            <button class="history-item" data-title="异常设备恢复">
+              <div class="history-title"><span>异常设备恢复</span><span class="history-status waiting"></span></div>
+              <div class="history-meta"><span>等待 1 台恢复</span><span>09:46</span></div>
+            </button>
+            <div class="history-group">最近 7 天</div>
+            <button class="history-item" data-title="抖音评论线索归档">
+              <div class="history-title"><span>抖音评论线索归档</span><span class="history-status done"></span></div>
+              <div class="history-meta"><span>同步飞书成功</span><span>昨天</span></div>
+            </button>
+            <button class="history-item" data-title="BOSS 候选人标签整理">
+              <div class="history-title"><span>BOSS 候选人标签整理</span><span class="history-status done"></span></div>
+              <div class="history-meta"><span>已沉淀为 Skill</span><span>周一</span></div>
+            </button>
+          </div>
+          <div class="history-footer"><div class="memory-state"><span>中枢长期记忆</span><strong>已同步</strong></div></div>
+        </aside>
+
+        <section class="chat-panel">
+          <div class="chat-stream" id="chatStream">
+            <div class="chat-inner" id="chatInner">
+              <div class="conversation-date">2026-07-15 · 招聘简历自动筛选</div>
+
+              <div class="message user">
+                <div class="message-body"><div class="user-bubble">让招聘组筛选今天的新简历，优先有电子厂经验、能接受夜班并且一周内能到岗的人。符合条件的进入待沟通队列。</div></div>
+                <div class="message-avatar user-avatar">我</div>
+              </div>
+
+              <div class="message agent">
+                <div class="message-avatar"><img src="../public/logo.png" alt="麓鸣中枢" /></div>
+                <div class="message-body">
+                  <div class="message-name">麓鸣中枢</div>
+                  <div class="message-copy agent-answer">
+                    <p>收到。我会使用招聘筛选 Skill 读取今日新增简历，先判断工作经历、夜班意愿和到岗时间，再把符合条件的人写入待沟通队列。</p>
+                    <div class="decision-line">
+                      <span class="decision-chip"><i data-lucide="shield-check"></i>安全任务自动执行</span>
+                      <span class="decision-note">筛选和归档无需逐步确认，真正外发消息时再按策略处理。</span>
+                    </div>
+                    <div class="plan-list">
+                      <div class="plan-row"><span class="plan-number">01</span><span><span class="plan-title">确认招聘组设备状态</span><span class="plan-desc">选择在线且空闲的 APKClaw 设备</span></span><span class="plan-state done">完成</span></div>
+                      <div class="plan-row"><span class="plan-number">02</span><span><span class="plan-title">读取今日新增简历</span><span class="plan-desc">并行分配 5 台手机，保持单机写操作串行</span></span><span class="plan-state running">执行中</span></div>
+                      <div class="plan-row"><span class="plan-number">03</span><span><span class="plan-title">验证条件并归档</span><span class="plan-desc">输出候选人、排除原因和截图证据</span></span><span class="plan-state">等待</span></div>
+                    </div>
+                  </div>
+
+                  <div class="tool-call"><i data-lucide="wrench"></i><span>调用 <code>luming-boss-resume-screening</code> 与 <code>loom_matrix_dispatch</code></span><span>238ms</span></div>
+
+                  <div class="run-attachment">
+                    <div class="run-head">
+                      <div><div class="run-kicker">MISSION / M-20260715-018</div><div class="run-title">今日新增简历筛选</div></div>
+                      <span class="run-status">矩阵执行中</span>
+                    </div>
+                    <div class="run-body">
+                      <div>
+                        <div class="run-progress-line"><span>已处理 <strong>37 / 60</strong></span><span>62%</span></div>
+                        <div class="run-progress"><span></span></div>
+                        <div class="run-stats">
+                          <div class="run-stat"><div class="run-stat-label">执行手机</div><div class="run-stat-value">5</div></div>
+                          <div class="run-stat"><div class="run-stat-label">符合条件</div><div class="run-stat-value">11</div></div>
+                          <div class="run-stat"><div class="run-stat-label">异常</div><div class="run-stat-value">0</div></div>
+                        </div>
+                      </div>
+                      <div class="evidence-strip">
+                        <button class="evidence-phone" title="打开工作台查看 LUMI-P01"><img src="../tmp-current-phone.png" alt="LUMI-P01 手机截图" /></button>
+                        <button class="evidence-phone" title="打开工作台查看 LUMI-P02"><img src="../tmp-cursor-preview-phone.png" alt="LUMI-P02 手机截图" /></button>
+                        <button class="evidence-phone" title="打开工作台查看 LUMI-P03"><img src="../phone-self-update-screen.png" alt="LUMI-P03 手机截图" /></button>
+                      </div>
+                    </div>
+                    <div class="run-actions"><button class="quiet-button workbench-link"><i data-lucide="layout-grid"></i>打开工作台</button><button class="quiet-button" id="pauseInline"><i data-lucide="pause"></i>暂停任务</button></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="message agent">
+                <div class="message-avatar"><img src="../public/logo.png" alt="麓鸣中枢" /></div>
+                <div class="message-body">
+                  <div class="message-name">麓鸣中枢</div>
+                  <div class="message-copy agent-answer"><p>目前找到 11 位符合条件的候选人。3 份简历缺少夜班意愿，我已标记为“待补充”，不会凭空推断。</p></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="chat-composer">
+            <div class="composer-inner">
+              <textarea id="composer" placeholder="告诉麓鸣中枢你想完成什么"></textarea>
+              <div class="composer-toolbar">
+                <button class="composer-icon" title="添加附件"><i data-lucide="paperclip"></i></button>
+                <button class="composer-icon" title="选择手机或设备组"><i data-lucide="at-sign"></i></button>
+                <button class="composer-icon" title="选择 Skill"><i data-lucide="puzzle"></i></button>
+                <button class="composer-icon" title="调用 MCP / CLI"><i data-lucide="terminal-square"></i></button>
+                <span class="scope-chip">招聘组 · 5 台手机</span>
+                <button class="send-button" id="sendButton" title="发送"><i data-lucide="send"></i></button>
+              </div>
+            </div>
+            <div class="composer-context"><div class="context-resources"><span><strong>12</strong> 台手机</span><span><strong>8</strong> Skills</span><span><strong>16</strong> MCP 工具</span></div><span>本轮策略：安全操作自动执行</span></div>
+          </div>
+        </section>
+
+        <aside class="debug-panel">
+          <div class="debug-header"><div><div class="debug-kicker">AGENT DEBUGGER</div><div class="debug-title">深度调试</div></div><span class="debug-live">运行中</span></div>
+          <div class="debug-tabs">
+            <button class="debug-tab active" data-tab="trace">调用链</button>
+            <button class="debug-tab" data-tab="prompt">Prompt</button>
+            <button class="debug-tab" data-tab="state">状态</button>
+          </div>
+          <div class="debug-content" id="debugContent"></div>
+          <div class="debug-footer"><button class="quiet-button" id="copyTrace"><i data-lucide="copy"></i>复制轨迹</button><button class="danger-button" id="stopRun"><i data-lucide="octagon-x"></i>中断</button></div>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script>
+    const traceItems = [
+      { icon: "brain-circuit", name: "planner.create_plan", duration: "412ms", copy: "将用户目标拆解为设备检查、简历读取和验证归档", detail: { status: "success", steps: 3, risk: "read_only", approval: false } },
+      { icon: "puzzle", name: "skill.resume_screening", duration: "86ms", copy: "加载招聘劳务简历筛选规则", detail: { skill: "luming-boss-resume-screening", version: "1.2.0", mode: "safe" } },
+      { icon: "network", name: "mcp.loom_matrix_status", duration: "71ms", copy: "读取招聘组手机在线状态和租约", detail: { online: 5, idle: 3, busy: 2, incidents: 0 } },
+      { icon: "send", name: "mcp.loom_matrix_dispatch", duration: "238ms", copy: "创建矩阵任务 M-20260715-018", detail: { missionId: "M-20260715-018", devices: 5, concurrency: 3, writePolicy: "serial_per_device" } },
+      { icon: "scan-search", name: "verifier.screen_evidence", duration: "running", copy: "持续核对截图、页面状态和候选人结果", detail: { processed: 37, target: 60, matched: 11, uncertain: 3 } }
+    ];
+
+    const promptText = `你是麓鸣中枢智能体，负责理解业务目标并调度 LOOM 本地能力。\n\n执行原则：\n1. 先确认目标、资源范围和权限。\n2. 已知任务优先使用确定性 Skill / CLI / MCP。\n3. 每台手机的写操作必须串行。\n4. 不确定信息必须标记，不得臆测。\n5. 高风险外发、支付、删除和授权操作进入策略检查。\n6. 所有结果必须带可验证证据和任务编号。`;
+
+    const stateData = [
+      ["Agent ID", "loom-command-brain"],
+      ["模型", "qwen3.7-plus"],
+      ["运行模式", "autonomous_safe"],
+      ["当前任务", "M-20260715-018"],
+      ["上下文", "18,420 / 32,768"],
+      ["检查点", "step-02 / batch-08"],
+      ["设备租约", "5 active"],
+      ["记忆命中", "3 records"],
+      ["取消状态", "not_requested"]
+    ];
+
+    let activeDebugTab = "trace";
+    let selectedTrace = 3;
+    let debugOpen = true;
+    let runStopped = false;
+
+    function icons() {
+      if (window.lucide) window.lucide.createIcons({ attrs: { "stroke-width": 1.8 } });
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
+    }
+
+    function toast(message, tone = "info") {
+      const stack = document.getElementById("toastStack");
+      const node = document.createElement("div");
+      node.className = `toast ${tone === "info" ? "" : tone}`;
+      node.textContent = message;
+      stack.appendChild(node);
+      setTimeout(() => node.remove(), 2800);
+    }
+
+    function renderDebug() {
+      const content = document.getElementById("debugContent");
+      if (activeDebugTab === "trace") {
+        content.innerHTML = traceItems.map((item,index) => `
+          <button class="trace-item ${selectedTrace === index ? "active" : ""}" data-trace="${index}">
+            <span class="trace-head"><span class="trace-icon"><i data-lucide="${item.icon}"></i></span><span class="trace-name">${item.name}</span><span class="trace-duration">${item.duration}</span></span>
+            <span class="trace-copy">${item.copy}</span>
+          </button>`).join("") + `
+          <div class="trace-detail"><div class="trace-detail-title">选中调用详情</div><pre class="trace-json">${escapeHtml(JSON.stringify(traceItems[selectedTrace].detail,null,2))}</pre></div>`;
+        content.querySelectorAll(".trace-item").forEach(button => button.addEventListener("click", () => { selectedTrace = Number(button.dataset.trace); renderDebug(); }));
+      } else if (activeDebugTab === "prompt") {
+        content.innerHTML = `<div class="debug-section-title">SYSTEM PROMPT / READ ONLY</div><div class="prompt-block">${escapeHtml(promptText)}</div><div class="debug-section-title" style="margin-top:12px">LOADED CONTEXT</div><div class="capability-list"><span class="capability-chip">recruitment-policy.md</span><span class="capability-chip">matrix-status.json</span><span class="capability-chip">device-leases.json</span><span class="capability-chip">memory:3</span></div>`;
+      } else {
+        content.innerHTML = `<div class="debug-section-title">RUNTIME STATE</div>${stateData.map(item => `<div class="config-row"><span class="config-key">${item[0]}</span><span class="config-value">${item[1]}</span></div>`).join("")}<div class="debug-section-title" style="margin-top:12px">ACTIVE CAPABILITIES</div><div class="capability-list"><span class="capability-chip">phone-control</span><span class="capability-chip">matrix-supervisor</span><span class="capability-chip">resume-screening</span><span class="capability-chip">lark-base</span><span class="capability-chip">CLI</span><span class="capability-chip">MCP</span></div>`;
+      }
+      icons();
+    }
+
+    function setDebugTab(tab) {
+      activeDebugTab = tab;
+      document.querySelectorAll(".debug-tab").forEach(button => button.classList.toggle("active", button.dataset.tab === tab));
+      renderDebug();
+    }
+
+    document.querySelectorAll(".debug-tab").forEach(button => button.addEventListener("click", () => setDebugTab(button.dataset.tab)));
+
+    function toggleDebug(forceOpen) {
+      debugOpen = typeof forceOpen === "boolean" ? forceOpen : !debugOpen;
+      document.getElementById("agentLayout").classList.toggle("debug-closed", !debugOpen);
+      document.getElementById("debugToggle").classList.toggle("active", debugOpen);
+      toast(debugOpen ? "已打开中枢深度调试器" : "已收起调试器，对话区域已扩展");
+    }
+
+    document.getElementById("debugToggle").addEventListener("click", () => toggleDebug());
+    document.getElementById("configButton").addEventListener("click", () => { toggleDebug(true); setDebugTab("state"); });
+
+    function openWorkbench() { window.location.href = "./LOOM_PHONE_AGENT_UI_DEMO.html"; }
+    document.getElementById("workbenchNav").addEventListener("click", openWorkbench);
+    document.querySelectorAll(".workbench-link, .evidence-phone").forEach(button => button.addEventListener("click", openWorkbench));
+
+    function sendMessage() {
+      const composer = document.getElementById("composer");
+      const value = composer.value.trim();
+      if (!value) return toast("请先输入要交给麓鸣中枢的目标", "warning");
+      const chat = document.getElementById("chatInner");
+      chat.insertAdjacentHTML("beforeend", `<div class="message user"><div class="message-body"><div class="user-bubble">${escapeHtml(value)}</div></div><div class="message-avatar user-avatar">我</div></div>`);
+      composer.value = "";
+      document.getElementById("chatStream").scrollTop = document.getElementById("chatStream").scrollHeight;
+      setTimeout(() => {
+        chat.insertAdjacentHTML("beforeend", `<div class="message agent"><div class="message-avatar"><img src="../public/logo.png" alt="麓鸣中枢" /></div><div class="message-body"><div class="message-name">麓鸣中枢</div><div class="message-copy agent-answer"><p>收到，我已把这条要求追加到当前任务。接下来会从最近检查点继续，不会重复处理已经完成的简历。</p></div><div class="tool-call"><i data-lucide="refresh-cw"></i><span>更新 <code>M-20260715-018</code> 的执行约束</span><span>64ms</span></div></div></div>`);
+        document.getElementById("chatStream").scrollTop = document.getElementById("chatStream").scrollHeight;
+        icons();
+      }, 650);
+    }
+
+    document.getElementById("sendButton").addEventListener("click", sendMessage);
+    document.getElementById("composer").addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); }
+    });
+
+    function newConversation() {
+      document.getElementById("chatInner").innerHTML = `<div class="conversation-date">新对话</div><div class="message agent"><div class="message-avatar"><img src="../public/logo.png" alt="麓鸣中枢" /></div><div class="message-body"><div class="message-name">麓鸣中枢</div><div class="message-copy agent-answer"><p>我已经就绪。你可以直接告诉我业务目标，我会自行选择 Skills、MCP、CLI 和手机资源，并把过程与结果留在这段对话里。</p></div></div></div>`;
+      document.querySelectorAll(".history-item").forEach(item => item.classList.remove("active"));
+      document.getElementById("composer").focus();
+      toast("已创建新的中枢对话");
+    }
+
+    document.getElementById("newChat").addEventListener("click", newConversation);
+    document.getElementById("newChatTop").addEventListener("click", newConversation);
+
+    document.querySelectorAll(".history-item").forEach(item => item.addEventListener("click", () => {
+      document.querySelectorAll(".history-item").forEach(other => other.classList.remove("active"));
+      item.classList.add("active");
+      toast(`已切换到对话：${item.dataset.title}`);
+    }));
+
+    document.getElementById("historySearch").addEventListener("input", event => {
+      const query = event.target.value.trim().toLowerCase();
+      document.querySelectorAll(".history-item").forEach(item => { item.style.display = !query || item.dataset.title.toLowerCase().includes(query) ? "block" : "none"; });
+    });
+
+    document.querySelectorAll(".composer-icon").forEach(button => button.addEventListener("click", () => toast(button.title)));
+    document.querySelectorAll(".nav-button:not(.active):not(#workbenchNav), .sidebar-tools .icon-button").forEach(button => button.addEventListener("click", () => toast("这是独立 UI Demo，当前只演示中枢智能体页面")));
+    document.querySelectorAll(".window-button").forEach(button => button.addEventListener("click", () => toast("HTML Demo 不执行窗口系统操作")));
+
+    document.getElementById("pauseInline").addEventListener("click", event => {
+      event.currentTarget.innerHTML = '<i data-lucide="play"></i>继续任务';
+      toast("任务已在安全检查点暂停", "warning");
+      icons();
+    });
+
+    document.getElementById("copyTrace").addEventListener("click", () => toast("调用轨迹已复制，敏感字段已脱敏"));
+    document.getElementById("stopRun").addEventListener("click", () => {
+      runStopped = true;
+      document.querySelector(".debug-live").textContent = "已中断";
+      document.querySelector(".debug-live").style.color = "#ff9fac";
+      toast("已向当前任务传播取消请求", "danger");
+    });
+
+    renderDebug();
+    icons();
+  </script>
+</body>
+</html>

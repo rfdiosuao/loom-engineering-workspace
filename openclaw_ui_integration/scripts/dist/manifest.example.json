@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "product": "openclaw-launcher",
+  "version": "2.0.6",
+  "tag": "v2.0.6",
+  "generatedAt": "2026-06-10T00:00:00.000Z",
+  "mirrors": [
+    "https://ghproxy.com/https://github.com/OWNER/REPO/releases/download/v2.0.6/",
+    "https://github.com/OWNER/REPO/releases/download/v2.0.6/",
+    "https://your-oss-or-cdn.example.com/openclaw/v2.0.6/"
+  ],
+  "layers": [
+    {
+      "id": "node",
+      "title": "Node.js 运行时",
+      "version": "20.x",
+      "file": "node.tar.gz",
+      "sha256": "<64-hex>",
+      "size": 41943040,
+      "installPath": "OpenClawFiles/node",
+      "required": true
+    },
+    {
+      "id": "openclaw-deps",
+      "title": "OpenClaw 依赖",
+      "version": "2026.6.1",
+      "file": "openclaw-deps.tar.gz",
+      "sha256": "<64-hex>",
+      "size": 146800640,
+      "installPath": "OpenClawFiles/node_modules",
+      "required": true
+    },
+    {
+      "id": "python-runtime",
+      "title": "Python 运行时",
+      "version": "3.11",
+      "file": "python-runtime.tar.gz",
+      "sha256": "<64-hex>",
+      "size": 73400320,
+      "installPath": "OpenClawFiles/_up_/python-runtime",
+      "required": true
+    },
+    {
+      "id": "luminode-desktop",
+      "title": "桌面控制 Agent（可选）",
+      "version": "2.0.6",
+      "file": "luminode-desktop.tar.gz",
+      "sha256": "<64-hex>",
+      "size": 134217728,
+      "installPath": "OpenClawFiles/agents/luminode-desktop",
+      "required": false
+    }
+  ]
+}

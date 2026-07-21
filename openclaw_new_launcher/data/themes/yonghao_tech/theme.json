@@ -1,0 +1,71 @@
+﻿{
+  "name": "永浩科技主题",
+  "colors": {
+    "app_bg": "#F3F4F5",
+    "sidebar_bg": "#F9F9FA",
+    "surface": "#FFFFFF",
+    "surface_alt": "#F6F7F8",
+    "surface_deep": "#1C202A",
+    "surface_deeper": "#14171E",
+    "hover": "#EDEFF1",
+    "input": "#F6F7F8",
+    "border": "#DDDFE3",
+    "border_strong": "#C1C4CC",
+    "text": "#1E2A3A",
+    "text_muted": "#64748B",
+    "text_subtle": "#94A3B8",
+    "accent": "#1A56DB",
+    "accent_hover": "#1444AD",
+    "accent_soft": "#E4E8F0",
+    "accent_ink": "#0F327F",
+    "success": "#059669",
+    "warning": "#D97706",
+    "danger": "#DC2626",
+    "danger_hover": "#B91C1C",
+    "terminal_bg": "#0F172A",
+    "terminal_header": "#1E293B",
+    "terminal_text": "#34D399"
+  },
+  "modes": {
+    "light": {
+      "accent": "#1A56DB",
+      "accent_hover": "#1444AD",
+      "accent_soft": "#E4E8F0",
+      "accent_ink": "#0F327F"
+    },
+    "dark": {
+      "accent": "#9D4EDD",
+      "accent_hover": "#B76BFF",
+      "accent_soft": "rgba(157, 78, 221, 0.18)",
+      "accent_ink": "#F5EAFF"
+    }
+  },
+  "fonts": {
+    "display": ["Microsoft YaHei UI", 21, "bold"],
+    "title": ["Microsoft YaHei UI", 14, "bold"],
+    "section": ["Microsoft YaHei UI", 10, "bold"],
+    "body": ["Microsoft YaHei UI", 10],
+    "small": ["Microsoft YaHei UI", 9],
+    "mono": ["Consolas", 10]
+  },
+  "brand": {
+    "name": "永浩科技",
+    "subtitle": "智能AI服务平台",
+    "app_user_model_id": "YonghaoTech.Launcher",
+    "terminal_header": "Service Console",
+    "logoUrl": ""
+  },
+  "navItems": [
+    {"key": "dashboard", "label": "启动器", "desc": "总览 / 状态", "icon": "HOME", "group": "LOOM"},
+    {"key": "agents", "label": "智能体", "desc": "安装运行时", "icon": "INS", "group": "LOOM", "accent": true},
+    {"key": "capabilities", "label": "能力", "desc": "本地 AI 能力", "icon": "CAP", "group": "LOOM"},
+    {"key": "license", "label": "账号", "desc": "中转站登录", "icon": "ACC", "group": "LOOM"},
+    {"key": "models", "label": "模型", "desc": "模型选择", "icon": "MDL", "group": "LOOM"},
+    {"key": "diagnostics", "label": "诊断", "desc": "环境 / 日志", "icon": "FIX", "group": "LOOM"}
+  ],
+  "window": {
+    "title": "永浩科技 - 智能AI服务平台",
+    "width": 1200,
+    "height": 800
+  }
+}
