@@ -26,20 +26,6 @@ $repo = Get-LoomRepository -Name $Repository
 $spec = Get-LoomFeatureSpec -Repository $Repository -Issue $Issue -Name $Name -BaseBranch $BaseBranch
 Assert-LoomGitRepository -Path $repo.Path
 
-$dirty = @(& git -C $repo.Path status --porcelain)
-if ($dirty.Count -ne 0) {
-    throw "Repository checkout is not clean: $($repo.Path)"
-}
-
-& git -C $repo.Path show-ref --verify --quiet "refs/heads/$($spec.Branch)"
-if ($LASTEXITCODE -eq 0) {
-    throw "Local branch already exists: $($spec.Branch)"
-}
-
-if (Test-Path -LiteralPath $spec.WorktreePath) {
-    throw "Worktree path already exists: $($spec.WorktreePath)"
-}
-
 $relativeWorktree = $spec.RelativeWorktreePath
 & git -C (Get-LoomWorkspaceRoot) check-ignore --quiet -- $relativeWorktree
 if ($LASTEXITCODE -ne 0) {
@@ -47,6 +33,20 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $DryRun) {
+    $dirty = @(& git -C $repo.Path status --porcelain)
+    if ($dirty.Count -ne 0) {
+        throw "Repository checkout is not clean: $($repo.Path)"
+    }
+
+    & git -C $repo.Path show-ref --verify --quiet "refs/heads/$($spec.Branch)"
+    if ($LASTEXITCODE -eq 0) {
+        throw "Local branch already exists: $($spec.Branch)"
+    }
+
+    if (Test-Path -LiteralPath $spec.WorktreePath) {
+        throw "Worktree path already exists: $($spec.WorktreePath)"
+    }
+
     & git -C $repo.Path fetch origin $spec.BaseBranch
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to fetch origin/$($spec.BaseBranch)"

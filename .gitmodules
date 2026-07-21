@@ -1,7 +1,7 @@
 [submodule "apps/loom-platform"]
 	path = apps/loom-platform
 	url = https://github.com/rfdiosuao/loom-luming-launcher.git
-	branch = codex/workspace-baseline-20260715
+	branch = codex/18-stability-spine
 [submodule "apps/loom-phone-agent"]
 	path = apps/loom-phone-agent
 	url = https://github.com/rfdiosuao/lumiapkclaw.git

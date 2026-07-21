@@ -76,6 +76,7 @@ Assert-Workspace -Condition ($spec.WorktreePath.EndsWith('worktrees\platform\101
 $ignoredPaths = @(
     'worktrees\platform\probe',
     'artifacts\probe',
+    '.gradle-apkclaw-qa\probe',
     'probe.apk',
     'probe.jks',
     'probe.log',
@@ -86,9 +87,18 @@ foreach ($path in $ignoredPaths) {
     Assert-Workspace -Condition ($LASTEXITCODE -eq 0) -Message "$path is ignored"
 }
 
-$dryRunJson = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $sharedWorkspaceRoot 'scripts\new-feature.ps1') -Repository platform -Issue 101 -Name 'Matrix Device Assignments' -DryRun -Json
+$dryRunJson = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\new-feature.ps1') -Repository platform -Issue 101 -Name 'Matrix Device Assignments' -DryRun -Json
 $dryRun = $dryRunJson | ConvertFrom-Json
 Assert-Workspace -Condition ($dryRun.dryRun -eq $true) -Message 'new-feature dry run does not mutate Git'
 Assert-Workspace -Condition ($dryRun.branch -eq 'codex/101-matrix-device-assignments') -Message 'new-feature dry run returns expected branch'
+Assert-Workspace -Condition ($dryRun.baseBranch -eq 'codex/18-stability-spine') -Message 'platform worktrees use the active stability baseline'
+
+$requiredDocs = @(
+    'docs\DEVELOPMENT_WIKI.md',
+    'docs\runbooks\repository-hygiene.md'
+)
+foreach ($path in $requiredDocs) {
+    Assert-Workspace -Condition (Test-Path -LiteralPath (Join-Path $root $path) -PathType Leaf) -Message "$path exists"
+}
 
 Write-Host "Workspace tests passed: $script:Passed" -ForegroundColor Green

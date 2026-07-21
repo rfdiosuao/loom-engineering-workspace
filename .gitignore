@@ -2,6 +2,7 @@
 /worktrees/
 /artifacts/
 /tmp/
+/.gradle-apkclaw-qa/
 
 # Secrets and local configuration
 .env
