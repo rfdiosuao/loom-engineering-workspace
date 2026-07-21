@@ -7,17 +7,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'workspace-core.ps1')
 
-$platform = Get-LoomRepository -Name 'platform'
-$phone = Get-LoomRepository -Name 'phone'
-Assert-LoomGitRepository -Path $platform.Path
-Assert-LoomGitRepository -Path $phone.Path
+$root = Get-LoomWorkspaceRoot
+$platform = Get-LoomComponent -Name 'platform'
+$phone = Get-LoomComponent -Name 'phone'
+Assert-LoomGitRepository -Path $root
 
-$hookPath = (Join-Path (Get-LoomWorkspaceRoot) '.githooks').Replace('\', '/')
-foreach ($gitPath in @((Get-LoomWorkspaceRoot), $platform.Path, $phone.Path)) {
-    & git -C $gitPath config core.hooksPath $hookPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to configure Git hooks for $gitPath"
-    }
+$hookPath = (Join-Path $root '.githooks').Replace('\', '/')
+& git -C $root config core.hooksPath $hookPath
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to configure the versioned Git hooks.'
 }
 
 Write-Host '[Platform dependencies]' -ForegroundColor Cyan
@@ -46,7 +44,7 @@ $sdkForGradle = [System.IO.Path]::GetFullPath($AndroidSdk).Replace('\', '/')
 $localProperties = Join-Path $phone.Path 'local.properties'
 [System.IO.File]::WriteAllText($localProperties, "sdk.dir=$sdkForGradle`n", [System.Text.UTF8Encoding]::new($false))
 
-& git -C $phone.Path check-ignore --quiet -- 'local.properties'
+& git -C $root check-ignore --quiet -- 'apps/loom-phone-agent/local.properties'
 if ($LASTEXITCODE -ne 0) {
     throw 'Phone local.properties is not ignored; refusing to continue.'
 }

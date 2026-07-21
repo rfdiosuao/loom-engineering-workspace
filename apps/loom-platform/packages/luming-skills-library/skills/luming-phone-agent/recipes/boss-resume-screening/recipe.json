@@ -1,0 +1,61 @@
+{
+  "schema": "loom.phone-agent.recipe.v1",
+  "recipeId": "boss-resume-screening",
+  "name": "BOSS Resume Screening",
+  "aliases": [
+    "BOSS screening",
+    "resume screening"
+  ],
+  "status": "draft",
+  "app": {
+    "packageName": "com.hpbr.bosszhipin",
+    "versionRange": "unverified",
+    "entryPage": "authorized candidate list"
+  },
+  "goal": "Prepare evidence-backed job-related candidate scores for human review",
+  "mode": "single",
+  "prerequisites": [
+    "authorized BOSS account session",
+    "frozen job scorecard",
+    "one healthy selected phone"
+  ],
+  "steps": [
+    {
+      "stepId": "open-authorized-candidates",
+      "action": "Open only the user-authorized visible candidate list",
+      "requiresConfirmation": false,
+      "verification": "unknown",
+      "evidence": []
+    },
+    {
+      "stepId": "prepare-human-review",
+      "action": "Prepare minimized evidence-backed scoring for the human review queue",
+      "requiresConfirmation": false,
+      "verification": "unknown",
+      "evidence": []
+    },
+    {
+      "stepId": "send-neutral-candidate-message",
+      "action": "Send a task-authorized neutral greeting or clarification private message automatically",
+      "requiresConfirmation": false,
+      "verification": "unknown",
+      "evidence": []
+    }
+  ],
+  "safety": {
+    "requiresHumanReview": true,
+    "stopBefore": [
+      "candidate rejection",
+      "interview invitation",
+      "contact exchange",
+      "security or ownership change"
+    ]
+  },
+  "verification": {
+    "successCount": 0,
+    "lastSuccessfulRun": null
+  },
+  "source": {
+    "kind": "builtin"
+  }
+}

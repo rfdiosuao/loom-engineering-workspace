@@ -1,0 +1,10 @@
+{
+  "id": "openclaw-pdf-ocr",
+  "name": "openclaw-pdf-ocr",
+  "displayName": "PDF And OCR Reader",
+  "version": "1.0.0",
+  "description": "Extract, summarize, and analyze PDFs, screenshots, scanned documents, invoices, contracts, forms, tables, and OCR text. Use for PDF reading, document QA, key field extraction, table extraction, and scanned office materials.",
+  "category": "Office",
+  "runtime": "openclaw-workspace",
+  "icon": "PO"
+}

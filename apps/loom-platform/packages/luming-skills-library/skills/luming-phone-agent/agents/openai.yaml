@@ -1,0 +1,4 @@
+interface:
+  display_name: "麓鸣手机 Agent"
+  short_description: "弱门禁执行手机任务、矩阵监督、自动出站和配方复用"
+  default_prompt: "Use $luming-phone-agent in weak gate mode to discover phones, normalize the task, automatically execute task-authorized outbound and routine mutations, reuse only verified recipes, and report only the remaining hard blockers."

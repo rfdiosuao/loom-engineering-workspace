@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "product": "LOOM",
+  "channel": "rc-local",
+  "version": "2.1.19-rc.20260628",
+  "publishedAt": "2026-06-28T07:50:00Z",
+  "minLauncherVersion": "2.1.19",
+  "signature": {
+    "algorithm": "ed25519",
+    "value": "SdTVb2ghTNXOvC54++JvUwmetymRuIPy/6HItCa2XuQspJUOrIc0XWMiaSom8KyYNLrH0UPuBzhumIWhEp4LAg=="
+  },
+  "components": [
+    {
+      "id": "codex-desktop",
+      "name": "Codex",
+      "version": "0.142.3-win32-x64",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "urls": [
+        "https://registry.npmjs.org/@openai/codex/-/codex-0.142.3-win32-x64.tgz"
+      ],
+      "installPath": "agents/codex-desktop",
+      "installCommand": [
+        "npm",
+        "install",
+        "-g",
+        "@openai/codex@0.142.3"
+      ],
+      "uninstallCommand": [
+        "npm",
+        "uninstall",
+        "-g",
+        "@openai/codex"
+      ],
+      "commandTimeoutMs": 900000,
+      "externalPaths": [
+        "%APPDATA%/npm/codex.cmd",
+        "%APPDATA%/npm/codex.CMD"
+      ],
+      "category": "agent",
+      "officialUrl": "https://www.npmjs.com/package/@openai/codex",
+      "description": "OpenAI 命令行编程智能体。",
+      "size": 117992842,
+      "sha256": "2e5a6fe84668442a0e06d5ec279b829852d0499bbba376e3a97e8ef5c9586ccb"
+    },
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "version": "2.1.195",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "urls": [
+        "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.195.tgz"
+      ],
+      "installPath": "agents/claude-code",
+      "installCommand": [
+        "npm",
+        "install",
+        "-g",
+        "@anthropic-ai/claude-code@2.1.195"
+      ],
+      "uninstallCommand": [
+        "npm",
+        "uninstall",
+        "-g",
+        "@anthropic-ai/claude-code"
+      ],
+      "commandTimeoutMs": 900000,
+      "externalPaths": [
+        "%USERPROFILE%/.local/bin/claude.exe",
+        "%APPDATA%/npm/claude.cmd",
+        "%APPDATA%/npm/claude.CMD"
+      ],
+      "category": "agent",
+      "officialUrl": "https://www.npmjs.com/package/@anthropic-ai/claude-code",
+      "description": "Anthropic 命令行编程智能体。",
+      "size": 19202,
+      "sha256": "a531d520e9ef0844c9883765aa7b4f83ea2f8fe914a7392accd4c249e1aec9e5"
+    },
+    {
+      "id": "opencode",
+      "name": "opencode",
+      "version": "1.17.11",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "urls": [
+        "https://registry.npmjs.org/opencode-windows-x64/-/opencode-windows-x64-1.17.11.tgz"
+      ],
+      "installPath": "agents/opencode",
+      "installCommand": [
+        "npm",
+        "install",
+        "-g",
+        "opencode-ai@1.17.11"
+      ],
+      "uninstallCommand": [
+        "npm",
+        "uninstall",
+        "-g",
+        "opencode-ai"
+      ],
+      "commandTimeoutMs": 900000,
+      "externalPaths": [
+        "%APPDATA%/npm/opencode.cmd",
+        "%APPDATA%/npm/opencode.CMD"
+      ],
+      "category": "agent",
+      "officialUrl": "https://www.npmjs.com/package/opencode-windows-x64",
+      "description": "终端优先的 AI 编程工具。",
+      "size": 55299692,
+      "sha256": "b9165d505120d7e521a298c68aa1e5cbaaf1fdbdf6bdc67eafed92a2dfe5e8ff"
+    },
+    {
+      "id": "openclaw-companion",
+      "name": "OpenClaw",
+      "version": "2026.6.10",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "urls": [
+        "https://registry.npmjs.org/openclaw/-/openclaw-2026.6.10.tgz"
+      ],
+      "installPath": "agents/openclaw-companion",
+      "installCommand": [
+        "npm",
+        "install",
+        "-g",
+        "openclaw@2026.6.10"
+      ],
+      "uninstallCommand": [
+        "npm",
+        "uninstall",
+        "-g",
+        "openclaw"
+      ],
+      "commandTimeoutMs": 900000,
+      "externalPaths": [
+        "%APPDATA%/npm/openclaw.cmd",
+        "%APPDATA%/npm/openclaw.CMD"
+      ],
+      "category": "agent",
+      "officialUrl": "https://openclaw.ai",
+      "description": "OpenClaw 兼容运行时。",
+      "size": 19243098,
+      "sha256": "263d6b0d7f5fa6f772e58e3413979484549540397722dd51230d8522e94e3202"
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes",
+      "version": "0.12.0",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "installer",
+      "urls": [
+        "https://hermes-assets.nousresearch.com/Hermes-Setup.exe?build=8d71c3891970"
+      ],
+      "installPath": "agents/hermes",
+      "entry": "Hermes-Setup.exe",
+      "installerArgs": [
+        "/S"
+      ],
+      "installerTimeoutMs": 900000,
+      "uninstallCommand": [
+        "%LOCALAPPDATA%/hermes/hermes-agent/venv/Scripts/hermes.EXE",
+        "uninstall"
+      ],
+      "commandTimeoutMs": 900000,
+      "externalPaths": [
+        "%LOCALAPPDATA%/hermes/hermes-agent/venv/Scripts/hermes.EXE"
+      ],
+      "category": "agent",
+      "officialUrl": "https://hermes-agent.nousresearch.com/desktop",
+      "description": "Hermes 智能体运行时。已安装时会优先检测本机 Hermes 入口。",
+      "size": 7597376,
+      "sha256": "505dfb4c2c1052b055e3fc694a76cb7ce093a64962c7713aa294f5549c6734f5"
+    }
+  ]
+}

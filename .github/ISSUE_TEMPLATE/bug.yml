@@ -7,11 +7,14 @@ body:
   - type: dropdown
     id: owner
     attributes:
-      label: Owning repository
+      label: Owning area
       options:
-        - loom-engineering-workspace
-        - loom-luming-launcher
-        - lumiapkclaw
+        - platform
+        - phone
+        - contracts
+        - skills
+        - docs
+        - cross-cutting
         - unknown
     validations:
       required: true

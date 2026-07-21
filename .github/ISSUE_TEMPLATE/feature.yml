@@ -7,12 +7,14 @@ body:
   - type: dropdown
     id: owner
     attributes:
-      label: Owning repository
+      label: Owning area
       options:
-        - loom-engineering-workspace
-        - loom-luming-launcher
-        - lumiapkclaw
-        - cross-repository
+        - platform
+        - phone
+        - contracts
+        - skills
+        - docs
+        - cross-cutting
     validations:
       required: true
   - type: textarea
@@ -40,7 +42,7 @@ body:
     id: dependencies
     attributes:
       label: Contracts and dependencies
-      description: Name required contract versions and linked Issues or PRs.
+      description: Name required contract versions, external services, or linked Issues.
   - type: checkboxes
     id: readiness
     attributes:

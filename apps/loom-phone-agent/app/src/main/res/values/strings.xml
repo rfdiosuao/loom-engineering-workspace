@@ -1,0 +1,327 @@
+<resources>
+    <string name="app_name">Lumi Agent Phone</string>
+
+    <!-- Common -->
+    <string name="common_confirm">OK</string>
+    <string name="common_cancel">Cancel</string>
+    <string name="common_close">Close</string>
+    <string name="common_save">Save</string>
+    <string name="common_agree">Agree</string>
+    <string name="common_bound">Connected</string>
+    <string name="common_unbound">Not connected</string>
+    <string name="common_unconfigured">Not configured</string>
+    <string name="common_unbound_success">Disconnected</string>
+    <string name="channel_dingtalk">DingTalk</string>
+    <string name="channel_feishu">Feishu</string>
+    <string name="channel_qq">QQ</string>
+    <string name="channel_discord">Discord</string>
+    <string name="channel_telegram">Telegram</string>
+    <string name="channel_wechat">WeChat</string>
+    <string name="common_load_failed">Failed to load: %s</string>
+
+    <string name="app_slogan">AI Agents that get things done</string>
+
+    <!-- Guide -->
+    <string name="guide_page_title">Permission Setup</string>
+    <string name="guide_page_subtitle">Please enable the following permissions for the app to work properly</string>
+    <string name="guide_skip">Skip</string>
+    <string name="guide_start">Get Started</string>
+    <string name="guide_title_accessibility">Accessibility Service</string>
+    <string name="guide_desc_accessibility">This is the core permission for AI to control your device.\n\n1. Go to Settings → Accessibility → Downloaded apps\n2. Find \"Lumi Agent Phone\" in the list\n3. Turn on the switch\n4. Confirm in the system dialog</string>
+    <string name="guide_title_notification">Persistent Notification</string>
+    <string name="guide_desc_notification">Keeps the app running in the background to prevent it from being killed by the system.\n\nJust tap the card on the home screen to enable it. Android 13+ will ask for notification permission first.</string>
+    <string name="guide_title_overlay">System Overlay</string>
+    <string name="guide_desc_overlay">Displays a floating panel showing AI execution status.\n\n1. Go to Settings → Apps → Lumi Agent Phone\n2. Find \"Display over other apps\"\n3. Turn on the switch</string>
+    <string name="guide_title_battery">Battery Whitelist</string>
+    <string name="guide_desc_battery">Prevents the system from stopping the app in the background.\n\nTap the card on the home screen, then confirm \"Allow\" in the system dialog. (Some devices may require setting to \"Unrestricted\")</string>
+    <string name="guide_title_storage">File Access</string>
+    <string name="guide_desc_storage">Allows the AI to read and write files on your device.\n\nAndroid 11+: Go to Settings → enable \"All files access\"\nAndroid 10 and below: Grant permission in the popup dialog</string>
+
+    <!-- Home -->
+    <string name="home_need_notification_permission">Notification permission is required</string>
+    <string name="home_enable_accessibility">Please enable Lumi Agent Phone Accessibility Service</string>
+    <string name="home_accessibility_enabled">Accessibility service enabled</string>
+    <string name="home_notification_enabled">Persistent notification enabled</string>
+    <string name="home_overlay_enabled">Overlay permission enabled</string>
+    <string name="home_battery_ignored">Battery optimization ignored</string>
+    <string name="home_permission_enabled">Enabled</string>
+    <string name="home_permission_required">Required</string>
+    <string name="home_permission_rebind_required">Reconnect</string>
+    <string name="home_agent_status_title">Lumi Control Console</string>
+    <string name="home_agent_status_ready">Phone is reachable. HTTP, RPA, and Agent fallback can run tasks.</string>
+    <string name="home_agent_status_setup">Finish the remaining checks before long-running tasks.</string>
+    <string name="home_agent_status_ready_badge">READY</string>
+    <string name="home_agent_status_setup_badge">SETUP</string>
+    <string name="home_agent_status_meta">%1$d/5 checks &#183; %2$s &#183; v%3$s</string>
+    <string name="home_control_http_placeholder">HTTP  checking</string>
+    <string name="home_control_lumi_placeholder">Lumi  checking</string>
+    <string name="home_control_model_placeholder">Model checking</string>
+    <string name="home_control_rpa_placeholder">RPA   checking</string>
+    <string name="home_task_console_title">Live task log</string>
+    <string name="home_task_console_subtitle">The floating log chip shows this status over other apps.</string>
+    <string name="home_task_console_idle">No task is running\nWaiting for the next phone task from LOOM or CLI</string>
+    <string name="home_task_console_agent_running">Agent is working\nSource: %1$s\nTask: %2$s\nUpdated: %3$s</string>
+    <string name="home_task_console_rpa">%1$s\nWorkflow: %2$s\nProgress: step %3$d of %4$d\nCurrent action: %5$s\nElapsed: %6$d ms · Updated: %7$s</string>
+    <string name="home_task_console_rpa_queued">RPA task is waiting</string>
+    <string name="home_task_console_rpa_running">RPA task is running</string>
+    <string name="home_task_console_rpa_succeeded">RPA task completed</string>
+    <string name="home_task_console_rpa_failed">RPA task encountered an error</string>
+    <string name="home_task_console_rpa_cancelled">RPA task was cancelled</string>
+    <string name="home_task_console_rpa_preparing">Preparing the next action</string>
+    <string name="home_permission_section_title">Runtime checks</string>
+    <string name="home_card_accessibility_title">Accessibility Service</string>
+    <string name="home_card_accessibility_subtitle">For automated phone control</string>
+    <string name="home_card_notification_title">Persistent Notification</string>
+    <string name="home_card_notification_subtitle">Show running status</string>
+    <string name="home_card_system_window_title">System Window</string>
+    <string name="home_card_system_window_subtitle">Floating panel overlay</string>
+    <string name="home_card_battery_title">Battery Whitelist</string>
+    <string name="home_card_battery_subtitle">Prevent background termination</string>
+    <string name="home_card_storage_title">File Access</string>
+    <string name="home_card_storage_subtitle">Read and write device files</string>
+    <string name="home_storage_enabled">File access permission granted</string>
+    <string name="home_enable_storage">Please allow access to all files</string>
+    <string name="home_cancel_task">Stop current task</string>
+    <string name="home_cancel_task_success">AI task stopped</string>
+    <string name="home_no_task_running">No task is running</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_group_channel">Channels</string>
+    <string name="settings_group_model">Model</string>
+    <string name="settings_group_display">Display</string>
+    <string name="settings_group_publish">Publish</string>
+
+    <!-- Unbind -->
+    <string name="unbind_title">Disconnect</string>
+    <string name="unbind_message">Disconnect %1$s? You will no longer receive messages via %2$s.</string>
+    <string name="unbind_action">Disconnect</string>
+
+    <!-- Channel Config -->
+    <string name="channel_config_dingtalk_title">DingTalk Config</string>
+    <string name="channel_config_feishu_title">Feishu Config</string>
+    <string name="channel_config_dingtalk_tip">Enter Client ID and Client Secret to connect DingTalk</string>
+    <string name="channel_config_feishu_tip">Enter App ID and App Secret to connect Feishu</string>
+    <string name="channel_config_dingtalk_hint1">Enter Client ID</string>
+    <string name="channel_config_dingtalk_hint2">Enter Client Secret</string>
+    <string name="channel_config_feishu_hint1">Enter App ID</string>
+    <string name="channel_config_feishu_hint2">Enter App Secret</string>
+    <string name="channel_config_qq_title">QQ Config</string>
+    <string name="channel_config_qq_tip">Enter QQ Bot App ID and App Secret (from QQ Open Platform)</string>
+    <string name="channel_config_qq_hint1">Enter App ID</string>
+    <string name="channel_config_qq_hint2">Enter App Secret</string>
+    <string name="channel_config_discord_title">Discord Config</string>
+    <string name="channel_config_discord_tip">Enter Bot Token (from Discord Developer Portal → Bot page). Message Content Intent must be enabled.</string>
+    <string name="channel_config_discord_hint1">Enter Bot Token</string>
+    <string name="channel_config_telegram_title">Telegram Config</string>
+    <string name="channel_config_telegram_tip">Enter Bot Token (create a bot via @BotFather on Telegram to get the token)</string>
+    <string name="channel_config_telegram_hint1">Enter Bot Token</string>
+    <string name="channel_config_wechat_title">WeChat Config</string>
+    <string name="channel_config_wechat_tip">Scan QR code with WeChat to authorize the bot. Token and API URL will be saved automatically after confirmation.</string>
+    <string name="channel_config_wechat_btn_scan">Get QR Code</string>
+    <string name="channel_config_wechat_scanning">Waiting for scan…</string>
+    <string name="channel_config_wechat_confirmed">Authorization confirmed</string>
+    <string name="wechat_qr_failed">Failed to get WeChat QR code</string>
+    <string name="wechat_unsupported_media">Received %s message, this type is not supported yet. Please send a text command.</string>
+    <string name="wechat_media_image">image</string>
+    <string name="wechat_media_video">video</string>
+    <string name="wechat_media_file">file</string>
+    <string name="wechat_media_voice">voice</string>
+    <string name="wechat_media_unknown">media</string>
+    <string name="channel_config_saved">Configuration saved</string>
+    <string name="channel_config_lan_hint">💡 Enable \"LAN Config\" in Settings to configure via browser</string>
+    <string name="channel_config_lan_hint_running">💡 Open %s in your browser to configure</string>
+    <string name="channel_config_lan_copied">Address copied</string>
+
+    <!-- LLM Config -->
+    <string name="llm_config_title">LLM Configuration</string>
+    <string name="llm_config_tip">Enter your LLM API key, base URL and model name. Data is stored locally only.</string>
+    <string name="llm_config_api_key">API Key</string>
+    <string name="llm_config_api_key_hint">e.g. sk-xxx (OpenAI) or your provider key</string>
+    <string name="llm_config_base_url">Base URL</string>
+    <string name="llm_config_base_url_hint">e.g. https://api.openai.com/v1 (leave empty for OpenAI default)</string>
+    <string name="llm_config_model_name">Model Name</string>
+    <string name="llm_config_model_name_hint">e.g. gpt-4o, gpt-4o-mini, claude-3-5-sonnet</string>
+    <string name="llm_config_saved">LLM configuration saved</string>
+    <string name="llm_config_api_key_required">Please enter API Key</string>
+    <string name="menu_llm_config">LLM Config</string>
+
+    <!-- Settings Menu -->
+    <string name="menu_dingtalk">DingTalk</string>
+    <string name="menu_feishu">Feishu</string>
+    <string name="menu_qq">QQ</string>
+    <string name="menu_discord">Discord</string>
+    <string name="menu_telegram">Telegram</string>
+    <string name="menu_wechat">WeChat</string>
+    <string name="menu_lan_config">LAN Config</string>
+    <string name="menu_api_token">API Token</string>
+    <string name="menu_publish_relay">Publish Relay</string>
+    <string name="menu_floating_circle_size">Floating Ball Size</string>
+    <string name="menu_floating_click_enabled">Clickable and draggable overlay</string>
+    <string name="publish_relay_status_on">On</string>
+    <string name="publish_relay_status_off">Off</string>
+    <string name="floating_size_small">Small</string>
+    <string name="floating_size_medium">Medium</string>
+    <string name="floating_size_large">Large</string>
+    <string name="floating_size_saved">Floating ball size: %s</string>
+    <string name="lan_config_stopped">Off</string>
+    <string name="lan_config_no_wifi">Please connect to Wi-Fi or enable phone hotspot</string>
+
+    <!-- API Token Config -->
+    <string name="api_token_config_title">API Token Configuration</string>
+    <string name="api_token_config_tip">Token is required for external HTTP API access. Generate or enter your own token.</string>
+    <string name="api_token_config_token">Token</string>
+    <string name="api_token_config_hint">Enter custom token or use generated</string>
+    <string name="api_token_config_generate">Generate Random</string>
+    <string name="api_token_config_saved">API Token saved</string>
+    <string name="api_token_config_required">Please enter or generate a token</string>
+    <string name="api_token_status_set">Token set</string>
+    <string name="api_token_status_unset">Not set</string>
+
+    <!-- Publish Relay Config -->
+    <string name="publish_relay_config_title">Publish Relay</string>
+    <string name="publish_relay_config_tip">Poll a public relay so this phone can receive publish packets even when direct LAN access is unavailable. Enter the relay service base URL, not the packet endpoint path.</string>
+    <string name="publish_relay_config_base_url">Relay Base URL</string>
+    <string name="publish_relay_config_base_url_hint">https://relay.example.com</string>
+    <string name="publish_relay_config_channel_id">Channel ID</string>
+    <string name="publish_relay_config_channel_id_hint">publish-channel-01</string>
+    <string name="publish_relay_config_token">Relay Token</string>
+    <string name="publish_relay_config_token_hint">Shared token if the public relay requires auth</string>
+    <string name="publish_relay_config_enabled">Enable polling</string>
+    <string name="publish_relay_config_enabled_desc">The phone polls the relay, executes packets locally, then reports the result.</string>
+    <string name="publish_relay_config_checking">Checking relay service…</string>
+    <string name="publish_relay_config_check_ok">Relay reachable. Polling will start when the phone is ready.</string>
+    <string name="publish_relay_config_check_failed">Relay check failed: %s</string>
+    <string name="publish_relay_config_check_failed_short">Relay check failed</string>
+    <string name="publish_relay_config_missing_url">Please enter the relay base URL</string>
+    <string name="publish_relay_config_missing_channel">Please enter the channel ID</string>
+    <string name="publish_relay_config_invalid_url">Relay URL must start with http:// or https://</string>
+    <string name="publish_relay_config_saved">Publish relay saved</string>
+
+    <!-- Protocol -->
+    <string name="protocol_agree_title">Privacy Guidelines</string>
+    <string name="protocol_alert_title">Terms and Privacy</string>
+    <string name="protocol_disagree">Disagree</string>
+    <string name="protocol_agree_continue">Agree and Continue</string>
+
+    <!-- Floating -->
+    <string name="floating_ai_label">Lumi</string>
+    <string name="floating_task_received">New task: %s</string>
+    <string name="floating_log_title">Lumi task progress</string>
+    <string name="floating_log_hint">Tap to collapse · Drag to move</string>
+    <string name="floating_log_hint_passthrough">Touch passthrough enabled</string>
+    <string name="floating_log_idle">Waiting for a new task\nPhone control, RPA, and Agent are ready</string>
+    <string name="floating_log_received">Preparing the new task\n%1$s</string>
+    <string name="floating_log_running">Understanding the screen and planning\nExecution stage %1$d</string>
+    <string name="floating_log_tool">Executing the task\nCurrent action: %1$s</string>
+    <string name="floating_log_action">Controlling the phone\n%1$s · Position %2$s</string>
+    <string name="floating_log_success">Task completed\nThe result was sent to LOOM</string>
+    <string name="floating_log_error">The task hit an error\nDetails were saved for Codex to inspect</string>
+    <string name="floating_state_idle">READY</string>
+    <string name="floating_state_received">RECEIVED</string>
+    <string name="floating_state_running">RUNNING</string>
+    <string name="floating_state_success">DONE</string>
+    <string name="floating_state_error">ERROR</string>
+    <string name="floating_state_recent">RECENT</string>
+    <string name="floating_history_thinking">Stage %1$d: Understanding the screen</string>
+    <string name="floating_history_tool">Stage %1$d: Tool call · %2$s</string>
+    <string name="floating_history_success">Completed: Result sent to LOOM</string>
+    <string name="floating_history_error">Error: Details saved for inspection</string>
+    <string name="floating_tool_open_app">Open the target app</string>
+    <string name="floating_tool_read_screen">Read the current screen</string>
+    <string name="floating_tool_tap">Tap a screen target</string>
+    <string name="floating_tool_input_text">Enter text</string>
+    <string name="floating_tool_swipe">Scroll and find content</string>
+    <string name="floating_tool_system_key">Go back or open Home</string>
+    <string name="floating_tool_screenshot">Capture the current screen</string>
+    <string name="floating_tool_finish">Prepare and return the result</string>
+    <string name="floating_tool_other">Perform a phone action</string>
+    <string name="floating_action_tap">Tap</string>
+    <string name="floating_action_long_press">Long press</string>
+    <string name="floating_action_swipe">Swipe</string>
+    <string name="floating_action_drag">Drag</string>
+    <string name="floating_action_other">Action</string>
+
+    <!-- Foreground Service Notification -->
+    <string name="notification_channel_name">Lumi Agent Status</string>
+    <string name="notification_channel_description">Shows Lumi Agent running status and stats</string>
+    <string name="notification_content_title">Lumi Agent Running</string>
+    <string name="notification_content_text">Lumi Agent service is active</string>
+
+    <!-- Channel Messages -->
+    <string name="channel_msg_task_cancelled">Task cancelled manually</string>
+    <string name="channel_msg_service_not_ready">Service not ready, please try again later</string>
+    <string name="channel_msg_tool_success">Success</string>
+    <string name="channel_msg_tool_failure">Failed</string>
+    <string name="channel_msg_tool_execution">[%1$s]: %2$s</string>
+    <string name="channel_msg_task_error">Error: %s</string>
+    <string name="channel_msg_no_accessibility">Accessibility permission missing, cannot execute task</string>
+    <string name="channel_msg_task_in_progress">A task is already running, please wait</string>
+    <string name="channel_msg_system_dialog_blocked">A system dialog may be blocking the screen. Please check and handle it manually, then try again.</string>
+
+    <!-- Accessibility -->
+    <string name="cd_back_button">Back</string>
+    <string name="cd_settings">Settings</string>
+    <string name="cd_clear_input">Clear input</string>
+    <string name="cd_checkbox">Toggle checkbox</string>
+    <string name="cd_selected">Selected</string>
+    <string name="cd_task_success">Task completed</string>
+    <string name="cd_task_error">Task failed</string>
+    <string name="cd_channel_logo">Channel logo</string>
+    <string name="cd_app_logo">App logo</string>
+    <string name="cd_qr_code">QR code</string>
+    <string name="cd_toggle_password">Show or hide password</string>
+    <string name="cd_copy">Copy</string>
+    <string name="cd_arrow_right">More</string>
+    <string name="cd_empty_state">No data</string>
+    <string name="cd_error_state">Load failed</string>
+
+    <!-- Agent -->
+    <string name="agent_accessibility_not_enabled">Accessibility service is not enabled</string>
+    <string name="agent_task_cancelled">Task cancelled</string>
+    <string name="agent_task_completed">Task completed</string>
+    <string name="agent_task_cancel">Task cancelled</string>
+    <string name="agent_api_call_failed">AI service call failed: %s</string>
+    <string name="agent_max_iterations">Reached maximum iterations (%d) without completing the task</string>
+
+    <!-- File Tool -->
+    <string name="tool_no_storage_permission">No file read/write permission</string>
+    <string name="tool_file_not_found">File not found: %s</string>
+    <string name="tool_not_a_file">Path is not a file: %s</string>
+    <string name="tool_no_task_channel">No active task channel</string>
+    <string name="tool_file_sent">File sent: %s</string>
+    <string name="tool_file_send_failed">Failed to send file: %s</string>
+
+    <!-- Tool Names -->
+    <string name="tool_name_screenshot">Screenshot</string>
+    <string name="tool_name_send_file">Send File</string>
+    <string name="tool_name_wait">Wait</string>
+    <string name="tool_name_get_screen_info">Get Screen Info</string>
+    <string name="tool_name_finish">Finish Task</string>
+    <string name="tool_name_open_app">Open App</string>
+    <string name="tool_name_get_installed_apps">Get Installed Apps</string>
+    <string name="tool_name_system_key">System Key</string>
+    <string name="tool_name_tap">Tap</string>
+    <string name="tool_name_swipe">Swipe</string>
+    <string name="tool_name_input_text">Input Text</string>
+    <string name="tool_name_find_node_info">Find Node</string>
+    <string name="tool_name_long_press">Long Press</string>
+    <string name="tool_name_repeat_actions">Repeat Actions</string>
+    <string name="tool_name_volume_up">Volume Up</string>
+    <string name="tool_name_volume_down">Volume Down</string>
+    <string name="tool_name_dpad_up">D-pad Up</string>
+    <string name="tool_name_dpad_down">D-pad Down</string>
+    <string name="tool_name_dpad_left">D-pad Left</string>
+    <string name="tool_name_dpad_right">D-pad Right</string>
+    <string name="tool_name_dpad_center">D-pad Center</string>
+    <string name="tool_name_press_menu">Menu</string>
+    <string name="tool_name_press_power">Power</string>
+    <string name="tool_name_search_app">Search App</string>
+    <string name="tool_name_clipboard">Clipboard</string>
+    <string name="tool_name_scroll_to_find">Scroll to Find</string>
+
+    <!-- Input Dialog -->
+    <string name="input_dialog_need_more">Enter at least %d characters</string>
+    <string name="input_dialog_need_less">Enter at most %d characters</string>
+    <string name="input_dialog_no_zero">Please enter a non-zero value</string>
+</resources>

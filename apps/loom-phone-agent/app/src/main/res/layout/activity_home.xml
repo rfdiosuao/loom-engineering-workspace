@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/colorBgPrimary"
+    android:paddingHorizontal="16pt">
+
+    <com.apk.claw.android.widget.CommonToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="56pt"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <androidx.core.widget.NestedScrollView
+        android:id="@+id/homeScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0pt"
+        android:clipToPadding="false"
+        android:fillViewport="true"
+        android:overScrollMode="never"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/toolbar">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingTop="12pt"
+            android:paddingBottom="24pt">
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/cardAgentStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12pt"
+                app:cardBackgroundColor="@color/colorLumiPanel"
+                app:cardCornerRadius="10pt"
+                app:cardElevation="0pt"
+                app:strokeColor="@color/colorLumiOrbStroke"
+                app:strokeWidth="1pt">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16pt">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <ImageView
+                            android:layout_width="30pt"
+                            android:layout_height="30pt"
+                            android:layout_marginEnd="10pt"
+                            android:contentDescription="@string/cd_app_logo"
+                            android:src="@drawable/ic_lumi_agent_mark" />
+
+                        <TextView
+                            android:id="@+id/tvReadinessTitle"
+                            android:layout_width="0pt"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="@string/home_agent_status_title"
+                            android:textColor="@color/colorTextFixedWhitePrimary"
+                            android:textSize="18pt"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/tvReadinessBadge"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:gravity="center"
+                            android:minWidth="58pt"
+                            android:paddingHorizontal="10pt"
+                            android:paddingVertical="5pt"
+                            android:text="@string/home_agent_status_setup_badge"
+                            android:textColor="@color/colorWarningOnContainer"
+                            android:textSize="10pt"
+                            android:textStyle="bold" />
+
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/tvReadinessSubtitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8pt"
+                        android:text="@string/home_agent_status_setup"
+                        android:textColor="@color/colorTextFixedWhiteSecondary"
+                        android:textSize="13pt" />
+
+                    <TextView
+                        android:id="@+id/tvReadinessMeta"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12pt"
+                        android:textColor="@color/colorTextFixedWhitePrimary"
+                        android:textSize="12pt"
+                        android:textStyle="bold" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14pt"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/tvControlPlaneHttp"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/home_control_http_placeholder"
+                            android:textColor="@color/colorTextFixedWhitePrimary"
+                            android:textSize="12pt" />
+
+                        <TextView
+                            android:id="@+id/tvControlPlaneLumi"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="5pt"
+                            android:text="@string/home_control_lumi_placeholder"
+                            android:textColor="@color/colorTextFixedWhiteSecondary"
+                            android:textSize="12pt" />
+
+                        <TextView
+                            android:id="@+id/tvControlPlaneModel"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="5pt"
+                            android:text="@string/home_control_model_placeholder"
+                            android:textColor="@color/colorTextFixedWhiteSecondary"
+                            android:textSize="12pt" />
+
+                        <TextView
+                            android:id="@+id/tvControlPlaneRpa"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="5pt"
+                            android:text="@string/home_control_rpa_placeholder"
+                            android:textColor="@color/colorTextFixedWhiteSecondary"
+                            android:textSize="12pt" />
+
+                    </LinearLayout>
+
+                </LinearLayout>
+
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/cardTaskConsole"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14pt"
+                app:cardBackgroundColor="@color/colorContainerLow"
+                app:cardCornerRadius="10pt"
+                app:cardElevation="0pt"
+                app:strokeColor="@color/colorBorderBase"
+                app:strokeWidth="1pt">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="14pt">
+
+                    <TextView
+                        android:id="@+id/tvTaskConsoleTitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/home_task_console_title"
+                        android:textColor="@color/colorTextPrimary"
+                        android:textSize="15pt"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="5pt"
+                        android:text="@string/home_task_console_subtitle"
+                        android:textColor="@color/colorTextSecondary"
+                        android:textSize="12pt" />
+
+                    <TextView
+                        android:id="@+id/tvTaskConsoleBody"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12pt"
+                        android:fontFamily="monospace"
+                        android:lineSpacingExtra="2pt"
+                        android:text="@string/home_task_console_idle"
+                        android:textColor="@color/colorTextPrimary"
+                        android:textSize="12pt" />
+
+                </LinearLayout>
+
+            </com.google.android.material.card.MaterialCardView>
+
+            <TextView
+                android:id="@+id/tvPermissionSectionTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8pt"
+                android:text="@string/home_permission_section_title"
+                android:textColor="@color/colorTextSecondary"
+                android:textSize="12pt"
+                android:textStyle="bold" />
+
+            <com.apk.claw.android.widget.PermissionCardView
+                android:id="@+id/cardAccessibility"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12pt"
+                app:cardIcon="@drawable/ic_accessibility"
+                app:cardSubtitle="@string/home_card_accessibility_subtitle"
+                app:cardTitle="@string/home_card_accessibility_title" />
+
+            <com.apk.claw.android.widget.PermissionCardView
+                android:id="@+id/cardNotification"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12pt"
+                app:cardIcon="@drawable/ic_notification"
+                app:cardSubtitle="@string/home_card_notification_subtitle"
+                app:cardTitle="@string/home_card_notification_title" />
+
+            <com.apk.claw.android.widget.PermissionCardView
+                android:id="@+id/cardSystemWindow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12pt"
+                app:cardIcon="@drawable/ic_window"
+                app:cardSubtitle="@string/home_card_system_window_subtitle"
+                app:cardTitle="@string/home_card_system_window_title" />
+
+            <com.apk.claw.android.widget.PermissionCardView
+                android:id="@+id/cardBattery"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12pt"
+                app:cardIcon="@drawable/ic_battery"
+                app:cardSubtitle="@string/home_card_battery_subtitle"
+                app:cardTitle="@string/home_card_battery_title" />
+
+            <com.apk.claw.android.widget.PermissionCardView
+                android:id="@+id/cardStorage"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="24pt"
+                app:cardIcon="@drawable/ic_storage"
+                app:cardSubtitle="@string/home_card_storage_subtitle"
+                app:cardTitle="@string/home_card_storage_title" />
+
+            <com.apk.claw.android.widget.KButton
+                android:id="@+id/btnCancelTask"
+                android:layout_width="match_parent"
+                android:layout_height="48pt"
+                android:text="@string/home_cancel_task"
+                android:textSize="16sp"
+                android:visibility="gone"
+                app:btnBackground="@color/colorErrorPrimary"
+                app:btnTextColor="@color/colorErrorOnPrimary" />
+
+        </LinearLayout>
+
+    </androidx.core.widget.NestedScrollView>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

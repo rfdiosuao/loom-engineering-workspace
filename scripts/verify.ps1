@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'hub', 'platform', 'phone')]
-    [string]$Repository = 'all',
+    [Alias('Repository')]
+    [ValidateSet('all', 'workspace', 'hub', 'platform', 'phone')]
+    [string]$Area = 'all',
 
     [switch]$Fast
 )
@@ -25,27 +26,37 @@ function Invoke-LoomStep {
     }
 }
 
-if ($Repository -in @('all', 'hub')) {
+if ($Area -in @('all', 'workspace', 'hub')) {
     Invoke-LoomStep -Name 'Workspace contracts' -Action {
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-workspace.ps1')
     }
-    Invoke-LoomStep -Name 'Hub whitespace' -Action {
+    Invoke-LoomStep -Name 'Repository whitespace' -Action {
         & git -C $root diff --check
     }
 }
 
-if ($Repository -in @('all', 'platform')) {
-    $platform = Get-LoomRepository -Name 'platform'
-    $platformModules = Join-Path $platform.Path 'openclaw_new_launcher\node_modules'
-    if (-not (Test-Path -LiteralPath $platformModules -PathType Container)) {
+if ($Area -in @('all', 'platform')) {
+    $platform = Get-LoomComponent -Name 'platform'
+    $launcher = Join-Path $platform.Path 'openclaw_new_launcher'
+    if (-not (Test-Path -LiteralPath (Join-Path $launcher 'node_modules') -PathType Container)) {
         throw 'Platform dependencies are missing. Run scripts\bootstrap.ps1 first.'
     }
+
+    Invoke-LoomStep -Name 'Build bundled Skill library' -Action {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $platform.Path 'scripts\build-luming-skills-library.ps1')
+    }
     Invoke-LoomStep -Name 'Platform frontend build' -Action {
-        & npm --prefix (Join-Path $platform.Path 'openclaw_new_launcher') run build
+        & npm --prefix $launcher run build
+    }
+    Invoke-LoomStep -Name 'Platform frontend contracts' -Action {
+        & npm --prefix $launcher run test:platform-contracts
+    }
+    Invoke-LoomStep -Name 'Platform Node contracts' -Action {
+        & npm --prefix $launcher run test:node-contracts
     }
     if (-not $Fast) {
         Invoke-LoomStep -Name 'Platform Python tests' -Action {
-            Push-Location (Join-Path $platform.Path 'openclaw_new_launcher')
+            Push-Location $launcher
             try {
                 & python -m pytest python/tests -q
             } finally {
@@ -55,17 +66,19 @@ if ($Repository -in @('all', 'platform')) {
     }
 }
 
-if ($Repository -in @('all', 'phone')) {
-    $phone = Get-LoomRepository -Name 'phone'
+if ($Area -in @('all', 'phone')) {
+    $phone = Get-LoomComponent -Name 'phone'
     $phoneLocalProperties = Join-Path $phone.Path 'local.properties'
-    if (-not (Test-Path -LiteralPath $phoneLocalProperties -PathType Leaf) -and
+    if (-not $Fast -and
+        -not (Test-Path -LiteralPath $phoneLocalProperties -PathType Leaf) -and
         [string]::IsNullOrWhiteSpace($env:ANDROID_SDK_ROOT) -and
         [string]::IsNullOrWhiteSpace($env:ANDROID_HOME)) {
         throw 'Android SDK configuration is missing. Run scripts\bootstrap.ps1 first.'
     }
+
     if ($Fast) {
         Invoke-LoomStep -Name 'Phone source whitespace' -Action {
-            & git -C $phone.Path diff --check
+            & git -C $root diff --check -- apps/loom-phone-agent
         }
     } else {
         Invoke-LoomStep -Name 'Phone unit tests' -Action {

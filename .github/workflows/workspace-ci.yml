@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - "codex/**"
 
 permissions:
   contents: read
@@ -12,14 +13,19 @@ permissions:
 jobs:
   governance:
     runs-on: windows-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: pwsh
+
     steps:
-      - name: Checkout engineering hub
-        uses: actions/checkout@v7
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
         with:
-          submodules: false
+          fetch-depth: 0
 
       - name: Validate JSON documents
-        shell: powershell
         run: |
           Get-Content -Raw .\workspace.json | ConvertFrom-Json | Out-Null
           Get-Content -Raw .\LOOM.code-workspace | ConvertFrom-Json | Out-Null
@@ -28,15 +34,12 @@ jobs:
           }
 
       - name: Install contract validation dependency
-        shell: powershell
         run: python -m pip install --disable-pip-version-check --no-cache-dir jsonschema==4.25.1
 
       - name: Validate contract schemas and fixtures
-        shell: powershell
         run: python -B .\packages\contracts\validate_contracts.py
 
       - name: Parse PowerShell scripts
-        shell: powershell
         run: |
           $failed = $false
           Get-ChildItem .\scripts\*.ps1 | ForEach-Object {
@@ -50,8 +53,28 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: Verify monorepo structure
+        run: .\scripts\test-workspace.ps1
+
+      - name: Reject submodules and nested Git repositories
+        run: |
+          if (Test-Path .\.gitmodules) {
+            throw ".gitmodules must not exist in the monorepo."
+          }
+
+          $gitlinks = @(git ls-files -s | Where-Object { $_ -match '^160000\s' })
+          if ($gitlinks.Count -gt 0) {
+            $gitlinks | ForEach-Object { Write-Error "Gitlink is not allowed: $_" }
+            exit 1
+          }
+
+          $nested = @(Get-ChildItem .\apps -Force -Recurse -Directory -Filter .git -ErrorAction SilentlyContinue)
+          if ($nested.Count -gt 0) {
+            $nested | ForEach-Object { Write-Error "Nested .git is not allowed: $($_.FullName)" }
+            exit 1
+          }
+
       - name: Verify default-branch push guard
-        shell: powershell
         run: |
           $gitExe = (Get-Command git).Source
           $gitRoot = Split-Path (Split-Path $gitExe -Parent) -Parent
@@ -67,9 +90,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'approved emergency bypass failed' }
 
       - name: Reject sensitive or generated filenames
-        shell: powershell
         run: |
-          $pattern = '(?i)(^|/)(\.env($|\.)|local\.properties$|.*\.(jks|keystore|p12|pfx|pem|key|db|sqlite|apk|aab|log)$|credentials.*\.json$|.*token.*\.txt$)'
+          $pattern = '(?i)(^|/)(\.env($|\.)|local\.properties$|.*\.(jks|keystore|p12|pfx|pem|key|db|sqlite|apk|aab|log)$|credentials.*\.json$|.*token.*\.txt$|.*授权码.*\.xlsx$)'
           $blocked = @(git ls-files | Where-Object { $_ -match $pattern })
           if ($blocked.Count -gt 0) {
             $blocked | ForEach-Object { Write-Error "Blocked tracked path: $_" }
@@ -77,5 +99,4 @@ jobs:
           }
 
       - name: Check whitespace
-        shell: powershell
         run: git show --check --format= HEAD

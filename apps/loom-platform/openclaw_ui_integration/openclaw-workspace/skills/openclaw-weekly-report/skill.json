@@ -1,0 +1,10 @@
+{
+  "id": "openclaw-weekly-report",
+  "name": "openclaw-weekly-report",
+  "displayName": "Daily And Weekly Reports",
+  "version": "1.0.0",
+  "description": "Create daily reports, weekly reports, progress updates, work summaries, boss-facing updates, and project status reports from task logs, chat records, git changes, file edits, or bullet notes.",
+  "category": "Office",
+  "runtime": "openclaw-workspace",
+  "icon": "WR"
+}

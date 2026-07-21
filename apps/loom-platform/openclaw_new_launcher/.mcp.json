@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "loom": {
+      "command": "python",
+      "args": [
+        "-B",
+        "python/loom_mcp.py"
+      ],
+      "env": {
+        "LOOM_MCP_PERMISSION": "read",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}

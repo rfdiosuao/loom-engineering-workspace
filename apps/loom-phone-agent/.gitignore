@@ -1,0 +1,43 @@
+*.iml
+.DS_Store
+
+# Local machine configuration
+local.properties
+/local.properties
+
+# IDE and local assistant state
+/.idea/
+/.claude/
+/.worktrees/
+
+# Gradle / Android build state
+.gradle/
+.kotlin/
+/build/
+/app/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing keys and generated install packages
+*.jks
+*.keystore
+debug.keystore
+*.apk
+*.aab
+*.sha256.txt
+
+# Local screenshots, recordings, and verification captures
+/Screenshots/
+/screen-*.png
+/captures/
+*.mp4
+*.webm
+
+# Local logs and runtime state
+*.log
+*.err
+*.out
+*.db
+*.db-shm
+*.db-wal

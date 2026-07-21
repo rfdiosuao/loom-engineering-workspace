@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.matrix.device_lease.v1",
+  "title": "LOOM Matrix Device Lease v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "leaseId",
+    "deviceId",
+    "holderType",
+    "holderId",
+    "mode",
+    "expiresAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.matrix.device_lease.v1"
+    },
+    "leaseId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "holderType": {
+      "enum": [
+        "agent",
+        "human"
+      ]
+    },
+    "holderId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "const": "control"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

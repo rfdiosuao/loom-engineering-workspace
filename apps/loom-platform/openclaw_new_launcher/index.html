@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/logo.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>麓鸣AI矩阵获客工作台</title>
+    <script>
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('loom_theme_mode_v2') || window.localStorage.getItem('loom_theme_mode');
+          var mode = stored === 'dark' ? 'dark' : 'light';
+          document.documentElement.dataset.themeMode = mode;
+          document.documentElement.style.background = mode === 'dark' ? '#061017' : '#F4EFE5';
+          document.documentElement.style.colorScheme = mode;
+        } catch (error) {
+          document.documentElement.dataset.themeMode = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

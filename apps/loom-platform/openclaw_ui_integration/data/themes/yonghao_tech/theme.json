@@ -1,0 +1,76 @@
+{
+  "name": "永浩科技主题",
+  "colors": {
+    "app_bg": "#F3F4F5",
+    "sidebar_bg": "#F9F9FA",
+    "surface": "#FFFFFF",
+    "surface_alt": "#F6F7F8",
+    "surface_deep": "#1C202A",
+    "surface_deeper": "#14171E",
+    "hover": "#EDEFF1",
+    "input": "#F6F7F8",
+    "border": "#DDDFE3",
+    "border_strong": "#C1C4CC",
+    "text": "#1E2A3A",
+    "text_muted": "#64748B",
+    "text_subtle": "#94A3B8",
+    "accent": "#1A56DB",
+    "accent_hover": "#1444AD",
+    "accent_soft": "#E4E8F0",
+    "accent_ink": "#0F327F",
+    "success": "#059669",
+    "warning": "#D97706",
+    "danger": "#DC2626",
+    "danger_hover": "#B91C1C",
+    "terminal_bg": "#0F172A",
+    "terminal_header": "#1E293B",
+    "terminal_text": "#34D399"
+  },
+  "modes": {
+    "light": {
+      "accent": "#1A56DB",
+      "accent_hover": "#1444AD",
+      "accent_soft": "#E4E8F0",
+      "accent_ink": "#0F327F"
+    },
+    "dark": {
+      "accent": "#9D4EDD",
+      "accent_hover": "#B76BFF",
+      "accent_soft": "rgba(157, 78, 221, 0.18)",
+      "accent_ink": "#F5EAFF"
+    }
+  },
+  "fonts": {
+    "display": ["Microsoft YaHei UI", 21, "bold"],
+    "title": ["Microsoft YaHei UI", 14, "bold"],
+    "section": ["Microsoft YaHei UI", 10, "bold"],
+    "body": ["Microsoft YaHei UI", 10],
+    "small": ["Microsoft YaHei UI", 9],
+    "mono": ["Consolas", 10]
+  },
+  "brand": {
+    "name": "永浩科技",
+    "subtitle": "智能AI服务平台",
+    "app_user_model_id": "YonghaoTech.Launcher",
+    "terminal_header": "Service Console",
+    "logoUrl": "logo.png"
+  },
+  "navItems": [
+    {"key": "terminal", "label": "服务日志", "group": "工作台"},
+    {"key": "storyboard", "label": "广告视频", "group": "工作台", "accent": true},
+    {"key": "image", "label": "AI 生图", "group": "工作台", "accent": true},
+    {"key": "video", "label": "AI 视频", "group": "工作台", "accent": true},
+    {"key": "license", "label": "授权码", "group": "配置"},
+    {"key": "api", "label": "API 配置", "group": "配置"},
+    {"key": "feishu", "label": "飞书机器人", "group": "配置"},
+    {"key": "weixin", "label": "微信机器人", "group": "配置"},
+    {"key": "web", "label": "网页界面", "group": "维护"},
+    {"key": "update", "label": "检查更新", "group": "维护"},
+    {"key": "help", "label": "帮助文档", "group": "维护"}
+  ],
+  "window": {
+    "title": "永浩科技 - 智能AI服务平台",
+    "width": 1200,
+    "height": 800
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "schema": "openclaw.launcher.runtime-context.v1",
+  "updatedAt": null,
+  "launcher": {
+    "name": "OpenClaw Portable Launcher",
+    "version": "2.0.0",
+    "mode": "usb-portable",
+    "root": "."
+  },
+  "workspace": {
+    "path": "data/.openclaw/workspace",
+    "bootstrapFiles": ["AGENTS.md", "SOUL.md", "TOOLS.md", "CAPABILITIES.md"],
+    "skillsPath": "data/.openclaw/workspace/skills"
+  },
+  "paths": {
+    "generatedImages": "data/generated-images",
+    "phoneVideos": "data/phone-videos",
+    "scripts": "scripts"
+  },
+  "capabilities": {
+    "imageGeneration": {
+      "available": true,
+      "localOutputDir": "data/generated-images",
+      "cli": "npm run phone:image",
+      "editCli": "npm run phone:image:edit -- --reference-image <path> --prompt \"<edit instruction>\""
+    },
+    "phoneAgent": {
+      "available": true,
+      "controlPolicy": "wrapper-only",
+      "agentCli": "npm run phone:agent",
+      "imageCli": "npm run phone:image",
+      "imageEditCli": "npm run phone:image:edit -- --reference-image <path> --prompt \"<edit instruction>\"",
+      "visionCli": "npm run phone:vision",
+      "videoDownloadDir": "data/phone-videos",
+      "videoCli": "npm run phone:video",
+      "gameModeCli": "npm run phone:game",
+      "defaultAlbum": "OpenClaw",
+      "galleryPath": "Pictures/OpenClaw",
+      "verifiedVersion": "6.26",
+      "verifiedVersionCode": 860,
+      "maxRoundsPerTask": 60,
+      "tokenSource": "data/.openclaw/launcher/phone-agent.json",
+      "tokenPolicy": "never expose token; use launcher CLI helpers only"
+    },
+    "portableRuntime": {
+      "available": true,
+      "preferRelativePaths": true
+    },
+    "officeSkills": {
+      "available": true,
+      "skills": [
+        "openclaw-meeting-notes",
+        "openclaw-weekly-report",
+        "openclaw-pdf-ocr",
+        "openclaw-excel-analysis",
+        "openclaw-presentation-builder",
+        "openclaw-file-organizer"
+      ],
+      "skillsPath": "data/.openclaw/workspace/skills"
+    }
+  },
+  "phone": {
+    "configured": false,
+    "connected": false,
+    "endpoint": "launcher-cli-wrapper",
+    "baseUrl": null,
+    "tokenAvailable": false,
+    "configPath": "data/.openclaw/launcher/phone-agent.json",
+    "lastStatus": null
+  },
+  "policies": {
+    "autoSendGeneratedImagesToPhone": "enabled_when_phone_configured",
+    "autoUploadPersonalFiles": false,
+    "screenRecordingRequiresExplicitIntent": true,
+    "neverExposeSecrets": true
+  }
+}

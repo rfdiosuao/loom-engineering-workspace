@@ -1,0 +1,10 @@
+{
+  "id": "openclaw-excel-analysis",
+  "name": "openclaw-excel-analysis",
+  "displayName": "Excel Analysis",
+  "version": "1.0.0",
+  "description": "Analyze spreadsheets, CSV files, KPI tables, expense sheets, sales reports, budgets, and operations data. Use for Excel cleanup, formulas, pivot-style summaries, charts, anomalies, and management reports.",
+  "category": "Office",
+  "runtime": "openclaw-workspace",
+  "icon": "XL"
+}

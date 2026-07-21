@@ -1,0 +1,307 @@
+name: Platform Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to create or update"
+        required: true
+        type: string
+      portable_seed_tag:
+        description: "Optional previous release tag used as portable seed"
+        required: false
+        type: string
+      phone_agent_apk_url:
+        description: "Optional AgentPhone_latest.apk download URL"
+        required: false
+        type: string
+      phone_agent_version:
+        description: "Optional phone agent versionName, for example 6.60"
+        required: false
+        type: string
+      phone_agent_version_code:
+        description: "Optional phone agent versionCode, for example 930"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  windows:
+    name: Windows release build
+    runs-on: windows-latest
+    timeout-minutes: 70
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/loom-platform/openclaw_new_launcher/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Setup Rust
+        run: |
+          rustup default stable
+          rustup show
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/loom-platform/openclaw_new_launcher/src-tauri/target
+          key: ${{ runner.os }}-cargo-platform-release-${{ hashFiles('apps/loom-platform/openclaw_new_launcher/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-platform-release-
+            ${{ runner.os }}-cargo-
+
+      - name: Install frontend dependencies
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm ci
+
+      - name: Verify source text
+        working-directory: apps/loom-platform
+        run: powershell -ExecutionPolicy Bypass -File scripts\verify-source-text.ps1
+
+      - name: Verify source secrets
+        working-directory: apps/loom-platform
+        run: powershell -ExecutionPolicy Bypass -File scripts\verify-release-secrets.ps1 -Source
+
+      - name: Verify version consistency
+        working-directory: apps/loom-platform
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: powershell -ExecutionPolicy Bypass -File scripts\verify-version-consistency.ps1 -TagName $env:RELEASE_TAG
+
+      - name: Build frontend
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm run build
+
+      - name: Check Rust
+        working-directory: apps/loom-platform/openclaw_new_launcher/src-tauri
+        run: cargo check
+
+      - name: Import Windows code-signing certificate
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_PASSWORD)) {
+            throw "Stable Windows releases require WINDOWS_PFX_BASE64 and WINDOWS_PFX_PASSWORD."
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP "loom-code-signing.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+          $password = ConvertTo-SecureString $env:WINDOWS_PFX_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item -LiteralPath $pfxPath -Force
+          if (-not $certificate -or -not $certificate.HasPrivateKey) {
+            throw "Imported Windows code-signing certificate has no private key."
+          }
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build signed protected NSIS
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: |
+          # Canonical bundle root: apps/loom-platform/openclaw_new_launcher/src-tauri/target/release/bundle
+          npm run package:protected:nsis
+          if ($LASTEXITCODE -ne 0) {
+            throw "Protected NSIS build failed with exit code $LASTEXITCODE"
+          }
+
+          $version = node -p "require('./package.json').version"
+          $bundleDir = Join-Path $PWD "src-tauri\target\release\bundle\nsis"
+          $builtInstaller = Get-ChildItem -LiteralPath $bundleDir -File -Filter "*$version*_x64-setup.exe" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $builtInstaller) {
+            throw "Protected NSIS output is missing under $bundleDir"
+          }
+
+          $certificate = Get-Item -LiteralPath "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT"
+          $signature = Set-AuthenticodeSignature `
+            -FilePath $builtInstaller.FullName `
+            -Certificate $certificate `
+            -HashAlgorithm SHA256 `
+            -TimestampServer "http://timestamp.digicert.com"
+          if ($signature.Status -ne "Valid") {
+            throw "Protected NSIS signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+          }
+
+          $outputRoot = Join-Path (Split-Path -Parent $PWD) "ci_release_nsis"
+          New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
+          $outputPath = Join-Path $outputRoot "LOOM-$version-setup.exe"
+          Copy-Item -LiteralPath $builtInstaller.FullName -Destination $outputPath -Force
+          $hash = Get-FileHash -LiteralPath $outputPath -Algorithm SHA256
+          "$($hash.Hash)  $(Split-Path -Leaf $outputPath)" |
+            Set-Content -LiteralPath "$outputPath.sha256.txt" -Encoding ASCII
+
+      - name: Smoke-test the exact complete installer
+        working-directory: apps/loom-platform
+        run: |
+          $version = node -p "require('./openclaw_new_launcher/package.json').version"
+          $installer = Join-Path $PWD "ci_release_nsis\LOOM-$version-setup.exe"
+          $smokeRoot = Join-Path $PWD "artifacts\ci-nsis-smoke"
+          $chineseUser = ([string][char]0x4E2D) + ([char]0x6587) + ([char]0x7528) + ([char]0x6237)
+          $luming = ([string][char]0x9E93) + ([char]0x9E23)
+          $paths = @(
+            (Join-Path $smokeRoot "ascii\LOOM"),
+            (Join-Path $smokeRoot "$chineseUser\$luming")
+          )
+          & .\scripts\smoke-test-tauri-nsis.ps1 `
+            -Installer $installer `
+            -SmokeRoot $smokeRoot `
+            -InstallPaths $paths
+
+      - name: Prepare portable seed
+        working-directory: apps/loom-platform
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PORTABLE_SEED_TAG: ${{ inputs.portable_seed_tag || '' }}
+        run: |
+          $seedRoot = Join-Path $PWD "ci_seed"
+          $downloadDir = Join-Path $seedRoot "download"
+          $extractDir = Join-Path $seedRoot "extract"
+          New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+
+          $downloadArgs = @("release", "download", "--repo", $env:GITHUB_REPOSITORY, "--pattern", "*Portable-*.zip", "--dir", $downloadDir)
+          if (-not [string]::IsNullOrWhiteSpace($env:PORTABLE_SEED_TAG)) {
+            $downloadArgs = @("release", "download", $env:PORTABLE_SEED_TAG, "--repo", $env:GITHUB_REPOSITORY, "--pattern", "*Portable-*.zip", "--dir", $downloadDir)
+          }
+
+          gh @downloadArgs
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Unable to download previous portable seed. The portable build will bootstrap runtime dependencies instead."
+            "PORTABLE_SEED_DIR=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            return
+          }
+
+          $seedZip = Get-ChildItem -LiteralPath $downloadDir -File -Filter "*Portable-*.zip" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $seedZip) {
+            Write-Warning "No portable seed was downloaded. The portable build will bootstrap runtime dependencies instead."
+            "PORTABLE_SEED_DIR=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            return
+          }
+
+          Expand-Archive -LiteralPath $seedZip.FullName -DestinationPath $extractDir -Force
+
+          $seedCandidates = @()
+          $seedCandidates += Get-ChildItem -LiteralPath $extractDir -Directory -ErrorAction SilentlyContinue
+          $seedCandidates += Get-Item -LiteralPath $extractDir
+          $seedDir = $seedCandidates |
+            Where-Object {
+              (Test-Path -LiteralPath (Join-Path $_.FullName "LOOM.exe")) -or
+              (Test-Path -LiteralPath (Join-Path $_.FullName "LOOMFiles")) -or
+              (Test-Path -LiteralPath (Join-Path $_.FullName "OpenClaw.exe")) -or
+              (Test-Path -LiteralPath (Join-Path $_.FullName "OpenClawFiles")) -or
+              (Test-Path -LiteralPath (Join-Path $_.FullName "node\node.exe"))
+            } |
+            Select-Object -First 1
+
+          if (-not $seedDir) {
+            Write-Warning "Downloaded seed zip does not look like a LOOM portable package: $($seedZip.FullName). The portable build will bootstrap runtime dependencies instead."
+            "PORTABLE_SEED_DIR=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            return
+          }
+
+          "PORTABLE_SEED_DIR=$($seedDir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build portable package
+        working-directory: apps/loom-platform
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+          PHONE_AGENT_VERSION: ${{ inputs.phone_agent_version || vars.PHONE_AGENT_VERSION || '' }}
+          PHONE_AGENT_VERSION_CODE: ${{ inputs.phone_agent_version_code || vars.PHONE_AGENT_VERSION_CODE || '0' }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $version = $tag -replace '^v', ''
+          $date = Get-Date -Format "yyyy.MM.dd"
+          $packageName = "LOOM-Portable-$tag-$date"
+
+          $args = @(
+            "-ExecutionPolicy", "Bypass",
+            "-File", "scripts\build-portable.ps1",
+            "-Version", $version,
+            "-PackageName", $packageName,
+            "-SeedPortableDir", $env:PORTABLE_SEED_DIR,
+            "-BrandProfile", "lumi",
+            "-SkipBuild"
+          )
+          if (-not [string]::IsNullOrWhiteSpace($env:PHONE_AGENT_VERSION)) {
+            $args += @("-PhoneAgentVerifiedVersion", $env:PHONE_AGENT_VERSION)
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:PHONE_AGENT_VERSION_CODE) -and $env:PHONE_AGENT_VERSION_CODE -ne "0") {
+            $args += @("-PhoneAgentVerifiedVersionCode", $env:PHONE_AGENT_VERSION_CODE)
+          }
+
+          & powershell @args
+
+      - name: Collect release assets
+        working-directory: apps/loom-platform
+        run: |
+          $artifactDir = Join-Path $PWD "ci_artifacts"
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+
+          $version = node -p "require('./openclaw_new_launcher/package.json').version"
+          $setupPath = Join-Path $PWD "ci_release_nsis\LOOM-$version-setup.exe"
+          $setupHashPath = "$setupPath.sha256.txt"
+          if (-not (Test-Path -LiteralPath $setupPath) -or -not (Test-Path -LiteralPath $setupHashPath)) {
+            throw "Complete NSIS output is missing: $setupPath"
+          }
+          Copy-Item -LiteralPath $setupPath -Destination (Join-Path $artifactDir "LOOM-$version-setup.exe")
+          Copy-Item -LiteralPath $setupHashPath -Destination (Join-Path $artifactDir "LOOM-$version-setup.exe.sha256.txt")
+
+          Get-ChildItem -LiteralPath (Join-Path $PWD "release") -File -Filter "LOOM-Portable-*.zip*" |
+            ForEach-Object {
+              Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $artifactDir $_.Name) -Force
+            }
+
+          foreach ($file in (Get-ChildItem -LiteralPath $artifactDir -File | Where-Object { $_.Name -notlike "*.sha256.txt" })) {
+            $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName
+            "$($hash.Hash)  $($file.Name)" | Set-Content -LiteralPath "$($file.FullName).sha256.txt" -Encoding ASCII
+          }
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: platform-release-assets
+          path: apps/loom-platform/ci_artifacts/*
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          name: LOOM ${{ inputs.tag_name || github.ref_name }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          files: |
+            apps/loom-platform/ci_artifacts/*.exe
+            apps/loom-platform/ci_artifacts/*.zip
+            apps/loom-platform/ci_artifacts/*.sha256.txt

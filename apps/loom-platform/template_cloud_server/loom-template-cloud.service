@@ -1,0 +1,18 @@
+[Unit]
+Description=LOOM Template Cloud Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/loom-template-cloud
+EnvironmentFile=-/opt/loom-template-cloud/template-cloud.env
+Environment=TEMPLATE_CLOUD_HOST=127.0.0.1
+Environment=TEMPLATE_CLOUD_PORT=18793
+Environment=TEMPLATE_CLOUD_DB=/opt/loom-template-cloud/templates.json
+ExecStart=/usr/bin/python3 /opt/loom-template-cloud/server.py serve
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
