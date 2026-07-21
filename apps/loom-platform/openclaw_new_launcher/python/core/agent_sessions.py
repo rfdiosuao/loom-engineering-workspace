@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -69,10 +70,38 @@ def _atomic_write_json(path: str, value: Any) -> None:
             json.dump(value, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace_file_with_retry(temporary, path)
     finally:
         if os.path.exists(temporary):
-            os.remove(temporary)
+            _remove_file_with_retry(temporary)
+
+
+def _is_retryable_windows_file_error(error: OSError) -> bool:
+    return os.name == "nt" and getattr(error, "winerror", None) in {5, 32, 33}
+
+
+def _replace_file_with_retry(source: str, destination: str) -> None:
+    for attempt in range(8):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as error:
+            if not _is_retryable_windows_file_error(error) or attempt == 7:
+                raise
+            time.sleep(0.025 * (attempt + 1))
+
+
+def _remove_file_with_retry(path: str) -> None:
+    for attempt in range(8):
+        try:
+            os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if not _is_retryable_windows_file_error(error) or attempt == 7:
+                raise
+            time.sleep(0.025 * (attempt + 1))
 
 
 def _read_json(path: str) -> Optional[Any]:

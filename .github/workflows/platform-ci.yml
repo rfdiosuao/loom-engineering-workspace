@@ -111,7 +111,20 @@ jobs:
 
       - name: Run Python tests
         working-directory: apps/loom-platform/openclaw_new_launcher
-        run: python -m pytest python/tests -q
+        run: python -B -m pytest python/tests -q
+
+      - name: Remove Python bytecode before Rust resource scan
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: |
+          Get-ChildItem -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+
+      - name: Build bundled Python runtime
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm run build:python-runtime
+
+      - name: Build bundled Node runtime
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm run build:node-runtime
 
       - name: Check Rust
         working-directory: apps/loom-platform/openclaw_new_launcher/src-tauri

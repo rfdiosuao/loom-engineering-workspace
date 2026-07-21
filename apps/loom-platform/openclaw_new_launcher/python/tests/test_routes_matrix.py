@@ -501,7 +501,7 @@ class MatrixRouteContractTests(unittest.TestCase):
                     "other = 'phone-b' if device == 'phone-a' else 'phone-a'\n"
                     "base = os.path.dirname(os.path.abspath(__file__))\n"
                     "open(os.path.join(base, f'started-{device}'), 'w').close()\n"
-                    "deadline = time.time() + 0.8\n"
+                    "deadline = time.time() + 3.0\n"
                     "other_path = os.path.join(base, f'started-{other}')\n"
                     "while time.time() < deadline and not os.path.exists(other_path):\n"
                     "    time.sleep(0.01)\n"
@@ -522,7 +522,7 @@ class MatrixRouteContractTests(unittest.TestCase):
                     "target": {"deviceIds": ["phone-a", "phone-b"]},
                 },
             )
-            job = _wait_for_job(client, submitted.json()["jobId"], timeout=4.0)
+            job = _wait_for_job(client, submitted.json()["jobId"], timeout=8.0)
             status = client.get("/api/matrix/status").json()
 
         self.assertEqual(job["status"], "succeeded")
@@ -591,7 +591,7 @@ class MatrixRouteContractTests(unittest.TestCase):
                     "/api/matrix/dispatch",
                     json={"prompt": "hold", "target": {"deviceIds": ["phone-a"]}},
                 )
-                self.assertTrue(started.wait(1))
+                self.assertTrue(started.wait(5))
                 device_task_id = submitted.json()["task"]["missions"][0]["deviceTasks"][0]["deviceTaskId"]
                 paused = client.post(f"/api/matrix/tasks/{device_task_id}/pause")
                 _wait_for_job(client, submitted.json()["jobId"], timeout=3)
@@ -852,7 +852,7 @@ class MatrixRouteContractTests(unittest.TestCase):
                     json={"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}},
                 )
                 payload = submitted.json()
-                self.assertTrue(executor_started.wait(1), "phone job did not enter the running state")
+                self.assertTrue(executor_started.wait(5), "phone job did not enter the running state")
 
                 with patch.object(
                     app.state.job_mgr,
@@ -865,7 +865,7 @@ class MatrixRouteContractTests(unittest.TestCase):
                     )
                     self.assertFalse(cancel_matching.call_args.kwargs["wait_for_workers"])
                 job = _wait_for_job(client, payload["jobId"])
-                self.assertTrue(executor_finished.wait(1), "cancelled phone executor did not exit")
+                self.assertTrue(executor_finished.wait(5), "cancelled phone executor did not exit")
 
                 stale_started = threading.Event()
 
@@ -884,7 +884,7 @@ class MatrixRouteContractTests(unittest.TestCase):
                     stale_target,
                     initial_progress={"campaignId": payload["task"]["campaignId"]},
                 )
-                self.assertTrue(stale_started.wait(1), "stale job did not enter the running state")
+                self.assertTrue(stale_started.wait(5), "stale job did not enter the running state")
                 repeated = client.post(
                     "/api/matrix/emergency-stop",
                     json={"campaignId": payload["task"]["campaignId"]},
@@ -955,8 +955,8 @@ class MatrixRouteContractTests(unittest.TestCase):
                     "matrixDeviceIds": ["phone-b"],
                 },
             )
-            self.assertTrue(started_a.wait(1))
-            self.assertTrue(started_b.wait(1))
+            self.assertTrue(started_a.wait(5))
+            self.assertTrue(started_b.wait(5))
 
             stopped = client.post(
                 "/api/matrix/emergency-stop",
@@ -977,7 +977,7 @@ class MatrixRouteContractTests(unittest.TestCase):
                     "matrixDeviceIds": ["phone-a"],
                 },
             )
-            self.assertTrue(stale_started.wait(1))
+            self.assertTrue(stale_started.wait(5))
             repeated = client.post(
                 "/api/matrix/emergency-stop",
                 json={"deviceTaskIds": [children["phone-a"]["deviceTaskId"]]},

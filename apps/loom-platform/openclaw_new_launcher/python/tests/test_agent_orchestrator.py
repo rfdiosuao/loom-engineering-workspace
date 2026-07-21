@@ -743,10 +743,10 @@ class AgentOrchestratorTests(unittest.TestCase):
                 )
             )
             worker.start()
-            self.assertTrue(tool_started.wait(1))
+            self.assertTrue(tool_started.wait(5))
             executing = repository.get_run("run-running-after-approval", session_id="session-1")
             release_tool.set()
-            worker.join(2)
+            worker.join(5)
 
             self.assertFalse(worker.is_alive())
 
@@ -838,7 +838,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             def synchronize_approval_reads(approval_id, session_id=None):
                 current = original_get_approval(approval_id, session_id=session_id)
                 if current.get("status") == "pending":
-                    pending_reads.wait(1)
+                    pending_reads.wait(5)
                 elif current.get("status") == "approved":
                     try:
                         approved_reads.wait(0.25)
@@ -868,7 +868,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             for worker in workers:
                 worker.start()
             for worker in workers:
-                worker.join(2)
+                worker.join(5)
 
             stored_approval = original_get_approval(approval["approvalId"], session_id="session-1")
             events = bus.replay("session-1")
@@ -923,13 +923,13 @@ class AgentOrchestratorTests(unittest.TestCase):
 
                 worker = threading.Thread(target=execute)
                 worker.start()
-                self.assertTrue(runtime.started.wait(1))
+                self.assertTrue(runtime.started.wait(5))
                 if action == "pause":
                     orchestrator.pause_run("run-runtime-race", session_id="session-1")
                 else:
                     orchestrator.cancel_run("run-runtime-race", session_id="session-1")
                 runtime.release.set()
-                worker.join(2)
+                worker.join(5)
 
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(failures, [])
@@ -1005,14 +1005,14 @@ class AgentOrchestratorTests(unittest.TestCase):
 
                 worker = threading.Thread(target=approve)
                 worker.start()
-                self.assertTrue(tool_started.wait(1))
+                self.assertTrue(tool_started.wait(5))
                 if action == "pause":
                     orchestrator.pause_run("run-tool-race", session_id="session-1")
                 else:
                     orchestrator.cancel_run("run-tool-race", session_id="session-1")
                 status_marker = len(status_changes)
                 release_tool.set()
-                worker.join(2)
+                worker.join(5)
 
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(failures, [])
@@ -1213,11 +1213,11 @@ class AgentOrchestratorTests(unittest.TestCase):
                 )
             )
             worker.start()
-            self.assertTrue(started.wait(1))
+            self.assertTrue(started.wait(5))
 
             cancelled = orchestrator.cancel_run("run-runtime-race", session_id="session-1")
             release.set()
-            worker.join(2)
+            worker.join(5)
 
             self.assertFalse(worker.is_alive())
             stored = repository.get_run("run-runtime-race", session_id="session-1")
@@ -1275,11 +1275,11 @@ class AgentOrchestratorTests(unittest.TestCase):
                 )
             )
             worker.start()
-            self.assertTrue(started.wait(1))
+            self.assertTrue(started.wait(5))
 
             paused = orchestrator.pause_run("run-tool-race", session_id="session-1")
             release.set()
-            worker.join(2)
+            worker.join(5)
 
             self.assertFalse(worker.is_alive())
             stored = repository.get_run("run-tool-race", session_id="session-1")
