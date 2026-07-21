@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/floatRoot"
+    android:layout_width="76pt"
+    android:layout_height="76pt">
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardLogPanel"
+        android:layout_width="236pt"
+        android:layout_height="112pt"
+        android:visibility="gone"
+        app:cardBackgroundColor="@color/colorLumiPanel"
+        app:cardCornerRadius="10pt"
+        app:cardElevation="5pt"
+        app:strokeColor="@color/colorLumiOrbStroke"
+        app:strokeWidth="1pt">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:padding="12pt">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:layout_width="18pt"
+                    android:layout_height="18pt"
+                    android:contentDescription="@string/floating_ai_label"
+                    android:src="@drawable/ic_lumi_agent_mark" />
+
+                <TextView
+                    android:id="@+id/tvFloatLogTitle"
+                    android:layout_width="0pt"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="7pt"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:text="@string/floating_log_title"
+                    android:textColor="@color/colorTextFixedWhitePrimary"
+                    android:textSize="11pt"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvFloatLogBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:minWidth="42pt"
+                    android:paddingHorizontal="7pt"
+                    android:paddingVertical="3pt"
+                    android:text="IDLE"
+                    android:textColor="@color/colorLumiCyan"
+                    android:textSize="8pt"
+                    android:textStyle="bold" />
+
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvFloatLogBody"
+                android:layout_width="match_parent"
+                android:layout_height="0pt"
+                android:layout_marginTop="9pt"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:lineSpacingExtra="1pt"
+                android:maxLines="3"
+                android:text="@string/floating_log_idle"
+                android:textColor="@color/colorTextFixedWhiteSecondary"
+                android:textSize="10pt" />
+
+            <TextView
+                android:id="@+id/tvFloatLogHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:text="@string/floating_log_hint"
+                android:textColor="@color/colorLumiCyan"
+                android:textSize="8pt" />
+
+        </LinearLayout>
+
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardTaskNotify"
+        android:layout_width="wrap_content"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        app:cardBackgroundColor="@color/colorLumiOrbBase"
+        app:cardCornerRadius="38pt"
+        app:cardElevation="4pt"
+        app:strokeColor="@color/colorLumiOrbStroke"
+        app:strokeWidth="1pt">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16pt"
+            android:paddingEnd="18pt">
+
+            <ImageView
+                android:id="@+id/ivNotifyChannelLogo"
+                android:layout_width="20pt"
+                android:layout_height="20pt"
+                android:contentDescription="@string/cd_channel_logo"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_lumi_agent_mark" />
+
+            <TextView
+                android:id="@+id/tvTaskNotify"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8pt"
+                android:ellipsize="end"
+                android:maxLines="2"
+                android:maxWidth="200pt"
+                android:text=""
+                android:textColor="@color/colorBrandOnPrimary"
+                android:textSize="12pt" />
+
+        </LinearLayout>
+
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardIdle"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:cardBackgroundColor="@color/colorLumiOrbBase"
+        app:cardCornerRadius="38pt"
+        app:cardElevation="4pt"
+        app:strokeColor="@color/colorLumiOrbStroke"
+        app:strokeWidth="2pt">
+
+        <ImageView
+            android:id="@+id/tvFloatTextIdle"
+            android:layout_width="42pt"
+            android:layout_height="42pt"
+            android:layout_gravity="center"
+            android:contentDescription="@string/floating_ai_label"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_lumi_agent_mark" />
+
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardRunning"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        app:cardBackgroundColor="@color/colorLumiOrbBase"
+        app:cardCornerRadius="38pt"
+        app:cardElevation="6pt"
+        app:strokeColor="@color/colorLumiOrbStroke"
+        app:strokeWidth="2pt">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <ProgressBar
+                android:id="@+id/progressRunning"
+                style="@style/Widget.AppCompat.ProgressBar"
+                android:layout_width="76pt"
+                android:layout_height="76pt"
+                android:layout_gravity="center"
+                android:indeterminate="true"
+                android:indeterminateTint="@color/colorLumiCyan" />
+
+            <View
+                android:id="@+id/cursorOuter"
+                android:layout_width="66pt"
+                android:layout_height="66pt"
+                android:layout_gravity="center"
+                android:background="@drawable/bg_ai_cursor_outer"
+                android:visibility="gone" />
+
+            <View
+                android:id="@+id/cursorHorizontal"
+                android:layout_width="54pt"
+                android:layout_height="3pt"
+                android:layout_gravity="center"
+                android:background="@drawable/bg_ai_cursor_cross_line"
+                android:visibility="gone" />
+
+            <View
+                android:id="@+id/cursorVertical"
+                android:layout_width="3pt"
+                android:layout_height="54pt"
+                android:layout_gravity="center"
+                android:background="@drawable/bg_ai_cursor_cross_line"
+                android:visibility="gone" />
+
+            <View
+                android:id="@+id/cursorCore"
+                android:layout_width="13pt"
+                android:layout_height="13pt"
+                android:layout_gravity="center"
+                android:background="@drawable/bg_ai_cursor_core"
+                android:visibility="gone" />
+
+            <com.google.android.material.imageview.ShapeableImageView
+                android:id="@+id/ivChannelLogo"
+                android:layout_width="24pt"
+                android:layout_height="24pt"
+                android:layout_gravity="top|center_horizontal"
+                android:layout_marginTop="10pt"
+                android:contentDescription="@string/cd_channel_logo"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_lumi_agent_mark"
+                app:shapeAppearanceOverlay="@style/ShapeAppearance.Launcher.Circle" />
+
+            <TextView
+                android:id="@+id/tvRound"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal|bottom"
+                android:layout_marginBottom="8pt"
+                android:text="1"
+                android:textColor="@color/colorTextFixedWhitePrimary"
+                android:textSize="10pt"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvActionHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|center_horizontal"
+                android:layout_marginBottom="6pt"
+                android:background="@drawable/bg_ai_cursor_label"
+                android:gravity="center"
+                android:minWidth="40pt"
+                android:paddingHorizontal="7pt"
+                android:paddingVertical="3pt"
+                android:text="AI POINTER"
+                android:textColor="@color/colorLumiCyan"
+                android:textSize="7pt"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+        </FrameLayout>
+
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardSuccess"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        app:cardBackgroundColor="@color/colorSuccessPrimary"
+        app:cardCornerRadius="38pt"
+        app:cardElevation="4pt">
+
+        <ImageView
+            android:layout_width="32pt"
+            android:layout_height="32pt"
+            android:layout_gravity="center"
+            android:contentDescription="@string/cd_task_success"
+            android:src="@drawable/ic_check"
+            app:tint="@color/colorBrandOnPrimary" />
+
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardError"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        app:cardBackgroundColor="@color/colorErrorPrimary"
+        app:cardCornerRadius="38pt"
+        app:cardElevation="4pt">
+
+        <ImageView
+            android:layout_width="32pt"
+            android:layout_height="32pt"
+            android:layout_gravity="center"
+            android:contentDescription="@string/cd_task_error"
+            android:src="@drawable/ic_close"
+            app:tint="@color/colorErrorOnPrimary" />
+
+    </com.google.android.material.card.MaterialCardView>
+
+</FrameLayout>
