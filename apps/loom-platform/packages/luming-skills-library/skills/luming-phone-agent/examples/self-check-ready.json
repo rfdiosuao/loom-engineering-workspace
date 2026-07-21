@@ -1,0 +1,12 @@
+{
+  "schema": "loom.phone-agent.self-check.v1",
+  "status": "ready",
+  "healthy": true,
+  "requiresHumanReview": false,
+  "checks": [
+    {"name": "command_catalog", "status": "ready"},
+    {"name": "recipe_storage", "status": "ready"}
+  ],
+  "repairs": ["created local transaction directory"],
+  "resumeFrom": null
+}

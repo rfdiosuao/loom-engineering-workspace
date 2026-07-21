@@ -1,0 +1,82 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Luming AI Matrix Acquisition Workbench",
+  "mainBinaryName": "LOOM",
+  "version": "2.2.0",
+  "identifier": "top.heang.loom",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420/?licenseState=authorized",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build:platform-tools && npm run build:node-runtime && npm run build:python-runtime && npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "麓鸣AI矩阵获客工作台",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "zoomHotkeysEnabled": false,
+        "decorations": false,
+        "center": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https: asset: http://asset.localhost; media-src 'self' data: blob: asset: http://asset.localhost http://127.0.0.1:* http://localhost:*; connect-src 'self' http: https: http://127.0.0.1:* http://localhost:*",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": [
+      "../../release-manifest.json",
+      "../../release-public-key.txt",
+      "../.mcp.json",
+      "../python/**/*",
+      "../python-runtime/**/*",
+      "../node-runtime/**/*",
+      "../public/skills/**/*",
+      "../data/themes/**/*",
+      "../scripts/**/*",
+      "../openclaw-workspace/**/*",
+      "../redist/**/*"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "installer/nsis-header.bmp",
+        "sidebarImage": "installer/nsis-sidebar.bmp",
+        "uninstallerHeaderImage": "installer/nsis-header.bmp",
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese"
+        ],
+        "customLanguageFiles": {
+          "SimpChinese": "installer/zh-cn.nsh"
+        },
+        "displayLanguageSelector": false,
+        "installerHooks": "installer/upgrade-hooks.nsh"
+      }
+    }
+  }
+}

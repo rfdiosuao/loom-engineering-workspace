@@ -1,0 +1,76 @@
+:root {
+  --color-app-bg: #F4EFE5;
+  --color-sidebar-bg: #071B24;
+  --color-surface: #FFFDF7;
+  --color-surface-alt: #EFE6D7;
+  --color-surface-deep: #092633;
+  --color-surface-deeper: #05141A;
+  --color-hover: #E8DDCA;
+  --color-input: #FFF9ED;
+  --color-border: rgba(8, 35, 48, 0.13);
+  --color-border-strong: rgba(11, 74, 62, 0.42);
+  --color-text: #1B211E;
+  --color-text-muted: #6B6357;
+  --color-text-subtle: #9D907D;
+  --color-accent: #0B4A3E;
+  --color-accent-hover: #12604F;
+  --color-accent-soft: rgba(11, 74, 62, 0.14);
+  --color-accent-ink: #F5FFF9;
+  --color-success: #0B8C6E;
+  --color-warning: #4F705F;
+  --color-danger: #C84B5F;
+  --color-danger-hover: #DE5C70;
+  --color-terminal-bg: #061017;
+  --color-terminal-header: #0B1D27;
+  --color-terminal-text: #37E6D0;
+
+  --font-display: 'HarmonyOS Sans SC', 'MiSans', 'Alibaba PuHuiTi', 'Source Han Sans SC', 'Microsoft YaHei UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', Consolas, monospace;
+  --brand-name: '麓鸣AI矩阵获客工作台';
+  --brand-subtitle: '手机矩阵获客与自动化总控';
+}
+
+:root[data-theme-mode='light'] {
+  --color-app-bg: #F4EFE5;
+  --color-sidebar-bg: #071B24;
+  --color-surface: #FFFDF7;
+  --color-surface-alt: #EFE6D7;
+  --color-surface-deep: #092633;
+  --color-surface-deeper: #05141A;
+  --color-hover: #E8DDCA;
+  --color-input: #FFF9ED;
+  --color-border: rgba(8, 35, 48, 0.13);
+  --color-border-strong: rgba(11, 74, 62, 0.42);
+  --color-text: #1B211E;
+  --color-text-muted: #6B6357;
+  --color-text-subtle: #9D907D;
+  --color-accent: #0B4A3E;
+  --color-accent-hover: #12604F;
+  --color-accent-soft: rgba(11, 74, 62, 0.14);
+  --color-accent-ink: #F5FFF9;
+  --color-success: #0B8C6E;
+  --color-warning: #4F705F;
+  --color-danger: #C84B5F;
+  --color-danger-hover: #DE5C70;
+  --color-terminal-bg: #061017;
+  --color-terminal-header: #0B1D27;
+  --color-terminal-text: #37E6D0;
+}
+
+body {
+  background: var(--color-app-bg);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 55% 44% at 88% 0%, rgba(11, 74, 62, 0.04), transparent),
+    radial-gradient(ellipse 36% 28% at 8% 96%, rgba(55, 230, 208, 0.022), transparent),
+    linear-gradient(rgba(8, 35, 48, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(8, 35, 48, 0.014) 1px, transparent 1px);
+  background-size: auto, auto, 52px 52px, 52px 52px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.6), transparent 75%);
+}

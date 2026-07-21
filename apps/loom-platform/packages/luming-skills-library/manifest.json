@@ -1,0 +1,25 @@
+{
+  "name": "luming-skills-library",
+  "displayName": "麓鸣 Skills Library",
+  "version": "2026.07.21",
+  "schema": "loom.skills.library.v2",
+  "updatedAt": "2026-07-21",
+  "skillsRoot": "skills",
+  "replaces": [
+    "loom-adb-forward-proxy-bypass",
+    "loom-command-brain",
+    "luming-acquisition-agent",
+    "luming-boss-resume-screening",
+    "luming-matrix-supervisor-loop",
+    "luming-phone-scenario-builder",
+    "luming-scenario-skill-writer"
+  ],
+  "skills": [
+    {
+      "name": "luming-phone-agent",
+      "path": "skills/luming-phone-agent",
+      "category": "phone-agent-orchestration",
+      "summary": "Self-check, discover phones, build or reuse verified tasks, supervise execution, and remember successful recipes."
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+﻿{
+  "name": "示例商家主题",
+  "colors": {
+    "app_bg": "#F0F4F8",
+    "sidebar_bg": "#FFFFFF",
+    "surface": "#FFFFFF",
+    "surface_alt": "#F7FAFC",
+    "surface_deep": "#1A202C",
+    "surface_deeper": "#171923",
+    "hover": "#EDF2F7",
+    "input": "#F7FAFC",
+    "border": "#E2E8F0",
+    "border_strong": "#CBD5E0",
+    "text": "#1A202C",
+    "text_muted": "#718096",
+    "text_subtle": "#A0AEC0",
+    "accent": "#E53E3E",
+    "accent_hover": "#C53030",
+    "accent_soft": "#FFF5F5",
+    "accent_ink": "#9B2C2C",
+    "success": "#38A169",
+    "warning": "#D69E2E",
+    "danger": "#E53E3E",
+    "danger_hover": "#C53030",
+    "terminal_bg": "#1A202C",
+    "terminal_header": "#2D3748",
+    "terminal_text": "#68D391"
+  },
+  "fonts": {
+    "display": ["Microsoft YaHei UI", 21, "bold"],
+    "title": ["Microsoft YaHei UI", 14, "bold"],
+    "section": ["Microsoft YaHei UI", 10, "bold"],
+    "body": ["Microsoft YaHei UI", 10, "normal"],
+    "small": ["Microsoft YaHei UI", 9, "normal"],
+    "mono": ["Consolas", 10, "normal"]
+  },
+  "brand": {
+    "name": "示例商家",
+    "subtitle": "定制AI服务",
+    "app_user_model_id": "ExampleMerchant.Launcher",
+    "terminal_header": "Custom Console"
+  },
+  "navItems": [
+    { "key": "dashboard", "label": "启动器", "desc": "总览 / 状态", "icon": "HOME", "group": "LOOM" },
+    { "key": "agents", "label": "智能体", "desc": "安装运行时", "icon": "INS", "group": "LOOM", "accent": true },
+    { "key": "capabilities", "label": "能力", "desc": "本地 AI 能力", "icon": "CAP", "group": "LOOM" },
+    { "key": "license", "label": "账号", "desc": "中转站登录", "icon": "ACC", "group": "LOOM" },
+    { "key": "models", "label": "模型", "desc": "模型选择", "icon": "MDL", "group": "LOOM" },
+    { "key": "diagnostics", "label": "诊断", "desc": "环境 / 日志", "icon": "FIX", "group": "LOOM" }
+  ],
+  "window": {
+    "title": "示例商家 - 定制AI服务",
+    "width": 1200,
+    "height": 800
+  }
+}

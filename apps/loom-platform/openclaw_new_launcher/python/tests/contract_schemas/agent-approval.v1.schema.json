@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.agent.approval.v1",
+  "title": "LOOM Agent Approval v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "approvalId",
+    "sessionId",
+    "runId",
+    "toolCallId",
+    "capability",
+    "inputHash",
+    "actionSummary",
+    "targets",
+    "inputSummary",
+    "risk",
+    "riskReason",
+    "status",
+    "requestedAt",
+    "expiresAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.agent.approval.v1"
+    },
+    "approvalId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "toolCallId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 1
+    },
+    "inputHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "actionSummary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "targets": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": true
+    },
+    "inputSummary": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "risk": {
+      "enum": [
+        "outbound",
+        "critical"
+      ]
+    },
+    "riskReason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "approved",
+        "rejected",
+        "expired",
+        "consumed"
+      ]
+    },
+    "requestedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "decision": {
+      "enum": [
+        "approved",
+        "rejected"
+      ]
+    },
+    "decidedBy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decidedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "consumedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "approved"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "decision": {
+            "const": "approved"
+          }
+        },
+        "required": [
+          "decision",
+          "decidedBy",
+          "decidedAt"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "rejected"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "decision": {
+            "const": "rejected"
+          }
+        },
+        "required": [
+          "decision",
+          "decidedBy",
+          "decidedAt"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "consumed"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "decision": {
+            "const": "approved"
+          }
+        },
+        "required": [
+          "decision",
+          "decidedBy",
+          "decidedAt",
+          "consumedAt"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": false
+}

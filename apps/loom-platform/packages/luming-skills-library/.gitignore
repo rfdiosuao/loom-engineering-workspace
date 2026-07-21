@@ -1,0 +1,7 @@
+dist/
+.worktrees/
+.superpowers/
+*.zip
+__pycache__/
+.DS_Store
+Thumbs.db

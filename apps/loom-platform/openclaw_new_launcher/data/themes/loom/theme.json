@@ -1,0 +1,77 @@
+{
+  "name": "LOOM Dark",
+  "colors": {
+    "app_bg": "#05060A",
+    "sidebar_bg": "#070912",
+    "surface": "#090B12",
+    "surface_alt": "#0F1420",
+    "surface_deep": "#171D2B",
+    "surface_deeper": "#05070D",
+    "hover": "#171B28",
+    "input": "#0B1020",
+    "border": "rgba(55, 213, 163, 0.16)",
+    "border_strong": "rgba(55, 213, 163, 0.44)",
+    "text": "#F7F1E3",
+    "text_muted": "#A9B2C3",
+    "text_subtle": "#69758B",
+    "accent": "#0B4A3E",
+    "accent_hover": "#12604F",
+    "accent_soft": "rgba(11, 74, 62, 0.14)",
+    "accent_ink": "#F5FFF9",
+    "success": "#38D996",
+    "warning": "#77B79A",
+    "danger": "#FF4D6D",
+    "danger_hover": "#FF6E86",
+    "terminal_bg": "#05070D",
+    "terminal_header": "#0D1320",
+    "terminal_text": "#37E6D0"
+  },
+  "modes": {
+    "light": {
+      "app_bg": "#F6F3EC",
+      "sidebar_bg": "#FBF8F0",
+      "surface": "#FFFCF5",
+      "surface_alt": "#F4EFE4",
+      "surface_deep": "#24211B",
+      "surface_deeper": "#14110D",
+      "hover": "#EEE5D5",
+      "input": "#FFF9EF",
+      "border": "rgba(11, 74, 62, 0.16)",
+      "border_strong": "rgba(11, 74, 62, 0.42)",
+      "text": "#201B12",
+      "text_muted": "#756B5B",
+      "text_subtle": "#A59A88",
+      "accent": "#0B4A3E",
+      "accent_hover": "#12604F",
+      "accent_soft": "rgba(11, 74, 62, 0.14)",
+      "accent_ink": "#F5FFF9",
+      "success": "#0F9F6E",
+      "warning": "#4F705F",
+      "danger": "#E54764",
+      "danger_hover": "#FF5E78",
+      "terminal_bg": "#0A0C12",
+      "terminal_header": "#111827",
+      "terminal_text": "#37E6D0"
+    }
+  },
+  "fonts": {
+    "display": ["Microsoft YaHei UI", 21, "bold"],
+    "title": ["Microsoft YaHei UI", 14, "bold"],
+    "section": ["Microsoft YaHei UI", 10, "bold"],
+    "body": ["Microsoft YaHei UI", 10, "normal"],
+    "small": ["Microsoft YaHei UI", 9, "normal"],
+    "mono": ["Cascadia Mono", 10, "normal"]
+  },
+  "brand": {
+    "name": "LOOM",
+    "subtitle": "麓鸣多智能体安装器",
+    "app_user_model_id": "LOOM.Agent",
+    "terminal_header": "LOOM 运行时",
+    "logoUrl": "logo.png"
+  },
+  "window": {
+    "title": "LOOM - 麓鸣多智能体安装器",
+    "width": 1200,
+    "height": 800
+  }
+}

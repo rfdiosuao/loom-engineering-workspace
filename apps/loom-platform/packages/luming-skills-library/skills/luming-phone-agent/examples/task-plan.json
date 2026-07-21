@@ -1,0 +1,51 @@
+{
+  "schema": "loom.phone-agent.task-plan.v1",
+  "goal": "Collect visible public demand signals and automatically publish, comment, and private-message within the approved scope.",
+  "app": {"name": "Example App", "versionRange": "observed"},
+  "selectedDevices": ["phone-01"],
+  "matrix": false,
+  "requiresHumanReview": false,
+  "requiresHumanConfirmation": false,
+  "gateMode": "weak",
+  "automaticActions": ["publish", "comment", "private_message", "routine_permission", "delete", "archive", "block", "report", "follow", "unfollow", "add_contact", "non_security_profile_change"],
+  "mutationPolicy": {
+    "taskAuthorized": true,
+    "targetScope": "exact targets named by the normalized task",
+    "auditLog": true,
+    "stopOn": ["target_mismatch", "unexpected_control", "missing_evidence", "security_sensitive_prompt"]
+  },
+  "outboundMode": "auto",
+  "outboundChannels": ["publish", "comment", "private_message"],
+  "outboundPolicy": {
+    "taskAuthorized": true,
+    "accountScope": "current approved signed-in account",
+    "targetScope": "approved visible targets for this task",
+    "contentPolicy": "task-approved content and platform rules",
+    "frequencyCap": 20,
+    "duplicatePrevention": true,
+    "auditLog": true,
+    "successEvidence": ["action_id", "target_ref", "content_hash", "after_state"],
+    "stopOn": ["target_mismatch", "duplicate", "platform_risk", "rate_limit", "content_policy_failure"]
+  },
+  "expectedResult": "Evidence-backed automatic outbound results",
+  "prerequisites": ["active approved session", "visible public results"],
+  "steps": [
+    {
+      "stepId": "observe-results",
+      "entryPage": "search results",
+      "action": "read visible results",
+      "expectedPage": "search results with visible demand signals",
+      "evidence": ["before:phone-01:screen-001", "after:phone-01:screen-002"],
+      "requiresHumanConfirmation": false
+    },
+    {
+      "stepId": "execute-outbound",
+      "entryPage": "approved target",
+      "action": "publish, comment, or private-message according to outboundPolicy",
+      "expectedPage": "visible success state for the authorized action",
+      "evidence": ["before:phone-01:outbound-001", "after:phone-01:outbound-002"],
+      "requiresHumanConfirmation": false
+    }
+  ],
+  "resumeFrom": "EXECUTE_VERIFY"
+}

@@ -1,0 +1,16 @@
+# Generated phone APK artifacts.
+AgentPhone_*.apk
+releases/agent-phone/archive/*.apk
+
+# Local API credentials and generated media.
+imgapi_config.json
+video_config.json
+data/generated-images/
+data/.openclaw/launcher/*audit*.jsonl
+data/.openclaw/launcher/bridge-session.json
+data/.openclaw/launcher/loom-*.jsonl
+data/.openclaw/launcher/loom-template-optimizer.json
+
+# Large redistributable installers are downloaded during release builds.
+redist/*.exe
+!redist/README.md

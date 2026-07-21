@@ -1,0 +1,10 @@
+{
+  "id": "openclaw-presentation-builder",
+  "name": "openclaw-presentation-builder",
+  "displayName": "Presentation Builder",
+  "version": "1.0.0",
+  "description": "Create business presentations, PPT outlines, slide decks, HTML slide decks, roadshow decks, competitor analysis decks, status report decks, and executive presentation narratives.",
+  "category": "Office",
+  "runtime": "openclaw-workspace",
+  "icon": "PT"
+}

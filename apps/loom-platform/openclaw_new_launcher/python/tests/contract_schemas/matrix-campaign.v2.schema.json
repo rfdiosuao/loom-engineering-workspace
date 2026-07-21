@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.matrix.campaign.v2",
+  "title": "LOOM Matrix Campaign v2",
+  "type": "object",
+  "required": [
+    "schema",
+    "campaignId",
+    "status",
+    "concurrency",
+    "counts",
+    "deviceTasks"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.matrix.campaign.v2"
+    },
+    "campaignId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "queued",
+        "running",
+        "partial",
+        "completed",
+        "failed",
+        "paused",
+        "cancelled"
+      ]
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "counts": {
+      "$ref": "#/$defs/counts"
+    },
+    "deviceTasks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/deviceTask"
+      }
+    }
+  },
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "required": [
+        "total",
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "needsHuman"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "queued": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "running": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "needsHuman": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "deviceTask": {
+      "type": "object",
+      "required": [
+        "assignmentId",
+        "deviceTaskId",
+        "deviceId",
+        "jobId",
+        "status",
+        "attempt"
+      ],
+      "properties": {
+        "assignmentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deviceTaskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "jobId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "preflight",
+            "running",
+            "completed",
+            "failed",
+            "needs_human",
+            "paused",
+            "cancelled",
+            "retrying"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

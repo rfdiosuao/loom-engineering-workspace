@@ -1,0 +1,10 @@
+{
+  "id": "openclaw-file-organizer",
+  "name": "openclaw-file-organizer",
+  "displayName": "File Organizer",
+  "version": "1.0.0",
+  "description": "Organize desktop files, downloads, project folders, document archives, screenshots, reports, invoices, and office materials. Use for safe file classification, naming, folder plans, duplicate checks, and cleanup proposals.",
+  "category": "Office",
+  "runtime": "openclaw-workspace",
+  "icon": "FO"
+}

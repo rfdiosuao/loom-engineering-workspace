@@ -1,0 +1,21 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "build": {
+    "beforeBuildCommand": "npm run build:platform-tools && npm run build:node-runtime && npm run build:python-runtime && npm run build && npm run stage:protected && npm run verify:protected"
+  },
+  "bundle": {
+    "resources": {
+      "../../release-manifest.json": "_up_/release-manifest.json",
+      "../../release-public-key.txt": "_up_/release-public-key.txt",
+      "../.mcp.json": "_up_/.mcp.json",
+      "../build/protected-resources/python/": "_up_/python/",
+      "../python-runtime/": "_up_/python-runtime/",
+      "../node-runtime/": "_up_/node-runtime/",
+      "../public/skills/": "_up_/public/skills/",
+      "../data/themes/": "_up_/data/themes/",
+      "../build/protected-resources/scripts/": "_up_/scripts/",
+      "../openclaw-workspace/": "_up_/openclaw-workspace/",
+      "../redist/": "_up_/redist/"
+    }
+  }
+}

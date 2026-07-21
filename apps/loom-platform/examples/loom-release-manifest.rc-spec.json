@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "product": "LOOM",
+  "channel": "rc-local",
+  "version": "2.1.19-rc.20260628",
+  "publishedAt": "2026-06-28T07:50:00Z",
+  "minLauncherVersion": "2.1.19",
+  "components": [
+    {
+      "id": "codex-desktop",
+      "name": "Codex",
+      "version": "0.142.3-win32-x64",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "artifactPath": "../artifacts/loom-rc/direct-agent-components-20260628/codex-0.142.3-win32-x64.tgz",
+      "urls": [
+        "https://registry.npmjs.org/@openai/codex/-/codex-0.142.3-win32-x64.tgz"
+      ],
+      "installPath": "agents/codex-desktop",
+      "entry": "package/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+      "installCommand": [
+        "npm",
+        "install",
+        "-g",
+        "@openai/codex@latest"
+      ],
+      "commandTimeoutMs": 900000,
+      "category": "agent",
+      "officialUrl": "https://www.npmjs.com/package/@openai/codex",
+      "description": "OpenAI 命令行编程智能体。"
+    },
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "version": "2.1.195",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "artifactPath": "../artifacts/loom-rc/direct-agent-components-20260628/claude-code-2.1.195.tgz",
+      "urls": [
+        "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.195.tgz"
+      ],
+      "installPath": "agents/claude-code",
+      "entry": "package/bin/claude.exe",
+      "installCommand": [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "irm https://claude.ai/install.ps1 | iex"
+      ],
+      "commandTimeoutMs": 900000,
+      "category": "agent",
+      "officialUrl": "https://www.npmjs.com/package/@anthropic-ai/claude-code",
+      "description": "Anthropic 命令行编程智能体。"
+    },
+    {
+      "id": "opencode",
+      "name": "opencode",
+      "version": "1.17.11",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "artifactPath": "../artifacts/loom-rc/direct-agent-components-20260628/opencode-windows-x64-1.17.11.tgz",
+      "urls": [
+        "https://registry.npmjs.org/opencode-windows-x64/-/opencode-windows-x64-1.17.11.tgz"
+      ],
+      "installPath": "agents/opencode",
+      "entry": "package/bin/opencode.exe",
+      "installCommand": [
+        "npm",
+        "install",
+        "-g",
+        "opencode-ai"
+      ],
+      "commandTimeoutMs": 900000,
+      "category": "agent",
+      "officialUrl": "https://www.npmjs.com/package/opencode-windows-x64",
+      "description": "终端优先的 AI 编程工具。"
+    },
+    {
+      "id": "openclaw-companion",
+      "name": "OpenClaw",
+      "version": "2026.6.10",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "tgz",
+      "artifactPath": "../artifacts/loom-rc/release-components-20260628/openclaw-2026.6.10.tgz",
+      "urls": [
+        "https://registry.npmjs.org/openclaw/-/openclaw-2026.6.10.tgz"
+      ],
+      "installPath": "agents/openclaw-companion",
+      "entry": "package/openclaw.mjs",
+      "installCommand": [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "& ([scriptblock]::Create((iwr -useb https://openclaw.ai/install.ps1))) -NoOnboard"
+      ],
+      "commandTimeoutMs": 900000,
+      "category": "agent",
+      "officialUrl": "https://openclaw.ai",
+      "description": "OpenClaw 兼容运行时。"
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes",
+      "version": "0.12.0",
+      "platform": "windows",
+      "arch": "x64",
+      "type": "installer",
+      "artifactPath": "../artifacts/loom-rc/direct-agent-components-20260628/Hermes-Setup.exe",
+      "urls": [
+        "https://hermes-assets.nousresearch.com/Hermes-Setup.exe?build=8d71c3891970"
+      ],
+      "installPath": "agents/hermes",
+      "entry": "Hermes-Setup.exe",
+      "installerArgs": [
+        "/S"
+      ],
+      "installerTimeoutMs": 900000,
+      "installCommand": [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "iex (irm https://hermes-agent.nousresearch.com/install.ps1)"
+      ],
+      "uninstallCommand": [
+        "%LOCALAPPDATA%/hermes/hermes-agent/venv/Scripts/hermes.EXE",
+        "uninstall"
+      ],
+      "commandTimeoutMs": 900000,
+      "externalPaths": [
+        "%LOCALAPPDATA%/hermes/hermes-agent/venv/Scripts/hermes.EXE"
+      ],
+      "category": "agent",
+      "officialUrl": "https://hermes-agent.nousresearch.com/desktop",
+      "description": "Hermes 智能体运行时。已安装时会优先检测本机 Hermes 入口。"
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+name: Publish LOOM Skill Library
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: publish-skill-library
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish Skill Library
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Require release-channel token
+        env:
+          RELEASE_CHANNEL_TOKEN: ${{ secrets.LOOM_RELEASE_CHANNEL_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_CHANNEL_TOKEN)) {
+            throw "Repository secret LOOM_RELEASE_CHANNEL_TOKEN is required."
+          }
+
+      - name: Build once and generate provenance
+        run: |
+          $output = Join-Path $PWD "artifacts\skill-library-release"
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-luming-skills-library.ps1 -OutputDir $output
+
+          $manifest = Get-Content -Raw -Encoding UTF8 packages\luming-skills-library\manifest.json | ConvertFrom-Json
+          $stamp = ([string]$manifest.version) -replace '[^0-9]', ''
+          $archiveName = "luming-skills-library-$stamp.zip"
+          $archivePath = Join-Path $output $archiveName
+          $sha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+          "$sha256  $archiveName" | Set-Content -LiteralPath "$archivePath.sha256.txt" -Encoding ASCII
+
+          [ordered]@{
+            schema = "loom.skill_release.v1"
+            version = [string]$manifest.version
+            archive = $archiveName
+            sha256 = $sha256
+            sourceRepository = $env:GITHUB_REPOSITORY
+            sourceCommit = $env:GITHUB_SHA
+            manifestUpdatedAt = [string]$manifest.updatedAt
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output "$archiveName.json") -Encoding UTF8
+
+          "SKILL_ARCHIVE_NAME=$archiveName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SKILL_OUTPUT_DIR=$output" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload immutable workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SKILL_ARCHIVE_NAME }}
+          path: |
+            ${{ env.SKILL_OUTPUT_DIR }}/${{ env.SKILL_ARCHIVE_NAME }}
+            ${{ env.SKILL_OUTPUT_DIR }}/${{ env.SKILL_ARCHIVE_NAME }}.sha256.txt
+            ${{ env.SKILL_OUTPUT_DIR }}/${{ env.SKILL_ARCHIVE_NAME }}.json
+          if-no-files-found: error
+
+      - name: Checkout release channel
+        uses: actions/checkout@v5
+        with:
+          repository: rfdiosuao/loom-release-channel
+          ref: main
+          token: ${{ secrets.LOOM_RELEASE_CHANNEL_TOKEN }}
+          path: _release_channel
+
+      - name: Publish the same build to release channel
+        run: |
+          $skillsDir = Join-Path $PWD "_release_channel\skills"
+          New-Item -ItemType Directory -Force -Path $skillsDir | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:SKILL_OUTPUT_DIR $env:SKILL_ARCHIVE_NAME) -Destination $skillsDir -Force
+          Copy-Item -LiteralPath (Join-Path $env:SKILL_OUTPUT_DIR "$($env:SKILL_ARCHIVE_NAME).sha256.txt") -Destination $skillsDir -Force
+          Copy-Item -LiteralPath (Join-Path $env:SKILL_OUTPUT_DIR "$($env:SKILL_ARCHIVE_NAME).json") -Destination $skillsDir -Force
+
+          git -C _release_channel config user.name "LOOM Release Bot"
+          git -C _release_channel config user.email "actions@users.noreply.github.com"
+          git -C _release_channel add -f -- "skills/$($env:SKILL_ARCHIVE_NAME)" "skills/$($env:SKILL_ARCHIVE_NAME).sha256.txt" "skills/$($env:SKILL_ARCHIVE_NAME).json"
+          git -C _release_channel diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release channel already contains this exact Skill build."
+            exit 0
+          }
+          git -C _release_channel commit -m "Publish $($env:SKILL_ARCHIVE_NAME) from $($env:GITHUB_SHA.Substring(0, 12))"
+          git -C _release_channel push origin main

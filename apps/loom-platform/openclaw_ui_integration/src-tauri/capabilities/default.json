@@ -1,0 +1,225 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "shell:allow-open",
+    "shell:allow-kill",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "bot-plugin-install-feishu",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "feishu"]
+        },
+        {
+          "name": "bot-plugin-install-feishu-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "feishu"]
+        },
+        {
+          "name": "bot-plugin-check-feishu",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "feishu"]
+        },
+        {
+          "name": "bot-plugin-check-feishu-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "feishu"]
+        },
+        {
+          "name": "bot-plugin-login-feishu",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-feishu"]
+        },
+        {
+          "name": "bot-plugin-login-feishu-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-feishu"]
+        },
+        {
+          "name": "bot-plugin-install-weixin",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "weixin"]
+        },
+        {
+          "name": "bot-plugin-install-weixin-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "weixin"]
+        },
+        {
+          "name": "bot-plugin-check-weixin",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "weixin"]
+        },
+        {
+          "name": "bot-plugin-check-weixin-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "weixin"]
+        },
+        {
+          "name": "bot-plugin-login-weixin",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-weixin"]
+        },
+        {
+          "name": "bot-plugin-login-weixin-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-weixin"]
+        },
+        {
+          "name": "bot-plugin-install-dingtalk",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "dingtalk"]
+        },
+        {
+          "name": "bot-plugin-install-dingtalk-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "dingtalk"]
+        },
+        {
+          "name": "bot-plugin-check-dingtalk",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "dingtalk"]
+        },
+        {
+          "name": "bot-plugin-check-dingtalk-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "dingtalk"]
+        },
+        {
+          "name": "bot-plugin-login-dingtalk",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-dingtalk"]
+        },
+        {
+          "name": "bot-plugin-login-dingtalk-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-dingtalk"]
+        },
+        {
+          "name": "openclaw-auth-openai-browser",
+          "cmd": "node",
+          "args": ["scripts/openclaw-auth-terminal.mjs", "openai-browser"]
+        },
+        {
+          "name": "openclaw-auth-openai-browser-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/openclaw-auth-terminal.mjs", "openai-browser"]
+        },
+        {
+          "name": "openclaw-onboard-terminal",
+          "cmd": "node",
+          "args": ["scripts/openclaw-auth-terminal.mjs", "onboard"]
+        },
+        {
+          "name": "openclaw-onboard-terminal-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/openclaw-auth-terminal.mjs", "onboard"]
+        }
+      ]
+    },
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "bot-plugin-install-feishu",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "feishu"]
+        },
+        {
+          "name": "bot-plugin-install-feishu-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "feishu"]
+        },
+        {
+          "name": "bot-plugin-check-feishu",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "feishu"]
+        },
+        {
+          "name": "bot-plugin-check-feishu-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "feishu"]
+        },
+        {
+          "name": "bot-plugin-login-feishu",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-feishu"]
+        },
+        {
+          "name": "bot-plugin-login-feishu-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-feishu"]
+        },
+        {
+          "name": "bot-plugin-install-weixin",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "weixin"]
+        },
+        {
+          "name": "bot-plugin-install-weixin-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "weixin"]
+        },
+        {
+          "name": "bot-plugin-check-weixin",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "weixin"]
+        },
+        {
+          "name": "bot-plugin-check-weixin-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "weixin"]
+        },
+        {
+          "name": "bot-plugin-login-weixin",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-weixin"]
+        },
+        {
+          "name": "bot-plugin-login-weixin-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-weixin"]
+        },
+        {
+          "name": "bot-plugin-install-dingtalk",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "dingtalk"]
+        },
+        {
+          "name": "bot-plugin-install-dingtalk-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "install", "dingtalk"]
+        },
+        {
+          "name": "bot-plugin-check-dingtalk",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "dingtalk"]
+        },
+        {
+          "name": "bot-plugin-check-dingtalk-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "check", "dingtalk"]
+        },
+        {
+          "name": "bot-plugin-login-dingtalk",
+          "cmd": "node",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-dingtalk"]
+        },
+        {
+          "name": "bot-plugin-login-dingtalk-node-exe",
+          "cmd": "node.exe",
+          "args": ["scripts/bot-plugin-helper.mjs", "login-dingtalk"]
+        }
+      ]
+    }
+  ]
+}

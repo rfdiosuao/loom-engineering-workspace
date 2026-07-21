@@ -1,0 +1,47 @@
+{
+  "schema": "loom.phone-agent.recipe-index.v1",
+  "recipes": [
+    {
+      "recipeId": "acquisition",
+      "name": "Authorized Acquisition Research",
+      "aliases": [
+        "acquisition",
+        "lead research"
+      ],
+      "status": "draft",
+      "app": {
+        "packageName": "user-selected",
+        "versionRange": "unverified",
+        "entryPage": "user-authorized discovery surface"
+      },
+      "goal": "Prepare minimized lead summaries and execute task-authorized outbound from visible authorized information",
+      "mode": "single",
+      "path": "recipes/acquisition/recipe.json",
+      "verification": {
+        "successCount": 0,
+        "lastSuccessfulRun": null
+      }
+    },
+    {
+      "recipeId": "boss-resume-screening",
+      "name": "BOSS Resume Screening",
+      "aliases": [
+        "BOSS screening",
+        "resume screening"
+      ],
+      "status": "draft",
+      "app": {
+        "packageName": "com.hpbr.bosszhipin",
+        "versionRange": "unverified",
+        "entryPage": "authorized candidate list"
+      },
+      "goal": "Prepare evidence-backed job-related candidate scores for human review",
+      "mode": "single",
+      "path": "recipes/boss-resume-screening/recipe.json",
+      "verification": {
+        "successCount": 0,
+        "lastSuccessfulRun": null
+      }
+    }
+  ]
+}

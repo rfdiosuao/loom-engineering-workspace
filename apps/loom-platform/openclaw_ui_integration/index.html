@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/logo.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lumi - AI Creative Console</title>
+    <script>
+      (function () {
+        try {
+          var mode = window.localStorage.getItem('lumi_theme_mode') === 'light' ? 'light' : 'dark';
+          document.documentElement.dataset.themeMode = mode;
+          document.documentElement.style.background = mode === 'dark' ? '#050510' : '#F3F4F6';
+          document.documentElement.style.colorScheme = mode;
+        } catch (error) {
+          document.documentElement.dataset.themeMode = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

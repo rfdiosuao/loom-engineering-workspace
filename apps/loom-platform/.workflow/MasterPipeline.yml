@@ -1,0 +1,63 @@
+version: '1.0'
+name: lumi-release-pipeline
+displayName: 'Lumi CI/CD Release Pipeline'
+
+triggers:
+  trigger: auto
+  push:
+    branches:
+      precise:
+        - master
+    tags:
+      include:
+        - '^v.*'
+
+stages:
+  - name: build
+    displayName: Build And Package
+    strategy: naturally
+    trigger: auto
+    steps:
+      - step: npmbuild@1
+        name: build_nodejs
+        displayName: Nodejs Build
+        # Gitee Go's bundled Node runtime can be old, so the script installs
+        # an isolated Node 20 runtime before running the real build.
+        inputs:
+          nodeVersion: 14.15
+          goals: |
+            bash scripts/gitee-ci.sh
+        artifacts:
+          - name: BUILD_ARTIFACT
+            path:
+              - ./ci_artifacts
+        caches:
+          - ~/.npm
+        strategy:
+          retry: '0'
+          timeout: 30
+
+  - name: artifacts
+    displayName: Publish Artifacts
+    strategy: naturally
+    trigger: auto
+    steps:
+      - step: publish@general_artifacts
+        name: publish_general_artifacts
+        displayName: Upload Artifacts
+        dependArtifact: BUILD_ARTIFACT
+        artifactRepository: default
+        artifactName: lumi-ci-artifacts
+        dependsOn: build_nodejs
+
+  - name: release
+    displayName: Release Artifacts
+    strategy: naturally
+    trigger: auto
+    steps:
+      - step: publish@release_artifacts
+        name: publish_release_artifacts
+        displayName: Publish Release
+        dependArtifact: lumi-ci-artifacts
+        version: '2.0.1.0'
+        autoIncrement: true
