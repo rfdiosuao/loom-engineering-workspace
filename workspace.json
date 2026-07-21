@@ -4,7 +4,7 @@
     "platform": {
       "path": "apps/loom-platform",
       "remote": "https://github.com/rfdiosuao/loom-luming-launcher.git",
-      "baselineBranch": "codex/workspace-baseline-20260715",
+      "baselineBranch": "codex/18-stability-spine",
       "verify": [
         "npm --prefix openclaw_new_launcher run build",
         "python -m pytest openclaw_new_launcher/python/tests -q"

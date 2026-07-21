@@ -18,6 +18,19 @@
 | 业务 Skills | `packages/skills` | 招聘、获客和矩阵监督能力 | 本仓库 |
 | 工程文档 | `docs` | 架构、决策、计划和操作手册 | 本仓库 |
 
+## 先分清四个概念
+
+| 名称 | 是什么 | 是否单独发布 |
+| --- | --- | --- |
+| `loom-engineering-workspace` | 工程总控仓，保存合同、文档和协作脚本 | 否 |
+| `loom-luming-launcher` | Windows/macOS 桌面端主源码仓 | 是 |
+| `lumiapkclaw` | Android 手机 Agent 主源码仓 | 是 |
+| `worktrees/` | 本地并行开发目录，不是新仓库，也不会推送 | 否 |
+
+桌面端和手机端不合并成一个 Git 仓库。它们的构建工具、版本和发布节奏不同；总控仓通过 Submodule 固定已验证提交，通过 `packages/contracts` 管理跨端协议。
+
+本机唯一推荐入口是 `D:\Axiangmu\LOOM-Workspace`。`AUSTART`、`U盘启动器`、`artifacts` 和临时测试目录都不是 LOOM 产品源码入口，不应从这些目录创建产品 PR。
+
 ## 每天只用这四条命令
 
 首次克隆后先初始化本机依赖：
@@ -51,7 +64,7 @@
 
 当前 GitHub 套餐不支持私有仓库服务端分支保护。`bootstrap.ps1` 会为总控、平台和手机仓库安装版本化 `pre-push` Hook，默认阻止向 `main` 或 `master` 直接推送；GitHub Actions 继续承担远端检查。
 
-详细流程见 [并行开发手册](docs/runbooks/parallel-development.md)和[工作区架构图](docs/architecture/workspace-map.md)。
+详细流程见[开发 Wiki](docs/DEVELOPMENT_WIKI.md)、[并行开发手册](docs/runbooks/parallel-development.md)、[仓库卫生手册](docs/runbooks/repository-hygiene.md)和[工作区架构图](docs/architecture/workspace-map.md)。
 
 ## 仓库边界
 
