@@ -220,6 +220,24 @@ test('missing critical target is localized without leaking the policy code', () 
   assert.doesNotMatch(JSON.stringify(summary), /critical_target_required|explicit target|critical actions/i);
 });
 
+test('invalid tool output warns against blindly retrying a completed side effect', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'capability_invalid_output',
+      message: 'output.receiptId is required',
+      recoverable: false,
+      outcomeIndeterminate: true,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '执行结果待确认',
+    message: '操作已经发起，但返回结果格式异常，麓鸣无法确认最终状态。请先查看目标设备或任务记录，确认后再决定是否重试，避免重复执行。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /capability_invalid_output|output\.receiptId|required/i);
+});
+
 test('phone publish login failures show the actionable manual handoff', () => {
   const summary = agentViewModel.userFacingAgentError({
     error: {

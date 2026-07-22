@@ -307,6 +307,13 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       recoverable: true,
     };
   }
+  if (code === 'capability_invalid_output') {
+    return {
+      title: '执行结果待确认',
+      message: '操作已经发起，但返回结果格式异常，麓鸣无法确认最终状态。请先查看目标设备或任务记录，确认后再决定是否重试，避免重复执行。',
+      recoverable: false,
+    };
+  }
   if (isProtocolError(data)) {
     return {
       title: '能力暂不可用',
