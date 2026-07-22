@@ -2,6 +2,7 @@
   "name": "openclaw-docs-site",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "docs:dev": "vitepress --host 127.0.0.1 --port 5500",

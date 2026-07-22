@@ -2,6 +2,7 @@
   "name": "openclaw-new-launcher",
   "version": "2.1.19",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",

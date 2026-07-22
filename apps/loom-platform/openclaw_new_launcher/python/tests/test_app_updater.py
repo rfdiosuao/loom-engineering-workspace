@@ -11,7 +11,12 @@ import urllib.error
 from unittest.mock import patch
 
 from core.paths import AppPaths
-from services.app_updater import LoomAppUpdater, LoomRelease, _default_update_cache_dir
+from services.app_updater import (
+    DEFAULT_RELEASE_API_URLS,
+    LoomAppUpdater,
+    LoomRelease,
+    _default_update_cache_dir,
+)
 
 
 class _Response:
@@ -53,6 +58,12 @@ class _InterruptedResponse(_Response):
 
 
 class LoomAppUpdaterTests(unittest.TestCase):
+    def test_default_release_source_is_the_public_monorepo(self) -> None:
+        self.assertEqual(
+            DEFAULT_RELEASE_API_URLS,
+            ("https://api.github.com/repos/rfdiosuao/loom-engineering-workspace/releases/latest",),
+        )
+
     def test_latest_release_exposes_release_notes_and_publication_metadata(self) -> None:
         installer = b"release-with-notes"
         digest = hashlib.sha256(installer).hexdigest()

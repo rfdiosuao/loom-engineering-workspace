@@ -1,5 +1,13 @@
 # Contributing
 
+## 许可证与贡献权利
+
+LOOM 自有代码以 `AGPL-3.0-only` 和单独商业许可双重提供。提交代码、文档或其他可版权化内容前，贡献者必须确认自己有权提交，并同意维护者可以在 AGPL-3.0-only 以及 LOOM 商业许可证下使用、修改和再许可该贡献。
+
+在正式的贡献者许可协议（CLA）流程上线前，未经维护者明确记录许可确认的外部代码 PR 不得合并。仅报告问题、提出建议或不包含可版权化实现的讨论不受此限制。
+
+第三方代码必须保留原始许可证和版权声明，并在需要时更新根目录的 `THIRD_PARTY_NOTICES.md`。
+
 ## Development Flow
 
 1. Start from `D:\Axiangmu\LOOM-Workspace` or a worktree created by this repository.
