@@ -617,7 +617,15 @@ class CapabilityRegistry:
             raise CapabilityExecutionError("capability_failed", f"Capability failed: {name}: {state.error}") from state.error
         result = state.result
         safe_result = redact_sensitive(result)
-        _validate_schema(safe_result, capability.output_schema, path="output")
+        try:
+            _validate_schema(safe_result, capability.output_schema, path="output")
+        except CapabilityInputError as exc:
+            raise CapabilityExecutionError(
+                "capability_invalid_output",
+                str(exc),
+                recoverable=False,
+                outcome_indeterminate=True,
+            ) from exc
         return safe_result
 
     def validate_input(

@@ -1020,6 +1020,76 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual({name: tool_error[name] for name in expected_flags}, expected_flags)
         self.assertEqual({name: run_error[name] for name in expected_flags}, expected_flags)
 
+    def test_invalid_tool_output_never_retries_a_completed_side_effect(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        runtime = ScriptedRuntime(
+            [
+                {
+                    "toolCalls": [{
+                        "toolCallId": "call-invalid-output",
+                        "name": "loom.matrix.dispatch",
+                        "input": {"prompt": "读取屏幕"},
+                    }],
+                },
+                {"final": {"text": "must not retry"}},
+            ]
+        )
+        executions = []
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            bus = AgentEventBus(repository)
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.matrix.dispatch": {
+                        "executor": lambda payload: executions.append(dict(payload)) or {"ok": True},
+                        "permission": "control",
+                        "risk": "control_safe",
+                        "outputSchema": {
+                            "type": "object",
+                            "required": ["campaignId"],
+                            "properties": {"campaignId": {"type": "string"}},
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                bus,
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="weak"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-invalid-output")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-invalid-output",
+                {"prompt": "读取 phone-1 屏幕", "targets": {"deviceIds": ["phone-1"]}},
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "capability_invalid_output")
+        self.assertTrue(failed["error"]["outcomeIndeterminate"])
+        self.assertFalse(failed["error"]["executionMayContinue"])
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(len(runtime.requests), 1)
+        self.assertEqual(
+            [event["type"] for event in events].count("tool.input_rejected"),
+            0,
+        )
+
     def test_matrix_dispatch_without_tool_targets_is_bound_to_run_request(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
 

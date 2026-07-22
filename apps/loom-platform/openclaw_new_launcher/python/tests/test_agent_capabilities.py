@@ -758,6 +758,39 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(result["token"], "[REDACTED]")
         self.assertNotIn("abc.def", json.dumps(result))
 
+    def test_execute_treats_invalid_output_as_indeterminate_nonrecoverable_failure(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        executions = []
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.side-effect": {
+                    "executor": lambda payload: executions.append(dict(payload)) or {"ok": True},
+                    "permission": "control",
+                    "risk": "control_safe",
+                    "outputSchema": {
+                        "type": "object",
+                        "required": ["receiptId"],
+                        "properties": {"receiptId": {"type": "string"}},
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.test.side-effect", {})
+
+        self.assertEqual(executions, [{}])
+        self.assertEqual(caught.exception.code, "capability_invalid_output")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+        self.assertIn("output.receiptId is required", str(caught.exception))
+
     def test_execute_returns_promptly_when_timed_out_work_keeps_running(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
 
