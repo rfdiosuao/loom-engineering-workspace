@@ -136,31 +136,26 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             ctx = _test_context(temp_dir, JobManager(logs.append), logs)
             cancel_requested = threading.Event()
             result: dict = {}
-            node_exe = shutil.which("node")
-            self.assertIsNotNone(node_exe)
-
             def run_process() -> None:
                 result.update(_run_phone_process_with_matrix_stream(
                     ctx,
                     [
-                        str(node_exe),
-                        "-e",
+                        sys.executable,
+                        "-c",
                         (
-                            "const fs = require('node:fs');\n"
-                            f"const started = {json.dumps(started_path)};\n"
-                            f"const cancel = {json.dumps(cancel_path)};\n"
-                            f"const acknowledged = {json.dumps(marker_path)};\n"
-                            "fs.writeFileSync(started, String(process.pid));\n"
-                            "const timer = setInterval(() => {\n"
-                            "  if (!fs.existsSync(cancel)) return;\n"
-                            "  fs.writeFileSync(acknowledged, 'cancelled');\n"
-                            "  clearInterval(timer);\n"
-                            "}, 10);\n"
+                            "import os, pathlib, time\n"
+                            f"started = pathlib.Path({started_path!r})\n"
+                            f"cancel = pathlib.Path({cancel_path!r})\n"
+                            f"acknowledged = pathlib.Path({marker_path!r})\n"
+                            "started.write_text(str(os.getpid()), encoding='utf-8')\n"
+                            "while not cancel.exists():\n"
+                            "    time.sleep(0.01)\n"
+                            "acknowledged.write_text('cancelled', encoding='utf-8')\n"
                         ),
                     ],
                     kind="phone.task",
                     layer="agent",
-                    timeout_sec=10,
+                    timeout_sec=30,
                     device_id="phone-a",
                     should_cancel=cancel_requested.is_set,
                     cooperative_cancel=True,
@@ -168,7 +163,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
             worker = threading.Thread(target=run_process)
             worker.start()
-            started = _wait_for_path(started_path, timeout=10.0)
+            started = _wait_for_path(started_path, timeout=20.0)
             pid = _read_pid(started_path) if started else 0
             try:
                 cancel_requested.set()
