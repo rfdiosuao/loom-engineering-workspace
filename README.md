@@ -1,3 +1,5 @@
+<p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
+
 <p align="center">
   <img src="apps/loom-platform/openclaw_new_launcher/src/assets/luming-logo.svg" width="96" alt="LOOM Logo" />
 </p>
