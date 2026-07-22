@@ -262,4 +262,4 @@ OpenClaw Launcher is for builders who need an AI automation product that can act
 
 ### License
 
-The repository currently contains productized launcher, packaging, and integration code. Confirm the intended open-source/commercial license before redistributing modified builds.
+LOOM-owned code is dual-licensed under GNU AGPL v3.0 only or a separate commercial license. See the repository root [`LICENSE`](../../LICENSE), [`LICENSE-COMMERCIAL.md`](../../LICENSE-COMMERCIAL.md), and [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). Third-party components remain under their respective licenses.

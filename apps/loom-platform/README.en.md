@@ -45,3 +45,7 @@ gh workflow run release.yml `
 ```
 
 The release workflow publishes Windows installer assets, a Windows portable package, macOS `.app.zip`, macOS `.dmg`, and SHA256 checksum files.
+
+## License
+
+LOOM-owned code is dual-licensed under GNU AGPL v3.0 only or a separate commercial license. See the repository root [`LICENSE`](../../LICENSE), [`LICENSE-COMMERCIAL.md`](../../LICENSE-COMMERCIAL.md), and [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). Third-party components remain under their respective licenses.
