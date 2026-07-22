@@ -1,10 +1,10 @@
 [package]
 name = "app"
 version = "2.3.1"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+description = "LOOM AI Matrix Acquisition Workbench"
+authors = ["Yu Hang (He Ang)"]
+license = "AGPL-3.0-only"
+repository = "https://github.com/rfdiosuao/loom-engineering-workspace"
 edition = "2021"
 rust-version = "1.77.2"
 

@@ -11,7 +11,7 @@ That split made the product harder to reason about and made parallel Agent work 
 
 ## Decision
 
-Use `rfdiosuao/loom-engineering-workspace` as the single private source repository for active LOOM engineering.
+Use the public `rfdiosuao/loom-engineering-workspace` repository as the single source repository for active LOOM engineering.
 
 Platform code lives under `apps/loom-platform`. Android phone Agent code lives under `apps/loom-phone-agent`. Contracts, Skills, scripts and docs remain in the same repository. There are no submodules, gitlinks, or nested Git repositories under `apps/`.
 

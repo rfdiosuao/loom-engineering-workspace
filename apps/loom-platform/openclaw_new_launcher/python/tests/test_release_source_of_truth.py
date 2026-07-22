@@ -15,6 +15,7 @@ RELEASE_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "platform
 CI_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "ci-check.ps1")
 SMOKE_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "smoke-test-tauri-nsis.ps1")
 PROTECTED_TAURI_CONFIG = os.path.join(LAUNCHER_ROOT, "src-tauri", "tauri.protected.conf.json")
+MAC_ONLINE_PACKAGER = os.path.join(LAUNCHER_ROOT, "scripts", "package-mac-online.mjs")
 
 
 def read_text(path: str) -> str:
@@ -23,6 +24,15 @@ def read_text(path: str) -> str:
 
 
 class ReleaseSourceOfTruthTests(unittest.TestCase):
+    def test_desktop_updaters_and_packagers_use_the_public_monorepo(self) -> None:
+        updater = read_text(os.path.join(PYTHON_DIR, "services", "app_updater.py"))
+        mac_packager = read_text(MAC_ONLINE_PACKAGER)
+
+        canonical_repo = "rfdiosuao/loom-engineering-workspace"
+        self.assertIn(f"api.github.com/repos/{canonical_repo}/releases/latest", updater)
+        self.assertIn(f'return "{canonical_repo}";', mac_packager)
+        self.assertNotIn("rfdiosuao/lumi/releases/latest", updater)
+
     def test_current_ci_and_release_only_build_new_launcher(self) -> None:
         for path in (CI_WORKFLOW, RELEASE_WORKFLOW):
             source = read_text(path)
