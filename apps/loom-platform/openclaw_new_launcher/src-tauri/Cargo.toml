@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "2.3.2"
+version = "2.3.3"
 description = "LOOM AI Matrix Acquisition Workbench"
 authors = ["Yu Hang (He Ang)"]
 license = "AGPL-3.0-only"

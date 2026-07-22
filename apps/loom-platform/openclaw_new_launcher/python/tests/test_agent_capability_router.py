@@ -23,10 +23,17 @@ class AgentCapabilityRouterTests(unittest.TestCase):
             {"name": "loom.media.video.generate", "domain": "media", "available": True},
             {"name": "loom.media.assets.list", "domain": "media", "available": True},
             {"name": "loom.media.asset.transfer", "domain": "media", "available": True},
+            {"name": "loom.mcp.loom.loom_media_config", "domain": "media", "available": True},
+            {"name": "loom.mcp.loom.loom_media_test_image", "domain": "media", "available": True},
             {"name": "loom.phone.publish", "domain": "phone", "available": True},
+            {"name": "loom.cli.phone.quick-task", "domain": "phone", "available": True},
+            {"name": "loom.mcp.loom.loom_phone_adb_doctor", "domain": "phone", "available": True},
+            {"name": "loom.mcp.loom.loom_phone_events_status", "domain": "phone", "available": True},
             {"name": "loom.matrix.dispatch", "domain": "matrix", "available": True},
+            {"name": "loom.acquisition.run", "domain": "acquisition", "available": True},
             {"name": "loom.agent.install", "domain": "agent", "available": True},
             {"name": "loom.schedule.add", "domain": "schedule", "available": True},
+            {"name": "loom.settings.theme.set", "domain": "settings", "available": True},
             {"name": "loom.cli.account.current", "domain": "account", "available": True},
             {"name": "loom.cli.logs.tail", "domain": "diagnostics", "available": True},
             {"name": "loom.settings.update.check", "domain": "settings", "available": True},
@@ -106,6 +113,139 @@ class AgentCapabilityRouterTests(unittest.TestCase):
                 self.assertNotIn("loom.media.image.generate", names)
                 self.assertEqual(metadata["mode"], "focused")
                 self.assertIn("schedule", metadata["domains"])
+
+    def test_existing_media_album_transfer_hides_generation_publish_and_subject_domain(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {"prompt": "把之前那张招聘海报传到所有在线手机相册"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.media.assets.list", names)
+        self.assertIn("loom.media.asset.transfer", names)
+        self.assertIn("loom.matrix.dispatch", names)
+        self.assertNotIn("loom.media.image.generate", names)
+        self.assertNotIn("loom.media.video.generate", names)
+        self.assertNotIn("loom.phone.publish", names)
+        self.assertNotIn("loom.acquisition.run", names)
+        self.assertNotIn("acquisition", metadata["domains"])
+
+    def test_existing_media_publish_keeps_publish_but_hides_generators(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, _metadata = route_capabilities(
+            {"prompt": "用刚才的海报发布到小红书，只保存草稿"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.media.assets.list", names)
+        self.assertIn("loom.phone.publish", names)
+        self.assertNotIn("loom.media.image.generate", names)
+        self.assertNotIn("loom.media.video.generate", names)
+
+    def test_explicit_regeneration_keeps_generation_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, _metadata = route_capabilities(
+            {"prompt": "把刚才那张招聘海报重新生成一版"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.media.image.generate", names)
+
+    def test_phone_settings_action_does_not_expose_loom_settings_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {"prompt": "让 phone-1 打开设置并截图确认"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.cli.phone.quick-task", names)
+        self.assertNotIn("loom.settings.theme.set", names)
+        self.assertNotIn("loom.phone.publish", names)
+        self.assertNotIn("loom.mcp.loom.loom_phone_adb_doctor", names)
+        self.assertNotIn("loom.mcp.loom.loom_phone_events_status", names)
+        self.assertNotIn("settings", metadata["domains"])
+
+    def test_recruitment_media_subject_does_not_expose_acquisition_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {"prompt": "生成一张招聘海报"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.media.image.generate", names)
+        self.assertNotIn("loom.acquisition.run", names)
+        self.assertNotIn("acquisition", metadata["domains"])
+
+    def test_recruitment_workflow_still_exposes_acquisition_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {"prompt": "筛选招聘简历并整理候选人"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.acquisition.run", names)
+        self.assertIn("acquisition", metadata["domains"])
+
+    def test_media_creation_hides_configuration_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, _metadata = route_capabilities(
+            {"prompt": "生成一张产品海报"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.media.image.generate", names)
+        self.assertNotIn("loom.mcp.loom.loom_media_config", names)
+        self.assertNotIn("loom.mcp.loom.loom_media_test_image", names)
+
+    def test_media_configuration_hides_execution_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, _metadata = route_capabilities(
+            {"prompt": "检查生图 API 配置和模型"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.mcp.loom.loom_media_config", names)
+        self.assertIn("loom.mcp.loom.loom_media_test_image", names)
+        self.assertNotIn("loom.media.image.generate", names)
+        self.assertNotIn("loom.media.asset.transfer", names)
+
+    def test_phone_repair_intent_keeps_adb_doctor(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, _metadata = route_capabilities(
+            {"prompt": "手机连接失败，帮我运行 ADB 修复"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.mcp.loom.loom_phone_adb_doctor", names)
+
+    def test_phone_event_intent_keeps_event_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, _metadata = route_capabilities(
+            {"prompt": "查看手机事件同步状态"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.mcp.loom.loom_phone_events_status", names)
 
     def test_ambiguous_request_uses_full_catalog_but_catalog_request_forces_catalog_tool(self) -> None:
         from core.agent_capability_router import route_capabilities
@@ -235,7 +375,8 @@ class AgentCapabilityRouterTests(unittest.TestCase):
                 selected, metadata = route_capabilities({"prompt": prompt}, self.capabilities)
                 names = {item["name"] for item in selected}
 
-                self.assertIn("loom.phone.publish", names)
+                self.assertIn("loom.cli.phone.quick-task", names)
+                self.assertNotIn("loom.phone.publish", names)
                 self.assertNotIn("loom.media.image.generate", names)
                 self.assertEqual(metadata["mode"], "focused")
                 self.assertIn("phone", metadata["domains"])

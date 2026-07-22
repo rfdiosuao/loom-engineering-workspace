@@ -80,6 +80,62 @@ _SCHEDULE_INTENT_PATTERNS = (
     ),
 )
 
+_MEDIA_REUSE_TERMS = (
+    "刚才", "之前", "已有", "现有", "已经生成", "上次", "那张", "这张", "那个视频",
+    "这个视频", "本地素材", "本地图片", "本地视频",
+)
+_MEDIA_REGENERATE_TERMS = (
+    "重新生成", "再生成", "重新做", "再做一张", "另生成", "新生成", "生成新版", "重绘",
+)
+_MEDIA_CONTENT_TERMS = ("海报", "图片", "视频", "封面", "素材", "壁纸", "文案")
+_MEDIA_CONFIG_TERMS = (
+    "生成配置", "生图配置", "视频配置", "模型配置", "api", "接口", "密钥", "key",
+)
+_MEDIA_EXECUTION_TERMS = (
+    "生成一张", "生成一个", "生成图片", "生成视频", "生成海报", "开始生图", "帮我生图",
+    "生一张", "制作", "创建", "画一张", "重绘", "编辑图片", "修改图片",
+)
+_MEDIA_CONFIG_CAPABILITY_MARKERS = (
+    ".loom_media_config",
+    ".loom_media_save_",
+    ".loom_media_test_",
+)
+_MEDIA_EXECUTION_CAPABILITIES = frozenset(
+    {
+        "loom.media.asset.transfer",
+        "loom.media.assets.list",
+        "loom.media.image.generate",
+        "loom.media.video.generate",
+    }
+)
+_ALBUM_TRANSFER_TERMS = (
+    "手机相册", "传到相册", "传入相册", "保存到手机", "导入手机", "同步到手机",
+    "传到手机", "传给手机",
+)
+_OUTBOUND_PUBLISH_TERMS = (
+    "发布", "发帖", "草稿", "抖音", "小红书", "快手", "微博", "朋友圈", "视频号",
+    "公众号", "推文", "douyin", "xiaohongshu",
+)
+_PHONE_REPAIR_TERMS = (
+    "连接失败", "连接异常", "离线", "不可达", "授权失效", "修复", "诊断", "adb", "无障碍",
+)
+_PHONE_EVENT_TERMS = (
+    "事件同步", "事件流", "手机事件", "监听事件", "实时事件", "events", "event stream",
+)
+_PHONE_NON_PUBLISH_ACTION_TERMS = (
+    "打开", "启动", "点击", "输入", "截图", "查看", "读取", "读屏", "状态", "检测", "连接",
+    "设置", "返回", "主页", "解锁", "亮屏", "修复", "诊断", "相册", "传到手机", "同步到手机",
+)
+_PHONE_SETTINGS_ACTION_TERMS = ("打开", "进入", "点击", "查看", "返回", "切换到", "启动")
+_LOOM_SETTINGS_TERMS = (
+    "麓鸣设置", "工作台设置", "界面设置", "主题", "深色", "浅色", "更新麓鸣", "版本更新",
+)
+_ACQUISITION_SUBJECT_TERMS = ("招聘", "招工", "简历", "候选人", "人才")
+_ACQUISITION_OPERATION_TERMS = (
+    "筛选", "搜索", "查找", "收集", "获取", "导入", "跟进", "联系", "打招呼", "沟通",
+    "投递", "职位", "线索", "获客", "客户", "招聘任务", "自动招聘", "boss直聘",
+)
+
 _CORE_NAME_PATTERNS = (
     ".capabilities.",
     ".capability.",
@@ -158,6 +214,8 @@ def route_capabilities(
             or _is_core_capability(capability)
         ):
             selected.append(capability)
+
+    selected = _prune_capabilities_for_intent(folded, selected, set(hinted))
 
     if not selected:
         return available, _routing_metadata(
@@ -246,6 +304,10 @@ def _intent_domains(text: str, request: Mapping[str, Any]) -> set[str]:
     }
     if any(pattern.search(text) for pattern in _SCHEDULE_INTENT_PATTERNS):
         domains.add("schedule")
+    if _is_phone_settings_navigation(text):
+        domains.discard("settings")
+    if _is_recruitment_media_subject(text):
+        domains.discard("acquisition")
     scope = request.get("requestScope")
     if isinstance(scope, Mapping):
         _add_target_domains(domains, scope)
@@ -258,6 +320,71 @@ def _intent_domains(text: str, request: Mapping[str, Any]) -> set[str]:
         if isinstance(target, Mapping):
             _add_target_domains(domains, target)
     return domains
+
+
+def _prune_capabilities_for_intent(
+    text: str,
+    capabilities: Sequence[Json],
+    hinted: set[str],
+) -> list[Json]:
+    reuse_media = "media" in {_domain for item in capabilities for _domain in _capability_domains(item)} and any(
+        term in text for term in _MEDIA_REUSE_TERMS
+    )
+    regenerate_media = any(term in text for term in _MEDIA_REGENERATE_TERMS)
+    media_config = any(term in text for term in _MEDIA_CONFIG_TERMS)
+    media_execution = any(term in text for term in _MEDIA_EXECUTION_TERMS)
+    album_transfer = any(term in text for term in _ALBUM_TRANSFER_TERMS)
+    outbound_publish = any(term in text for term in _OUTBOUND_PUBLISH_TERMS)
+    if album_transfer and not any(
+        term in text
+        for term in _OUTBOUND_PUBLISH_TERMS
+        if term not in {"发布"}
+    ):
+        outbound_publish = False
+    phone_repair = any(term in text for term in _PHONE_REPAIR_TERMS)
+    phone_events = any(term in text for term in _PHONE_EVENT_TERMS)
+    non_publish_phone_action = any(term in text for term in _PHONE_NON_PUBLISH_ACTION_TERMS)
+
+    selected: list[Json] = []
+    for capability in capabilities:
+        name = str(capability.get("name") or "").strip()
+        if not name or name in hinted or _is_core_capability(capability):
+            selected.append(capability)
+            continue
+        if reuse_media and not regenerate_media and name in {
+            "loom.media.image.generate",
+            "loom.media.video.generate",
+        }:
+            continue
+        if media_config and not media_execution and name in _MEDIA_EXECUTION_CAPABILITIES:
+            continue
+        if not media_config and any(marker in name for marker in _MEDIA_CONFIG_CAPABILITY_MARKERS):
+            continue
+        if name == "loom.phone.publish" and not outbound_publish and non_publish_phone_action:
+            continue
+        if ".loom_phone_adb_doctor" in name and not phone_repair:
+            continue
+        if ".loom_phone_events_" in name and not phone_events:
+            continue
+        selected.append(capability)
+    return selected
+
+
+def _is_phone_settings_navigation(text: str) -> bool:
+    return (
+        "设置" in text
+        and any(term in text for term in ("手机", "phone", "device", "设备"))
+        and any(term in text for term in _PHONE_SETTINGS_ACTION_TERMS)
+        and not any(term in text for term in _LOOM_SETTINGS_TERMS)
+    )
+
+
+def _is_recruitment_media_subject(text: str) -> bool:
+    return (
+        any(term in text for term in _ACQUISITION_SUBJECT_TERMS)
+        and any(term in text for term in _MEDIA_CONTENT_TERMS)
+        and not any(term in text for term in _ACQUISITION_OPERATION_TERMS)
+    )
 
 
 def _add_target_domains(domains: set[str], target: Mapping[str, Any]) -> None:
