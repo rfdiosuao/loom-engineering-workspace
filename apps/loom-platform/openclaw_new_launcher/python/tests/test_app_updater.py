@@ -53,6 +53,157 @@ class _InterruptedResponse(_Response):
 
 
 class LoomAppUpdaterTests(unittest.TestCase):
+    def test_latest_release_exposes_release_notes_and_publication_metadata(self) -> None:
+        installer = b"release-with-notes"
+        digest = hashlib.sha256(installer).hexdigest()
+        release = {
+            "tag_name": "v2.3.0",
+            "body": "## 更新内容\n\n- 全新更新中心\n- 支持安全回滚",
+            "published_at": "2026-07-22T08:30:00Z",
+            "html_url": "https://example.invalid/releases/v2.3.0",
+            "assets": [{
+                "name": "LOOM-2.3.0-setup.exe",
+                "size": len(installer),
+                "digest": f"sha256:{digest}",
+                "browser_download_url": "https://downloads.example/LOOM-2.3.0-setup.exe",
+            }],
+        }
+
+        def opener(request, timeout=0):
+            del timeout
+            return _Response(json.dumps(release).encode("utf-8"), url=request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(temp_dir),
+                current_version="2.2.0",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+            )
+            latest, error = updater.latest_release()
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.version, "2.3.0")
+        self.assertIn("全新更新中心", latest.notes)
+        self.assertEqual(latest.published_at, "2026-07-22T08:30:00Z")
+        self.assertEqual(latest.release_url, "https://example.invalid/releases/v2.3.0")
+
+    def test_cancelled_download_keeps_partial_file_for_a_later_resume(self) -> None:
+        installer = b"x" * (2 * 1024 * 1024 + 64)
+        digest = hashlib.sha256(installer).hexdigest()
+        release = {
+            "body": "取消后应保留进度",
+            "assets": [{
+                "name": "LOOM-2.3.0-setup.exe",
+                "size": len(installer),
+                "digest": f"sha256:{digest}",
+                "browser_download_url": "https://downloads.example/LOOM-2.3.0-setup.exe",
+            }],
+        }
+        updater_ref: list[LoomAppUpdater] = []
+
+        class CancellingResponse(_Response):
+            def read(self, size: int = -1) -> bytes:
+                chunk = super().read(min(size, 512 * 1024))
+                if chunk and self._stream.tell() >= 512 * 1024:
+                    updater_ref[0].cancel_update()
+                return chunk
+
+        def opener(request, timeout=0):
+            del timeout
+            if request.full_url.endswith("/latest"):
+                return _Response(json.dumps(release).encode("utf-8"), url=request.full_url)
+            return CancellingResponse(installer, url=request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_root = os.path.join(temp_dir, "LOOM-Update-Recovery", "updates")
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.2.0",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                signature_verifier=lambda _path: (True, "CN=LOOM Release"),
+                update_cache_dir=cache_root,
+            )
+            updater_ref.append(updater)
+
+            success, version, _output = updater.install_latest()
+            partial_path = os.path.join(cache_root, "LOOM-2.3.0-setup.exe.part")
+
+            self.assertFalse(success)
+            self.assertEqual(version, "2.2.0")
+            self.assertEqual(updater.status()["phase"], "cancelled")
+            self.assertEqual(updater.status()["errorCode"], "update_cancelled")
+            self.assertTrue(os.path.isfile(partial_path))
+            self.assertGreater(os.path.getsize(partial_path), 0)
+
+    def test_update_result_receipt_is_returned_only_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recovery_root = os.path.join(temp_dir, "LOOM-Update-Recovery")
+            update_cache = os.path.join(recovery_root, "updates")
+            result_dir = os.path.join(recovery_root, "upgrade-backups", "2.3.0-test")
+            os.makedirs(result_dir, exist_ok=True)
+            with open(os.path.join(result_dir, "update-success.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "version": "2.3.0",
+                    "state": "healthy",
+                    "confirmedAt": "2026-07-22T08:45:00+08:00",
+                }, handle)
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.3.0",
+                release_api_urls=(),
+                update_cache_dir=update_cache,
+            )
+
+            self.assertTrue(updater.has_pending_update_result())
+            first = updater.consume_update_result()
+            self.assertFalse(updater.has_pending_update_result())
+            second = updater.consume_update_result()
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(first["version"], "2.3.0")
+        self.assertIsNone(second)
+
+    def test_update_result_is_not_pending_without_a_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.3.0",
+                release_api_urls=(),
+                update_cache_dir=os.path.join(temp_dir, "LOOM-Update-Recovery", "updates"),
+            )
+
+            self.assertFalse(updater.has_pending_update_result())
+
+    def test_update_failure_receipt_is_read_from_recovery_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recovery_root = os.path.join(temp_dir, "LOOM-Update-Recovery")
+            update_cache = os.path.join(recovery_root, "updates")
+            os.makedirs(recovery_root, exist_ok=True)
+            with open(os.path.join(recovery_root, "update-failed.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "version": "2.3.0",
+                    "state": "failed",
+                    "error": "new version health check failed",
+                    "rollbackState": "restored",
+                    "recoveryActions": ["Restart the previous LOOM version."],
+                }, handle)
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.2.0",
+                release_api_urls=(),
+                update_cache_dir=update_cache,
+            )
+
+            result = updater.consume_update_result()
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["rollbackState"], "restored")
+        self.assertIn("health check failed", result["message"])
+        self.assertEqual(result["remediation"], ["Restart the previous LOOM version."])
+
     def test_default_update_cache_uses_external_recovery_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(
@@ -231,6 +382,50 @@ class LoomAppUpdaterTests(unittest.TestCase):
             with open(launched[0], "rb") as handle:
                 self.assertEqual(handle.read(), installer)
             self.assertTrue(any("SHA256" in line for line in output))
+
+    def test_verified_cached_installer_skips_a_second_download(self) -> None:
+        installer = b"already-downloaded-and-verified"
+        digest = hashlib.sha256(installer).hexdigest()
+        release = {
+            "assets": [{
+                "name": "LOOM-2.3.0-setup.exe",
+                "size": len(installer),
+                "digest": f"sha256:{digest}",
+                "browser_download_url": "https://downloads.example/LOOM-2.3.0-setup.exe",
+            }],
+        }
+        download_requests: list[str] = []
+
+        def opener(request, timeout=0):
+            del timeout
+            if request.full_url.endswith("/latest"):
+                return _Response(json.dumps(release).encode("utf-8"), url=request.full_url)
+            download_requests.append(request.full_url)
+            raise AssertionError("verified cached installer should not be downloaded again")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_root = os.path.join(temp_dir, "cache")
+            os.makedirs(cache_root, exist_ok=True)
+            installer_path = os.path.join(cache_root, "LOOM-2.3.0-setup.exe")
+            with open(installer_path, "wb") as handle:
+                handle.write(installer)
+            launched: list[str] = []
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.2.0",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                launcher=launched.append,
+                signature_verifier=lambda _path: (True, "CN=LOOM Release"),
+                update_cache_dir=cache_root,
+            )
+
+            success, version, _output = updater.install_latest()
+
+        self.assertTrue(success)
+        self.assertEqual(version, "2.3.0")
+        self.assertFalse(download_requests)
+        self.assertEqual(launched, [installer_path])
 
     def test_install_uses_its_request_local_release_snapshot(self) -> None:
         installer = b"request-local-release"

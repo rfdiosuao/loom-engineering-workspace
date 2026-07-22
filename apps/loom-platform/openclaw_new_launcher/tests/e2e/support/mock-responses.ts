@@ -109,6 +109,18 @@ export function createBaselineSeed(): TauriMockSeed {
       'GET /api/process/status': {
         value: { running: false, processAlive: false, startupState: 'idle', pid: null, portReady: false },
       },
+      'GET /api/update/check': {
+        value: {
+          current: '2.3.0',
+          latest: '2.3.0',
+          hasUpdate: false,
+          notes: '',
+          publishedAt: '',
+          releaseUrl: '',
+          size: 0,
+        },
+      },
+      'GET /api/update/result': { value: { pending: false, result: null } },
       'GET /api/theme/current': { value: { theme: null, isCustom: false, merchantId: null } },
       'GET /api/account/current': { value: { account: AUDIT_ACCOUNT } },
       'GET /api/account/capabilities': {

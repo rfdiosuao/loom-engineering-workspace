@@ -3,10 +3,10 @@ import { open } from '@tauri-apps/plugin-shell';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/sidebar/Sidebar';
 import { WindowTitlebar } from './components/window/WindowTitlebar';
-import { ConfirmDialogHost, ToastContainer, showConfirm, showToast } from './components/common';
+import { ConfirmDialogHost, ToastContainer, showToast } from './components/common';
 import { useAppStore } from './stores/appStore';
 import { useLogStore } from './stores/logStore';
-import { processApi, logApi, parseErrorText, resolveUpdateDisposition, updateApi } from './services/api';
+import { processApi, logApi, parseErrorText } from './services/api';
 import { detectApiConfigured } from './services/apiStatus';
 import { ThemeProvider } from './providers/ThemeProvider';
 import { useTheme } from './hooks/useTheme';
@@ -14,6 +14,7 @@ import { getFeatureDefinition } from './features/registry';
 import { renderFeaturePage } from './features/pages';
 import { SetupGate } from './components/SetupGate';
 import { LoomSplash } from './components/brand/LoomSplash';
+import { UpdateCenter, requestUpdateCenterOpen } from './components/update/UpdateCenter';
 
 const NAV_PARENT_BY_PAGE: Record<string, string> = {
   models: 'license',
@@ -187,44 +188,7 @@ export default function App() {
     }
 
     if (feature?.action.type === 'command' && feature.action.command === 'update') {
-      let updateStarted = false;
-      try {
-        const resp = await updateApi.check();
-        if (resp.hasUpdate) {
-          showToast(`发现新版本 ${resp.current} -> ${resp.latest}`, 'info');
-          const ok = await showConfirm({
-            title: '发现新版本',
-            message: `当前版本：${resp.current}\n最新版本：${resp.latest}\n是否现在更新？`,
-            confirmText: '立即更新',
-          });
-          if (ok) {
-            updateStarted = true;
-            appendLog('[更新] 开始更新...\n');
-            const updateResp = await updateApi.do();
-            const disposition = resolveUpdateDisposition(updateResp);
-            if (disposition === 'prepare_install') {
-              await updateApi.prepareInstall(updateResp.installer_path);
-            }
-            showToast(
-              disposition === 'prepare_install'
-                ? `LOOM ${updateResp.current_version} 已完成校验，正在安全更新`
-                : `已是最新版本 ${updateResp.current_version}`,
-              disposition === 'prepare_install' ? 'success' : 'info',
-            );
-          }
-        } else {
-          showToast(`已是最新版本 ${resp.current}`, 'info');
-        }
-      } catch (error) {
-        const message = formatError(error) || (updateStarted ? '更新失败' : '检查更新失败');
-        if (updateStarted && error && typeof error === 'object') {
-          const remediation = (error as { remediation?: unknown }).remediation;
-          if (Array.isArray(remediation) && remediation.length) {
-            appendLog(`[更新失败] ${message}\n${remediation.join('\n')}\n`);
-          }
-        }
-        showToast(message, 'error');
-      }
+      requestUpdateCenterOpen();
       return;
     }
 
@@ -260,6 +224,7 @@ export default function App() {
         <ConfirmDialogHost />
         <LoomSplash />
         <SetupGate />
+        <UpdateCenter />
       </div>
     </ThemeProvider>
   );

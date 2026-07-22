@@ -1,6 +1,6 @@
 {
   "name": "loom-launcher",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "build:python-runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-python-runtime.ps1",
     "build:platform-tools": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-platform-tools.ps1",
     "build": "tsc && vite build",
-    "test:platform-contracts": "tsc --noEmit && node --import tsx --test src/components/controlIntegrity.test.ts src/components/agent/agentFrontendIntegrity.test.ts src/components/agent/agentViewModel.test.ts src/components/matrix/matrixViewModel.test.ts src/components/phone/phoneConnectionState.test.ts src/services/api.test.ts src/services/platformContracts.test.ts src/services/realtimeStream.test.ts src/stores/agentStore.test.ts src/stores/appNavigation.test.ts",
+    "test:platform-contracts": "tsc --noEmit && node --import tsx --test src/components/controlIntegrity.test.ts src/components/agent/agentFrontendIntegrity.test.ts src/components/agent/agentViewModel.test.ts src/components/matrix/matrixViewModel.test.ts src/components/phone/phoneConnectionState.test.ts src/components/update/UpdateCenter.test.ts src/services/api.test.ts src/services/platformContracts.test.ts src/services/realtimeStream.test.ts src/stores/agentStore.test.ts src/stores/appNavigation.test.ts",
     "test:node-contracts": "node --test scripts/openclaw-phone-agent-fast-path.test.mjs scripts/openclaw-phone-daemon.test.mjs scripts/openclaw-media-phone.test.mjs scripts/tests/openclaw-image-phone-contract.test.mjs scripts/tests/phone-frame-paths.test.mjs scripts/tests/publish-contract.test.mjs scripts/tests/vision-safety.test.mjs",
     "test:e2e": "tsc --noEmit -p tests/e2e/tsconfig.json && playwright test",
     "verify:phone": "powershell -ExecutionPolicy Bypass -File scripts/verify-phone-agent.ps1",
@@ -47,6 +47,7 @@
     "stage:protected": "node scripts/stage-protected-release.mjs",
     "verify:protected": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-protected-release.ps1",
     "package:protected:nsis": "npm run stage:protected && npm run verify:protected && npm run tauri -- build --bundles nsis --config src-tauri/tauri.protected.conf.json",
+    "release:update-assets": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-desktop-update-release.ps1",
     "preview": "vite preview",
     "tauri": "tauri"
   },

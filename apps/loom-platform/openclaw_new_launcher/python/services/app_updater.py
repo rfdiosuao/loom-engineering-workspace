@@ -35,6 +35,13 @@ class LoomRelease:
     size: int
     sha256: str
     source: str
+    notes: str = ""
+    published_at: str = ""
+    release_url: str = ""
+
+
+class UpdateCancelled(Exception):
+    """Raised after the user asks the resumable downloader to stop."""
 
 
 @dataclass(frozen=True)
@@ -245,6 +252,7 @@ class LoomAppUpdater:
         self.last_installer_path = ""
         self._status_lock = threading.Lock()
         self._install_lock = threading.Lock()
+        self._cancel_event = threading.Event()
         self._status: dict[str, Any] = {
             "phase": "idle",
             "downloaded": 0,
@@ -263,6 +271,104 @@ class LoomAppUpdater:
     def status(self) -> dict[str, Any]:
         with self._status_lock:
             return dict(self._status)
+
+    def cancel_update(self) -> bool:
+        phase = str(self.status().get("phase") or "")
+        if not self._install_lock.locked() or phase not in {
+            "checking",
+            "downloading",
+        }:
+            return False
+        self._cancel_event.set()
+        return True
+
+    def _pending_update_result_candidate(self) -> tuple[str, str, str, str] | None:
+        recovery_root = os.path.abspath(os.path.dirname(self.update_cache_dir))
+        backup_root = os.path.join(recovery_root, "upgrade-backups")
+        candidates: list[tuple[int, str, str]] = []
+        marker_statuses = {
+            "update-success.json": "success",
+            "update-failed.json": "failed",
+            "update-failure.json": "failed",
+            "recovery-failure.json": "failed",
+        }
+        search_roots = [recovery_root]
+        if os.path.isdir(backup_root):
+            search_roots.append(backup_root)
+        for search_root in search_roots:
+            if not os.path.isdir(search_root):
+                continue
+            for root, directories, filenames in os.walk(search_root):
+                if root == recovery_root:
+                    directories[:] = [item for item in directories if item != "upgrade-backups"]
+                for filename in filenames:
+                    status = marker_statuses.get(filename.lower())
+                    if not status:
+                        continue
+                    path = os.path.abspath(os.path.join(root, filename))
+                    if os.path.commonpath([recovery_root, path]) != recovery_root:
+                        continue
+                    try:
+                        stat = os.stat(path)
+                    except OSError:
+                        continue
+                    candidates.append((stat.st_mtime_ns, path, status))
+        if not candidates:
+            return None
+
+        modified_ns, marker_path, result_status = max(candidates, key=lambda item: item[0])
+        try:
+            marker_size = os.path.getsize(marker_path)
+        except OSError:
+            return None
+        fingerprint = f"{marker_path}|{modified_ns}|{marker_size}"
+        acknowledgement_path = os.path.join(recovery_root, "update-result-ack.json")
+        try:
+            with open(acknowledgement_path, "r", encoding="utf-8-sig") as handle:
+                acknowledged = json.load(handle)
+            if str(acknowledged.get("fingerprint") or "") == fingerprint:
+                return None
+        except (OSError, TypeError, ValueError):
+            pass
+        return fingerprint, marker_path, result_status, acknowledgement_path
+
+    def has_pending_update_result(self) -> bool:
+        return self._pending_update_result_candidate() is not None
+
+    def consume_update_result(self) -> dict[str, Any] | None:
+        candidate = self._pending_update_result_candidate()
+        if candidate is None:
+            return None
+        fingerprint, marker_path, result_status, acknowledgement_path = candidate
+        recovery_root = os.path.abspath(os.path.dirname(self.update_cache_dir))
+
+        try:
+            with open(marker_path, "r", encoding="utf-8-sig") as handle:
+                marker = json.load(handle)
+        except (OSError, TypeError, ValueError):
+            return None
+        if not isinstance(marker, dict):
+            return None
+
+        os.makedirs(recovery_root, exist_ok=True)
+        temporary_ack = acknowledgement_path + ".tmp"
+        with open(temporary_ack, "w", encoding="utf-8") as handle:
+            json.dump({"fingerprint": fingerprint}, handle, ensure_ascii=True)
+        os.replace(temporary_ack, acknowledgement_path)
+        return {
+            "status": result_status,
+            "version": str(marker.get("version") or ""),
+            "confirmedAt": str(marker.get("confirmedAt") or marker.get("failedAt") or ""),
+            "message": str(marker.get("error") or marker.get("failure") or marker.get("message") or ""),
+            "rollbackState": str(marker.get("rollbackState") or ""),
+            "remediation": [
+                str(item)
+                for item in marker.get("remediation") or marker.get("recoveryActions") or []
+            ],
+        }
+
+    def is_newer_version(self, version: str) -> bool:
+        return _version_tuple(version) > _version_tuple(self.current_version())
 
     def _report(
         self,
@@ -309,13 +415,19 @@ class LoomAppUpdater:
         return release, None
 
     def latest_version(self) -> tuple[str | None, str | None]:
-        release, error = self._resolve_latest_release()
+        release, error = self.latest_release()
         if error or release is None:
             return None, error or "没有可用的 LOOM 更新源"
         self.cached_release = release
-        if _version_tuple(release.version) <= _version_tuple(self.current_version()):
+        if not self.is_newer_version(release.version):
             return self.current_version(), None
         return release.version, None
+
+    def latest_release(self) -> tuple[LoomRelease | None, str | None]:
+        release, error = self._resolve_latest_release()
+        if release is not None:
+            self.cached_release = release
+        return release, error
 
     def install_latest(
         self,
@@ -341,6 +453,7 @@ class LoomAppUpdater:
                 )
             return False, self.current_version(), [message, *remediation]
         self.last_installer_path = ""
+        self._cancel_event.clear()
         try:
             self._report("checking", callback=progress_callback)
             release, error = self._resolve_latest_release()
@@ -370,6 +483,39 @@ class LoomAppUpdater:
                 os.makedirs(self.update_cache_dir, exist_ok=True)
                 final_path = os.path.join(self.update_cache_dir, release.filename)
                 partial_path = final_path + ".part"
+                if os.path.isfile(final_path):
+                    cached_size = os.path.getsize(final_path)
+                    cached_hash = self._hash_file(final_path)
+                    if (release.size > 0 and cached_size != release.size) or cached_hash != release.sha256:
+                        os.remove(final_path)
+                    else:
+                        self._report(
+                            "verifying_signature",
+                            downloaded=cached_size,
+                            total=release.size or cached_size,
+                            version=release.version,
+                            message="正在重新验证已下载的更新包",
+                            callback=progress_callback,
+                        )
+                        signature_ok, signer = self.signature_verifier(final_path)
+                        if not signature_ok:
+                            os.remove(final_path)
+                            raise ValueError(f"Windows 签名验证失败：{signer}")
+                        self.last_installer_path = final_path
+                        self.launcher(final_path)
+                        self._report(
+                            "ready",
+                            downloaded=cached_size,
+                            total=release.size or cached_size,
+                            version=release.version,
+                            message="已下载的更新包验证通过，等待安全交接安装",
+                            callback=progress_callback,
+                        )
+                        return True, release.version, [
+                            f"已验证 SHA256：{cached_hash}",
+                            f"已验证 Windows 发布者：{signer}",
+                            f"LOOM {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
+                        ]
                 written, digest = self._prepare_partial(partial_path, release.size)
                 self._report(
                     "downloading",
@@ -429,6 +575,19 @@ class LoomAppUpdater:
                     f"已验证 Windows 发布者：{signer}",
                     f"LOOM {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
                 ]
+            except UpdateCancelled:
+                message = "已取消更新，下载进度已保留"
+                remediation = ("下次更新将从已下载的位置继续。",)
+                self._report(
+                    "cancelled",
+                    version=release.version,
+                    message=message,
+                    error_code="update_cancelled",
+                    retryable=True,
+                    remediation=remediation,
+                    callback=progress_callback,
+                )
+                return False, self.current_version(), [message, *remediation]
             except Exception as error:
                 failure = _classify_update_failure(error)
                 self._report(
@@ -465,6 +624,17 @@ class LoomAppUpdater:
                         digest.update(chunk)
                         written += len(chunk)
         return written, digest
+
+    @staticmethod
+    def _hash_file(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest().lower()
 
     def _download_release(
         self,
@@ -510,6 +680,8 @@ class LoomAppUpdater:
                 mode = "ab" if written > 0 else "wb"
             with open(partial_path, mode) as output:
                 while True:
+                    if self._cancel_event.is_set():
+                        raise UpdateCancelled()
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
@@ -524,6 +696,8 @@ class LoomAppUpdater:
                         message="正在下载更新包",
                         callback=progress_callback,
                     )
+                    if self._cancel_event.is_set():
+                        raise UpdateCancelled()
         return written, digest
 
     def _fetch_release(self, source_url: str) -> LoomRelease:
@@ -573,6 +747,9 @@ class LoomAppUpdater:
             size=size,
             sha256=sha256.lower(),
             source=urlparse(source_url).hostname or source_url,
+            notes=str(payload.get("body") or payload.get("description") or "").strip()[:20000],
+            published_at=str(payload.get("published_at") or payload.get("created_at") or "").strip(),
+            release_url=str(payload.get("html_url") or payload.get("url") or "").strip(),
         )
 
     def _fetch_sidecar_sha(self, assets: list[Any], filename: str) -> str:

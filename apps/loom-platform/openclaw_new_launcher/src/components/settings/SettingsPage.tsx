@@ -1,29 +1,15 @@
 import React from 'react';
-import { Button, Select, showConfirm, showToast } from '../common';
+import { Button, Select, showToast } from '../common';
 import { useTheme } from '../../hooks/useTheme';
 import { useAppStore } from '../../stores/appStore';
-import { parseErrorText, resolveUpdateDisposition, updateApi } from '../../services/api';
+import { parseErrorText } from '../../services/api';
 import { storyboardApi } from '../../services/storyboardApi';
+import { requestUpdateCenterOpen } from '../update/UpdateCenter';
 import type { BuiltinThemeMode } from '../../theme/default';
 import type { AppLanguage } from '../../i18n/language';
 import { APP_DISPLAY_NAME, APP_DISPLAY_SUBTITLE, APP_VERSION } from '../../version';
 
 type SettingsTab = 'appearance' | 'updates' | 'data' | 'about';
-type UpdateBusy = 'check' | 'install' | null;
-
-interface UpdateStatus {
-  tone: 'info' | 'success' | 'error';
-  message: string;
-  current?: string;
-  latest?: string;
-  hasUpdate?: boolean;
-  checkedAt?: string;
-  log?: string[];
-  errorCode?: string;
-  retryable?: boolean;
-  remediation?: string[];
-}
-
 interface SettingsCopy {
   eyebrow: string;
   title: string;
@@ -274,14 +260,8 @@ const SettingRow: React.FC<{
   </div>
 );
 
-function formatUpdateError(error: unknown, fallback: string): string {
-  return parseErrorText(error) || fallback;
-}
-
 export const SettingsPage: React.FC = () => {
   const [activeTab, setActiveTab] = React.useState<SettingsTab>('appearance');
-  const [updateBusy, setUpdateBusy] = React.useState<UpdateBusy>(null);
-  const [updateStatus, setUpdateStatus] = React.useState<UpdateStatus | null>(null);
   const [paramImportBusy, setParamImportBusy] = React.useState(false);
   const [paramImportStatus, setParamImportStatus] = React.useState<{ tone: 'info' | 'success' | 'error'; message: string } | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -304,105 +284,6 @@ export const SettingsPage: React.FC = () => {
   const handleThemeChange = (mode: BuiltinThemeMode) => {
     switchThemeMode(mode);
     showToast(copy.toast.themeChanged, 'success');
-  };
-
-  const handleCheckUpdate = async () => {
-    setUpdateBusy('check');
-    setUpdateStatus({ tone: 'info', message: copy.updates.checking });
-    try {
-      const result = await updateApi.check();
-      const nextStatus: UpdateStatus = {
-        tone: result.hasUpdate ? 'info' : 'success',
-        message: result.hasUpdate ? copy.updates.found : copy.updates.upToDate,
-        current: result.current,
-        latest: result.latest,
-        hasUpdate: result.hasUpdate,
-        checkedAt: new Date().toLocaleString(language),
-      };
-      setUpdateStatus(nextStatus);
-      showToast(nextStatus.message, result.hasUpdate ? 'info' : 'success');
-    } catch (error) {
-      const message = formatUpdateError(error, copy.updates.failedCheck);
-      setUpdateStatus({ tone: 'error', message, checkedAt: new Date().toLocaleString(language) });
-      showToast(message, 'error');
-    } finally {
-      setUpdateBusy(null);
-    }
-  };
-
-  const handleInstallUpdate = async () => {
-    const ok = await showConfirm({
-      title: copy.updates.confirmTitle,
-      message: copy.updates.confirmMessage,
-      confirmText: copy.updates.confirmText,
-    });
-    if (!ok) return;
-
-    setUpdateBusy('install');
-    setUpdateStatus((prev) => ({
-      ...(prev ?? { tone: 'info' as const }),
-      tone: 'info',
-      message: copy.updates.installing,
-    }));
-    const progressTimer = window.setInterval(() => {
-      void updateApi.status().then((progress) => {
-        if (progress.phase === 'downloading') {
-          setUpdateStatus((prev) => ({
-            ...(prev ?? { tone: 'info' as const }),
-            tone: 'info',
-            message: `${copy.updates.installing} ${progress.percent}%`,
-          }));
-        } else if (progress.phase === 'failed') {
-          setUpdateStatus((prev) => ({
-            ...(prev ?? { tone: 'error' as const }),
-            tone: 'error',
-            message: progress.message || copy.updates.failedInstall,
-            errorCode: progress.errorCode,
-            retryable: progress.retryable,
-            remediation: progress.remediation,
-          }));
-        }
-      }).catch(() => undefined);
-    }, 500);
-    try {
-      const result = await updateApi.do();
-      window.clearInterval(progressTimer);
-      const disposition = resolveUpdateDisposition(result);
-      if (disposition === 'prepare_install') {
-        await updateApi.prepareInstall(result.installer_path);
-      }
-      const message = disposition === 'prepare_install'
-        ? `${copy.toast.updateSuccess}: ${result.current_version}`
-        : `${copy.updates.upToDate} ${result.current_version}`;
-      setUpdateStatus({
-        tone: disposition === 'prepare_install' ? 'success' : 'info',
-        message,
-        current: result.current_version,
-        log: result.log,
-        checkedAt: new Date().toLocaleString(language),
-      });
-      showToast(message, disposition === 'prepare_install' ? 'success' : 'info');
-    } catch (error) {
-      window.clearInterval(progressTimer);
-      const message = formatUpdateError(error, copy.updates.failedInstall);
-      const errorDetail = error && typeof error === 'object'
-        ? error as { errorCode?: string; retryable?: boolean; remediation?: string[]; log?: string[] }
-        : {};
-      setUpdateStatus((prev) => ({
-        ...(prev ?? { tone: 'error' as const }),
-        tone: 'error',
-        message,
-        errorCode: errorDetail.errorCode,
-        retryable: errorDetail.retryable,
-        remediation: Array.isArray(errorDetail.remediation) ? errorDetail.remediation : [],
-        log: Array.isArray(errorDetail.log) ? errorDetail.log : prev?.log,
-        checkedAt: new Date().toLocaleString(language),
-      }));
-      showToast(message, 'error');
-    } finally {
-      window.clearInterval(progressTimer);
-      setUpdateBusy(null);
-    }
   };
 
   const handleImportParamConfig = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -490,51 +371,12 @@ export const SettingsPage: React.FC = () => {
 
           {activeTab === 'updates' ? (
             <SettingRow title={copy.updates.checkTitle} desc={copy.updates.checkDesc}>
-              <div className="space-y-4">
-                <div className="flex flex-wrap gap-3">
-                  <Button variant="primary" disabled={Boolean(updateBusy)} onClick={handleCheckUpdate}>
-                    {updateBusy === 'check' ? copy.updates.checking : copy.updates.checkButton}
-                  </Button>
-                  <Button
-                    variant={updateStatus?.hasUpdate ? 'success' : 'quiet'}
-                    disabled={Boolean(updateBusy) || updateStatus?.hasUpdate !== true}
-                    onClick={handleInstallUpdate}
-                  >
-                    {updateBusy === 'install' ? copy.updates.installing : copy.updates.installButton}
-                  </Button>
+              <div className="flex flex-wrap items-center justify-between gap-4 border-y border-border py-4">
+                <div>
+                  <div className="text-sm font-black text-text">LOOM {APP_VERSION}</div>
+                  <div className="mt-1 text-xs leading-5 text-text-muted">启动后自动检查正式版本，下载、签名校验、备份和回滚均由更新中心管理。</div>
                 </div>
-                <div className={`rounded-[16px] border p-4 ${
-                  updateStatus?.tone === 'error'
-                    ? 'border-status-danger/30 bg-status-danger/8 text-status-danger'
-                    : updateStatus?.tone === 'success'
-                      ? 'border-status-success/25 bg-status-success/10 text-text'
-                      : 'border-border bg-surface-alt/55 text-text'
-                }`}>
-                  <div className="text-sm font-black">{updateStatus?.message ?? copy.updates.idle}</div>
-                  {updateStatus ? (
-                    <div className="mt-3 grid gap-2 text-xs text-text-muted md:grid-cols-3">
-                      {updateStatus.current ? <div><span className="font-black text-text">{copy.updates.current}：</span>{updateStatus.current}</div> : null}
-                      {updateStatus.latest ? <div><span className="font-black text-text">{copy.updates.latest}：</span>{updateStatus.latest}</div> : null}
-                      {updateStatus.checkedAt ? <div><span className="font-black text-text">{copy.updates.checkedAt}：</span>{updateStatus.checkedAt}</div> : null}
-                    </div>
-                  ) : null}
-                  {updateStatus?.log?.length ? (
-                    <details className="mt-4">
-                      <summary className="cursor-pointer text-xs font-black text-text">{copy.updates.logTitle}</summary>
-                      <pre className="mt-2 max-h-44 overflow-auto rounded-xl bg-terminal-bg p-3 text-xs leading-5 text-terminal-text">
-                        {updateStatus.log.slice(-16).join('\n')}
-                      </pre>
-                    </details>
-                  ) : null}
-                  {updateStatus?.remediation?.length ? (
-                    <div className="mt-4 rounded-xl border border-current/15 bg-surface/55 p-3 text-xs leading-5">
-                      <div className="font-black text-text">{copy.updates.recoveryTitle}</div>
-                      <ul className="mt-1 list-disc space-y-1 pl-5 text-text-muted">
-                        {updateStatus.remediation.map((item) => <li key={item}>{item}</li>)}
-                      </ul>
-                    </div>
-                  ) : null}
-                </div>
+                <Button variant="primary" onClick={requestUpdateCenterOpen}>{copy.updates.checkButton}</Button>
               </div>
             </SettingRow>
           ) : null}

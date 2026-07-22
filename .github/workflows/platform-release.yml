@@ -292,6 +292,19 @@ jobs:
           name: platform-release-assets
           path: apps/loom-platform/ci_artifacts/*
 
+      - name: Prepare product release notes
+        working-directory: apps/loom-platform
+        run: |
+          $version = node -p "require('./openclaw_new_launcher/package.json').version"
+          $notesPath = Join-Path $PWD "openclaw_new_launcher\docs\RELEASE_NOTES_$version.md"
+          $bodyPath = Join-Path $PWD "ci_artifacts\RELEASE_BODY.md"
+          $body = if (Test-Path -LiteralPath $notesPath -PathType Leaf) {
+            (Get-Content -LiteralPath $notesPath -Raw).Trim()
+          } else {
+            "# LOOM $version 更新说明`n`n本次版本包含稳定性、兼容性与使用体验改进。"
+          }
+          [IO.File]::WriteAllText($bodyPath, "$body`n", [Text.UTF8Encoding]::new($false))
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -301,6 +314,7 @@ jobs:
           prerelease: false
           make_latest: true
           generate_release_notes: true
+          body_path: apps/loom-platform/ci_artifacts/RELEASE_BODY.md
           files: |
             apps/loom-platform/ci_artifacts/*.exe
             apps/loom-platform/ci_artifacts/*.zip

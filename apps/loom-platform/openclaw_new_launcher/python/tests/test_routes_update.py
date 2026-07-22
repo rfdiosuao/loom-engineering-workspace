@@ -22,6 +22,18 @@ class _FailedUpdater:
     def latest_version(self):
         return "2.1.90", None
 
+    def latest_release(self):
+        return SimpleNamespace(
+            version="2.1.90",
+            notes="",
+            published_at="",
+            release_url="",
+            size=0,
+        ), None
+
+    def is_newer_version(self, _version: str) -> bool:
+        return True
+
     def install_latest(self, progress_callback=None):
         if progress_callback:
             progress_callback(self.status())
@@ -42,6 +54,173 @@ class _FailedUpdater:
 
 
 class UpdateRouteTests(unittest.TestCase):
+    def test_check_response_includes_release_notes_and_publication_metadata(self) -> None:
+        app = FastAPI()
+
+        class MetadataUpdater(_FailedUpdater):
+            def latest_release(self):
+                return SimpleNamespace(
+                    version="2.3.0",
+                    notes="## 更新内容\n\n- 全新更新中心",
+                    published_at="2026-07-22T08:30:00Z",
+                    release_url="https://example.invalid/releases/v2.3.0",
+                    size=1024,
+                ), None
+
+        updater = MetadataUpdater()
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            get_app_updater=lambda: updater,
+            append_log=lambda _line: None,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+        )
+        register_update_routes(app, ctx)
+
+        response = TestClient(app).get("/api/update/check")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["latest"], "2.3.0")
+        self.assertIn("全新更新中心", response.json()["notes"])
+        self.assertEqual(response.json()["publishedAt"], "2026-07-22T08:30:00Z")
+        self.assertEqual(response.json()["size"], 1024)
+
+    def test_check_never_offers_an_older_release_as_an_update(self) -> None:
+        app = FastAPI()
+
+        class NewerCurrentUpdater(_FailedUpdater):
+            def current_version(self) -> str:
+                return "2.3.1"
+
+            def latest_release(self):
+                release, error = super().latest_release()
+                release.version = "2.3.0"
+                return release, error
+
+            def is_newer_version(self, _version: str) -> bool:
+                return False
+
+        updater = NewerCurrentUpdater()
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            get_app_updater=lambda: updater,
+            append_log=lambda _line: None,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+        )
+        register_update_routes(app, ctx)
+
+        response = TestClient(app).get("/api/update/check")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["hasUpdate"])
+
+    def test_cancel_route_requests_download_cancellation(self) -> None:
+        app = FastAPI()
+
+        class CancelUpdater(_FailedUpdater):
+            def __init__(self) -> None:
+                self.called = False
+
+            def cancel_update(self) -> bool:
+                self.called = True
+                return True
+
+        updater = CancelUpdater()
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            get_app_updater=lambda: updater,
+            append_log=lambda _line: None,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+        )
+        register_update_routes(app, ctx)
+
+        response = TestClient(app).post("/api/update/cancel")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["cancelRequested"])
+        self.assertTrue(updater.called)
+
+    def test_result_route_consumes_post_restart_receipt(self) -> None:
+        app = FastAPI()
+
+        class ResultUpdater(_FailedUpdater):
+            def has_pending_update_result(self) -> bool:
+                return True
+
+            def consume_update_result(self):
+                return {"status": "success", "version": "2.3.0", "confirmedAt": "now"}
+
+        updater = ResultUpdater()
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            get_app_updater=lambda: updater,
+            append_log=lambda _line: None,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+        )
+        register_update_routes(app, ctx)
+
+        response = TestClient(app).get("/api/update/result")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["pending"])
+        self.assertEqual(response.json()["result"]["version"], "2.3.0")
+
+    def test_result_route_reports_when_no_receipt_is_pending(self) -> None:
+        app = FastAPI()
+
+        class EmptyResultUpdater(_FailedUpdater):
+            def has_pending_update_result(self) -> bool:
+                return False
+
+            def consume_update_result(self):
+                raise AssertionError("an absent receipt must not be consumed")
+
+        updater = EmptyResultUpdater()
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            get_app_updater=lambda: updater,
+            append_log=lambda _line: None,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+        )
+        register_update_routes(app, ctx)
+
+        response = TestClient(app).get("/api/update/result")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"pending": False, "result": None})
+
+    def test_cancelled_update_is_a_normal_outcome_without_an_error_payload(self) -> None:
+        app = FastAPI()
+
+        class CancelledUpdater(_FailedUpdater):
+            def install_latest(self, progress_callback=None):
+                if progress_callback:
+                    progress_callback(self.status())
+                return False, "2.2.0", ["update cancelled"]
+
+            def status(self) -> dict:
+                return {
+                    **super().status(),
+                    "phase": "cancelled",
+                    "message": "update cancelled",
+                    "errorCode": "update_cancelled",
+                    "retryable": True,
+                }
+
+        updater = CancelledUpdater()
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            get_app_updater=lambda: updater,
+            append_log=lambda _line: None,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+        )
+        register_update_routes(app, ctx)
+
+        response = TestClient(app).post("/api/update/do")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["outcome"], "cancelled")
+        self.assertNotIn("error", response.json())
+
     def test_failed_update_response_exposes_recovery_metadata(self) -> None:
         app = FastAPI()
         updater = _FailedUpdater()
@@ -151,9 +330,9 @@ class UpdateCheckAsyncTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
 
         class BlockingUpdater(_FailedUpdater):
-            def latest_version(self):
+            def latest_release(self):
                 release.wait(timeout=1)
-                return "2.1.90", None
+                return super().latest_release()
 
         updater = BlockingUpdater()
         ctx = SimpleNamespace(
