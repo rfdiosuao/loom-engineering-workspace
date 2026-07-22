@@ -58,10 +58,26 @@ MEDIA_VIDEO_INPUT_SCHEMA: Json = {
     "required": ["prompt"],
     "properties": {
         "prompt": {"type": "string", "minLength": 1},
+        "providerId": {
+            "type": "string",
+            "enum": ["dashscope", "agnes", "seedance", "pippit", "custom"],
+            "description": "视频服务商；使用小云雀时传 pippit。",
+        },
+        "apiBase": {"type": "string"},
         "model": {"type": "string"},
         "duration": {"type": "integer"},
         "ratio": {"type": "string"},
         "imagePath": {"type": "string"},
+        "requestKey": {
+            "type": "string",
+            "minLength": 1,
+            "description": "小云雀任务幂等键；续接人工问答时必须复用首次返回的 requestKey。",
+        },
+        "continuationMessage": {
+            "type": "string",
+            "minLength": 1,
+            "description": "回复小云雀人工问答并继续原 thread；必须同时传原 requestKey。",
+        },
         "deviceIds": {
             "type": "array",
             "minItems": 1,

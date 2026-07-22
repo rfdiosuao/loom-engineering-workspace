@@ -181,7 +181,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
                 "count": 1,
             }
 
-        def generate_video(_ctx, _body, on_status=None):
+        def generate_video(_ctx, _body, on_status=None, *, request_key=""):
             selected["value"] = "phone-b"
             return {
                 "video": "base64",

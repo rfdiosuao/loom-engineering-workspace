@@ -13,6 +13,7 @@ import urllib.request
 from typing import Callable
 
 from core.constants import DASHSCOPE_TASK_URL, DASHSCOPE_VIDEO_URL, VIDEO_MODEL_I2V, VIDEO_MODEL_T2V
+from services.pippit_video_api import PippitManualRequired, PippitVideoClient, PippitVideoError
 
 StatusCallback = Callable[[str, str], None]
 
@@ -25,7 +26,8 @@ def _http_error_message(error: urllib.error.HTTPError) -> str:
     try:
         body = error.read().decode("utf-8")
         data = json.loads(body)
-        return data.get("message") or data.get("error", {}).get("message") or f"HTTP {error.code}"
+        detail = data.get("message") or data.get("error", {}).get("message") or ""
+        return f"HTTP {error.code}: {detail}" if detail else f"HTTP {error.code}"
     except Exception:
         return f"HTTP {error.code}"
 
@@ -58,9 +60,31 @@ class DashScopeVideoClient:
         api_base: str = "",
         model: str = "",
         on_status: StatusCallback | None = None,
+        request_key: str = "",
+        state_path: str = "",
+        continuation_message: str = "",
+        poll_interval_ms: int | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes:
         try:
             provider_id = (provider_id or "dashscope").strip().lower()
+            if provider_id in ("pippit", "xyq", "xiaoyunque", "小云雀"):
+                return PippitVideoClient().generate(
+                    dash_key,
+                    prompt,
+                    mode,
+                    resolution,
+                    duration,
+                    ratio,
+                    image_path,
+                    api_base=api_base,
+                    request_key=request_key,
+                    state_path=state_path,
+                    continuation_message=continuation_message,
+                    poll_interval_ms=poll_interval_ms,
+                    timeout_ms=timeout_ms,
+                    on_status=on_status,
+                )
             if provider_id == "agnes" or "agnes-video" in (model or "").strip().lower():
                 return self._generate_agnes_compatible(
                     dash_key, prompt, mode, resolution, duration, ratio, image_path,
@@ -78,6 +102,12 @@ class DashScopeVideoClient:
             if on_status:
                 on_status(f"任务已提交：{task_id[:8]}...，等待生成", "accent")
             return self._poll_dashscope_and_download(dash_key, task_id, on_status, task_url)
+        except PippitManualRequired:
+            raise
+        except PippitVideoError as error:
+            raise VideoApiError(str(error)) from error
+        except VideoApiError:
+            raise
         except urllib.error.HTTPError as error:
             raise VideoApiError(_http_error_message(error)) from error
         except Exception as error:
@@ -576,4 +606,3 @@ class DashScopeVideoClient:
             return True
         head = data[:128]
         return b"ftyp" in head or head.startswith(b"\x1aE\xdf\xa3")
-

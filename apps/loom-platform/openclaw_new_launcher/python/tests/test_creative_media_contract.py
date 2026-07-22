@@ -89,6 +89,26 @@ class CreativeMediaUiContractTests(unittest.TestCase):
         self.assertIn("disabled={imageRunning}", source)
         self.assertIn("disabled={videoRunning}", source)
 
+    def test_creative_page_supports_pippit_manual_continuation(self) -> None:
+        with open(CREATIVE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        with open(API_FILE, "r", encoding="utf-8") as handle:
+            api_source = handle.read()
+
+        for marker in (
+            '<option value="pippit">小云雀 / Pippit</option>',
+            "createVideoRequestKey",
+            "jobNeedsManual",
+            "continuePippitVideo",
+            "continuationMessage",
+            "继续原任务",
+            "打开任务页",
+        ):
+            self.assertIn(marker, source)
+        self.assertIn("requestKey?: string", api_source)
+        self.assertIn("continuationMessage?: string", api_source)
+        self.assertIn("rememberedCreativeJobs[kind] = jobId", source)
+
     def test_creative_page_exposes_reference_modes_ratios_and_persistent_library(self) -> None:
         with open(CREATIVE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
@@ -401,6 +421,47 @@ class CreativeMediaBackendContractTests(unittest.TestCase):
                 video_meta = json.load(handle)
             self.assertEqual(video_meta["providerId"], "agnes")
 
+    def test_pippit_video_generation_receives_persistent_request_state(self) -> None:
+        routes_media = importlib.import_module("api.routes_media")
+        calls: list[dict] = []
+
+        class VideoClient:
+            def generate(self, *_args, **kwargs):
+                calls.append(kwargs)
+                return b"video-bytes"
+
+        license_mgr = SimpleNamespace(current_gateway_profile=lambda: {})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = SimpleNamespace(
+                image_config=os.path.join(temp_dir, "image.json"),
+                video_config=os.path.join(temp_dir, "video.json"),
+                data_dir=temp_dir,
+            )
+            ctx = SimpleNamespace(
+                paths=paths,
+                get_video_client=lambda: VideoClient(),
+                get_license_mgr=lambda: license_mgr,
+            )
+
+            routes_media._video_generate_payload(
+                ctx,
+                {
+                    "apiKey": "xyq-key",
+                    "providerId": "pippit",
+                    "prompt": "生成一条竖版产品视频",
+                    "continuationMessage": "",
+                },
+                request_key="request-xyq-1",
+            )
+
+            self.assertEqual(calls[0]["provider_id"], "pippit")
+            self.assertEqual(calls[0]["api_base"], "")
+            self.assertEqual(calls[0]["request_key"], "request-xyq-1")
+            self.assertEqual(
+                calls[0]["state_path"],
+                os.path.join(temp_dir, "pippit-video-runs.json"),
+            )
+
     def test_image_generation_maps_ratio_to_size_before_saved_fallback(self) -> None:
         routes_media = importlib.import_module("api.routes_media")
 
@@ -482,8 +543,14 @@ class CreativeMediaBackendContractTests(unittest.TestCase):
                 saved_image = json.load(handle)
             with open(video_config, "r", encoding="utf-8") as handle:
                 saved_video = json.load(handle)
-            self.assertEqual(saved_image["apiKey"], "TEST_IMAGE_SECRET")
-            self.assertEqual(saved_video["apiKey"], "TEST_VIDEO_SECRET")
+            if os.name == "nt":
+                self.assertEqual(saved_image["apiKey"]["__loomSecret"], "dpapi")
+                self.assertEqual(saved_video["apiKey"]["__loomSecret"], "dpapi")
+                self.assertNotIn("TEST_IMAGE_SECRET", json.dumps(saved_image))
+                self.assertNotIn("TEST_VIDEO_SECRET", json.dumps(saved_video))
+            else:
+                self.assertEqual(saved_image["apiKey"], "TEST_IMAGE_SECRET")
+                self.assertEqual(saved_video["apiKey"], "TEST_VIDEO_SECRET")
 
             self.assertEqual(
                 routes_media._image_config_fallback(ctx)["apiKey"],

@@ -585,6 +585,8 @@ export const videoApi = {
     ratio: string;
     imagePath?: string;
     source?: string;
+    requestKey?: string;
+    continuationMessage?: string;
   }): Promise<{ video: string; mime?: string; size?: number; path?: string; directory?: string; filename?: string }> =>
     api('/api/video/generate', 'POST', params),
   submit: (params: {
@@ -599,6 +601,8 @@ export const videoApi = {
     ratio: string;
     imagePath?: string;
     source?: string;
+    requestKey?: string;
+    continuationMessage?: string;
   }): Promise<{ jobId: string; job: BridgeJob }> =>
     api('/api/video/generate/submit', 'POST', params),
 };
