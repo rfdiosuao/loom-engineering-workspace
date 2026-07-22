@@ -21,6 +21,8 @@ class AgentCapabilityRouterTests(unittest.TestCase):
             {"name": "loom.cli.logs.tail", "domain": "diagnostics", "available": True},
             {"name": "loom.settings.update.check", "domain": "settings", "available": True},
             {"name": "loom.settings.update.install", "domain": "settings", "available": True},
+            {"name": "loom.license.current", "domain": "license", "available": True},
+            {"name": "loom.license.activate", "domain": "license", "available": True},
         ]
 
     def test_media_and_phone_cross_domain_request_is_focused(self) -> None:
@@ -132,6 +134,21 @@ class AgentCapabilityRouterTests(unittest.TestCase):
         self.assertNotIn("loom.media.image.generate", names)
         self.assertEqual(metadata["mode"], "focused")
         self.assertEqual(metadata["domains"], ["matrix"])
+
+    def test_license_request_focuses_license_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {"prompt": "查看商业授权状态，如果未激活就使用授权码激活"},
+            self.capabilities,
+        )
+
+        names = {item["name"] for item in selected}
+        self.assertIn("loom.license.current", names)
+        self.assertIn("loom.license.activate", names)
+        self.assertNotIn("loom.media.image.generate", names)
+        self.assertEqual(metadata["mode"], "focused")
+        self.assertIn("license", metadata["domains"])
 
 
 if __name__ == "__main__":

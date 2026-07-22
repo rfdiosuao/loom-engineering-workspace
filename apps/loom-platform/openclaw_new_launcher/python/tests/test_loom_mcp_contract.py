@@ -186,6 +186,21 @@ class LoomMcpContractTests(unittest.TestCase):
         self.assertEqual(tools["loom_agent_uninstall"]["risk"], "critical")
         self.assertEqual(tools["loom_schedule_add"]["permission"], "automation")
         self.assertEqual(tools["loom_schedule_add"]["risk"], "critical")
+        self.assertEqual(tools["loom_media_test_image"]["permission"], "control")
+        self.assertEqual(tools["loom_media_test_image"]["risk"], "control_safe")
+        self.assertEqual(tools["loom_media_test_video"]["permission"], "control")
+        self.assertEqual(tools["loom_media_test_video"]["risk"], "control_safe")
+
+    def test_restricted_cli_arguments_are_discoverable_in_tool_schemas(self) -> None:
+        import loom_mcp
+
+        tools = {tool["name"]: tool for tool in loom_mcp.tool_definitions()}
+        schedule_command = tools["loom_schedule_add"]["inputSchema"]["properties"]["command"]
+        repair_action = tools["loom_diagnostics_repair"]["inputSchema"]["properties"]["action"]
+
+        self.assertIn("status", schedule_command["examples"])
+        self.assertIn("phone screenshot", schedule_command["description"])
+        self.assertEqual(repair_action["enum"], ["prerequisites"])
 
     def test_phone_and_matrix_tools_expose_target_scope_contracts(self) -> None:
         import loom_mcp
@@ -290,11 +305,12 @@ class LoomMcpContractTests(unittest.TestCase):
         tool = next(item for item in loom_mcp.tool_definitions() if item["name"] == "loom_phone_template_task")
         enum_values = tool["inputSchema"]["properties"]["template"]["enum"]
         self.assertIn("screen-summary", enum_values)
+        self.assertEqual(tool["inputSchema"]["properties"]["deviceId"]["type"], "string")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             result = loom_mcp.call_tool(
                 "loom_phone_template_task",
-                {"template": "screen-summary", "dryRun": True},
+                {"template": "screen-summary", "deviceId": "phone-2", "dryRun": True},
                 permission="read",
                 base_path=temp_dir,
             )
@@ -304,6 +320,7 @@ class LoomMcpContractTests(unittest.TestCase):
         self.assertEqual(content["data"]["endpoint"], "/api/phone/task")
         self.assertEqual(content["data"]["body"]["template"], "screen-summary")
         self.assertEqual(content["data"]["body"]["executionLayer"], "template")
+        self.assertEqual(content["data"]["body"]["deviceId"], "phone-2")
 
     def test_mcp_denies_dangerous_tool_by_default(self) -> None:
         import loom_mcp

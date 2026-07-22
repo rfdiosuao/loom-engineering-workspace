@@ -40,6 +40,7 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "schedule": ("定时", "计划任务", "日程", "调度", "schedule", "cron"),
     "models": ("模型", "供应商", "api key", "apikey", "provider", "model"),
     "account": ("账号", "登录", "订阅", "额度", "账户", "account", "login", "quota"),
+    "license": ("授权", "授权码", "许可证", "激活码", "商业授权", "license", "activation"),
     "agent": ("智能体", "agent", "runtime", "运行时", "技能", "skill", "mcp", "cli"),
     "settings": ("设置", "主题", "深色", "浅色", "更新", "版本", "settings", "theme", "update", "version"),
     "diagnostics": (

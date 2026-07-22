@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import sys
+import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -14,6 +16,13 @@ if PYTHON_DIR not in sys.path:
 
 
 def _minimal_value(schema: Mapping[str, Any]) -> Any:
+    if "const" in schema:
+        return schema["const"]
+    if "default" in schema:
+        return schema["default"]
+    examples = schema.get("examples")
+    if isinstance(examples, Sequence) and not isinstance(examples, (str, bytes)) and examples:
+        return examples[0]
     expected = schema.get("type")
     allowed = schema.get("enum")
     if isinstance(allowed, Sequence) and not isinstance(allowed, (str, bytes)) and allowed:
@@ -50,6 +59,68 @@ def _minimal_value(schema: Mapping[str, Any]) -> Any:
 
 
 class AgentAllToolsContractTests(unittest.TestCase):
+    def test_every_mcp_tool_matches_cli_permission_and_target_scope(self) -> None:
+        import loom_cli
+        import loom_mcp
+
+        catalog = {
+            command["name"]: command
+            for domain in loom_cli._command_catalog()["domains"]
+            for command in domain["commands"]
+        }
+        for tool in loom_mcp.tool_definitions():
+            payload = _minimal_value(tool["inputSchema"])
+            argv = loom_mcp._tool_to_cli_args(str(tool["name"]), payload)
+            matches = [
+                (name, command)
+                for name, command in catalog.items()
+                if argv[: len(name.split())] == name.split()
+            ]
+            self.assertTrue(matches, tool["name"])
+            cli_name, cli_command = max(matches, key=lambda item: len(item[0].split()))
+            self.assertIn(
+                tool["permission"],
+                str(cli_command["permission"]).split("/"),
+                f"{tool['name']} -> {cli_name}",
+            )
+            self.assertEqual(
+                tool.get("targetScope", "none"),
+                cli_command.get("targetScope", "none"),
+                f"{tool['name']} -> {cli_name}",
+            )
+
+    def test_every_builtin_mcp_tool_reaches_real_cli_dry_run(self) -> None:
+        import loom_mcp
+
+        failures: dict[str, Any] = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for tool in loom_mcp.tool_definitions():
+                name = str(tool["name"])
+                payload = _minimal_value(tool["inputSchema"])
+                payload["dryRun"] = True
+                result = loom_mcp.call_tool(
+                    name,
+                    payload,
+                    permission=str(tool["permission"]),
+                    base_path=temp_dir,
+                    trusted_internal=True,
+                )
+                content = json.loads(result["content"][0]["text"])
+                if result.get("isError") or not content.get("ok"):
+                    failures[name] = content.get("error") or content
+
+        self.assertEqual(failures, {})
+
+    def test_every_single_device_tool_schema_accepts_bound_device_id(self) -> None:
+        import loom_mcp
+
+        for tool in loom_mcp.tool_definitions():
+            if tool.get("targetScope") not in {"single-device-read", "single-device-write"}:
+                continue
+            properties = tool["inputSchema"].get("properties", {})
+            self.assertIn("deviceId", properties, tool["name"])
+            self.assertEqual(properties["deviceId"].get("type"), "string", tool["name"])
+
     def test_every_builtin_mcp_tool_round_trips_through_agent_registry(self) -> None:
         import loom_mcp
         from core.agent_capabilities import CapabilityRegistry

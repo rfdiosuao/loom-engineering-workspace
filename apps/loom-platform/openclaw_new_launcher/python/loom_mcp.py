@@ -215,8 +215,8 @@ def tool_definitions() -> list[Json]:
         _tool("loom_media_config", "Read image/video generation config.", "read", {}),
         _tool("loom_media_save_image_config", "Save image generation provider config.", "control", {"baseUrl": _string_schema("Image API base URL"), "apiKey": _string_schema("Image API key"), "model": _string_schema("Image model"), "provider": _string_schema("Provider label", required=False)}),
         _tool("loom_media_save_video_config", "Save video generation provider config.", "control", {"baseUrl": _string_schema("Video API base URL"), "apiKey": _string_schema("Video API key"), "model": _string_schema("Video model"), "provider": _string_schema("Provider label", required=False)}),
-        _tool("loom_media_test_image", "Test image generation provider config.", "read", {}),
-        _tool("loom_media_test_video", "Test video generation provider config.", "read", {}),
+        _tool("loom_media_test_image", "Test image generation provider config.", "control", {}),
+        _tool("loom_media_test_video", "Test video generation provider config.", "control", {}),
         _tool("loom_media_generate_image", "Submit an image generation job.", "control", {"prompt": _string_schema("Image prompt"), "editImage": _string_schema("Optional image path for edit mode", required=False), "sync": {"type": "boolean", "required": False}}),
         _tool("loom_media_generate_video", "Submit a video generation job.", "control", {"prompt": _string_schema("Video prompt"), "image": _string_schema("Optional reference image path", required=False), "sync": {"type": "boolean", "required": False}}),
         _tool(
@@ -258,7 +258,10 @@ def tool_definitions() -> list[Json]:
             "loom_phone_template_task",
             "Run a built-in phone template task.",
             "control",
-            {"template": {"type": "string", "enum": ["read-screen", "screen-summary", "back", "home"], "required": False}},
+            {
+                "template": {"type": "string", "enum": ["read-screen", "screen-summary", "back", "home"], "required": False},
+                "deviceId": _string_schema("Bound device ID", required=False),
+            },
             target_scope="single-device-write",
         ),
         _tool("loom_phone_adb_doctor", "Repair common ADB or phone connection issues.", "admin", {
@@ -319,7 +322,15 @@ def tool_definitions() -> list[Json]:
             "automation",
             {
                 "name": _string_schema("Task name"),
-                "command": _string_schema("Allowed LOOM CLI command"),
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "Allowed LOOM CLI command. Supported roots: status, models, logs; "
+                        "supported commands: agents list, phone screenshot, phone read, "
+                        "phone read-screen, phone quick-task, phone template-task."
+                    ),
+                    "examples": ["status", "phone screenshot"],
+                },
                 "at": _string_schema("ISO time", required=False),
                 "every": _string_schema("Repeat interval", required=False),
             },
@@ -393,7 +404,12 @@ def tool_definitions() -> list[Json]:
         _tool("loom_settings_update_check", "Check launcher update status.", "read", {}),
         _tool("loom_settings_update_install", "Install launcher update.", "admin", {}),
         _tool("loom_diagnostics_run", "Run launcher diagnostics.", "read", {"scope": _string_schema("Diagnostic scope", required=False)}),
-        _tool("loom_diagnostics_repair", "Run a diagnostic repair action.", "admin", {"action": _string_schema("Repair action")}),
+        _tool(
+            "loom_diagnostics_repair",
+            "Run a diagnostic repair action.",
+            "admin",
+            {"action": {"type": "string", "enum": ["prerequisites"], "description": "Repair action"}},
+        ),
         _tool("loom_diagnostics_export", "Export diagnostic bundle.", "read", {}),
         _tool("loom_license_current", "Read current license state.", "read", {}),
         _tool("loom_license_activate", "Activate a license code.", "control", {"code": _string_schema("License code")}),
@@ -642,7 +658,9 @@ def _tool_to_cli_args(name: str, args: Json) -> list[str]:
         _append_optional(argv, args, "deviceId", "--device-id")
         return argv
     if name == "loom_phone_template_task":
-        return ["phone", "template-task", "--template", str(args.get("template") or "read-screen")]
+        argv = ["phone", "template-task", "--template", str(args.get("template") or "read-screen")]
+        _append_optional(argv, args, "deviceId", "--device-id")
+        return argv
     if name == "loom_phone_adb_doctor":
         argv = ["phone", "adb-doctor"]
         _append_optional(argv, args, "serial", "--serial")
