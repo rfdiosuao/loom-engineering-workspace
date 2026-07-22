@@ -427,6 +427,7 @@ export interface MediaConfigSnapshot {
     duration?: number;
     ratio?: string;
     hasApiKey?: boolean;
+    configuredProviders?: import('../types').VideoProviderId[];
     updatedAt?: string;
   };
 }
@@ -587,6 +588,7 @@ export const videoApi = {
     source?: string;
     requestKey?: string;
     continuationMessage?: string;
+    resumeExisting?: boolean;
   }): Promise<{ video: string; mime?: string; size?: number; path?: string; directory?: string; filename?: string }> =>
     api('/api/video/generate', 'POST', params),
   submit: (params: {
@@ -603,6 +605,7 @@ export const videoApi = {
     source?: string;
     requestKey?: string;
     continuationMessage?: string;
+    resumeExisting?: boolean;
   }): Promise<{ jobId: string; job: BridgeJob }> =>
     api('/api/video/generate/submit', 'POST', params),
 };

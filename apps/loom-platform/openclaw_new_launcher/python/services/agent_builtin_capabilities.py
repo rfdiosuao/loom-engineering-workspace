@@ -157,7 +157,7 @@ class AgentBuiltinCapabilityProvider:
             _video_generation_failure,
             _video_generate_payload,
         )
-        from services.pippit_video_api import PippitManualRequired
+        from services.pippit_video_api import PippitManualRequired, PippitResumeRequired
         from services.video_api import VideoApiError
 
         requested_device_ids = [
@@ -225,7 +225,7 @@ class AgentBuiltinCapabilityProvider:
                         ),
                         request_key=str(body.get("requestKey") or job_id),
                     )
-                except (VideoApiError, PippitManualRequired, ValueError) as exc:
+                except (VideoApiError, PippitManualRequired, PippitResumeRequired, ValueError) as exc:
                     return _video_generation_failure(exc)
             ensure_job_active(job_id)
             update_progress(job_id, "正在传送到已配置手机相册", phase="phone-transfer")
@@ -264,6 +264,17 @@ class AgentBuiltinCapabilityProvider:
             }
         if terminal.get("status") == "cancelled":
             raise CapabilityExecutionError("capability_cancelled", "媒体生成任务已取消")
+        if result.get("resumeRequired") is True:
+            return {
+                "jobId": job_id,
+                "kind": kind,
+                "status": "resume_required",
+                "result": result,
+                "resumeRequired": True,
+                "requestKey": result.get("requestKey"),
+                "webThreadLink": result.get("webThreadLink"),
+                "attachments": [],
+            }
         if terminal.get("status") != "succeeded" or result.get("success") is False:
             failure = terminal.get("failure") if isinstance(terminal.get("failure"), dict) else {}
             code = str(result.get("errorCode") or failure.get("code") or "media_job_failed")

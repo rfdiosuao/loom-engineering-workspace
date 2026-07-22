@@ -13,7 +13,12 @@ import urllib.request
 from typing import Callable
 
 from core.constants import DASHSCOPE_TASK_URL, DASHSCOPE_VIDEO_URL, VIDEO_MODEL_I2V, VIDEO_MODEL_T2V
-from services.pippit_video_api import PippitManualRequired, PippitVideoClient, PippitVideoError
+from services.pippit_video_api import (
+    PippitManualRequired,
+    PippitResumeRequired,
+    PippitVideoClient,
+    PippitVideoError,
+)
 
 StatusCallback = Callable[[str, str], None]
 
@@ -63,6 +68,7 @@ class DashScopeVideoClient:
         request_key: str = "",
         state_path: str = "",
         continuation_message: str = "",
+        resume_existing: bool = False,
         poll_interval_ms: int | None = None,
         timeout_ms: int | None = None,
     ) -> bytes:
@@ -81,6 +87,7 @@ class DashScopeVideoClient:
                     request_key=request_key,
                     state_path=state_path,
                     continuation_message=continuation_message,
+                    resume_existing=resume_existing,
                     poll_interval_ms=poll_interval_ms,
                     timeout_ms=timeout_ms,
                     on_status=on_status,
@@ -102,7 +109,7 @@ class DashScopeVideoClient:
             if on_status:
                 on_status(f"任务已提交：{task_id[:8]}...，等待生成", "accent")
             return self._poll_dashscope_and_download(dash_key, task_id, on_status, task_url)
-        except PippitManualRequired:
+        except (PippitManualRequired, PippitResumeRequired):
             raise
         except PippitVideoError as error:
             raise VideoApiError(str(error)) from error

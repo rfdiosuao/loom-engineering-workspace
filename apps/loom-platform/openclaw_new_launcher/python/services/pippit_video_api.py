@@ -8,6 +8,7 @@ poll the original paid run instead of accidentally submitting it twice.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
@@ -25,6 +26,7 @@ from typing import Callable
 StatusCallback = Callable[[str, str], None]
 DEFAULT_API_BASE = "https://xyq.jianying.com"
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 _STORE_LOCK = threading.RLock()
 
 
@@ -34,6 +36,27 @@ class PippitVideoError(RuntimeError):
 
 class PippitSubmissionUncertain(PippitVideoError):
     pass
+
+
+class PippitTransientError(PippitVideoError):
+    pass
+
+
+class PippitResumeRequired(PippitVideoError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_key: str,
+        thread_id: str,
+        run_id: str,
+        web_thread_link: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.request_key = request_key
+        self.thread_id = thread_id
+        self.run_id = run_id
+        self.web_thread_link = web_thread_link
 
 
 class PippitManualRequired(PippitVideoError):
@@ -70,6 +93,7 @@ class PippitVideoClient:
         request_key: str = "",
         state_path: str = "",
         continuation_message: str = "",
+        resume_existing: bool = False,
         poll_interval_ms: int | None = None,
         timeout_ms: int | None = None,
         on_status: StatusCallback | None = None,
@@ -99,10 +123,36 @@ class PippitVideoClient:
         continuation_message = str(continuation_message or "").strip()
 
         state = self._read_run(state_path, request_key)
+        if resume_existing and not (
+            (state.get("threadId") and state.get("runId"))
+            or (state.get("status") == "succeeded" and state.get("videoUrl"))
+        ):
+            raise PippitVideoError("没有可恢复的小云雀原任务，已禁止创建新任务")
+        input_hash = "" if resume_existing else self._input_hash(
+            prompt,
+            mode,
+            resolution,
+            duration,
+            ratio,
+            image_path,
+        )
+        if (
+            not resume_existing
+            and not continuation_message
+            and state.get("inputHash")
+            and state.get("status") != "upload_failed"
+            and state.get("inputHash") != input_hash
+        ):
+            raise PippitVideoError(
+                "同一 request_key 的生成输入已变化，已阻止串用原付费任务。请新建任务。"
+            )
         if state.get("status") == "succeeded" and state.get("videoUrl"):
             if on_status:
                 on_status("正在恢复已完成的小云雀视频", "accent")
-            return self._download_video(str(state["videoUrl"]))
+            try:
+                return self._download_video(str(state["videoUrl"]))
+            except PippitVideoError as error:
+                raise self._resume_error(str(error), request_key, state) from error
 
         if continuation_message:
             state = self._continue_run(
@@ -118,6 +168,8 @@ class PippitVideoClient:
             if on_status:
                 on_status("正在恢复原小云雀任务，不会重复提交", "accent")
         else:
+            if resume_existing:
+                raise PippitVideoError("没有可恢复的小云雀原任务，已禁止创建新任务")
             if state.get("status") in {"submitting", "uncertain"}:
                 raise PippitVideoError(
                     "小云雀上次提交结果尚不确定，已停止自动重提以避免重复计费。请打开任务页确认。"
@@ -139,6 +191,7 @@ class PippitVideoClient:
                 duration,
                 ratio,
                 image_path,
+                input_hash,
                 on_status,
             )
 
@@ -165,15 +218,19 @@ class PippitVideoClient:
         duration: int,
         ratio: str,
         image_path: str | None,
+        input_hash: str,
         on_status: StatusCallback | None,
     ) -> dict:
         operation_id = uuid.uuid4().hex
+        now = time.time()
         initial_state = {
             "requestKey": request_key,
+            "inputHash": input_hash,
             "status": "uploading" if image_path else "submitting",
             "operationId": operation_id,
-            "createdAt": time.time(),
-            "updatedAt": time.time(),
+            "leaseExpiresAt": now + 1_200 if image_path else 0,
+            "createdAt": now,
+            "updatedAt": now,
         }
         state, claimed = self._claim_initial_run(state_path, request_key, initial_state)
         if not claimed:
@@ -187,8 +244,22 @@ class PippitVideoClient:
         if image_path:
             if on_status:
                 on_status("正在向小云雀上传参考素材", "neutral")
-            asset_ids.append(self._upload_asset(access_key, api_base, image_path))
-            state.update({"assetIds": asset_ids, "status": "submitting", "updatedAt": time.time()})
+            try:
+                asset_ids.append(self._upload_asset(access_key, api_base, image_path))
+            except Exception:
+                state.update({
+                    "status": "upload_failed",
+                    "leaseExpiresAt": 0,
+                    "updatedAt": time.time(),
+                })
+                self._write_run(state_path, request_key, state)
+                raise
+            state.update({
+                "assetIds": asset_ids,
+                "status": "submitting",
+                "leaseExpiresAt": 0,
+                "updatedAt": time.time(),
+            })
             self._write_run(state_path, request_key, state)
 
         if on_status:
@@ -308,14 +379,51 @@ class PippitVideoClient:
 
         deadline = time.monotonic() + (timeout_ms / 1000)
         attempt = 0
+        consecutive_query_failures = 0
         while time.monotonic() < deadline:
-            payload = self._get_thread(access_key, api_base, thread_id, run_id)
+            try:
+                payload = self._get_thread(access_key, api_base, thread_id, run_id)
+                consecutive_query_failures = 0
+            except PippitTransientError as error:
+                consecutive_query_failures += 1
+                state.update({"status": "running", "updatedAt": time.time()})
+                self._write_run(state_path, request_key, state)
+                if on_status:
+                    on_status(
+                        f"小云雀查询暂时失败，正在重试（{consecutive_query_failures}/3）",
+                        "warning",
+                    )
+                if consecutive_query_failures >= 3:
+                    raise self._resume_error(
+                        "小云雀连续 3 次查询失败，原任务仍已保留，请继续原任务查询",
+                        request_key,
+                        state,
+                    ) from error
+                if poll_interval_ms:
+                    time.sleep(poll_interval_ms / 1000)
+                continue
             run = self._find_run(payload, run_id)
             if run:
                 run_state = self._state_number(run.get("state"))
                 if run_state == 3:
                     video_urls = self._extract_video_urls(run.get("entry_list") or run)
                     if not video_urls:
+                        question = self._extract_manual_question(run)
+                        if question:
+                            state.update({
+                                "status": "needs_manual",
+                                "question": question,
+                                "updatedAt": time.time(),
+                            })
+                            self._write_run(state_path, request_key, state)
+                            raise PippitManualRequired(
+                                "小云雀需要您补充信息后继续",
+                                request_key=request_key,
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                web_thread_link=str(state.get("webThreadLink") or ""),
+                                question=question,
+                            )
                         state.update({"status": "failed", "updatedAt": time.time()})
                         self._write_run(state_path, request_key, state)
                         raise PippitVideoError("小云雀任务已完成，但没有发现可下载的视频")
@@ -328,7 +436,10 @@ class PippitVideoClient:
                     self._write_run(state_path, request_key, state)
                     if on_status:
                         on_status("正在下载并校验小云雀视频", "accent")
-                    return self._download_video(video_url)
+                    try:
+                        return self._download_video(video_url)
+                    except PippitVideoError as error:
+                        raise self._resume_error(str(error), request_key, state) from error
                 if run_state in {4, 5}:
                     state.update({
                         "status": "failed" if run_state == 4 else "cancelled",
@@ -366,7 +477,11 @@ class PippitVideoClient:
 
         state.update({"status": "running", "updatedAt": time.time()})
         self._write_run(state_path, request_key, state)
-        raise PippitVideoError("小云雀本轮等待超时，原任务已保留；再次提交会继续查询，不会重复创建")
+        raise self._resume_error(
+            "小云雀本轮等待超时，原任务已保留；继续原任务只会查询，不会重复创建",
+            request_key,
+            state,
+        )
 
     def _upload_asset(self, access_key: str, api_base: str, path: str) -> str:
         path = os.path.abspath(str(path or ""))
@@ -380,6 +495,8 @@ class PippitVideoClient:
 
         boundary = f"----loom-pippit-{uuid.uuid4().hex}"
         mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        if not mime.startswith(("image/", "video/")):
+            raise PippitVideoError("小云雀参考素材仅支持图片或视频文件")
         filename = os.path.basename(path).replace('"', "")
         parts = [
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"accessKey\"\r\n\r\n{access_key}\r\n".encode("utf-8"),
@@ -425,6 +542,7 @@ class PippitVideoClient:
             body,
             idempotency_key=request_key,
             timeout=90,
+            outcome_uncertain=True,
         )
         run = data.get("run") if isinstance(data.get("run"), dict) else {}
         returned_thread_id = str(run.get("thread_id") or thread_id or "").strip()
@@ -453,6 +571,7 @@ class PippitVideoClient:
         *,
         idempotency_key: str = "",
         timeout: int = 60,
+        outcome_uncertain: bool = False,
     ) -> dict:
         headers = {
             "Authorization": f"Bearer {access_key}",
@@ -465,9 +584,19 @@ class PippitVideoClient:
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers=headers,
         )
-        return self._read_envelope(request, timeout=timeout)
+        return self._read_envelope(
+            request,
+            timeout=timeout,
+            outcome_uncertain=outcome_uncertain,
+        )
 
-    def _read_envelope(self, request: urllib.request.Request, *, timeout: int) -> dict:
+    def _read_envelope(
+        self,
+        request: urllib.request.Request,
+        *,
+        timeout: int,
+        outcome_uncertain: bool = False,
+    ) -> dict:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -477,11 +606,21 @@ class PippitVideoClient:
                 detail = self._public_message(payload)
             except Exception:
                 detail = ""
+            if outcome_uncertain and (error.code == 408 or error.code >= 500):
+                raise PippitSubmissionUncertain(
+                    f"HTTP {error.code}: {detail or '小云雀提交结果不确定'}"
+                ) from error
+            if not outcome_uncertain and (error.code == 408 or error.code >= 500):
+                raise PippitTransientError(
+                    f"HTTP {error.code}: {detail or '小云雀接口暂时不可用'}"
+                ) from error
             raise PippitVideoError(f"HTTP {error.code}: {detail or '小云雀接口请求失败'}") from error
         except urllib.error.URLError as error:
-            raise PippitSubmissionUncertain(f"小云雀网络请求失败：{error.reason}") from error
+            error_type = PippitSubmissionUncertain if outcome_uncertain else PippitTransientError
+            raise error_type(f"小云雀网络请求失败：{error.reason}") from error
         except (UnicodeError, json.JSONDecodeError) as error:
-            raise PippitSubmissionUncertain("小云雀返回了无法解析的响应") from error
+            error_type = PippitSubmissionUncertain if outcome_uncertain else PippitTransientError
+            raise error_type("小云雀返回了无法解析的响应") from error
 
         if not isinstance(payload, dict):
             raise PippitVideoError("小云雀返回格式不正确")
@@ -504,35 +643,55 @@ class PippitVideoClient:
         candidates: list[str] = []
         video_extensions = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
 
-        def visit(item: object, parent_key: str = "", depth: int = 0) -> None:
+        def visit(item: object, key_path: tuple[str, ...] = (), depth: int = 0) -> None:
             if depth > 12:
                 return
             if isinstance(item, str):
                 text = item.strip()
                 if text.startswith(("{", "[")):
                     try:
-                        visit(json.loads(text), parent_key, depth + 1)
+                        visit(json.loads(text), key_path, depth + 1)
                     except (TypeError, ValueError, json.JSONDecodeError):
                         pass
                     return
-                if not text.startswith(("http://", "https://")):
+                if not text.startswith("https://"):
                     return
                 parsed = urllib.parse.urlsplit(text)
                 lowered = parsed.path.lower()
-                key = parent_key.lower()
-                if lowered.endswith(video_extensions) or "/video/" in lowered or "video" in key:
+                leaf_key = key_path[-1].lower() if key_path else ""
+                is_preview = any(marker in leaf_key for marker in ("thumbnail", "poster", "cover", "preview"))
+                is_video_field = any("video" in key.lower() for key in key_path) and leaf_key in {
+                    "url",
+                    "src",
+                    "download_url",
+                    "downloadurl",
+                    "play_url",
+                    "playurl",
+                    "video_url",
+                    "videourl",
+                }
+                if not is_preview and (
+                    lowered.endswith(video_extensions) or "/video/" in lowered or is_video_field
+                ):
                     candidates.append(text)
                 return
             if isinstance(item, dict):
                 mime = str(item.get("mime_type") or item.get("mimeType") or item.get("content_type") or "").lower()
                 for key, child in item.items():
-                    if isinstance(child, str) and mime.startswith("video/") and child.startswith(("http://", "https://")):
+                    key_lower = str(key).lower()
+                    is_preview = any(marker in key_lower for marker in ("thumbnail", "poster", "cover", "preview"))
+                    if (
+                        isinstance(child, str)
+                        and mime.startswith("video/")
+                        and child.startswith("https://")
+                        and not is_preview
+                    ):
                         candidates.append(child)
-                    visit(child, str(key), depth + 1)
+                    visit(child, (*key_path, str(key)), depth + 1)
                 return
             if isinstance(item, list):
                 for child in item:
-                    visit(child, parent_key, depth + 1)
+                    visit(child, key_path, depth + 1)
 
         visit(value)
         seen: set[str] = set()
@@ -630,26 +789,50 @@ class PippitVideoClient:
         return ""
 
     def _download_video(self, video_url: str) -> bytes:
+        self._validate_download_url(video_url)
         request = urllib.request.Request(video_url, headers={"User-Agent": "LOOM/1.0"})
         try:
             with urllib.request.urlopen(request, timeout=240) as response:
-                content_type = str(response.headers.get("Content-Type", ""))
-                data = response.read()
+                content_length = str(response.headers.get("Content-Length", "")).strip()
+                if content_length:
+                    try:
+                        if int(content_length) > MAX_DOWNLOAD_BYTES:
+                            raise PippitVideoError("小云雀返回的视频超过 512MB，已停止下载")
+                    except ValueError:
+                        pass
+                data = response.read(MAX_DOWNLOAD_BYTES + 1)
         except urllib.error.HTTPError as error:
             raise PippitVideoError(f"HTTP {error.code}: 小云雀视频下载失败") from error
         except urllib.error.URLError as error:
             raise PippitVideoError(f"小云雀视频下载失败：{error.reason}") from error
         if not data:
             raise PippitVideoError("小云雀视频下载结果为空")
+        if len(data) > MAX_DOWNLOAD_BYTES:
+            raise PippitVideoError("小云雀返回的视频超过 512MB，已停止下载")
         head = data[:128]
-        valid = (
-            (content_type.lower().startswith("video/") and len(data) > 1024)
-            or b"ftyp" in head
-            or head.startswith(b"\x1aE\xdf\xa3")
-        )
+        valid = b"ftyp" in head or head.startswith(b"\x1aE\xdf\xa3")
         if not valid:
             raise PippitVideoError("小云雀返回的文件不是可播放视频")
         return data
+
+    def _validate_download_url(self, video_url: str) -> None:
+        parsed = urllib.parse.urlsplit(str(video_url or "").strip())
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if (
+            parsed.scheme.lower() != "https"
+            or not hostname
+            or parsed.username
+            or parsed.password
+            or hostname == "localhost"
+            or hostname.endswith((".localhost", ".local"))
+        ):
+            raise PippitVideoError("小云雀返回了不安全的视频下载地址")
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            return
+        if not address.is_global:
+            raise PippitVideoError("小云雀返回了不安全的视频下载地址")
 
     def _read_run(self, state_path: str, request_key: str) -> dict:
         with self._store_guard(state_path):
@@ -679,7 +862,14 @@ class PippitVideoClient:
             runs = store.get("runs") if isinstance(store.get("runs"), dict) else {}
             existing = runs.get(request_key)
             if isinstance(existing, dict):
-                return dict(existing), False
+                existing_status = str(existing.get("status") or "")
+                lease_expired = (
+                    existing_status == "uploading"
+                    and float(existing.get("leaseExpiresAt") or 0) > 0
+                    and float(existing.get("leaseExpiresAt") or 0) <= time.time()
+                )
+                if existing_status != "upload_failed" and not lease_expired:
+                    return dict(existing), False
             runs[request_key] = dict(initial_state)
             self._write_store(state_path, {
                 "schemaVersion": 1,
@@ -780,15 +970,66 @@ class PippitVideoClient:
         return payload
 
     def _build_message(self, prompt: str, mode: str, resolution: str, duration: int, ratio: str) -> str:
-        reference = "已附参考素材，请基于素材生成" if str(mode or "").lower() == "i2v" else "根据文字描述生成"
-        return (
-            f"{str(prompt).strip()}\n\n"
-            f"制作要求：{reference}一条完整成片；画幅 {ratio}；清晰度 {resolution}；"
-            f"目标时长约 {max(1, int(duration))} 秒。信息已经确认，若无需额外素材请直接开始生成。"
+        return str(prompt or "").strip()
+
+    def _input_hash(
+        self,
+        prompt: str,
+        mode: str,
+        resolution: str,
+        duration: int,
+        ratio: str,
+        image_path: str | None,
+    ) -> str:
+        image_identity: dict[str, object] | None = None
+        if image_path:
+            normalized = os.path.abspath(str(image_path))
+            image_identity = {}
+            try:
+                digest = hashlib.sha256()
+                size = 0
+                with open(normalized, "rb") as handle:
+                    while True:
+                        chunk = handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        size += len(chunk)
+                image_identity.update({"sha256": digest.hexdigest(), "size": size})
+            except OSError:
+                image_identity["path"] = os.path.normcase(normalized)
+        payload = {
+            "prompt": str(prompt or "").strip(),
+            "mode": str(mode or "").strip().lower(),
+            "resolution": str(resolution or "").strip().upper(),
+            "duration": max(1, int(duration)),
+            "ratio": str(ratio or "").strip(),
+            "image": image_identity,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _resume_error(self, message: str, request_key: str, state: dict) -> PippitResumeRequired:
+        return PippitResumeRequired(
+            message,
+            request_key=request_key,
+            thread_id=str(state.get("threadId") or ""),
+            run_id=str(state.get("runId") or ""),
+            web_thread_link=str(state.get("webThreadLink") or ""),
         )
 
     def _normalize_base(self, api_base: str) -> str:
-        return str(api_base or DEFAULT_API_BASE).strip().rstrip("/") or DEFAULT_API_BASE
+        base = str(api_base or DEFAULT_API_BASE).strip().rstrip("/") or DEFAULT_API_BASE
+        parsed = urllib.parse.urlsplit(base)
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.netloc.lower() != "xyq.jianying.com"
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise PippitVideoError("小云雀仅允许使用官方接口地址 https://xyq.jianying.com")
+        return DEFAULT_API_BASE
 
     def _state_number(self, value: object) -> int:
         try:
