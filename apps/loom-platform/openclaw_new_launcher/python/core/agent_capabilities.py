@@ -6,6 +6,7 @@ import inspect
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -527,6 +528,7 @@ class CapabilityRegistry:
         cli_catalog_provider: Callable[[], Any] | None = None,
         cli_executor: Callable[[str, Json], Any] | None = None,
         cli_allowlist: Sequence[str] = tuple(DEFAULT_CLI_ALLOWLIST),
+        discovery_cache_ttl_sec: float = 5.0,
     ):
         self.internal_operations = dict(internal_operations or {})
         self.skill_provider = skill_provider or _default_skill_provider
@@ -537,6 +539,10 @@ class CapabilityRegistry:
         self.cli_catalog_provider = cli_catalog_provider or _default_cli_catalog_provider
         self.cli_executor = cli_executor or _default_cli_executor
         self.cli_allowlist = {str(item).strip() for item in cli_allowlist if str(item).strip()}
+        self.discovery_cache_ttl_sec = max(0.0, float(discovery_cache_ttl_sec or 0.0))
+        self._discovery_lock = threading.RLock()
+        self._discovery_cache: dict[str, Capability] | None = None
+        self._discovery_cache_expires_at = 0.0
 
     def list_capabilities(self, *, available_only: bool = False) -> list[Json]:
         capabilities = list(self._capabilities(available_only=available_only).values())
@@ -558,6 +564,8 @@ class CapabilityRegistry:
         capability, data = self.validate_input(name, payload)
         if capability.executor is None:
             raise CapabilityExecutionError("capability_unavailable", f"Capability is not connected: {name}")
+        if capability.permission != "read":
+            self.invalidate_cache()
         token = CapabilityCancellationToken()
         state = _ExecutionState()
         supports_cancellation = _accepts_cancellation_token(capability.executor)
@@ -623,14 +631,30 @@ class CapabilityRegistry:
         return capability, data
 
     def _all_capabilities(self) -> dict[str, Capability]:
-        capabilities = self._internal_capabilities()
-        for capability in self._skill_capabilities():
-            capabilities[capability.name] = capability
-        for capability in self._mcp_capabilities():
-            capabilities[capability.name] = capability
-        for capability in self._cli_capabilities():
-            capabilities[capability.name] = capability
-        return dict(sorted(capabilities.items()))
+        now = time.monotonic()
+        with self._discovery_lock:
+            if (
+                self._discovery_cache is not None
+                and now < self._discovery_cache_expires_at
+            ):
+                return dict(self._discovery_cache)
+            capabilities = self._internal_capabilities()
+            for capability in self._skill_capabilities():
+                capabilities[capability.name] = capability
+            for capability in self._mcp_capabilities():
+                capabilities[capability.name] = capability
+            for capability in self._cli_capabilities():
+                capabilities[capability.name] = capability
+            discovered = dict(sorted(capabilities.items()))
+            if self.discovery_cache_ttl_sec > 0:
+                self._discovery_cache = discovered
+                self._discovery_cache_expires_at = now + self.discovery_cache_ttl_sec
+            return dict(discovered)
+
+    def invalidate_cache(self) -> None:
+        with self._discovery_lock:
+            self._discovery_cache = None
+            self._discovery_cache_expires_at = 0.0
 
     def _capabilities(self, *, available_only: bool = False) -> dict[str, Capability]:
         capabilities = list(self._all_capabilities().values())
@@ -818,11 +842,15 @@ def _preferred_capability(
     *,
     prefer_available: bool,
 ) -> Capability:
+    eligible = list(candidates)
+    if prefer_available:
+        available = [capability for capability in eligible if capability.executor is not None]
+        if available:
+            eligible = available
     return min(
-        candidates,
+        eligible,
         key=lambda capability: (
-            0 if not prefer_available or capability.executor is not None else 1,
-            0 if _preserves_structured_contract(capability, candidates) else 1,
+            0 if _preserves_structured_contract(capability, eligible) else 1,
             CAPABILITY_SOURCE_PRIORITY.get(capability.source, 99),
             capability.name,
         ),
@@ -1042,15 +1070,49 @@ def _validate_schema(value: Any, schema: Mapping[str, Any], *, path: str) -> Non
             raise CapabilityInputError(f"{path} must be at least {minimum}")
         if isinstance(maximum, (int, float)) and value > maximum:
             raise CapabilityInputError(f"{path} must be at most {maximum}")
-    if expected == "object" and isinstance(value, Mapping):
-        for key in schema.get("required", []):
+    required = schema.get("required")
+    properties = schema.get("properties")
+    has_required_fields = isinstance(required, Sequence) and not isinstance(required, (str, bytes))
+    has_object_constraints = (
+        expected == "object"
+        or isinstance(properties, Mapping)
+        or has_required_fields
+        or schema.get("additionalProperties") is False
+    )
+    if has_object_constraints:
+        if not isinstance(value, Mapping):
+            raise CapabilityInputError(f"{path} must be object")
+        for key in required if has_required_fields else []:
             if key not in value:
                 raise CapabilityInputError(f"{path}.{key} is required")
-        properties = schema.get("properties", {})
         if isinstance(properties, Mapping):
             for key, child_schema in properties.items():
                 if key in value and isinstance(child_schema, Mapping):
                     _validate_schema(value[key], child_schema, path=f"{path}.{key}")
+            if schema.get("additionalProperties") is False:
+                unexpected = [str(key) for key in value if key not in properties]
+                if unexpected:
+                    raise CapabilityInputError(f"{path}.{sorted(unexpected)[0]} is not allowed")
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, Sequence) and not isinstance(any_of, (str, bytes)) and any_of:
+        for option in any_of:
+            if not isinstance(option, Mapping):
+                continue
+            try:
+                _validate_schema(value, option, path=path)
+            except CapabilityInputError:
+                continue
+            break
+        else:
+            required_options = [
+                "/".join(str(key) for key in option.get("required", []))
+                for option in any_of
+                if isinstance(option, Mapping)
+                and isinstance(option.get("required"), Sequence)
+                and not isinstance(option.get("required"), (str, bytes))
+            ]
+            detail = f": {' or '.join(required_options)}" if required_options else ""
+            raise CapabilityInputError(f"{path} must satisfy one allowed parameter combination{detail}")
 
 
 def _default_skill_provider() -> Any:

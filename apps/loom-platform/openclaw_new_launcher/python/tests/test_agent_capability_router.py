@@ -19,6 +19,8 @@ class AgentCapabilityRouterTests(unittest.TestCase):
             {"name": "loom.matrix.dispatch", "domain": "matrix", "available": True},
             {"name": "loom.cli.account.current", "domain": "account", "available": True},
             {"name": "loom.cli.logs.tail", "domain": "diagnostics", "available": True},
+            {"name": "loom.settings.update.check", "domain": "settings", "available": True},
+            {"name": "loom.settings.update.install", "domain": "settings", "available": True},
         ]
 
     def test_media_and_phone_cross_domain_request_is_focused(self) -> None:
@@ -73,6 +75,63 @@ class AgentCapabilityRouterTests(unittest.TestCase):
         self.assertEqual(len(selected), len(self.capabilities))
         self.assertEqual(metadata["mode"], "full")
         self.assertEqual(metadata["reason"], "selection_repair")
+
+    def test_update_request_includes_settings_update_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {"prompt": "检查麓鸣更新，如果有新版本就安装"},
+            self.capabilities,
+        )
+
+        names = {item["name"] for item in selected}
+        self.assertIn("loom.settings.update.check", names)
+        self.assertIn("loom.settings.update.install", names)
+        self.assertNotIn("loom.media.image.generate", names)
+        self.assertEqual(metadata["mode"], "focused")
+        self.assertIn("settings", metadata["domains"])
+
+    def test_nested_single_device_scope_focuses_phone_tools_for_short_followup(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {
+                "prompt": "继续",
+                "requestScope": {
+                    "status": "resolved",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            },
+            self.capabilities,
+        )
+
+        names = {item["name"] for item in selected}
+        self.assertIn("loom.phone.publish", names)
+        self.assertNotIn("loom.matrix.dispatch", names)
+        self.assertNotIn("loom.media.image.generate", names)
+        self.assertEqual(metadata["mode"], "focused")
+        self.assertEqual(metadata["domains"], ["phone"])
+
+    def test_nested_all_online_scope_focuses_matrix_tools_for_short_followup(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {
+                "prompt": "开始执行",
+                "requestScope": {
+                    "status": "resolved",
+                    "targets": {"allOnline": True},
+                },
+            },
+            self.capabilities,
+        )
+
+        names = {item["name"] for item in selected}
+        self.assertIn("loom.matrix.dispatch", names)
+        self.assertNotIn("loom.phone.publish", names)
+        self.assertNotIn("loom.media.image.generate", names)
+        self.assertEqual(metadata["mode"], "focused")
+        self.assertEqual(metadata["domains"], ["matrix"])
 
 
 if __name__ == "__main__":

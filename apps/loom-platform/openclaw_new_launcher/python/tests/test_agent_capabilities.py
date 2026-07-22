@@ -524,6 +524,54 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertTrue(registry.execute("loom.mcp.loom.loom_job_get", {"id": "job-2"})["ok"])
         self.assertEqual(calls, [("loom_job_get", {"id": "job-1"}), ("loom_job_get", {"id": "job-2"})])
 
+    def test_unavailable_internal_alias_does_not_change_the_model_selected_executor(self) -> None:
+        from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
+
+        calls: list[tuple[str, dict]] = []
+        registry = CapabilityRegistry(
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "loom",
+                "name": "loom_matrix_dispatch",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["prompt", "targets"],
+                    "properties": {
+                        "prompt": {"type": "string", "minLength": 1},
+                        "targets": {"type": "object"},
+                    },
+                    "additionalProperties": False,
+                },
+                "permission": "control",
+                "risk": "control_safe",
+            }],
+            mcp_executor=lambda _server, tool, data: calls.append((tool, data)) or {"ok": True},
+            cli_catalog_provider=lambda: {
+                "domains": [{"domain": "matrix", "commands": [{"name": "matrix dispatch"}]}],
+            },
+            cli_executor=lambda _command, _payload: self.fail(
+                "execution must use the same structured implementation exposed to the model"
+            ),
+        )
+
+        catalog = registry.list_capabilities(available_only=True)
+        self.assertEqual(len(catalog), 1)
+        exposed_name = catalog[0]["name"]
+        self.assertEqual(catalog[0]["source"], "mcp")
+        with self.assertRaises(CapabilityInputError):
+            registry.validate_input(exposed_name, {"prompt": "读取屏幕"})
+
+        result = registry.execute(
+            exposed_name,
+            {"prompt": "读取屏幕", "targets": {"deviceIds": ["phone-1"]}},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [(
+            "loom_matrix_dispatch",
+            {"prompt": "读取屏幕", "targets": {"deviceIds": ["phone-1"]}},
+        )])
+
     def test_execute_validates_input_schema_and_dispatches_by_source(self) -> None:
         from core.agent_capabilities import CapabilityInputError
 
@@ -540,6 +588,43 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(skill["skill"], "screen-reader")
         self.assertEqual(mcp["tool"], "search_logs")
         self.assertEqual(cli["command"], "phone status")
+
+    def test_discovery_is_reused_across_list_resolve_validate_and_read_execution(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        calls = {"skills": 0, "mcp": 0, "cli": 0}
+
+        def skills():
+            calls["skills"] += 1
+            return []
+
+        def mcp():
+            calls["mcp"] += 1
+            return [{
+                "server": "local",
+                "name": "ping",
+                "inputSchema": {"type": "object", "additionalProperties": False},
+                "permission": "read",
+                "risk": "read",
+            }]
+
+        def cli():
+            calls["cli"] += 1
+            return {"domains": []}
+
+        registry = CapabilityRegistry(
+            skill_provider=skills,
+            mcp_provider=mcp,
+            mcp_executor=lambda _server, _tool, _payload: {"ok": True},
+            cli_catalog_provider=cli,
+        )
+
+        registry.list_capabilities(available_only=True)
+        registry.get("loom.mcp.local.ping")
+        registry.validate_input("loom.mcp.local.ping", {})
+        registry.execute("loom.mcp.local.ping", {})
+
+        self.assertEqual(calls, {"skills": 1, "mcp": 1, "cli": 1})
 
     def test_validate_input_enforces_json_schema_value_constraints(self) -> None:
         from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
@@ -583,6 +668,77 @@ class CapabilityRegistryTests(unittest.TestCase):
             {"title": "title", "platform": "douyin", "mediaPaths": ["video.mp4"]},
         )
         self.assertEqual(valid["title"], "title")
+
+    def test_validate_input_enforces_any_of_and_rejects_unknown_properties(self) -> None:
+        from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.schedule": {
+                    "executor": lambda payload: {"ok": True, "payload": payload},
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1},
+                            "at": {"type": "string", "minLength": 1},
+                            "every": {"type": "string", "minLength": 1},
+                        },
+                        "anyOf": [
+                            {"required": ["at"]},
+                            {"required": ["every"]},
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "loom.test.matrix": {
+                    "executor": lambda payload: {"ok": True, "payload": payload},
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["targets"],
+                        "properties": {
+                            "targets": {
+                                "type": "object",
+                                "properties": {
+                                    "deviceIds": {"type": "array", "minItems": 1},
+                                    "allOnline": {"type": "boolean"},
+                                },
+                                "anyOf": [
+                                    {"required": ["deviceIds"]},
+                                    {"required": ["allOnline"]},
+                                ],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        invalid_cases = [
+            ("loom.test.schedule", {"name": "nightly"}),
+            ("loom.test.schedule", {"name": "nightly", "at": "21:00", "timezone": "Asia/Shanghai"}),
+            ("loom.test.matrix", {"targets": {}}),
+            ("loom.test.matrix", {"targets": {"allOnline": True, "unknown": True}}),
+        ]
+        for capability, payload in invalid_cases:
+            with self.subTest(capability=capability, payload=payload), self.assertRaises(CapabilityInputError):
+                registry.validate_input(capability, payload)
+
+        _, scheduled = registry.validate_input(
+            "loom.test.schedule",
+            {"name": "nightly", "every": "1h"},
+        )
+        _, matrix = registry.validate_input(
+            "loom.test.matrix",
+            {"targets": {"deviceIds": ["phone-1"]}},
+        )
+        self.assertEqual(scheduled["every"], "1h")
+        self.assertEqual(matrix["targets"]["deviceIds"], ["phone-1"])
 
     def test_execute_redacts_secrets_from_results(self) -> None:
         from core.agent_capabilities import CapabilityRegistry

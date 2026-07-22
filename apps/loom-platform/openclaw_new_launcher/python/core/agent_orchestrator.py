@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -22,6 +23,7 @@ Json = dict[str, Any]
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 MAX_TOOL_INPUT_REPAIR_ATTEMPTS = 1
 MAX_TOOL_SELECTION_REPAIR_ATTEMPTS = 1
+MAX_CONSECUTIVE_DEDUPLICATED_CALLS = 1
 
 
 class AgentRepositoryProtocol(Protocol):
@@ -217,6 +219,47 @@ class AgentOrchestrator:
                 try:
                     capability = self.capabilities.get(call["name"])
                     call = self._bind_execution_scope(session_id, run_id, call, capability, checkpoint)
+                    fingerprint = _tool_fingerprint(capability.name, call["input"])
+                    previous_result = _previous_completed_tool_result(checkpoint, fingerprint)
+                    can_refresh = (
+                        capability.permission == "read"
+                        and previous_result is not None
+                        and _tool_result_requires_refresh(previous_result.get("result"))
+                    )
+                    if previous_result is not None and not can_refresh:
+                        duplicate_count = int(checkpoint.get("consecutiveDeduplicatedToolCalls", 0) or 0) + 1
+                        checkpoint["consecutiveDeduplicatedToolCalls"] = duplicate_count
+                        if duplicate_count > MAX_CONSECUTIVE_DEDUPLICATED_CALLS:
+                            error = {
+                                "code": "agent_repeated_tool_call",
+                                "message": "智能体连续请求了相同工具且没有新证据，已停止重复执行。",
+                                "recoverable": True,
+                            }
+                            _close_failed_tool_checkpoint(checkpoint, call, error)
+                            self._emit(
+                                session_id,
+                                run_id,
+                                "tool.failed",
+                                {"toolCallId": call_id, "capability": call["name"], "error": error},
+                            )
+                            return self._fail_run(
+                                session_id,
+                                run_id,
+                                error["code"],
+                                error["message"],
+                                True,
+                                checkpoint,
+                            )
+                        self._reuse_completed_tool_result(
+                            session_id,
+                            run_id,
+                            call,
+                            checkpoint,
+                            previous_result,
+                            fingerprint,
+                        )
+                        continue
+                    checkpoint["consecutiveDeduplicatedToolCalls"] = 0
                     self.capabilities.validate_input(call["name"], call["input"])
                     decision = self.policy.evaluate(capability, call["input"])
                     if not decision.allowed:
@@ -808,6 +851,7 @@ class AgentOrchestrator:
                 "status": "completed",
                 "input": _summary(call["input"]),
                 "result": _summary(safe_result),
+                "fingerprint": _tool_fingerprint(capability.name, call["input"]),
             }
         )
         checkpoint["inFlightToolCall"] = None
@@ -831,6 +875,46 @@ class AgentOrchestrator:
         )
         self._pending_inputs.pop((run_id, call_id), None)
         return safe_result
+
+    def _reuse_completed_tool_result(
+        self,
+        session_id: str,
+        run_id: str,
+        call: Json,
+        checkpoint: Json,
+        previous_result: Mapping[str, Any],
+        fingerprint: str,
+    ) -> None:
+        call_id = call["toolCallId"]
+        if call_id not in checkpoint["completedToolCallIds"]:
+            checkpoint["completedToolCallIds"].append(call_id)
+        output_summary = _summary(previous_result.get("result"))
+        checkpoint["toolResults"].append({
+            "toolCallId": call_id,
+            "capability": call["name"],
+            "status": "completed",
+            "input": _summary(call["input"]),
+            "result": output_summary,
+            "fingerprint": fingerprint,
+            "deduplicated": True,
+        })
+        checkpoint["inFlightToolCall"] = None
+        self.repository.update_run(
+            run_id,
+            {"checkpoint": _dump_checkpoint(checkpoint)},
+            session_id=session_id,
+        )
+        self._emit(
+            session_id,
+            run_id,
+            "tool.completed",
+            {
+                "toolCallId": call_id,
+                "capability": call["name"],
+                "outputSummary": output_summary,
+                "deduplicated": True,
+            },
+        )
 
     def _attach_matrix_result(self, session_id: str, run_id: str, call: Json, result: Any) -> None:
         if not isinstance(result, Mapping):
@@ -1009,7 +1093,54 @@ def _empty_checkpoint() -> Json:
         "completedToolCallIds": [],
         "toolResults": [],
         "inFlightToolCall": None,
+        "consecutiveDeduplicatedToolCalls": 0,
     }
+
+
+def _tool_fingerprint(capability_name: str, tool_input: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        {"capability": capability_name, "input": dict(tool_input)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _previous_completed_tool_result(checkpoint: Mapping[str, Any], fingerprint: str) -> Json | None:
+    tool_results = checkpoint.get("toolResults")
+    if not isinstance(tool_results, list):
+        return None
+    for item in reversed(tool_results):
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("status") or "") != "completed":
+            return None
+        return dict(item) if str(item.get("fingerprint") or "") == fingerprint else None
+    return None
+
+
+def _tool_result_requires_refresh(value: Any, *, depth: int = 0) -> bool:
+    if depth > 5:
+        return False
+    if isinstance(value, Mapping):
+        for key in ("status", "state", "phase"):
+            status = str(value.get(key) or "").strip().lower().replace("-", "_")
+            if status in {
+                "queued",
+                "pending",
+                "running",
+                "in_progress",
+                "processing",
+                "submitted",
+                "waiting",
+            }:
+                return True
+        return any(_tool_result_requires_refresh(item, depth=depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return any(_tool_result_requires_refresh(item, depth=depth + 1) for item in value)
+    return False
 
 
 def _close_failed_tool_checkpoint(

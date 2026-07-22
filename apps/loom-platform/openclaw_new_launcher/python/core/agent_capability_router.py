@@ -41,6 +41,7 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "models": ("模型", "供应商", "api key", "apikey", "provider", "model"),
     "account": ("账号", "登录", "订阅", "额度", "账户", "account", "login", "quota"),
     "agent": ("智能体", "agent", "runtime", "运行时", "技能", "skill", "mcp", "cli"),
+    "settings": ("设置", "主题", "深色", "浅色", "更新", "版本", "settings", "theme", "update", "version"),
     "diagnostics": (
         "诊断", "日志", "报错", "错误", "失败", "状态", "健康", "修复", "更新", "diagnostic", "log", "error", "status",
     ),
@@ -127,25 +128,34 @@ def _intent_domains(text: str, request: Mapping[str, Any]) -> set[str]:
     }
     scope = request.get("requestScope")
     if isinstance(scope, Mapping):
-        device_ids = scope.get("deviceIds") or scope.get("devices")
-        group_ids = scope.get("groupIds") or scope.get("groups")
-        if isinstance(device_ids, list) and device_ids:
-            domains.add("phone")
-        if isinstance(group_ids, list) and group_ids:
-            domains.add("matrix")
-        target = scope.get("target")
+        _add_target_domains(domains, scope)
+        for key in ("target", "targets"):
+            target = scope.get(key)
+            if isinstance(target, Mapping):
+                _add_target_domains(domains, target)
+    for key in ("target", "targets"):
+        target = request.get(key)
         if isinstance(target, Mapping):
-            if target.get("deviceIds"):
-                domains.add("phone")
-            if target.get("groupIds"):
-                domains.add("matrix")
-    target = request.get("target")
-    if isinstance(target, Mapping):
-        if target.get("deviceIds") or target.get("deviceId"):
-            domains.add("phone")
-        if target.get("groupIds") or target.get("groupId"):
-            domains.add("matrix")
+            _add_target_domains(domains, target)
     return domains
+
+
+def _add_target_domains(domains: set[str], target: Mapping[str, Any]) -> None:
+    raw_device_ids = target.get("deviceIds") or target.get("devices")
+    device_ids = raw_device_ids if isinstance(raw_device_ids, list) else []
+    has_single_device = bool(target.get("deviceId")) or len(device_ids) == 1
+    has_multiple_devices = len(device_ids) > 1
+    has_matrix_target = bool(
+        target.get("groupIds")
+        or target.get("groups")
+        or target.get("groupId")
+        or target.get("group")
+        or target.get("allOnline") is True
+    )
+    if has_single_device and not has_matrix_target:
+        domains.add("phone")
+    if has_multiple_devices or has_matrix_target:
+        domains.add("matrix")
 
 
 def _capability_domains(capability: Mapping[str, Any]) -> set[str]:

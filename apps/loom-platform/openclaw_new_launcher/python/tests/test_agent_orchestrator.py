@@ -185,6 +185,169 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in events].count("tool.failed"), 0)
         self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 1)
 
+    def test_consecutive_identical_completed_read_is_reused_instead_of_executed_again(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        calls: list[dict] = []
+        repeated_call = {
+            "name": "loom.status.inspect",
+            "input": {},
+        }
+        runtime = ScriptedRuntime([
+            {"toolCalls": [{"toolCallId": "status-1", **repeated_call}]},
+            {"toolCalls": [{"toolCallId": "status-2", **repeated_call}]},
+            {"final": {"text": "系统状态正常"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.status.inspect": {
+                        "executor": lambda payload: calls.append(payload) or {"ok": True, "status": "ready"},
+                        "permission": "read",
+                        "risk": "read",
+                        "timeoutSec": 2,
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            bus = AgentEventBus(repository)
+            orchestrator = AgentOrchestrator(
+                repository,
+                bus,
+                runtime,
+                registry,
+                AgentPolicyEngine(),
+            )
+            orchestrator.queue_run("session-1", run_id="run-deduplicate-read")
+
+            completed = orchestrator.execute_run(
+                "session-1",
+                "run-deduplicate-read",
+                {"prompt": "检查系统状态"},
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(calls, [{}])
+        checkpoint = json.loads(completed["checkpoint"])
+        self.assertEqual(len(checkpoint["toolResults"]), 2)
+        self.assertTrue(checkpoint["toolResults"][1]["deduplicated"])
+        completed_events = [event for event in events if event["type"] == "tool.completed"]
+        self.assertEqual(len(completed_events), 2)
+        self.assertTrue(completed_events[1]["data"]["deduplicated"])
+
+    def test_repeated_completed_read_loop_fails_before_spamming_executor(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        calls: list[dict] = []
+        runtime = ScriptedRuntime([
+            {"toolCalls": [{"toolCallId": "status-1", "name": "loom.status.inspect", "input": {}}]},
+            {"toolCalls": [{"toolCallId": "status-2", "name": "loom.status.inspect", "input": {}}]},
+            {"toolCalls": [{"toolCallId": "status-3", "name": "loom.status.inspect", "input": {}}]},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.status.inspect": {
+                        "executor": lambda payload: calls.append(payload) or {"ok": True, "status": "ready"},
+                        "permission": "read",
+                        "risk": "read",
+                        "timeoutSec": 2,
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                AgentEventBus(repository),
+                runtime,
+                registry,
+                AgentPolicyEngine(),
+            )
+            orchestrator.queue_run("session-1", run_id="run-repeated-read-loop")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-repeated-read-loop",
+                {"prompt": "检查系统状态"},
+            )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "agent_repeated_tool_call")
+        self.assertEqual(calls, [{}])
+
+    def test_identical_read_can_poll_again_while_previous_result_is_running(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        calls: list[dict] = []
+        statuses = iter(("running", "completed"))
+        runtime = ScriptedRuntime([
+            {"toolCalls": [{"toolCallId": "job-1", "name": "loom.job.inspect", "input": {"id": "job-a"}}]},
+            {"toolCalls": [{"toolCallId": "job-2", "name": "loom.job.inspect", "input": {"id": "job-a"}}]},
+            {"final": {"text": "任务已完成"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.job.inspect": {
+                        "executor": lambda payload: calls.append(payload) or {"status": next(statuses)},
+                        "permission": "read",
+                        "risk": "read",
+                        "timeoutSec": 2,
+                        "inputSchema": {
+                            "type": "object",
+                            "required": ["id"],
+                            "properties": {"id": {"type": "string"}},
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                AgentEventBus(repository),
+                runtime,
+                registry,
+                AgentPolicyEngine(),
+            )
+            orchestrator.queue_run("session-1", run_id="run-poll-running-job")
+
+            completed = orchestrator.execute_run(
+                "session-1",
+                "run-poll-running-job",
+                {"prompt": "等待任务完成"},
+            )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(calls, [{"id": "job-a"}, {"id": "job-a"}])
+        checkpoint = json.loads(completed["checkpoint"])
+        self.assertFalse(any(item.get("deduplicated") for item in checkpoint["toolResults"]))
+
     def test_unknown_capability_selection_repair_is_bounded_to_one_attempt(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
         from core.agent_events import AgentEventBus
