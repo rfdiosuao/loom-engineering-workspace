@@ -285,6 +285,7 @@ DEFAULT_CLI_ALLOWLIST = frozenset(
 )
 
 SEMANTIC_CAPABILITY_GROUPS = (
+    ("loom.capabilities.list", "loom.mcp.loom.loom_cli_commands"),
     ("loom.logs.tail", "loom.cli.logs.tail", "loom.mcp.loom.loom_logs_tail"),
     ("loom.matrix.status", "loom.cli.matrix.status", "loom.mcp.loom.loom_matrix_status"),
     ("loom.matrix.dispatch", "loom.cli.matrix.dispatch", "loom.mcp.loom.loom_matrix_dispatch"),
@@ -433,6 +434,16 @@ UNSAFE_CLI_GLOBAL_OPTIONS = frozenset(
 
 
 DEFAULT_INTERNAL_SPECS: dict[str, Json] = {
+    "loom.capabilities.list": {
+        "displayName": "查看能力目录",
+        "description": "查看麓鸣智能体当前真实连接且可执行的完整能力目录。",
+        "domain": "agent",
+        "targetScope": "none",
+        "permission": "read",
+        "risk": "read",
+        "timeoutSec": 15,
+        "inputSchema": {"type": "object", "additionalProperties": False},
+    },
     "loom.matrix.status": {
         "displayName": "查看矩阵状态",
         "description": "查看手机矩阵任务与设备执行状态。",

@@ -136,6 +136,7 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(matrix_dispatch["targetScope"], "matrix-write")
 
         expected_scopes = {
+            "loom.capabilities.list": "none",
             "loom.matrix.status": "none",
             "loom.matrix.dispatch": "matrix-write",
             "loom.matrix.screenshot": "single-device-read",
@@ -343,6 +344,33 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertNotIn("loom.mcp.loom.loom_matrix_status", full_names)
         self.assertNotIn("loom.mcp.loom.loom_status", connected_names)
         self.assertIn("loom.cli.status", connected_names)
+
+    def test_native_capability_catalog_deduplicates_the_legacy_mcp_catalog(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        calls: list[str] = []
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.capabilities.list": {
+                    "executor": lambda _payload: calls.append("internal") or {"count": 1},
+                },
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "loom",
+                "name": "loom_cli_commands",
+                "permission": "read",
+                "risk": "read",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: calls.append("mcp") or {"count": 2},
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        names = {item["name"] for item in registry.list_capabilities(available_only=True)}
+        self.assertIn("loom.capabilities.list", names)
+        self.assertNotIn("loom.mcp.loom.loom_cli_commands", names)
+        self.assertEqual(registry.execute("loom.mcp.loom.loom_cli_commands", {}), {"count": 1})
+        self.assertEqual(calls, ["internal"])
 
     def test_semantic_aliases_execute_the_preferred_connected_implementation(self) -> None:
         from core.agent_capabilities import CapabilityRegistry

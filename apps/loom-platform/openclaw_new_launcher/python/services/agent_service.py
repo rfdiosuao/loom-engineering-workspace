@@ -986,12 +986,40 @@ class AgentService:
 
     def _internal_operations(self) -> Json:
         return {
+            "loom.capabilities.list": {
+                "executor": self._connected_capability_catalog,
+                "permission": "read",
+                "risk": "read",
+            },
             "loom.matrix.status": {"executor": self._matrix_status, "permission": "read", "risk": "read"},
             "loom.matrix.dispatch": {"executor": self._matrix_dispatch, "permission": "control", "risk": "control_safe", "timeoutSec": 180},
             "loom.matrix.screenshot": {"executor": self._matrix_screenshot, "permission": "read", "risk": "read", "timeoutSec": 60},
             "loom.matrix.cancel": {"executor": self._matrix_cancel, "permission": "control", "risk": "control_safe"},
             "loom.matrix.retry": {"executor": self._matrix_retry, "permission": "control", "risk": "control_safe", "timeoutSec": 180},
             "loom.logs.tail": {"executor": self._logs_tail, "permission": "read", "risk": "read"},
+        }
+
+    def _connected_capability_catalog(self, _payload: Json) -> Json:
+        capabilities = self.capabilities.list_capabilities(available_only=True)
+        domains: dict[str, list[str]] = {}
+        for item in capabilities:
+            if not isinstance(item, Mapping):
+                continue
+            domain = str(item.get("domain") or "general")
+            display_name = str(item.get("displayName") or "").strip()
+            if display_name:
+                domains.setdefault(domain, []).append(display_name)
+        return {
+            "schema": "loom.agent.capability-catalog.v1",
+            "count": len(capabilities),
+            "domains": [
+                {
+                    "domain": domain,
+                    "count": len(display_names),
+                    "capabilities": display_names,
+                }
+                for domain, display_names in sorted(domains.items())
+            ],
         }
 
     def _require_matrix_access(self) -> None:

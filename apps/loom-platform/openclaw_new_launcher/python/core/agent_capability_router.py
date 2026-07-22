@@ -16,12 +16,21 @@ _BROAD_INTENT_PATTERNS = (
     "完整能力",
     "能力目录",
     "能力列表",
+    "已开放能力",
+    "已连接能力",
+    "连接的能力",
+    "可以掌握什么",
     "你会什么",
     "你能做什么",
     "what can you do",
+    "what capabilities",
+    "connected capabilities",
     "all capabilities",
     "capability catalog",
 )
+
+_CAPABILITY_CATALOG_NAME = "loom.capabilities.list"
+_LEGACY_CAPABILITY_CATALOG_SUFFIX = ".loom_cli_commands"
 
 _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "media": (
@@ -74,6 +83,33 @@ def route_capabilities(
     folded = text.casefold()
     explicit_mode = str(request.get("capabilityRoutingMode") or "").strip().lower()
     hinted = _available_capability_hints(request, available)
+
+    catalog_capability = _capability_catalog(available)
+    if (
+        explicit_mode != "full"
+        and any(pattern in folded for pattern in _BROAD_INTENT_PATTERNS)
+        and catalog_capability is not None
+    ):
+        catalog_name = str(catalog_capability.get("name") or "").strip()
+        if _has_capability_result(checkpoint, catalog_name):
+            return [catalog_capability], _routing_metadata(
+                "response_only",
+                set(),
+                len(available),
+                1,
+                "capability_catalog_available",
+                hinted,
+                toolChoice="none",
+            )
+        return [catalog_capability], _routing_metadata(
+            "forced",
+            set(),
+            len(available),
+            1,
+            "capability_catalog_required",
+            hinted,
+            forcedCapability=catalog_name,
+        )
 
     fallback_reason = ""
     if explicit_mode == "full":
@@ -134,6 +170,29 @@ def _available_capability_hints(
             for hint in raw_hints
             if isinstance(hint, str) and hint.strip() in available_names
         }
+    )
+
+
+def _capability_catalog(capabilities: Sequence[Mapping[str, Any]]) -> Json | None:
+    preferred: Json | None = None
+    for capability in capabilities:
+        name = str(capability.get("name") or "").strip()
+        display_name = str(capability.get("displayName") or "").strip()
+        if name == _CAPABILITY_CATALOG_NAME:
+            return dict(capability)
+        if display_name == "查看能力目录" or name.endswith(_LEGACY_CAPABILITY_CATALOG_SUFFIX):
+            preferred = dict(capability)
+    return preferred
+
+
+def _has_capability_result(checkpoint: Mapping[str, Any], capability_name: str) -> bool:
+    tool_results = checkpoint.get("toolResults")
+    if not isinstance(tool_results, list):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and str(item.get("capability") or "").strip() == capability_name
+        for item in tool_results
     )
 
 
@@ -255,6 +314,7 @@ def _routing_metadata(
     selected: int,
     reason: str,
     hinted: Sequence[str] = (),
+    **extras: Any,
 ) -> Json:
     return {
         "schema": "loom.agent.capability-routing.v1",
@@ -264,6 +324,7 @@ def _routing_metadata(
         "selected": selected,
         "reason": reason,
         "hinted": list(hinted),
+        **extras,
     }
 
 

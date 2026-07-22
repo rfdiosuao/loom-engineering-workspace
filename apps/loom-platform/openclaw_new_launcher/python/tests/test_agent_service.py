@@ -452,6 +452,33 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(bootstrap["policy"]["approvalRequired"], ["critical"])
         self.assertTrue(bootstrap["permissions"]["outbound"])
 
+    def test_native_capability_catalog_returns_the_live_connected_registry(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime())
+            try:
+                expected = service.capabilities.list_capabilities(available_only=True)
+                catalog = service.capabilities.execute("loom.capabilities.list", {})
+            finally:
+                service.shutdown()
+
+        self.assertEqual(catalog["schema"], "loom.agent.capability-catalog.v1")
+        self.assertEqual(catalog["count"], len(expected))
+        self.assertEqual(
+            sorted(
+                display_name
+                for domain in catalog["domains"]
+                for display_name in domain["capabilities"]
+            ),
+            sorted(item["displayName"] for item in expected),
+        )
+        self.assertEqual(sum(domain["count"] for domain in catalog["domains"]), catalog["count"])
+        self.assertLess(
+            len(json.dumps(catalog, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
+            10_000,
+        )
+
     def test_session_model_is_snapshotted_into_run_and_survives_later_switch(self) -> None:
         from services.agent_service import AgentService
 

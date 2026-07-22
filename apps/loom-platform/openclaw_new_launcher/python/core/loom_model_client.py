@@ -670,6 +670,10 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
     round_value = request.get("round")
     tool_choice: Any = "auto"
     tool_results = request.get("toolResults")
+    routing = request.get("capabilityRouting")
+    routing = routing if isinstance(routing, Mapping) else {}
+    routing_forced_capability = str(routing.get("forcedCapability") or "").strip()
+    routing_tool_choice = str(routing.get("toolChoice") or "").strip().lower()
     repair_capability = ""
     if isinstance(tool_results, list) and tool_results:
         latest_result = tool_results[-1]
@@ -680,7 +684,7 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
                 and str(latest_error.get("code") or "") == "capability_invalid_input"
             ):
                 repair_capability = str(latest_result.get("capability") or "").strip()
-    forced_capability = repair_capability or (
+    forced_capability = repair_capability or routing_forced_capability or (
         explicit_hints[0]
         if len(explicit_hints) == 1 and not (isinstance(tool_results, list) and tool_results)
         else ""
@@ -689,6 +693,8 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
         forced_alias = canonical_to_alias.get(forced_capability)
         if forced_alias:
             tool_choice = {"type": "function", "function": {"name": forced_alias}}
+    elif routing_tool_choice == "none":
+        tool_choice = "none"
 
     return {
         "model": profile.model,

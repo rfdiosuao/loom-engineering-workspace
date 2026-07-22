@@ -13,6 +13,12 @@ if PYTHON_DIR not in sys.path:
 class AgentCapabilityRouterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.capabilities = [
+            {
+                "name": "loom.capabilities.list",
+                "displayName": "查看能力目录",
+                "domain": "agent",
+                "available": True,
+            },
             {"name": "loom.media.image.generate", "domain": "media", "available": True},
             {"name": "loom.media.video.generate", "domain": "media", "available": True},
             {"name": "loom.phone.publish", "domain": "phone", "available": True},
@@ -55,7 +61,7 @@ class AgentCapabilityRouterTests(unittest.TestCase):
         self.assertNotIn("loom.media.image.generate", names)
         self.assertEqual(metadata["mode"], "focused")
 
-    def test_ambiguous_or_catalog_request_uses_full_catalog(self) -> None:
+    def test_ambiguous_request_uses_full_catalog_but_catalog_request_forces_catalog_tool(self) -> None:
         from core.agent_capability_router import route_capabilities
 
         ambiguous, ambiguous_meta = route_capabilities({"prompt": "继续"}, self.capabilities)
@@ -63,8 +69,32 @@ class AgentCapabilityRouterTests(unittest.TestCase):
 
         self.assertEqual(len(ambiguous), len(self.capabilities))
         self.assertEqual(ambiguous_meta["reason"], "ambiguous_intent")
-        self.assertEqual(len(catalog), len(self.capabilities))
-        self.assertEqual(catalog_meta["reason"], "broad_capability_intent")
+        self.assertEqual([item["name"] for item in catalog], ["loom.capabilities.list"])
+        self.assertEqual(catalog_meta["mode"], "forced")
+        self.assertEqual(catalog_meta["reason"], "capability_catalog_required")
+        self.assertEqual(catalog_meta["forcedCapability"], "loom.capabilities.list")
+
+    def test_catalog_tool_is_not_repeated_after_a_real_result(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        catalog, metadata = route_capabilities(
+            {"prompt": "What capabilities are connected?"},
+            self.capabilities,
+            {
+                "toolResults": [{
+                    "toolCallId": "catalog-1",
+                    "capability": "loom.capabilities.list",
+                    "status": "completed",
+                    "result": {"count": 12},
+                }],
+            },
+        )
+
+        self.assertEqual([item["name"] for item in catalog], ["loom.capabilities.list"])
+        self.assertEqual(metadata["mode"], "response_only")
+        self.assertEqual(metadata["reason"], "capability_catalog_available")
+        self.assertEqual(metadata["toolChoice"], "none")
+        self.assertNotIn("forcedCapability", metadata)
 
     def test_selection_repair_restores_full_catalog(self) -> None:
         from core.agent_capability_router import route_capabilities

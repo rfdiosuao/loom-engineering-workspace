@@ -476,6 +476,47 @@ class LoomModelClientTests(unittest.TestCase):
 
         self.assertEqual(payload["tool_choice"], "auto")
 
+    def test_capability_router_can_force_the_catalog_tool(self):
+        payload = build_chat_payload(transport_profile(), {
+            "runId": "run_catalog",
+            "round": 1,
+            "prompt": "列出当前已经连接的全部能力",
+            "capabilityRouting": {
+                "mode": "forced",
+                "forcedCapability": "loom.capabilities.list",
+            },
+            "capabilities": [{
+                "name": "loom.capabilities.list",
+                "description": "查看当前真实连接的能力目录。",
+                "inputSchema": {"type": "object", "additionalProperties": False},
+            }],
+        })
+
+        self.assertEqual(payload["tool_choice"], {
+            "type": "function",
+            "function": {"name": "loom_capabilities_list"},
+        })
+
+    def test_capability_router_disables_more_tools_after_catalog_result(self):
+        payload = build_chat_payload(transport_profile(), {
+            "runId": "run_catalog",
+            "round": 2,
+            "prompt": "列出当前已经连接的全部能力",
+            "capabilityRouting": {"mode": "response_only", "toolChoice": "none"},
+            "toolResults": [{
+                "toolCallId": "catalog-1",
+                "capability": "loom.capabilities.list",
+                "status": "completed",
+                "result": {"count": 12},
+            }],
+            "capabilities": [{
+                "name": "loom.capabilities.list",
+                "inputSchema": {"type": "object", "additionalProperties": False},
+            }],
+        })
+
+        self.assertEqual(payload["tool_choice"], "none")
+
     def test_invalid_tool_input_forces_one_model_repair_call_for_the_same_capability(self):
         payload = build_chat_payload(transport_profile(), {
             "runId": "run_repair_publish",
