@@ -25,6 +25,9 @@ MAX_TOOL_INPUT_REPAIR_ATTEMPTS = 1
 MAX_TOOL_SELECTION_REPAIR_ATTEMPTS = 1
 MAX_TOOL_EXECUTION_REPAIR_ATTEMPTS = 1
 MAX_CONSECUTIVE_DEDUPLICATED_CALLS = 1
+MAX_TOOL_CALLS_PER_ROUND = 32
+TOOL_CALL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+CAPABILITY_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,159}\Z")
 RUNTIME_PROGRESS_EVENT_TYPES = frozenset({
     "message.delta",
     "plan.updated",
@@ -207,12 +210,19 @@ class AgentOrchestrator:
             if not tool_calls:
                 return self._complete_run(session_id, run_id, result, checkpoint)
 
-            for raw_call in tool_calls:
-                try:
-                    call = _normalize_tool_call(raw_call)
-                    call = _restore_explicit_publish_title(call, request)
-                except ValueError as exc:
-                    return self._fail_run(session_id, run_id, "agent_invalid_tool_call", str(exc), False, checkpoint)
+            try:
+                normalized_tool_calls = _normalize_tool_call_batch(tool_calls, request)
+            except ValueError as exc:
+                return self._fail_run(
+                    session_id,
+                    run_id,
+                    "agent_runtime_invalid_tool_calls",
+                    str(exc),
+                    True,
+                    checkpoint,
+                )
+
+            for call in normalized_tool_calls:
                 call_id = call["toolCallId"]
                 if call_id in checkpoint["completedToolCallIds"]:
                     continue
@@ -1537,9 +1547,29 @@ def _normalize_tool_call(value: Any) -> Json:
     call_id = str(value.get("toolCallId") or value.get("id") or "").strip()
     name = str(value.get("name") or value.get("capability") or "").strip()
     raw_input = value.get("input", value.get("arguments", {}))
-    if not call_id or not name or not isinstance(raw_input, Mapping):
+    if (
+        not TOOL_CALL_ID_PATTERN.fullmatch(call_id)
+        or not CAPABILITY_NAME_PATTERN.fullmatch(name)
+        or not isinstance(raw_input, Mapping)
+    ):
         raise ValueError("Tool call requires toolCallId, name, and object input.")
     return {"toolCallId": call_id, "name": name, "input": dict(raw_input)}
+
+
+def _normalize_tool_call_batch(values: list[Any], request: Mapping[str, Any]) -> list[Json]:
+    if len(values) > MAX_TOOL_CALLS_PER_ROUND:
+        raise ValueError(f"Runtime returned more than {MAX_TOOL_CALLS_PER_ROUND} tool calls in one round.")
+
+    normalized: list[Json] = []
+    seen_call_ids: set[str] = set()
+    for value in values:
+        call = _restore_explicit_publish_title(_normalize_tool_call(value), request)
+        call_id = call["toolCallId"]
+        if call_id in seen_call_ids:
+            raise ValueError("Runtime returned duplicate toolCallId values in one round.")
+        seen_call_ids.add(call_id)
+        normalized.append(call)
+    return normalized
 
 
 _EXPLICIT_PUBLISH_TITLE_PATTERN = re.compile(

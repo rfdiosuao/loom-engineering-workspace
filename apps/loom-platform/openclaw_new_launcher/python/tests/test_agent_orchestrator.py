@@ -232,6 +232,174 @@ class AgentOrchestratorTests(unittest.TestCase):
             ["unknown-first"],
         )
 
+    def test_malformed_later_tool_rejects_the_entire_batch_before_any_execution(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime([{
+            "toolCalls": [
+                {
+                    "toolCallId": "valid-first",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "must not execute"},
+                },
+                "not-a-tool-call",
+            ],
+        }])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-malformed-batch")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-malformed-batch",
+                {"prompt": "dispatch", "targets": {"allOnline": True}},
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "agent_runtime_invalid_tool_calls")
+        self.assertEqual(calls, [])
+        self.assertNotIn("tool.queued", [event["type"] for event in events])
+
+    def test_duplicate_tool_call_ids_reject_the_entire_batch(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [
+                    {
+                        "toolCallId": "duplicate-call",
+                        "name": "loom.matrix.dispatch",
+                        "input": {"prompt": "first"},
+                    },
+                    {
+                        "toolCallId": "duplicate-call",
+                        "name": "loom.matrix.cancel",
+                        "input": {"campaignId": "campaign-1"},
+                    },
+                ],
+            },
+            {"final": {"text": "must not reach a repair round"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-duplicate-call-ids")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-duplicate-call-ids",
+                {"prompt": "dispatch then cancel", "targets": {"allOnline": True}},
+            )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "agent_runtime_invalid_tool_calls")
+        self.assertEqual(calls, [])
+        self.assertEqual(len(runtime.requests), 1)
+
+    def test_excessive_tool_batch_is_rejected_before_any_execution(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator, MAX_TOOL_CALLS_PER_ROUND
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [
+                    {
+                        "toolCallId": f"call-{index}",
+                        "name": "loom.matrix.dispatch",
+                        "input": {"prompt": f"task-{index}"},
+                    }
+                    for index in range(MAX_TOOL_CALLS_PER_ROUND + 1)
+                ],
+            },
+            {"final": {"text": "must not reach a repair round"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-excessive-tool-batch")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-excessive-tool-batch",
+                {"prompt": "dispatch many tasks", "targets": {"allOnline": True}},
+            )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "agent_runtime_invalid_tool_calls")
+        self.assertEqual(calls, [])
+        self.assertEqual(len(runtime.requests), 1)
+
+    def test_registry_max_length_capability_name_remains_executable(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        long_capability_name = "l" + ("a" * 159)
+        calls: list[dict] = []
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "long-capability-call",
+                    "name": long_capability_name,
+                    "input": {},
+                }],
+            },
+            {"final": {"text": "done"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    long_capability_name: {
+                        "executor": lambda payload: calls.append(payload) or {"ok": True},
+                        "permission": "read",
+                        "risk": "read",
+                        "timeoutSec": 2,
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            bus = AgentEventBus(repository)
+            orchestrator = AgentOrchestrator(
+                repository,
+                bus,
+                runtime,
+                registry,
+                AgentPolicyEngine(),
+            )
+            orchestrator.queue_run("session-1", run_id="run-long-capability")
+
+            completed = orchestrator.execute_run(
+                "session-1",
+                "run-long-capability",
+                {"prompt": "run the connected capability"},
+            )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(calls, [{}])
+
     def test_consecutive_identical_completed_read_is_reused_instead_of_executed_again(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
         from core.agent_events import AgentEventBus

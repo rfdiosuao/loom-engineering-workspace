@@ -159,6 +159,14 @@ def _append_jsonl(path: str, value: JsonObject) -> None:
         os.fsync(handle.fileno())
 
 
+def _file_signature(path: str) -> tuple[int, int]:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return (0, 0)
+    return (int(stat.st_size), int(stat.st_mtime_ns))
+
+
 def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(str(offset).encode("ascii")).decode("ascii").rstrip("=")
 
@@ -188,6 +196,10 @@ class AgentSessionRepository:
         self.sessions_root = os.path.join(self.root, "sessions")
         self.index_path = os.path.join(self.root, "sessions-index.json")
         self._lock = _path_lock(self.root)
+        self._event_states: dict[
+            str,
+            tuple[tuple[int, int], int, dict[str, JsonObject], list[JsonObject]],
+        ] = {}
         with self._lock:
             os.makedirs(self.sessions_root, exist_ok=True)
             index = self._load_index_unlocked()
@@ -582,16 +594,43 @@ class AgentSessionRepository:
             if not isinstance(event_id, str) or not event_id:
                 raise ValueError("eventId is required")
             path = self._events_path(session_id)
-            events = _read_jsonl(path)
-            for existing in events:
-                if existing.get("eventId") == event_id:
-                    return copy.deepcopy(existing)
-            sanitized["seq"] = max(
-                (item.get("seq", 0) for item in events if isinstance(item.get("seq"), int)),
-                default=0,
-            ) + 1
+            last_seq, events_by_id, events = self._event_state_unlocked(path)
+            existing = events_by_id.get(event_id)
+            if existing is not None:
+                return copy.deepcopy(existing)
+            sanitized["seq"] = last_seq + 1
             _append_jsonl(path, sanitized)
+            events_by_id[event_id] = copy.deepcopy(sanitized)
+            events.append(copy.deepcopy(sanitized))
+            self._event_states[path] = (
+                _file_signature(path),
+                sanitized["seq"],
+                events_by_id,
+                events,
+            )
             return copy.deepcopy(sanitized)
+
+    def _event_state_unlocked(
+        self,
+        path: str,
+    ) -> tuple[int, dict[str, JsonObject], list[JsonObject]]:
+        signature = _file_signature(path)
+        cached = self._event_states.get(path)
+        if cached is not None and cached[0] == signature:
+            return cached[1], cached[2], cached[3]
+
+        events = _read_jsonl(path)
+        events_by_id: dict[str, JsonObject] = {}
+        last_seq = 0
+        for item in events:
+            event_id = item.get("eventId")
+            if isinstance(event_id, str) and event_id:
+                events_by_id.setdefault(event_id, item)
+            seq = item.get("seq")
+            if isinstance(seq, int):
+                last_seq = max(last_seq, seq)
+        self._event_states[path] = (signature, last_seq, events_by_id, events)
+        return last_seq, events_by_id, events
 
     def replay_events(
         self,
@@ -605,9 +644,12 @@ class AgentSessionRepository:
             raise ValueError("limit must be positive")
         with self._lock:
             self._require_session_unlocked(session_id)
+            _last_seq, _events_by_id, cached_events = self._event_state_unlocked(
+                self._events_path(session_id)
+            )
             events = [
                 event
-                for event in _read_jsonl(self._events_path(session_id))
+                for event in cached_events
                 if isinstance(event.get("seq"), int) and event["seq"] > after_seq
             ]
         events.sort(key=lambda event: event["seq"])

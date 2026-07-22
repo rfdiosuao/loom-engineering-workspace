@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 from python.core.agent_events import AgentEventBus
 from python.core.agent_sessions import AgentSessionRepository
@@ -83,6 +84,103 @@ class AgentEventLedgerTests(unittest.TestCase):
             persisted = [json.loads(line) for line in handle if line.strip()]
         self.assertEqual(len(persisted), 32)
         self.assertEqual({event["eventId"] for event in persisted}, {event["eventId"] for event in published})
+
+    def test_repeated_publish_scans_the_existing_ledger_only_once(self) -> None:
+        from python.core import agent_sessions
+
+        with mock.patch.object(agent_sessions, "_read_jsonl", wraps=agent_sessions._read_jsonl) as read_jsonl:
+            for index in range(64):
+                self.bus.publish(
+                    "session_events",
+                    "message.delta",
+                    topic="agent.message",
+                    entity_id="message_1",
+                    data={"index": index},
+                )
+
+        event_ledger_reads = [
+            call
+            for call in read_jsonl.call_args_list
+            if str(call.args[0]).endswith("events.jsonl")
+        ]
+        self.assertEqual(len(event_ledger_reads), 1)
+
+    def test_duplicate_event_id_returns_the_original_event_without_appending(self) -> None:
+        first = self.bus.publish(
+            "session_events",
+            "tool.started",
+            topic="agent.run",
+            entity_id="run_1",
+            event_id="evt_idempotent",
+            data={"attempt": 1},
+        )
+        duplicate = self.bus.publish(
+            "session_events",
+            "tool.completed",
+            topic="agent.run",
+            entity_id="run_1",
+            event_id="evt_idempotent",
+            data={"attempt": 2},
+        )
+
+        self.assertEqual(duplicate, first)
+        self.assertEqual(len(self.bus.replay("session_events")), 1)
+
+    def test_repeated_replay_after_restart_scans_the_ledger_only_once(self) -> None:
+        from python.core import agent_sessions
+
+        for index in range(16):
+            self.bus.publish(
+                "session_events",
+                "message.delta",
+                topic="agent.message",
+                entity_id="message_1",
+                data={"index": index},
+            )
+
+        restarted = AgentEventBus(AgentSessionRepository(self.temp_dir.name))
+        with mock.patch.object(agent_sessions, "_read_jsonl", wraps=agent_sessions._read_jsonl) as read_jsonl:
+            for after_seq in range(8):
+                replay = restarted.replay("session_events", after_seq=after_seq)
+                self.assertEqual(replay[0]["seq"], after_seq + 1)
+
+        event_ledger_reads = [
+            call
+            for call in read_jsonl.call_args_list
+            if str(call.args[0]).endswith("events.jsonl")
+        ]
+        self.assertEqual(len(event_ledger_reads), 1)
+
+    def test_alternating_repository_instances_keep_sequences_unique_and_visible(self) -> None:
+        second_bus = AgentEventBus(AgentSessionRepository(self.temp_dir.name))
+
+        first = self.bus.publish(
+            "session_events",
+            "message.delta",
+            topic="agent.message",
+            entity_id="message_1",
+            data={"source": "first"},
+        )
+        second = second_bus.publish(
+            "session_events",
+            "message.delta",
+            topic="agent.message",
+            entity_id="message_1",
+            data={"source": "second"},
+        )
+        third = self.bus.publish(
+            "session_events",
+            "message.delta",
+            topic="agent.message",
+            entity_id="message_1",
+            data={"source": "first-again"},
+        )
+
+        self.assertEqual([first["seq"], second["seq"], third["seq"]], [1, 2, 3])
+        self.assertEqual(
+            [event["data"]["source"] for event in second_bus.replay("session_events")],
+            ["first", "second", "first-again"],
+        )
 
     def test_event_payload_is_redacted_before_publish_and_persistence(self) -> None:
         event = self.bus.publish(

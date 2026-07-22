@@ -147,6 +147,46 @@ class LoomNativeRuntimeAdapterTests(unittest.TestCase):
         self.assertFalse(caught.exception.recoverable)
         self.assertNotIn("sk-secret-value", str(caught.exception))
 
+    def test_event_persistence_failure_is_classified_without_leaking_storage_details(self) -> None:
+        from core.agent_runtime import RuntimeExecutionError
+        from core.native_agent_runtime import LoomNativeRuntimeAdapter
+
+        def reject_event(_event):
+            raise OSError("D:/private/session-ledger.json could not be written")
+
+        with self.assertRaises(RuntimeExecutionError) as caught:
+            LoomNativeRuntimeAdapter(FakeModelClient()).start(
+                {"runId": "run-event-failure"},
+                reject_event,
+                threading.Event(),
+            )
+
+        self.assertEqual(caught.exception.code, "agent_runtime_event_failed")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertNotIn("session-ledger", str(caught.exception))
+
+    def test_runtime_typed_event_callback_failure_is_also_safely_reclassified(self) -> None:
+        from core.agent_runtime import RuntimeExecutionError
+        from core.native_agent_runtime import LoomNativeRuntimeAdapter
+
+        def reject_event(_event):
+            raise RuntimeExecutionError(
+                "repository_write_failed",
+                "D:/private/agent/events.jsonl could not be written",
+                recoverable=False,
+            )
+
+        with self.assertRaises(RuntimeExecutionError) as caught:
+            LoomNativeRuntimeAdapter(FakeModelClient()).start(
+                {"runId": "run-typed-event-failure"},
+                reject_event,
+                threading.Event(),
+            )
+
+        self.assertEqual(caught.exception.code, "agent_runtime_event_failed")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertNotIn("events.jsonl", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

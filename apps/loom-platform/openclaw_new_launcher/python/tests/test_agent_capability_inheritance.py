@@ -119,6 +119,9 @@ class AgentCapabilityInheritanceTests(unittest.TestCase):
         self.assertIn("不得调用修复手机连接", prompt)
         self.assertIn("询问已开放能力", prompt)
         self.assertIn("只调用查看能力目录", prompt)
+        self.assertIn("单轮最多调用 32 个工具", prompt)
+        self.assertIn("toolCallId 必须唯一", prompt)
+        self.assertIn("存在依赖关系的调用必须分轮执行", prompt)
         self.assertNotIn("让用户勾选能力", prompt)
 
     def test_every_connected_capability_is_injected_exactly_once_and_hints_do_not_filter(self) -> None:
