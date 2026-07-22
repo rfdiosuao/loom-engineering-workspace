@@ -23,6 +23,7 @@ Json = dict[str, Any]
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 MAX_TOOL_INPUT_REPAIR_ATTEMPTS = 1
 MAX_TOOL_SELECTION_REPAIR_ATTEMPTS = 1
+MAX_TOOL_EXECUTION_REPAIR_ATTEMPTS = 1
 MAX_CONSECUTIVE_DEDUPLICATED_CALLS = 1
 
 
@@ -302,7 +303,7 @@ class AgentOrchestrator:
                         },
                     )
                     if repair_count <= MAX_TOOL_INPUT_REPAIR_ATTEMPTS:
-                        continue
+                        break
                     self._emit(
                         session_id,
                         run_id,
@@ -322,13 +323,18 @@ class AgentOrchestrator:
                         False,
                         checkpoint,
                     )
-                except (CapabilityError, PolicyViolationError) as exc:
+                except CapabilityError as exc:
                     if control.action in {"pause", "cancel"}:
                         return self._finish_control_request(session_id, run_id, control)
                     code = getattr(exc, "code", "tool_failed")
                     recoverable = getattr(exc, "recoverable", False)
                     error_flags = _capability_error_flags(exc)
-                    error = {"code": code, "message": str(exc), **error_flags}
+                    error = {
+                        "code": code,
+                        "message": str(exc),
+                        "recoverable": bool(recoverable),
+                        **error_flags,
+                    }
                     if code == "capability_not_found":
                         _close_failed_tool_checkpoint(checkpoint, call, {**error, "recoverable": True})
                         repair_count = int(checkpoint.get("toolSelectionRepairAttempts", 0) or 0) + 1
@@ -352,7 +358,67 @@ class AgentOrchestrator:
                                     "error": {**error, "recoverable": True},
                                 },
                             )
-                            continue
+                            break
+                    elif recoverable and not (
+                        error_flags.get("outcomeIndeterminate")
+                        or error_flags.get("executionMayContinue")
+                    ):
+                        _close_failed_tool_checkpoint(checkpoint, call, error)
+                        repair_attempts = checkpoint.get("toolExecutionRepairAttempts")
+                        if not isinstance(repair_attempts, dict):
+                            repair_attempts = {}
+                            checkpoint["toolExecutionRepairAttempts"] = repair_attempts
+                        repair_key = f"{call['name']}:{code}"
+                        repair_count = int(repair_attempts.get(repair_key, 0) or 0) + 1
+                        repair_attempts[repair_key] = repair_count
+                        self.repository.update_run(
+                            run_id,
+                            {"checkpoint": _dump_checkpoint(checkpoint)},
+                            session_id=session_id,
+                        )
+                        if repair_count <= MAX_TOOL_EXECUTION_REPAIR_ATTEMPTS:
+                            self._emit(
+                                session_id,
+                                run_id,
+                                "tool.input_rejected",
+                                {
+                                    "toolCallId": call_id,
+                                    "capability": call["name"],
+                                    "status": "repairing",
+                                    "reason": "execution",
+                                    "attempt": repair_count,
+                                    "error": error,
+                                },
+                            )
+                            break
+                    _close_failed_tool_checkpoint(checkpoint, call, error)
+                    self._emit(
+                        session_id,
+                        run_id,
+                        "tool.failed",
+                        {"toolCallId": call_id, "capability": call["name"], "error": error},
+                    )
+                    return self._fail_run(
+                        session_id,
+                        run_id,
+                        code,
+                        str(exc),
+                        recoverable,
+                        checkpoint,
+                        error_flags=error_flags,
+                    )
+                except PolicyViolationError as exc:
+                    if control.action in {"pause", "cancel"}:
+                        return self._finish_control_request(session_id, run_id, control)
+                    code = getattr(exc, "code", "policy_denied")
+                    recoverable = getattr(exc, "recoverable", False)
+                    error_flags = _capability_error_flags(exc)
+                    error = {
+                        "code": code,
+                        "message": str(exc),
+                        "recoverable": bool(recoverable),
+                        **error_flags,
+                    }
                     _close_failed_tool_checkpoint(checkpoint, call, error)
                     self._emit(
                         session_id,
@@ -656,11 +722,76 @@ class AgentOrchestrator:
             )
         try:
             self._execute_tool(session_id, run["runId"], normalized, capability, checkpoint, approval=approval)
-        except (CapabilityError, PolicyViolationError) as exc:
+        except CapabilityError as exc:
             code = getattr(exc, "code", "tool_failed")
             recoverable = getattr(exc, "recoverable", False)
             error_flags = _capability_error_flags(exc)
-            error = {"code": code, "message": str(exc), **error_flags}
+            error = {
+                "code": code,
+                "message": str(exc),
+                "recoverable": bool(recoverable),
+                **error_flags,
+            }
+            _close_failed_tool_checkpoint(checkpoint, normalized, error)
+            self._pending_inputs.pop((run["runId"], normalized["toolCallId"]), None)
+            if recoverable and not (
+                error_flags.get("outcomeIndeterminate")
+                or error_flags.get("executionMayContinue")
+            ):
+                repair_attempts = checkpoint.get("toolExecutionRepairAttempts")
+                if not isinstance(repair_attempts, dict):
+                    repair_attempts = {}
+                    checkpoint["toolExecutionRepairAttempts"] = repair_attempts
+                repair_key = f"{normalized['name']}:{code}"
+                repair_count = int(repair_attempts.get(repair_key, 0) or 0) + 1
+                repair_attempts[repair_key] = repair_count
+                if repair_count <= MAX_TOOL_EXECUTION_REPAIR_ATTEMPTS:
+                    run = self.repository.update_run(
+                        run["runId"],
+                        {"status": "running", "checkpoint": _dump_checkpoint(checkpoint)},
+                        session_id=session_id,
+                    )
+                    self._emit(
+                        session_id,
+                        run["runId"],
+                        "tool.input_rejected",
+                        {
+                            "toolCallId": normalized["toolCallId"],
+                            "capability": normalized["name"],
+                            "status": "repairing",
+                            "reason": "execution",
+                            "attempt": repair_count,
+                            "error": error,
+                        },
+                    )
+                    return run, checkpoint
+            self._emit(
+                session_id,
+                run["runId"],
+                "tool.failed",
+                {"toolCallId": normalized["toolCallId"], "capability": normalized["name"], "error": error},
+            )
+            return self._fail_run(
+                session_id,
+                run["runId"],
+                code,
+                str(exc),
+                recoverable,
+                checkpoint,
+                error_flags=error_flags,
+            ), checkpoint
+        except PolicyViolationError as exc:
+            code = getattr(exc, "code", "policy_denied")
+            recoverable = getattr(exc, "recoverable", False)
+            error_flags = _capability_error_flags(exc)
+            error = {
+                "code": code,
+                "message": str(exc),
+                "recoverable": bool(recoverable),
+                **error_flags,
+            }
+            _close_failed_tool_checkpoint(checkpoint, normalized, error)
+            self._pending_inputs.pop((run["runId"], normalized["toolCallId"]), None)
             self._emit(
                 session_id,
                 run["runId"],

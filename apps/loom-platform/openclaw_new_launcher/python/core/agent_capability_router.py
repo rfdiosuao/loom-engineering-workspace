@@ -29,7 +29,9 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
     "phone": (
         "手机", "设备", "截图", "读屏", "亮屏", "解锁", "点击", "输入", "返回键", "主页键", "发布",
-        "抖音", "小红书", "phone", "device", "screenshot", "publish",
+        "抖音", "小红书", "快手", "微博", "微信", "qq", "闲鱼", "咸鱼", "淘宝", "京东", "拼多多",
+        "美团", "知乎", "boss直聘", "飞书", "钉钉", "浏览器", "相机", "相册",
+        "phone", "device", "screenshot", "publish",
     ),
     "matrix": (
         "矩阵", "多台", "批量", "设备组", "群控", "急停", "下发任务", "matrix", "fleet", "campaign",
@@ -71,6 +73,7 @@ def route_capabilities(
     text = _request_text(request)
     folded = text.casefold()
     explicit_mode = str(request.get("capabilityRoutingMode") or "").strip().lower()
+    hinted = _available_capability_hints(request, available)
 
     fallback_reason = ""
     if explicit_mode == "full":
@@ -81,23 +84,57 @@ def route_capabilities(
         fallback_reason = "broad_capability_intent"
 
     domains = _intent_domains(folded, request)
-    if not fallback_reason and not domains:
+    if not fallback_reason and not domains and not hinted:
         fallback_reason = "ambiguous_intent"
 
     if fallback_reason:
-        return available, _routing_metadata("full", domains, len(available), len(available), fallback_reason)
+        return available, _routing_metadata(
+            "full", domains, len(available), len(available), fallback_reason, hinted
+        )
 
     selected: list[Json] = []
     for capability in available:
         capability_domains = _capability_domains(capability)
-        if capability_domains.intersection(domains) or _is_core_capability(capability):
+        if (
+            str(capability.get("name") or "") in hinted
+            or capability_domains.intersection(domains)
+            or _is_core_capability(capability)
+        ):
             selected.append(capability)
 
     if not selected:
-        return available, _routing_metadata("full", domains, len(available), len(available), "empty_route")
+        return available, _routing_metadata(
+            "full", domains, len(available), len(available), "empty_route", hinted
+        )
     if len(selected) >= len(available):
-        return available, _routing_metadata("full", domains, len(available), len(available), "all_domains_selected")
-    return selected, _routing_metadata("focused", domains, len(available), len(selected), "intent_match")
+        return available, _routing_metadata(
+            "full", domains, len(available), len(available), "all_domains_selected", hinted
+        )
+    reason = "intent_match" if domains else "explicit_hint"
+    return selected, _routing_metadata(
+        "focused", domains, len(available), len(selected), reason, hinted
+    )
+
+
+def _available_capability_hints(
+    request: Mapping[str, Any],
+    capabilities: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    raw_hints = request.get("capabilityHints")
+    if not isinstance(raw_hints, list):
+        return []
+    available_names = {
+        str(capability.get("name") or "").strip()
+        for capability in capabilities
+        if str(capability.get("name") or "").strip()
+    }
+    return sorted(
+        {
+            hint.strip()
+            for hint in raw_hints
+            if isinstance(hint, str) and hint.strip() in available_names
+        }
+    )
 
 
 def _request_text(request: Mapping[str, Any]) -> str:
@@ -217,6 +254,7 @@ def _routing_metadata(
     total: int,
     selected: int,
     reason: str,
+    hinted: Sequence[str] = (),
 ) -> Json:
     return {
         "schema": "loom.agent.capability-routing.v1",
@@ -225,6 +263,7 @@ def _routing_metadata(
         "total": total,
         "selected": selected,
         "reason": reason,
+        "hinted": list(hinted),
     }
 
 

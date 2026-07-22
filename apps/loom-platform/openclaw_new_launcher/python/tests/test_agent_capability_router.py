@@ -23,6 +23,7 @@ class AgentCapabilityRouterTests(unittest.TestCase):
             {"name": "loom.settings.update.install", "domain": "settings", "available": True},
             {"name": "loom.license.current", "domain": "license", "available": True},
             {"name": "loom.license.activate", "domain": "license", "available": True},
+            {"name": "loom.skill.resume-screener", "domain": "custom", "available": True},
         ]
 
     def test_media_and_phone_cross_domain_request_is_focused(self) -> None:
@@ -149,6 +150,36 @@ class AgentCapabilityRouterTests(unittest.TestCase):
         self.assertNotIn("loom.media.image.generate", names)
         self.assertEqual(metadata["mode"], "focused")
         self.assertIn("license", metadata["domains"])
+
+    def test_common_mobile_app_launch_focuses_phone_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        for prompt in ("打开QQ", "打开闲鱼", "启动淘宝"):
+            with self.subTest(prompt=prompt):
+                selected, metadata = route_capabilities({"prompt": prompt}, self.capabilities)
+                names = {item["name"] for item in selected}
+
+                self.assertIn("loom.phone.publish", names)
+                self.assertNotIn("loom.media.image.generate", names)
+                self.assertEqual(metadata["mode"], "focused")
+                self.assertIn("phone", metadata["domains"])
+
+    def test_explicit_capability_hint_survives_unrelated_domain_routing(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {
+                "prompt": "分析这张图片",
+                "capabilityHints": ["loom.skill.resume-screener", "loom.skill.not-connected"],
+            },
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.skill.resume-screener", names)
+        self.assertNotIn("loom.skill.not-connected", names)
+        self.assertEqual(metadata["mode"], "focused")
+        self.assertEqual(metadata["hinted"], ["loom.skill.resume-screener"])
 
 
 if __name__ == "__main__":

@@ -121,6 +121,71 @@ class AgentAllToolsContractTests(unittest.TestCase):
             self.assertIn("deviceId", properties, tool["name"])
             self.assertEqual(properties["deviceId"].get("type"), "string", tool["name"])
 
+    def test_every_builtin_mcp_tool_rejects_undeclared_input_fields(self) -> None:
+        import loom_mcp
+        from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
+
+        definitions = loom_mcp.tool_definitions()
+        registry = CapabilityRegistry(
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{"server": "loom", **tool} for tool in definitions],
+            mcp_executor=lambda _server, _tool, _payload: {"ok": True},
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        for tool in definitions:
+            name = f"loom.mcp.loom.{tool['name']}"
+            payload = _minimal_value(tool["inputSchema"])
+            payload["undeclaredTargetOverride"] = "phone-attacker"
+            with self.assertRaises(CapabilityInputError, msg=name):
+                registry.validate_input(name, payload)
+
+    def test_every_builtin_mcp_tool_has_localized_agent_metadata(self) -> None:
+        import loom_mcp
+        from core.agent_capabilities import CapabilityRegistry
+
+        definitions = loom_mcp.tool_definitions()
+        registry = CapabilityRegistry(
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{"server": "loom", **tool} for tool in definitions],
+            mcp_executor=lambda _server, _tool, _payload: {"ok": True},
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        capabilities = registry.list_capabilities(available_only=True)
+        self.assertEqual(len(capabilities), len(definitions))
+        for capability in capabilities:
+            self.assertRegex(capability["displayName"], r"[\u3400-\u9fff]", capability["name"])
+            self.assertRegex(capability["description"], r"[\u3400-\u9fff]", capability["name"])
+            self.assertNotEqual(capability["domain"], "general", capability["name"])
+
+    def test_every_builtin_mcp_tool_is_reachable_by_its_agent_metadata(self) -> None:
+        import loom_mcp
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_capability_router import route_capabilities
+
+        definitions = loom_mcp.tool_definitions()
+        registry = CapabilityRegistry(
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{"server": "loom", **tool} for tool in definitions],
+            mcp_executor=lambda _server, _tool, _payload: {"ok": True},
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+        capabilities = registry.list_capabilities(available_only=True)
+
+        for capability in capabilities:
+            for metadata_field in ("displayName", "description"):
+                selected, metadata = route_capabilities(
+                    {"prompt": capability[metadata_field]},
+                    capabilities,
+                )
+                selected_names = {item["name"] for item in selected}
+                self.assertIn(
+                    capability["name"],
+                    selected_names,
+                    f"{metadata_field}: {capability['name']} -> {metadata}",
+                )
+
     def test_every_builtin_mcp_tool_round_trips_through_agent_registry(self) -> None:
         import loom_mcp
         from core.agent_capabilities import CapabilityRegistry

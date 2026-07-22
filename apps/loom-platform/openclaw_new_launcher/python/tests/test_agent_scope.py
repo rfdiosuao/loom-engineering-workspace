@@ -38,10 +38,13 @@ class AgentScopeTests(unittest.TestCase):
 
     def test_all_online_requires_an_explicit_all_online_phrase(self) -> None:
         resolved = resolve_request_scope("让全部在线设备继续任务", {"mode": "auto"}, MATRIX_STATUS)
+        common_phrase = resolve_request_scope("让全部手机打开抖音", {"mode": "auto"}, MATRIX_STATUS)
         ambiguous = resolve_request_scope("让那几台手机继续", {"mode": "auto"}, MATRIX_STATUS)
 
         self.assertTrue(resolved.all_online)
         self.assertEqual(resolved.status, "resolved")
+        self.assertTrue(common_phrase.all_online)
+        self.assertEqual(common_phrase.status, "resolved")
         self.assertFalse(ambiguous.all_online)
         self.assertEqual(ambiguous.status, "ambiguous")
 
@@ -67,6 +70,70 @@ class AgentScopeTests(unittest.TestCase):
         self.assertEqual(result.status, "resolved")
         self.assertEqual(result.device_ids, ["phone-1"])
         self.assertEqual(result.targets(), {"deviceIds": ["phone-1"]})
+
+    def test_common_mobile_app_launch_selects_one_phone_and_clarifies_multiple(self) -> None:
+        one_phone = {"devices": [{"deviceId": "phone-1", "online": True}]}
+
+        for prompt in ("打开QQ", "打开闲鱼", "启动淘宝"):
+            with self.subTest(prompt=prompt):
+                resolved = resolve_request_scope(prompt, {"mode": "auto"}, one_phone)
+                ambiguous = resolve_request_scope(prompt, {"mode": "auto"}, MATRIX_STATUS)
+
+                self.assertEqual(resolved.status, "resolved")
+                self.assertEqual(resolved.device_ids, ["phone-1"])
+                self.assertEqual(ambiguous.status, "ambiguous")
+
+    def test_phone_inspection_language_requires_a_bound_target_when_needed(self) -> None:
+        one_phone = {"devices": [{"deviceId": "phone-1", "online": True}]}
+
+        for prompt in ("查看手机屏幕", "检查手机页面", "检测手机当前界面"):
+            with self.subTest(prompt=prompt):
+                result = resolve_request_scope(prompt, {"mode": "auto"}, one_phone)
+                self.assertEqual(result.status, "resolved")
+                self.assertEqual(result.device_ids, ["phone-1"])
+
+    def test_resolves_unique_device_display_name_to_its_stable_id(self) -> None:
+        matrix_status = {
+            "devices": [
+                {"deviceId": "phone-1", "name": "Android Phone", "online": True},
+                {"deviceId": "phone-2", "name": "Android Phone 2", "online": True},
+            ],
+        }
+
+        result = resolve_request_scope("让 Android Phone 2 打开QQ", {"mode": "auto"}, matrix_status)
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.device_ids, ["phone-2"])
+
+    def test_resolves_two_explicit_prefix_device_names_without_dropping_one(self) -> None:
+        matrix_status = {
+            "devices": [
+                {"deviceId": "phone-1", "name": "Android Phone", "online": True},
+                {"deviceId": "phone-2", "name": "Android Phone 2", "online": True},
+            ],
+        }
+
+        result = resolve_request_scope(
+            "让 Android Phone 和 Android Phone 2 打开QQ",
+            {"mode": "auto"},
+            matrix_status,
+        )
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.device_ids, ["phone-1", "phone-2"])
+
+    def test_duplicate_device_display_name_is_ambiguous(self) -> None:
+        matrix_status = {
+            "devices": [
+                {"deviceId": "phone-1", "name": "发布手机", "online": True},
+                {"deviceId": "phone-2", "name": "发布手机", "online": True},
+            ],
+        }
+
+        result = resolve_request_scope("让发布手机打开小红书", {"mode": "auto"}, matrix_status)
+
+        self.assertEqual(result.status, "ambiguous")
+        self.assertEqual(result.targets(), {})
 
     def test_unknown_or_mixed_phone_targets_are_ambiguous(self) -> None:
         unknown = resolve_request_scope("给 P99 截图", {"mode": "auto"}, MATRIX_STATUS)

@@ -210,6 +210,15 @@ class ConfirmationMatrix(ProgressMatrix):
         return super().dispatch(body)
 
 
+class MultiPhoneMatrix(ConfirmationMatrix):
+    def __init__(self) -> None:
+        super().__init__()
+        self.devices = [
+            {"deviceId": "phone-1", "online": True, "group": "本机手机", "groups": ["本机手机"]},
+            {"deviceId": "phone-2", "online": True, "group": "本机手机", "groups": ["本机手机"]},
+        ]
+
+
 class CancellableMatrix(ProgressMatrix):
     def __init__(self, *, completes_cancel: bool = True) -> None:
         super().__init__()
@@ -357,6 +366,40 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(matrix.dispatches, [])
         self.assertEqual(trace["approvals"], [])
         self.assertIn("哪台手机", detail["messages"][-1]["blocks"][0]["data"]["text"])
+
+    def test_device_id_reply_resolves_the_next_run_after_multi_phone_clarification(self) -> None:
+        from services.agent_service import AgentService
+
+        matrix = MultiPhoneMatrix()
+        runtime = ScriptedRuntime([{"final": {"text": "phone-2 已锁定"}}])
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=_registry(),
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                session = service.create_session({"title": "Scope clarification"})
+                ambiguous = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-question",
+                    "text": "在手机上打开小红书",
+                    "scopeMode": "auto",
+                })
+                first = _wait_for_status(service, ambiguous["run"]["runId"], "completed")
+                selected = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-answer",
+                    "text": "phone-2",
+                    "scopeMode": "auto",
+                })
+                second = _wait_for_status(service, selected["run"]["runId"], "completed")
+            finally:
+                service.shutdown()
+
+        self.assertEqual(first["request"]["requestScope"]["status"], "ambiguous")
+        self.assertEqual(second["request"]["requestScope"]["status"], "resolved")
+        self.assertEqual(second["request"]["targets"], {"deviceIds": ["phone-2"]})
+        self.assertEqual(runtime.requests[0]["requestScope"]["targets"], {"deviceIds": ["phone-2"]})
 
     def test_invalid_manual_scope_is_rejected_before_run_creation(self) -> None:
         from services.agent_service import AgentService
