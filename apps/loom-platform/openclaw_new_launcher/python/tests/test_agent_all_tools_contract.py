@@ -58,6 +58,28 @@ def _minimal_value(schema: Mapping[str, Any]) -> Any:
     return "test-value"
 
 
+class _SingleToolRuntime:
+    def __init__(self, capability_name: str, payload: Mapping[str, Any]):
+        self.responses = [
+            {
+                "toolCalls": [{
+                    "toolCallId": "all-tools-call",
+                    "name": capability_name,
+                    "input": dict(payload),
+                }],
+            },
+            {"final": {"text": "done"}},
+        ]
+
+    def status(self, _profile_id=None):
+        return {"available": True, "runtime": "all-tools-contract"}
+
+    def start(self, _request, _emit, cancel, *, timeout_sec=None):
+        if cancel.is_set():
+            raise AssertionError("runtime started after cancellation")
+        return self.responses.pop(0)
+
+
 class AgentAllToolsContractTests(unittest.TestCase):
     def test_every_mcp_tool_matches_cli_permission_and_target_scope(self) -> None:
         import loom_cli
@@ -223,6 +245,87 @@ class AgentAllToolsContractTests(unittest.TestCase):
             {str(tool["name"]) for tool in definitions},
         )
         self.assertEqual(len(calls), len(definitions))
+
+    def test_every_builtin_mcp_tool_completes_the_real_agent_orchestration_path(self) -> None:
+        import loom_mcp
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        definitions = loom_mcp.tool_definitions()
+        calls: list[dict[str, Any]] = []
+
+        def execute(_server, tool, payload, *, permission=None):
+            calls.append({"tool": tool, "payload": dict(payload), "permission": permission})
+            return {"ok": True, "tool": tool}
+
+        registry = CapabilityRegistry(
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{"server": "loom", **tool} for tool in definitions],
+            mcp_executor=execute,
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+        capabilities = registry.list_capabilities(available_only=True)
+        expected_approvals = sum(capability["risk"] == "critical" for capability in capabilities)
+        approval_count = 0
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            event_bus = AgentEventBus(repository)
+            for index, capability in enumerate(capabilities):
+                session_id = f"all-tools-session-{index}"
+                run_id = f"all-tools-run-{index}"
+                repository.create_session(capability["displayName"], session_id=session_id)
+                payload = _minimal_value(capability["inputSchema"])
+                target_scope = capability["targetScope"]
+                request: dict[str, Any] = {
+                    "prompt": capability["displayName"],
+                    "capabilityHints": [capability["name"]],
+                }
+                if target_scope in {
+                    "single-device-read",
+                    "single-device-write",
+                    "optional-device-write",
+                }:
+                    for key in ("deviceId", "device", "target"):
+                        payload.pop(key, None)
+                    request["targets"] = {"deviceIds": ["phone-1"]}
+                elif target_scope == "matrix-write":
+                    request["targets"] = {"allOnline": True}
+                elif target_scope == "campaign-write":
+                    request["campaignIds"] = ["campaign-1"]
+
+                before_calls = len(calls)
+                orchestrator = AgentOrchestrator(
+                    repository,
+                    event_bus,
+                    _SingleToolRuntime(capability["name"], payload),
+                    registry,
+                    AgentPolicyEngine(approval_mode="strong"),
+                )
+                orchestrator.queue_run(session_id, run_id=run_id)
+                result = orchestrator.execute_run(session_id, run_id, request)
+                if result["status"] == "waiting_approval":
+                    approval_count += 1
+                    approvals = repository.list_approvals(session_id, run_id=run_id)
+                    self.assertEqual(len(approvals), 1, capability["name"])
+                    result = orchestrator.resolve_approval(
+                        session_id,
+                        approvals[0]["approvalId"],
+                        decision="approved",
+                        decided_by="contract-test",
+                        request=request,
+                    )["run"]
+
+                self.assertEqual(result["status"], "completed", capability["name"])
+                self.assertEqual(len(calls), before_calls + 1, capability["name"])
+                if target_scope in {"single-device-read", "single-device-write"}:
+                    self.assertEqual(calls[-1]["payload"]["deviceId"], "phone-1", capability["name"])
+
+        self.assertEqual(len(calls), len(capabilities))
+        self.assertEqual(approval_count, expected_approvals)
 
 
 if __name__ == "__main__":
