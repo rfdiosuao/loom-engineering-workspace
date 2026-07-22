@@ -273,11 +273,12 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
                     )
             finally:
                 service.shutdown()
+            transferred_same_file = os.path.samefile(observed["files"][0]["path"], image_path)
 
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["kind"], "media-transfer")
         self.assertEqual(observed["kind"], "image")
-        self.assertEqual(observed["files"][0]["path"], image_path)
+        self.assertTrue(transferred_same_file)
         self.assertEqual([item["id"] for item in observed["snapshot"]["devices"]], ["phone-2"])
 
     def test_disconnected_agent_service_hides_media_from_model_catalog(self) -> None:
