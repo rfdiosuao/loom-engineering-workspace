@@ -1,44 +1,57 @@
-# LOOM Engineering Workspace
+<p align="center">
+  <img src="apps/loom-platform/openclaw_new_launcher/src/assets/luming-logo.svg" width="96" alt="LOOM Logo" />
+</p>
 
-麓鸣 AI 矩阵获客工作台的唯一工程主仓库。
+<h1 align="center">麓鸣 AI 矩阵获客工作台</h1>
 
-从 2026-07-22 起，平台端、手机 Agent、合同、Skills 和工程文档都在这个仓库里统一开发、统一开分支、统一提 PR。以前分散在多个私有仓库里的源码已经导入为普通目录，不再以 submodule 或子仓库方式参与日常开发。
+<p align="center">
+  <strong>LOOM Engineering Workspace</strong><br />
+  桌面平台、手机 Agent、矩阵控制、媒体生成、业务 Skills 与工程文档的统一主仓库。
+</p>
 
-## 唯一入口
+<p align="center">
+  <a href="https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/workspace-ci.yml"><img alt="Workspace CI" src="https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/workspace-ci.yml/badge.svg" /></a>
+  <a href="https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/platform-ci.yml"><img alt="Platform CI" src="https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/platform-ci.yml/badge.svg" /></a>
+  <a href="https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/phone-ci.yml"><img alt="Phone Agent CI" src="https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/phone-ci.yml/badge.svg" /></a>
+  <img alt="Monorepo" src="https://img.shields.io/badge/repo-monorepo-006b5b" />
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Android-0b7285" />
+  <img alt="Status" src="https://img.shields.io/badge/status-active%20development-1f9d70" />
+</p>
 
-| 内容 | 路径 | 职责 |
-| --- | --- | --- |
-| LOOM 平台 | `apps/loom-platform` | 桌面端、矩阵工作台、智能体、媒体生成、模型账号、飞书与交付链路 |
-| 手机 Agent | `apps/loom-phone-agent` | Android 端、手机控制、RPA、视觉观察、设备 API 与事件回传 |
-| 跨端合同 | `packages/contracts` | 任务、设备、事件、结果与错误 Schema |
-| 业务 Skills | `packages/skills` | 麓鸣对外接入、招聘获客、矩阵监控等能力包 |
-| 工程文档 | `docs` | 架构、决策、迁移记录、开发 Wiki 与操作手册 |
+## 项目定位
 
-本机推荐工作目录是 `D:\Axiangmu\LOOM-Workspace`。`AUSTART`、`U盘启动器`、`Downloads`、`artifacts` 和安装包输出目录都不是产品源码入口。
+麓鸣是一套面向矩阵化获客与手机自动化运营的本地总控工作台。它把桌面控制台、Android 手机 Agent、AI 智能体、媒体生成、矩阵任务、业务技能包和工程治理放在同一条产品链路里，目标是让销售、中介、招聘劳务等高重复获客场景可以稳定地批量执行、观察、追踪和复盘。
 
-## 现在只有一个 GitHub 仓库
+从 2026-07-22 起，本仓库是 LOOM 的唯一工程主仓库。平台端和手机端已经从旧的多仓库/子仓库模式合并为普通目录，不再以 submodule 或 gitlink 参与日常开发。
+
+## 核心能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 手机矩阵控制 | 多台 Android 手机的连接、截图、任务下发、急停、状态回传和异常展示 |
+| 中枢智能体 | 在 LOOM 内部调用平台能力、手机能力、媒体生成和只读监控能力 |
+| 媒体生成 | 图片/视频生成任务、素材保存、本地素材库和手机相册传输链路 |
+| 获客工作流 | 面向招聘、劳务、销售、中介等场景的线索处理与平台发布自动化 |
+| Agent 接入 | Codex、Claude Code、其他 CLI/MCP Agent 通过提示词或 Skill 接入 LOOM |
+| 工程治理 | 单仓库开发、统一脚本、统一 CI、统一文档和 PR 验证链路 |
+
+## 仓库结构
 
 ```text
 rfdiosuao/loom-engineering-workspace
-|-- apps/loom-platform
-|-- apps/loom-phone-agent
-|-- packages/contracts
-|-- packages/skills
-|-- docs
-`-- scripts
+|-- apps/
+|   |-- loom-platform       # 桌面端、矩阵工作台、智能体、媒体生成、模型账号
+|   `-- loom-phone-agent    # Android 手机 Agent、RPA、设备 API、视觉观察
+|-- packages/
+|   |-- contracts           # 跨端任务、事件、结果、错误与 Schema
+|   `-- skills              # LOOM 业务 Skills 和对外接入能力包
+|-- docs/                   # 开发 Wiki、架构决策、迁移记录、Runbook
+|-- scripts/                # 工作区脚本、验证脚本、并行开发辅助脚本
+|-- workspace.json          # 单仓库组件索引
+`-- LOOM.code-workspace     # VS Code / Cursor 工作区入口
 ```
 
-日常规则很简单：
-
-- 一次克隆：只克隆 `rfdiosuao/loom-engineering-workspace`。
-- 一个根 `.git`：`apps/loom-platform` 和 `apps/loom-phone-agent` 不是子仓库。
-- 一个功能分支：跨平台和手机的功能也在同一个分支里完成。
-- 一个 PR：同一件事不要再拆成平台 PR、手机 PR、合同 PR。
-- `worktrees/` 只是本地并行 checkout，不是 GitHub 仓库。
-
-旧的 `loom-luming-launcher` 和 `lumiapkclaw` 只作为迁移来源与短期回滚参照保留。至少一个正式版本从本仓库完成构建、安装、回滚验证之前，不删除旧仓库，也不要从旧仓库继续开新产品 PR。
-
-## 常用命令
+## 快速开始
 
 首次进入仓库：
 
@@ -46,7 +59,7 @@ rfdiosuao/loom-engineering-workspace
 .\scripts\bootstrap.ps1
 ```
 
-查看当前状态：
+查看当前工作区状态：
 
 ```powershell
 .\scripts\status.ps1
@@ -57,8 +70,6 @@ rfdiosuao/loom-engineering-workspace
 ```powershell
 .\scripts\new-feature.ps1 -Area platform -Issue 101 -Name matrix-device-assignments
 ```
-
-可选区域包括 `platform`、`phone`、`contracts`、`skills`、`docs`、`cross-cutting`。这只是用于命名和说明改动范围，不会切换到另一个仓库。
 
 同步远端：
 
@@ -74,19 +85,31 @@ rfdiosuao/loom-engineering-workspace
 .\scripts\verify.ps1 -Area phone
 ```
 
-## 并行开发规则
+## 开发规则
 
-- 一个 Issue 对应一个分支和一个 PR。
-- 一个 Agent 或工程师只进入自己的 worktree。
+- 只克隆一个仓库：`rfdiosuao/loom-engineering-workspace`。
+- 只使用一个根 `.git`：`apps/loom-platform` 和 `apps/loom-phone-agent` 都不是子仓库。
+- 一个 Issue 对应一个分支和一个 PR，跨平台/手机/合同的改动也放在同一个 PR 里。
 - 分支统一使用 `codex/<issue>-<feature>` 或 `codex/<feature>`。
+- `worktrees/` 只是本地并行 checkout 目录，不是 GitHub 仓库。
 - 禁止提交 Token、密钥、授权码、数据库、日志、截图、APK、安装包、模型输出和本地配置。
-- 合并前必须运行对应验证，并在 PR 里写清楚验证证据。
+- 合并前必须运行对应验证，并在 PR 中写清楚验证结果。
 
-更多说明见：
+## 文档入口
 
-- [开发 Wiki](docs/DEVELOPMENT_WIKI.md)
-- [工作区架构图](docs/architecture/workspace-map.md)
-- [并行开发手册](docs/runbooks/parallel-development.md)
-- [仓库卫生手册](docs/runbooks/repository-hygiene.md)
-- [单仓库决策 ADR 0002](docs/decisions/0002-single-repository-monorepo.md)
-- [2026-07-22 迁移记录](docs/migration/MONOREPO_CUTOVER_20260722.md)
+| 文档 | 用途 |
+| --- | --- |
+| [开发 Wiki](docs/DEVELOPMENT_WIKI.md) | 新成员入口、目录地图、日常命令 |
+| [工作区架构图](docs/architecture/workspace-map.md) | 单仓库边界、组件职责和代码位置 |
+| [并行开发手册](docs/runbooks/parallel-development.md) | 多 Agent/多人并行开发方式 |
+| [仓库卫生手册](docs/runbooks/repository-hygiene.md) | 如何保持仓库干净、可维护 |
+| [ADR 0002 单仓库决策](docs/decisions/0002-single-repository-monorepo.md) | 为什么从多仓库切到 monorepo |
+| [2026-07-22 迁移记录](docs/migration/MONOREPO_CUTOVER_20260722.md) | 子仓库合并来源、验证和回滚说明 |
+
+## 历史仓库说明
+
+旧的 `loom-luming-launcher` 和 `lumiapkclaw` 只作为迁移来源与短期回滚参考保留。至少一个正式版本从本仓库完成构建、安装、升级和回滚验证之前，不建议删除旧仓库；但新的产品 PR 不再从旧仓库发起。
+
+## 安全
+
+安全问题、凭据泄漏、授权绕过、手机控制越权、外部发布链路风险，请优先参考 [SECURITY.md](SECURITY.md)，并在修复 PR 中补充验证证据。
