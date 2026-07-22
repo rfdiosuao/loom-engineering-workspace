@@ -188,31 +188,7 @@ async function registerMatrixDeepLinkRoutes(audit: AuditHarness) {
   await audit.registerRoute('GET', '/api/matrix/status', { value: RUNNING_MATRIX_STATUS });
   await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/timeline?limit=80', { value: { events: [] } });
   await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/lease', { value: { lease: null } });
-  await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/screen', {
-    value: {
-      schema: 'loom.matrix.screen.v1',
-      deviceId: 'phone-audit-1',
-      capturedAt: '2026-07-15T00:00:00.000Z',
-      screenHash: 'agent-deep-link-screen',
-      mime: 'image/png',
-      width: 1,
-      height: 1,
-      notModified: false,
-      image: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-    },
-  });
-  await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/screen?*', {
-    value: {
-      schema: 'loom.matrix.screen.v1',
-      deviceId: 'phone-audit-1',
-      capturedAt: '2026-07-15T00:00:01.000Z',
-      screenHash: 'agent-deep-link-screen',
-      mime: 'image/png',
-      width: 1,
-      height: 1,
-      notModified: true,
-    },
-  });
+  await registerBatchScreens(audit, ['phone-audit-1']);
 }
 
 test.beforeEach(async ({ audit }) => {
@@ -552,12 +528,17 @@ const SQUARE_MATRIX_SCREEN = {
   image: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
 };
 
-async function registerSquareScreen(audit: AuditHarness, deviceId: string) {
-  await audit.registerRoute('GET', `/api/matrix/devices/${deviceId}/screen`, {
-    value: { ...SQUARE_MATRIX_SCREEN, deviceId, screenHash: `${deviceId}-square` },
-  });
-  await audit.registerRoute('GET', `/api/matrix/devices/${deviceId}/screen?*`, {
-    value: { ...SQUARE_MATRIX_SCREEN, deviceId, screenHash: `${deviceId}-square`, notModified: true, image: undefined },
+async function registerBatchScreens(audit: AuditHarness, deviceIds: string[]) {
+  await audit.registerRoute('POST', '/api/matrix/screens', {
+    value: {
+      schema: 'loom.matrix.screens.v1',
+      screens: deviceIds.map((deviceId) => ({
+        ...SQUARE_MATRIX_SCREEN,
+        deviceId,
+        screenHash: `${deviceId}-square`,
+      })),
+      errors: [],
+    },
   });
 }
 
@@ -572,7 +553,7 @@ test('matrix confirmation is scoped to the current dispatch inputs and supported
   await audit.registerRoute('GET', '/api/matrix/status', { value: preflightStatus });
   await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/timeline?limit=80', { value: { events: [] } });
   await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/lease', { value: { lease: null } });
-  await registerSquareScreen(audit, 'phone-audit-1');
+  await registerBatchScreens(audit, ['phone-audit-1']);
   await audit.registerRoute('POST', '/api/matrix/dispatch', { value: { campaign: RUNNING_MATRIX_STATUS.campaigns[0] } });
   await navigateTo(audit, 'workbench');
 
@@ -656,7 +637,7 @@ test('matrix manual touch maps to the contained image and ignores letterbox padd
     },
   });
   await audit.registerRoute('POST', '/api/matrix/devices/phone-audit-1/control', { value: { status: 'applied' } });
-  await registerSquareScreen(audit, 'phone-audit-1');
+  await registerBatchScreens(audit, ['phone-audit-1']);
   await navigateTo(audit, 'workbench');
 
   const main = appMain(page);
@@ -714,8 +695,7 @@ test('matrix focus ignores stale timeline and lease responses from the previous 
   await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-2/lease', {
     value: { lease: { schema: 'loom.matrix.device_lease.v1', leaseId: 'lease-new', deviceId: 'phone-audit-2', holderType: 'human', holderId: 'new', mode: 'control', expiresAt: '2099-12-31T22:22:22.000Z' } },
   });
-  await registerSquareScreen(audit, 'phone-audit-1');
-  await registerSquareScreen(audit, 'phone-audit-2');
+  await registerBatchScreens(audit, ['phone-audit-1', 'phone-audit-2']);
   await navigateTo(audit, 'workbench');
 
   const main = appMain(page);
@@ -987,12 +967,21 @@ test('agent and matrix production layouts remain framed at the three release vie
     const metrics = await page.evaluate(() => {
       const root = document.documentElement;
       const shell = document.querySelector<HTMLElement>('[data-commercial-app-shell]');
+      const main = document.querySelector<HTMLElement>('[data-commercial-app-shell] > div > main');
+      const accessGate = document.querySelector<HTMLElement>('[data-phone-matrix-access-granted]');
       const workbench = document.querySelector<HTMLElement>('[data-white-label-layout="phone-matrix"]');
+      const mainBox = main?.getBoundingClientRect();
+      const accessBox = accessGate?.getBoundingClientRect();
       const box = workbench?.getBoundingClientRect();
       return {
         rootOverflow: root.scrollWidth - root.clientWidth,
         bodyOverflow: document.body.scrollWidth - document.body.clientWidth,
         shellRight: shell?.getBoundingClientRect().right || 0,
+        mainTop: mainBox?.top || 0,
+        mainBottom: mainBox?.bottom || 0,
+        accessTop: accessBox?.top || 0,
+        accessBottom: accessBox?.bottom || 0,
+        workbenchTop: box?.top || 0,
         workbenchLeft: box?.left || 0,
         workbenchRight: box?.right || 0,
         workbenchBottom: box?.bottom || 0,

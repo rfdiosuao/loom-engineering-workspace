@@ -8,7 +8,7 @@ import {
 import { AUDIT_MATRIX_WITH_DEVICE } from './support/control-audit-data';
 
 const DEVICE_ID = 'phone-audit-1';
-const SCREEN_PATH = `/api/matrix/devices/${DEVICE_ID}/screen`;
+const SCREEN_PATH = '/api/matrix/screens';
 const CONTROL_PATH = `/api/matrix/devices/${DEVICE_ID}/control`;
 const MATRIX_SCREEN = {
   schema: 'loom.matrix.screen.v1',
@@ -26,9 +26,8 @@ async function registerMatrixControlRoutes(audit: AuditHarness) {
   await audit.registerRoute('GET', '/api/matrix/status', { value: AUDIT_MATRIX_WITH_DEVICE });
   await audit.registerRoute('GET', `/api/matrix/devices/${DEVICE_ID}/timeline?limit=80`, { value: { events: [] } });
   await audit.registerRoute('GET', `/api/matrix/devices/${DEVICE_ID}/lease`, { value: { lease: null } });
-  await audit.registerRoute('GET', SCREEN_PATH, { value: MATRIX_SCREEN });
-  await audit.registerRoute('GET', `${SCREEN_PATH}?*`, {
-    value: { ...MATRIX_SCREEN, notModified: true, image: undefined },
+  await audit.registerRoute('POST', SCREEN_PATH, {
+    value: { schema: 'loom.matrix.screens.v1', screens: [MATRIX_SCREEN], errors: [] },
   });
   await audit.registerRoute('POST', `/api/matrix/devices/${DEVICE_ID}/lease`, {
     value: {
@@ -81,7 +80,7 @@ test('matrix screenshot control performs one screen read and no control write', 
 
 test('failed screen refresh keeps last-frame controls available and supports retry', async ({ audit, page }) => {
   const { inspector } = await openManualInspector(audit, page);
-  await audit.registerRoute('GET', `${SCREEN_PATH}?*`, { error: 'USB screenshot transport unavailable' });
+  await audit.registerRoute('POST', SCREEN_PATH, { error: 'USB screenshot transport unavailable' });
 
   await inspector.getByRole('button', { name: '截图' }).click();
 
@@ -90,8 +89,12 @@ test('failed screen refresh keeps last-frame controls available and supports ret
   await expect(inspector.getByRole('button', { name: '主页' })).toBeEnabled();
   await expect(inspector.getByRole('button', { name: '截图' })).toBeEnabled();
 
-  await audit.registerRoute('GET', `${SCREEN_PATH}?*`, {
-    value: { ...MATRIX_SCREEN, capturedAt: '2026-07-18T00:00:01.000Z', notModified: true, image: undefined },
+  await audit.registerRoute('POST', SCREEN_PATH, {
+    value: {
+      schema: 'loom.matrix.screens.v1',
+      screens: [{ ...MATRIX_SCREEN, capturedAt: '2026-07-18T00:00:01.000Z' }],
+      errors: [],
+    },
   });
   await inspector.getByRole('button', { name: '重试', exact: true }).click();
 

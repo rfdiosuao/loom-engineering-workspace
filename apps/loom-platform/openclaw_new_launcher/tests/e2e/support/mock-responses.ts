@@ -121,6 +121,19 @@ export function createBaselineSeed(): TauriMockSeed {
         },
       },
       'GET /api/update/result': { value: { pending: false, result: null } },
+      'GET /api/update/status': {
+        value: {
+          phase: 'idle',
+          downloaded: 0,
+          total: 0,
+          percent: 0,
+          version: '',
+          message: '',
+          errorCode: '',
+          retryable: false,
+          remediation: [],
+        },
+      },
       'GET /api/theme/current': { value: { theme: null, isCustom: false, merchantId: null } },
       'GET /api/account/current': { value: { account: AUDIT_ACCOUNT } },
       'GET /api/account/capabilities': {
@@ -224,6 +237,9 @@ export function createBaselineSeed(): TauriMockSeed {
         },
       },
       'GET /api/matrix/status': { value: AUDIT_MATRIX_STATUS },
+      'POST /api/matrix/screens': {
+        value: { schema: 'loom.matrix.screens.v1', screens: [], errors: [] },
+      },
       'POST /api/realtime/tickets': {
         value: {
           ticket: 'audit-single-use-ticket',

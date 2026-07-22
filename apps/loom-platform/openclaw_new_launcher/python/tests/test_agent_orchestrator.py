@@ -118,6 +118,134 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertNotIn("loom.media.image.generate", capabilities)
         self.assertTrue(all(item["available"] for item in capabilities.values()))
 
+    def test_unknown_capability_is_returned_to_model_for_one_hidden_selection_repair(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        calls: list[dict] = []
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "unknown-status",
+                    "name": "loom_mcp_loom_loom_status",
+                    "input": {},
+                }],
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "canonical-status",
+                    "name": "loom.status.inspect",
+                    "input": {},
+                }],
+            },
+            {"final": {"text": "状态正常"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.status.inspect": {
+                        "executor": lambda payload: calls.append(payload) or {"ok": True},
+                        "permission": "read",
+                        "risk": "read",
+                        "timeoutSec": 2,
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                AgentEventBus(repository),
+                runtime,
+                registry,
+                AgentPolicyEngine(),
+            )
+            orchestrator.queue_run("session-1", run_id="run-capability-selection-repair")
+
+            completed = orchestrator.execute_run(
+                "session-1",
+                "run-capability-selection-repair",
+                {"prompt": "检查系统状态"},
+            )
+            events = AgentEventBus(repository).replay("session-1")
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(calls, [{}])
+        self.assertEqual(len(runtime.requests), 3)
+        self.assertEqual(
+            runtime.requests[1]["toolResults"][0]["error"]["code"],
+            "capability_not_found",
+        )
+        self.assertEqual([event["type"] for event in events].count("tool.failed"), 0)
+        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 1)
+
+    def test_unknown_capability_selection_repair_is_bounded_to_one_attempt(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "unknown-status-1",
+                    "name": "loom_mcp_loom_loom_status",
+                    "input": {},
+                }],
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "unknown-status-2",
+                    "name": "loom_mcp_loom_loom_status_again",
+                    "input": {},
+                }],
+            },
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.status.inspect": {
+                        "executor": lambda _payload: {"ok": True},
+                        "permission": "read",
+                        "risk": "read",
+                        "timeoutSec": 2,
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                AgentEventBus(repository),
+                runtime,
+                registry,
+                AgentPolicyEngine(),
+            )
+            orchestrator.queue_run("session-1", run_id="run-bounded-selection-repair")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-bounded-selection-repair",
+                {"prompt": "检查系统状态"},
+            )
+            events = AgentEventBus(repository).replay("session-1")
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "capability_not_found")
+        self.assertEqual(len(runtime.requests), 2)
+        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 1)
+        self.assertEqual([event["type"] for event in events].count("tool.failed"), 1)
+
     def test_invalid_outbound_tool_input_is_returned_to_model_for_one_hidden_repair(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
         from core.agent_events import AgentEventBus
@@ -565,6 +693,16 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(
             {name: failed["error"][name] for name in expected_flags},
+            expected_flags,
+        )
+        checkpoint = json.loads(failed["checkpoint"])
+        self.assertEqual(len(checkpoint["toolResults"]), 1)
+        self.assertEqual(
+            checkpoint["toolResults"][0]["error"]["code"],
+            "capability_timeout_indeterminate",
+        )
+        self.assertEqual(
+            {name: checkpoint["toolResults"][0]["error"][name] for name in expected_flags},
             expected_flags,
         )
         tool_error = next(event for event in events if event["type"] == "tool.failed")["data"]["error"]

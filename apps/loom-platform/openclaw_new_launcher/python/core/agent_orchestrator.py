@@ -20,6 +20,7 @@ from core.agent_sessions import RepositoryConflictError
 Json = dict[str, Any]
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 MAX_TOOL_INPUT_REPAIR_ATTEMPTS = 1
+MAX_TOOL_SELECTION_REPAIR_ATTEMPTS = 1
 
 
 class AgentRepositoryProtocol(Protocol):
@@ -277,6 +278,31 @@ class AgentOrchestrator:
                     recoverable = getattr(exc, "recoverable", False)
                     error_flags = _capability_error_flags(exc)
                     error = {"code": code, "message": str(exc), **error_flags}
+                    if code == "capability_not_found":
+                        _close_failed_tool_checkpoint(checkpoint, call, {**error, "recoverable": True})
+                        repair_count = int(checkpoint.get("toolSelectionRepairAttempts", 0) or 0) + 1
+                        checkpoint["toolSelectionRepairAttempts"] = repair_count
+                        self.repository.update_run(
+                            run_id,
+                            {"checkpoint": _dump_checkpoint(checkpoint)},
+                            session_id=session_id,
+                        )
+                        if repair_count <= MAX_TOOL_SELECTION_REPAIR_ATTEMPTS:
+                            self._emit(
+                                session_id,
+                                run_id,
+                                "tool.input_rejected",
+                                {
+                                    "toolCallId": call_id,
+                                    "capability": call["name"],
+                                    "status": "repairing",
+                                    "reason": "selection",
+                                    "attempt": repair_count,
+                                    "error": {**error, "recoverable": True},
+                                },
+                            )
+                            continue
+                    _close_failed_tool_checkpoint(checkpoint, call, error)
                     self._emit(
                         session_id,
                         run_id,

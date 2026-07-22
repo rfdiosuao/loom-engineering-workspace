@@ -104,6 +104,7 @@ export const UpdateCenter: React.FC = () => {
   }, [visible]);
 
   const checkForUpdate = React.useCallback(async (manual: boolean) => {
+    if (!manual && shouldReuseUpdateSession(phaseRef.current)) return;
     const sequence = ++requestSequence.current;
     if (manual) setVisible(true);
     setPhase('checking');
@@ -307,6 +308,7 @@ export const UpdateCenter: React.FC = () => {
         role="dialog"
         aria-modal="true"
         aria-labelledby="loom-update-title"
+        data-update-phase={phase}
         className="update-center-enter flex max-h-[min(82vh,760px)] w-full max-w-[680px] flex-col overflow-hidden rounded-[8px] border border-border-strong bg-surface shadow-[0_32px_110px_rgba(0,18,24,0.48)]"
       >
         <header className="flex shrink-0 items-center gap-4 border-b border-border bg-surface-alt/50 px-6 py-5">

@@ -61,8 +61,8 @@ class AgentPolicyEngine:
         risk = str(_capability_value(capability, "risk", "") or "").lower()
         permission = str(_capability_value(capability, "permission", "read") or "read").lower()
         name = str(_capability_value(capability, "name", "") or "").lower()
-        content = json.dumps(tool_input or {}, ensure_ascii=False, sort_keys=True, default=str).lower()
-        searchable = f"{name} {content}"
+        action_content = _action_content(capability, tool_input or {})
+        searchable = f"{name} {action_content}"
         if any(marker in searchable for marker in _CRITICAL_MARKERS):
             return "critical"
         if any(marker in searchable for marker in _OUTBOUND_MARKERS):
@@ -241,11 +241,49 @@ _CRITICAL_MARKERS = (
     "安全设置",
 )
 
+_ACTION_TEXT_KEYS = ("action", "operation", "command", "task", "prompt")
+_FREE_FORM_ACTION_SCOPES = {"single-device-write", "matrix-write"}
+
 
 def _capability_value(capability: Any, name: str, default: Any) -> Any:
     if isinstance(capability, Mapping):
         return capability.get(name, default)
     return getattr(capability, name, default)
+
+
+def _action_content(capability: Any, tool_input: Mapping[str, Any]) -> str:
+    """Return only text that represents an executable action, not descriptive content."""
+
+    permission = str(_capability_value(capability, "permission", "read") or "read").strip().lower()
+    if permission == "read":
+        return ""
+    name = str(_capability_value(capability, "name", "") or "").strip().lower()
+    target_scope = str(
+        _capability_value(
+            capability,
+            "target_scope",
+            _capability_value(capability, "targetScope", "none"),
+        )
+        or "none"
+    ).strip().lower()
+    if target_scope not in _FREE_FORM_ACTION_SCOPES and name not in {
+        "loom.matrix.dispatch",
+        "loom.phone.control",
+    }:
+        return ""
+
+    values = [tool_input.get(key) for key in _ACTION_TEXT_KEYS if tool_input.get(key) is not None]
+    assignments = tool_input.get("deviceAssignments")
+    if isinstance(assignments, list):
+        for assignment in assignments:
+            if not isinstance(assignment, Mapping):
+                continue
+            values.extend(
+                assignment.get(key)
+                for key in _ACTION_TEXT_KEYS
+                if assignment.get(key) is not None
+            )
+    return json.dumps(values, ensure_ascii=False, sort_keys=True, default=str).lower()
 
 
 def _targets(tool_input: Mapping[str, Any]) -> Json:

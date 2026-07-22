@@ -52,6 +52,49 @@ class AgentPolicyEngineTests(unittest.TestCase):
             "critical",
         )
 
+    def test_descriptive_media_and_read_payloads_do_not_escalate_to_critical_actions(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="weak")
+
+        media = policy.evaluate(
+            {
+                "name": "loom.media.image.generate",
+                "permission": "control",
+                "risk": "control_safe",
+                "targetScope": "optional-device-write",
+            },
+            {"prompt": "生成一张支付安全宣传海报"},
+        )
+        read_only = policy.evaluate(
+            {
+                "name": "loom.logs.tail",
+                "permission": "read",
+                "risk": "read",
+                "targetScope": "none",
+            },
+            {"query": "查找删除账号相关日志"},
+        )
+        phone_action = policy.evaluate(
+            {
+                "name": "loom.phone.task.quick",
+                "permission": "control",
+                "risk": "control_safe",
+                "targetScope": "single-device-write",
+            },
+            {
+                "prompt": "打开支付宝",
+                "targets": {"deviceIds": ["phone-1"]},
+            },
+        )
+
+        self.assertEqual(media.classification, "control_safe")
+        self.assertFalse(media.requires_approval)
+        self.assertEqual(read_only.classification, "read")
+        self.assertFalse(read_only.requires_approval)
+        self.assertEqual(phone_action.classification, "critical")
+        self.assertTrue(phone_action.requires_approval)
+
     def test_outbound_and_critical_require_approval(self) -> None:
         from core.agent_policy import AgentPolicyEngine
 

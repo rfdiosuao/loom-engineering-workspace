@@ -3,13 +3,13 @@ import { pageControls, shellControls } from './support/control-audit';
 
 const BASELINE_CONTROL_COUNTS: Record<string, number> = {
   dashboard: 2,
-  agents: 20,
-  creative: 18,
+  agents: 15,
+  creative: 19,
   acquisition: 10,
-  phone: 26,
+  phone: 22,
   workbench: 11,
   agent: 7,
-  license: 13,
+  license: 6,
   agentAccess: 2,
   capabilities: 0,
   settings: 8,

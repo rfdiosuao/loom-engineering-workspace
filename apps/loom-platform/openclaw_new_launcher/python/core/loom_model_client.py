@@ -553,6 +553,26 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
             item_error = item.get("error")
             if (
                 isinstance(item_error, Mapping)
+                and str(item_error.get("code") or "") == "capability_not_found"
+            ):
+                available_names = list(canonical_to_alias)[:120]
+                repair_context = json.dumps(
+                    {"availableCapabilities": available_names},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "麓鸣执行层确认上一轮选择的能力不存在，工具尚未执行。"
+                        "请只从本轮结构化工具中重新选择最匹配的能力；不要重复旧名称，"
+                        "也不要把尚未执行写成已完成。\n"
+                        f"{repair_context[:10000]}"
+                    ),
+                })
+                continue
+            if (
+                isinstance(item_error, Mapping)
                 and str(item_error.get("code") or "") == "capability_invalid_input"
             ):
                 repair_context = {

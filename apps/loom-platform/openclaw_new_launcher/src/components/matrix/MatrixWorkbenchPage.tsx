@@ -549,7 +549,7 @@ export const MatrixWorkbenchPage = () => {
   };
 
   return (
-    <div data-white-label-layout="phone-matrix" className="loom-matrix-shell relative flex h-full min-h-0 flex-col overflow-hidden bg-[#07131B] text-slate-100">
+    <div data-white-label-layout="phone-matrix" className="loom-matrix-shell relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#07131B] text-slate-100">
       <header className="flex shrink-0 items-center justify-between gap-4 border-b border-white/[0.08] bg-[#091722] px-3 py-2">
         <div className="min-w-0"><div className="text-[9px] font-black tracking-[0.2em] text-cyan-200/60">LOOM CONTROL PLANE</div><h1 className="truncate text-[17px] font-black text-white">超级矩阵工作台</h1></div>
         <div className="flex items-center gap-3">

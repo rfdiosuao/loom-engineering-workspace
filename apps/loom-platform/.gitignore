@@ -53,7 +53,7 @@ license_server/license.db
 # Release packages
 release/
 *.zip
-!openclaw_new_launcher/public/skills/luming-skills-library-20260720.zip
+!openclaw_new_launcher/public/skills/luming-skills-library-20260721.zip
 
 # Local scratch / downloaded runtimes
 /artifacts/

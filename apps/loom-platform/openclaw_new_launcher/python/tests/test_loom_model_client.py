@@ -509,6 +509,35 @@ class LoomModelClientTests(unittest.TestCase):
         self.assertNotIn("tool", [message["role"] for message in payload["messages"]])
         self.assertNotIn("assistant", [message["role"] for message in payload["messages"]])
 
+    def test_unknown_capability_result_requests_a_fresh_selection_from_current_tools(self):
+        payload = build_chat_payload(transport_profile(), {
+            "runId": "run_repair_selection",
+            "round": 2,
+            "prompt": "检查麓鸣状态",
+            "toolResults": [{
+                "toolCallId": "call_unknown_status",
+                "capability": "loom_mcp_loom_loom_status",
+                "status": "failed",
+                "input": {},
+                "error": {
+                    "code": "capability_not_found",
+                    "message": "Unknown capability: loom_mcp_loom_loom_status",
+                    "recoverable": True,
+                },
+            }],
+            "capabilities": [{
+                "name": "loom.mcp.loom.loom_status",
+                "inputSchema": {"type": "object"},
+            }],
+        })
+
+        repair_message = payload["messages"][-1]
+        self.assertEqual(repair_message["role"], "user")
+        self.assertIn("上一轮选择的能力不存在", repair_message["content"])
+        self.assertIn("loom.mcp.loom.loom_status", repair_message["content"])
+        self.assertNotIn("Unknown capability", repair_message["content"])
+        self.assertEqual(payload["tool_choice"], "auto")
+
     def test_tool_results_use_native_assistant_and_tool_protocol_messages(self):
         payload = build_chat_payload(transport_profile(), {
             "runId": "run_tool_history",
