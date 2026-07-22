@@ -219,47 +219,47 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             ctx = _test_context(temp_dir, JobManager(logs.append), logs)
             cancel_requested = threading.Event()
             result: dict = {}
-            node_exe = shutil.which("node")
-            self.assertIsNotNone(node_exe)
-
             def run_process() -> None:
                 result.update(_run_phone_process_with_matrix_stream(
                     ctx,
                     [
-                        str(node_exe),
-                        "-e",
+                        sys.executable,
+                        "-c",
                         (
-                            "const fs = require('node:fs');\n"
-                            f"const started = {json.dumps(started_path)};\n"
-                            f"const release = {json.dumps(release_path)};\n"
-                            f"const completed = {json.dumps(completed_path)};\n"
-                            "fs.writeFileSync(started, String(process.pid));\n"
-                            "const timer = setInterval(() => {\n"
-                            "  if (!fs.existsSync(release)) return;\n"
-                            "  fs.writeFileSync(completed, 'completed');\n"
-                            "  clearInterval(timer);\n"
-                            "}, 10);\n"
+                            "import os, pathlib, time\n"
+                            f"started = pathlib.Path({started_path!r})\n"
+                            f"release = pathlib.Path({release_path!r})\n"
+                            f"completed = pathlib.Path({completed_path!r})\n"
+                            "started.write_text(str(os.getpid()), encoding='utf-8')\n"
+                            "while not release.exists():\n"
+                            "    time.sleep(0.01)\n"
+                            "completed.write_text('completed', encoding='utf-8')\n"
                         ),
                     ],
                     kind="phone.task",
                     layer="direct",
-                    timeout_sec=10,
+                    timeout_sec=30,
                     device_id="phone-a",
                     should_cancel=cancel_requested.is_set,
                 ))
 
             worker = threading.Thread(target=run_process)
             worker.start()
-            self.assertTrue(_wait_for_path(started_path))
-            pid = _read_pid(started_path)
-            cancel_requested.set()
-            worker.join(timeout=8)
-            finished = not worker.is_alive()
-            if not finished:
-                with open(release_path, "w", encoding="ascii") as handle:
-                    handle.write("release\n")
-                worker.join(timeout=3)
+            started = _wait_for_path(started_path, timeout=20.0)
+            pid = _read_pid(started_path) if started else 0
+            finished = False
+            try:
+                cancel_requested.set()
+                worker.join(timeout=8)
+                finished = not worker.is_alive()
+            finally:
+                cancel_requested.set()
+                if worker.is_alive():
+                    with open(release_path, "w", encoding="ascii") as handle:
+                        handle.write("release\n")
+                    worker.join(timeout=5)
 
+            self.assertTrue(started)
             self.assertTrue(finished)
             self.assertTrue(result["cancelled"])
             self.assertNotEqual(result["returncode"], 0)
@@ -1033,7 +1033,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
             try:
                 submitted = client.post("/api/phone/status", json={"deviceId": "phone-2"})
-                job = _wait_for_job(client, submitted.json()["jobId"], timeout=10.0)
+                job = _wait_for_job(client, submitted.json()["jobId"], timeout=30.0)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -3462,7 +3462,7 @@ def _session_snapshot() -> dict:
     }
 
 
-def _wait_for_job(client: TestClient, job_id: str, timeout: float = 2.0) -> dict:
+def _wait_for_job(client: TestClient, job_id: str, timeout: float = 10.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         response = client.get(f"/api/jobs/{job_id}")

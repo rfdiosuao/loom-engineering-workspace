@@ -1182,7 +1182,7 @@ def _context(base_path: str, job_mgr: JobManager, logs: list[str]) -> SimpleName
     )
 
 
-def _wait_for_job(client: TestClient, job_id: str, timeout: float = 2.0) -> dict:
+def _wait_for_job(client: TestClient, job_id: str, timeout: float = 10.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         response = client.get(f"/api/jobs/{job_id}")

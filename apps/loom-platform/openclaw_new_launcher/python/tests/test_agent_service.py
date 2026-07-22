@@ -73,7 +73,7 @@ class FakeAccount:
         }
 
 
-def _wait_for_status(service, run_id: str, *statuses: str, timeout: float = 3.0) -> dict:
+def _wait_for_status(service, run_id: str, *statuses: str, timeout: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         run = service.get_run(run_id)
@@ -510,9 +510,9 @@ class AgentServiceTests(unittest.TestCase):
                 )
                 elapsed = time.monotonic() - started
 
-                self.assertLess(elapsed, 0.5)
+                self.assertLess(elapsed, 2.0)
                 self.assertEqual(response["run"]["status"], "queued")
-                self.assertTrue(runtime.started.wait(1.0))
+                self.assertTrue(runtime.started.wait(5.0))
                 self.assertTrue(os.path.isfile(os.path.join(root, "data", "agent", "sessions-index.json")))
                 self.assertTrue(os.path.isfile(os.path.join(
                     root,

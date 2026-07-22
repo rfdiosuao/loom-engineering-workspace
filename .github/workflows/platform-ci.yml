@@ -12,7 +12,6 @@ on:
   push:
     branches:
       - main
-      - "codex/**"
     paths:
       - "apps/loom-platform/**"
       - "packages/contracts/**"
@@ -22,6 +21,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: platform-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
