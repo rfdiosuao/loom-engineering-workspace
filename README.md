@@ -15,6 +15,7 @@
   <a href="https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/phone-ci.yml"><img alt="Phone Agent CI" src="https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/phone-ci.yml/badge.svg" /></a>
   <img alt="Monorepo" src="https://img.shields.io/badge/repo-monorepo-006b5b" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Android-0b7285" />
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0%20or%20commercial-7a3e9d" /></a>
   <img alt="Status" src="https://img.shields.io/badge/status-active%20development-1f9d70" />
 </p>
 
@@ -113,3 +114,12 @@ rfdiosuao/loom-engineering-workspace
 ## 安全
 
 安全问题、凭据泄漏、授权绕过、手机控制越权、外部发布链路风险，请优先参考 [SECURITY.md](SECURITY.md)，并在修复 PR 中补充验证证据。
+
+## 许可证
+
+LOOM 自有代码采用双许可证模式：
+
+- 开源许可：GNU Affero General Public License v3.0 only（`AGPL-3.0-only`），完整条款见 [LICENSE](LICENSE)。修改后通过网络提供服务时，需要按照 AGPL-3.0 向对应用户提供源代码。
+- 商业许可：需要闭源分发、专有集成、白标/OEM 或不履行 AGPL 对应源代码义务时，必须取得单独商业授权，详见 [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)。
+
+第三方和上游组件继续适用各自许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。LOOM 名称、Logo 和其他品牌标识不因代码许可证而自动获得使用授权。
