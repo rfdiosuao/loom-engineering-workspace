@@ -577,3 +577,66 @@ textarea::placeholder {
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+@keyframes update-center-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes update-progress-pulse {
+  0%, 100% { opacity: 0.62; }
+  50% { opacity: 1; }
+}
+
+.update-center-enter {
+  animation: update-center-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.update-progress-pulse {
+  animation: update-progress-pulse 1.2s ease-in-out infinite;
+}
+
+.update-release-notes h1,
+.update-release-notes h2,
+.update-release-notes h3 {
+  margin: 1rem 0 0.45rem;
+  color: var(--color-text);
+  font-size: 0.875rem;
+  font-weight: 900;
+}
+
+.update-release-notes p {
+  margin: 0.45rem 0;
+}
+
+.update-release-notes ul,
+.update-release-notes ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.update-release-notes ul { list-style: disc; }
+.update-release-notes ol { list-style: decimal; }
+
+.update-release-notes code {
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface-alt);
+  padding: 0.08rem 0.3rem;
+  color: var(--color-text);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.78rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-center-enter,
+  .update-progress-pulse {
+    animation: none;
+  }
+}

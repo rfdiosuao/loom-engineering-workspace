@@ -20,4 +20,4 @@ Use a private engineering hub with the platform and Phone Agent linked as indepe
 
 ## Supersession
 
-On 2026-07-22 this approach was replaced by a single private monorepo. The old decision remains as historical context for why the engineering workspace was first separated from public distribution material.
+On 2026-07-22 this approach was replaced by a single public monorepo. The old decision remains as historical context for why the engineering workspace was first separated from public distribution material.

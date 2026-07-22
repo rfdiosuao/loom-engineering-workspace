@@ -1,6 +1,7 @@
 import 'tsx/esm';
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 import type { AgentApproval, AgentMessageBlock } from '../types/agent.ts';
@@ -25,6 +26,16 @@ import {
   loadCachedComponentSnapshot,
   saveCachedComponentSnapshot,
 } from './componentStatusCache.ts';
+
+test('application mounts one global production update center', async () => {
+  const appSource = await readFile(new URL('../App.tsx', import.meta.url), 'utf8');
+  const settingsSource = await readFile(new URL('../components/settings/SettingsPage.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /<UpdateCenter\s*\/>/);
+  assert.match(appSource, /requestUpdateCenterOpen/);
+  assert.match(settingsSource, /requestUpdateCenterOpen/);
+  assert.doesNotMatch(appSource, /showConfirm\([\s\S]*?发现新版本/);
+});
 
 test('component status cache survives page remounts until the user explicitly refreshes it', () => {
   const values = new Map<string, string>();

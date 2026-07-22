@@ -15,6 +15,7 @@ RELEASE_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "platform
 CI_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "ci-check.ps1")
 SMOKE_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "smoke-test-tauri-nsis.ps1")
 PROTECTED_TAURI_CONFIG = os.path.join(LAUNCHER_ROOT, "src-tauri", "tauri.protected.conf.json")
+MAC_ONLINE_PACKAGER = os.path.join(LAUNCHER_ROOT, "scripts", "package-mac-online.mjs")
 
 
 def read_text(path: str) -> str:
@@ -23,6 +24,15 @@ def read_text(path: str) -> str:
 
 
 class ReleaseSourceOfTruthTests(unittest.TestCase):
+    def test_desktop_updaters_and_packagers_use_the_public_monorepo(self) -> None:
+        updater = read_text(os.path.join(PYTHON_DIR, "services", "app_updater.py"))
+        mac_packager = read_text(MAC_ONLINE_PACKAGER)
+
+        canonical_repo = "rfdiosuao/loom-engineering-workspace"
+        self.assertIn(f"api.github.com/repos/{canonical_repo}/releases/latest", updater)
+        self.assertIn(f'return "{canonical_repo}";', mac_packager)
+        self.assertNotIn("rfdiosuao/lumi/releases/latest", updater)
+
     def test_current_ci_and_release_only_build_new_launcher(self) -> None:
         for path in (CI_WORKFLOW, RELEASE_WORKFLOW):
             source = read_text(path)
@@ -145,7 +155,7 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn('"$base...HEAD"', source)
         self.assertNotIn("git ls-files release", source)
 
-    def test_all_authoritative_version_files_are_2_2_0(self) -> None:
+    def test_all_authoritative_version_files_are_2_3_0(self) -> None:
         with open(os.path.join(LAUNCHER_ROOT, "package.json"), "r", encoding="utf-8") as handle:
             package = json.load(handle)
         with open(os.path.join(LAUNCHER_ROOT, "package-lock.json"), "r", encoding="utf-8") as handle:
@@ -155,12 +165,19 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         cargo_toml = read_text(os.path.join(LAUNCHER_ROOT, "src-tauri", "Cargo.toml"))
         cargo_lock = read_text(os.path.join(LAUNCHER_ROOT, "src-tauri", "Cargo.lock"))
 
-        self.assertEqual(package["version"], "2.2.0")
-        self.assertEqual(package_lock["version"], "2.2.0")
-        self.assertEqual(package_lock["packages"][""]["version"], "2.2.0")
-        self.assertEqual(tauri["version"], "2.2.0")
-        self.assertRegex(cargo_toml, r'(?ms)^\[package\].*?^version\s*=\s*"2\.2\.0"')
-        self.assertRegex(cargo_lock, r'(?s)\[\[package\]\]\s*name\s*=\s*"app"\s*version\s*=\s*"2\.2\.0"')
+        self.assertEqual(package["version"], "2.3.0")
+        self.assertEqual(package_lock["version"], "2.3.0")
+        self.assertEqual(package_lock["packages"][""]["version"], "2.3.0")
+        self.assertEqual(tauri["version"], "2.3.0")
+        self.assertRegex(cargo_toml, r'(?ms)^\[package\].*?^version\s*=\s*"2\.3\.0"')
+        self.assertRegex(cargo_lock, r'(?s)\[\[package\]\]\s*name\s*=\s*"app"\s*version\s*=\s*"2\.3\.0"')
+
+    def test_release_body_uses_the_versioned_product_notes_when_available(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+
+        self.assertIn('RELEASE_NOTES_$version.md', release)
+        self.assertIn('Get-Content -LiteralPath $notesPath -Raw', release)
+        self.assertIn('body_path: apps/loom-platform/ci_artifacts/RELEASE_BODY.md', release)
 
 
 if __name__ == "__main__":

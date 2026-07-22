@@ -2,7 +2,7 @@
 
 OpenClaw Launcher is a delivery-ready AI automation workbench that packages the OpenClaw runtime, a Tauri desktop launcher, a Python bridge, phone automation, desktop RPA, IM connectors, image/video workflows, skills, and license delivery into a product-ready desktop distribution.
 
-Current launcher version: `v2.1.11`
+Current launcher version: `v2.3.0`
 Bundled OpenClaw runtime target: `2026.6.5`
 
 Main repository README: [README.md](./README.md)
@@ -38,10 +38,10 @@ powershell -ExecutionPolicy Bypass -File scripts\ci-check.ps1
 ## Release
 
 ```powershell
-gh workflow run release.yml `
-  --repo rfdiosuao/lumi `
-  --ref codex/phone-agent-hardguard `
-  -f tag_name=v2.1.11
+gh workflow run platform-release.yml `
+  --repo rfdiosuao/loom-engineering-workspace `
+  --ref main `
+  -f tag_name=v2.3.0
 ```
 
 The release workflow publishes Windows installer assets, a Windows portable package, macOS `.app.zip`, macOS `.dmg`, and SHA256 checksum files.

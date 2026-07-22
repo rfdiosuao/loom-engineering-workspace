@@ -6,19 +6,20 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SETTINGS_PAGE = os.path.join(REPO_ROOT, "src", "components", "settings", "SettingsPage.tsx")
+UPDATE_CENTER = os.path.join(REPO_ROOT, "src", "components", "update", "UpdateCenter.tsx")
 THEME_FILE = os.path.join(REPO_ROOT, "src", "theme", "default.ts")
 APP_STORE = os.path.join(REPO_ROOT, "src", "stores", "appStore.ts")
 
 
 class SettingsPageContractTests(unittest.TestCase):
-    def test_settings_page_exposes_real_update_actions(self) -> None:
+    def test_settings_page_opens_the_single_global_update_center(self) -> None:
         with open(SETTINGS_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn("updateApi", source)
-        self.assertIn("handleCheckUpdate", source)
-        self.assertIn("handleInstallUpdate", source)
-        self.assertIn("updateStatus", source)
+        self.assertIn("requestUpdateCenterOpen", source)
+        self.assertIn("onClick={requestUpdateCenterOpen}", source)
+        self.assertIn("APP_VERSION", source)
+        self.assertNotIn("handleInstallUpdate", source)
 
     def test_update_copy_describes_verified_launcher_app_updates(self) -> None:
         with open(SETTINGS_PAGE, "r", encoding="utf-8") as handle:
@@ -30,12 +31,14 @@ class SettingsPageContractTests(unittest.TestCase):
         self.assertIn("SHA256", source)
         self.assertNotIn("智能体运行时更新", source)
 
-    def test_install_update_is_locked_until_an_update_is_found(self) -> None:
-        with open(SETTINGS_PAGE, "r", encoding="utf-8") as handle:
+    def test_install_action_only_appears_in_the_available_update_phase(self) -> None:
+        with open(UPDATE_CENTER, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn("showConfirm", source)
-        self.assertIn("disabled={Boolean(updateBusy) || updateStatus?.hasUpdate !== true}", source)
+        self.assertIn("phase === 'available'", source)
+        self.assertIn("onClick={() => void startDownload()}", source)
+        self.assertIn("立即更新", source)
+        self.assertNotIn("showConfirm", source)
 
     def test_theme_modes_are_not_locked_to_light(self) -> None:
         with open(THEME_FILE, "r", encoding="utf-8") as handle:

@@ -136,15 +136,23 @@ test('settings appearance controls persist language and theme state', async ({ a
   }
 });
 
-test('settings update controls check, confirm, and invoke only isolated update mocks', async ({ audit, page }) => {
+test('settings opens the global update center and installs only after download verification', async ({ audit, page }) => {
   await audit.registerRoute('GET', '/api/update/check', {
-    value: { current: '2.1.81', latest: '2.1.82-audit', hasUpdate: true },
+    value: {
+      current: '2.3.0',
+      latest: '2.3.1-audit',
+      hasUpdate: true,
+      notes: 'Audit update center release notes',
+      publishedAt: '2026-07-22T00:00:00.000Z',
+      releaseUrl: 'https://example.invalid/releases/2.3.1-audit',
+      size: 12_345_678,
+    },
   });
   await audit.registerRoute('POST', '/api/update/do', {
     value: {
       success: true,
       outcome: 'ready',
-      current_version: '2.1.82-audit',
+      current_version: '2.3.1-audit',
       log: ['isolated audit download', 'isolated audit verification'],
       installer_path: 'C:\\LOOM\\playwright-audit\\update.exe',
     },
@@ -156,19 +164,23 @@ test('settings update controls check, confirm, and invoke only isolated update m
   const beforeCheck = await markCalls(audit);
   await appMain(page).getByRole('button', { name: '检查更新' }).click();
   await expectProxyIntent(audit, beforeCheck, { method: 'GET', path: '/api/update/check', body: null });
-  await expectToast(page, '发现可用新版本。');
+  const updateCenter = page.getByRole('dialog', { name: '发现新版本' });
+  await expect(updateCenter).toBeVisible();
+  await expect(updateCenter).toContainText('Audit update center release notes');
 
-  const install = appMain(page).getByRole('button', { name: '立即更新' });
+  const install = updateCenter.getByRole('button', { name: '立即更新' });
   await expect(install).toBeEnabled();
   const beforeInstall = await markCalls(audit);
   await install.click();
-  await confirmDialog(page, '确认更新', '立即更新');
   await expectProxyIntent(audit, beforeInstall, { method: 'POST', path: '/api/update/do', body: null });
-  await expectInvokeIntent(audit, beforeInstall, {
+  await expect(updateCenter.getByText('下载与安全校验已完成')).toBeVisible();
+
+  const beforeRestart = await markCalls(audit);
+  await updateCenter.getByRole('button', { name: '立即重启' }).click();
+  await expectInvokeIntent(audit, beforeRestart, {
     command: 'prepare_update_install',
     args: { installerPath: 'C:\\LOOM\\playwright-audit\\update.exe' },
   });
-  await expectToast(page, '更新完成: 2.1.82-audit');
 });
 
 const settingsDataDestinations = [

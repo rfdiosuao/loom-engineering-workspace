@@ -1,17 +1,17 @@
 # OpenClaw Launcher / Lumi Automation Workbench
 
-[![CI](https://github.com/rfdiosuao/lumi/actions/workflows/ci.yml/badge.svg)](https://github.com/rfdiosuao/lumi/actions/workflows/ci.yml)
-[![Release](https://github.com/rfdiosuao/lumi/actions/workflows/release.yml/badge.svg)](https://github.com/rfdiosuao/lumi/actions/workflows/release.yml)
-[![GitHub release](https://img.shields.io/github/v/release/rfdiosuao/lumi?include_prereleases&label=release)](https://github.com/rfdiosuao/lumi/releases)
+[![CI](https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/platform-ci.yml/badge.svg)](https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/platform-ci.yml)
+[![Release](https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/platform-release.yml/badge.svg)](https://github.com/rfdiosuao/loom-engineering-workspace/actions/workflows/platform-release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/rfdiosuao/loom-engineering-workspace?include_prereleases&label=release)](https://github.com/rfdiosuao/loom-engineering-workspace/releases)
 
 > 中文: OpenClaw Launcher 是一套面向交付的 AI 自动化工作台,把 OpenClaw 运行时、桌面启动器、手机控制、桌面 RPA、IM 通道、图像/视频工作流和授权交付封装成客户能直接运行的产品包。
 >
 > English: OpenClaw Launcher is a delivery-ready AI automation workbench that packages the OpenClaw runtime, desktop launcher, phone control, desktop RPA, IM connectors, image/video workflows, and license delivery into a product-ready desktop distribution.
 
-Current launcher version: `v2.1.11`
+Current launcher version: `v2.3.0`
 Bundled OpenClaw runtime target: `2026.6.5`
 
-Repository: [github.com/rfdiosuao/lumi](https://github.com/rfdiosuao/lumi)
+Repository: [github.com/rfdiosuao/loom-engineering-workspace](https://github.com/rfdiosuao/loom-engineering-workspace)
 
 ---
 
@@ -148,10 +148,10 @@ macOS 不能复用 Windows 的 `node_modules`、`src-tauri/target`、Windows Nod
 手动触发主发布:
 
 ```powershell
-gh workflow run release.yml `
-  --repo rfdiosuao/lumi `
-  --ref codex/phone-agent-hardguard `
-  -f tag_name=v2.1.11
+gh workflow run platform-release.yml `
+  --repo rfdiosuao/loom-engineering-workspace `
+  --ref main `
+  -f tag_name=v2.3.0
 ```
 
 ### 安全交付底线
@@ -244,10 +244,10 @@ The main release workflow builds and publishes:
 - SHA256 checksum files
 
 ```powershell
-gh workflow run release.yml `
-  --repo rfdiosuao/lumi `
-  --ref codex/phone-agent-hardguard `
-  -f tag_name=v2.1.11
+gh workflow run platform-release.yml `
+  --repo rfdiosuao/loom-engineering-workspace `
+  --ref main `
+  -f tag_name=v2.3.0
 ```
 
 ### Audience

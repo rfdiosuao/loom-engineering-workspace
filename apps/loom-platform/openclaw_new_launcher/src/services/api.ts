@@ -604,7 +604,38 @@ export const videoApi = {
 };
 
 // === Update API ===
-export type UpdateOutcome = 'ready' | 'already_current' | 'failed';
+export type UpdateOutcome = 'ready' | 'already_current' | 'cancelled' | 'failed';
+
+export interface UpdateCheckResponse {
+  current: string;
+  latest: string;
+  hasUpdate: boolean;
+  notes: string;
+  publishedAt: string;
+  releaseUrl: string;
+  size: number;
+}
+
+export interface UpdateProgressResponse {
+  phase: string;
+  downloaded: number;
+  total: number;
+  percent: number;
+  version: string;
+  message: string;
+  errorCode: string;
+  retryable: boolean;
+  remediation: string[];
+}
+
+export interface UpdateResultReceipt {
+  status: 'success' | 'failed';
+  version: string;
+  confirmedAt: string;
+  message: string;
+  rollbackState: string;
+  remediation: string[];
+}
 
 export interface UpdateDoResponse {
   success: boolean;
@@ -629,20 +660,17 @@ export function resolveUpdateDisposition(
   throw new Error('Update result is missing a verified installer path or has an invalid outcome.');
 }
 
+export function shouldPresentUpdate(latest: string, skipped: string, manual: boolean): boolean {
+  return manual || !latest.trim() || latest.trim() !== skipped.trim();
+}
+
 export const updateApi = {
-  check: (): Promise<{ current: string; latest: string; hasUpdate: boolean }> => api('/api/update/check'),
-  status: (): Promise<{
-    phase: string;
-    downloaded: number;
-    total: number;
-    percent: number;
-    version: string;
-    message: string;
-    errorCode: string;
-    retryable: boolean;
-    remediation: string[];
-  }> => api('/api/update/status'),
+  check: (): Promise<UpdateCheckResponse> => api('/api/update/check'),
+  status: (): Promise<UpdateProgressResponse> => api('/api/update/status'),
   do: (): Promise<UpdateDoResponse> => api('/api/update/do', 'POST'),
+  cancel: (): Promise<{ cancelRequested: boolean; status: UpdateProgressResponse }> =>
+    api('/api/update/cancel', 'POST'),
+  result: (): Promise<{ pending: boolean; result: UpdateResultReceipt | null }> => api('/api/update/result'),
   prepareInstall: (installerPath: string): Promise<string> =>
     invoke('prepare_update_install', { installerPath }),
 };

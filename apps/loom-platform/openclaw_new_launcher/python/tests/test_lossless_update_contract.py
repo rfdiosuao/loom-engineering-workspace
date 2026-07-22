@@ -11,9 +11,21 @@ TAURI_LIB = os.path.join(ROOT, "src-tauri", "src", "lib.rs")
 INSTALLER_HOOKS = os.path.join(ROOT, "src-tauri", "installer", "upgrade-hooks.nsh")
 HANDOFF_SCRIPT = os.path.join(ROOT, "src-tauri", "installer", "update-handoff.ps1")
 INSTALLER_PROCESS_CLEANUP = os.path.join(ROOT, "src-tauri", "installer", "stop-owned-install-processes.ps1")
+UPDATE_RELEASE_SCRIPT = os.path.join(ROOT, "scripts", "prepare-desktop-update-release.ps1")
 
 
 class LosslessUpdateContractTests(unittest.TestCase):
+    def test_update_release_preparation_canonicalizes_and_hashes_the_installer(self) -> None:
+        self.assertTrue(os.path.isfile(UPDATE_RELEASE_SCRIPT))
+        with open(UPDATE_RELEASE_SCRIPT, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn('"LOOM-$Version-setup.exe"', source)
+        self.assertIn("Get-FileHash", source)
+        self.assertIn("Get-AuthenticodeSignature", source)
+        self.assertIn("NotSigned", source)
+        self.assertIn(".sha256.txt", source)
+
     def test_nsis_blocks_downgrades_and_loads_upgrade_hooks(self) -> None:
         with open(TAURI_CONFIG, "r", encoding="utf-8") as handle:
             config = json.load(handle)
