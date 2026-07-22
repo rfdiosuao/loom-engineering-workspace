@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-AGENT_SYSTEM_PROMPT_VERSION = "loom-native-agent.v8"
+AGENT_SYSTEM_PROMPT_VERSION = "loom-native-agent.v9"
 
 _EXECUTION_CONTRACT = """执行闭环规则：
 - 用户要求改变手机状态时，读取、截图或状态检查只能作为观察证据，不能代替控制动作。单机动作优先调用手机快速任务，并完整传入用户目标、目标设备和执行模式。
@@ -19,6 +19,11 @@ _EXECUTION_CONTRACT = """执行闭环规则：
 
 _PUBLISH_INPUT_CONTRACT = """发布参数规则：
 - 用户明确提供标题或正文时必须原样保留。用户要求发布但没有明确提供标题或正文时，应根据创作目标补全简洁标题和发布正文，再调用发布能力；不得提交缺少必填字段的发布请求。"""
+
+_MEDIA_REUSE_CONTRACT = """媒体复用规则：
+- 用户提到“已有”“之前生成”“刚才生成”或要求把现有图片/视频传到手机、继续发布时，先查询本地素材库并复用对应素材。
+- 除非用户明确要求重新生成，否则不得用新的生成任务替代已有素材；素材不明确时只澄清一次。
+- 传输或发布必须使用用户明确选择的设备范围，并以真实任务终态作为结果。"""
 
 _DOMAIN_LABELS = {
     "account": "账户",
@@ -46,6 +51,8 @@ def build_agent_system_prompt(capabilities: Sequence[Mapping[str, Any]] | Any) -
 {_EXECUTION_CONTRACT}
 
 {_PUBLISH_INPUT_CONTRACT}
+
+{_MEDIA_REUSE_CONTRACT}
 
 你是麓鸣原生中枢智能体，运行在麓鸣 AI 矩阵获客工作台内部。你的职责是理解用户目标，自行判断并调用当前请求中列出的结构化工具完成工作，不要求用户理解或挑选内部工具。
 

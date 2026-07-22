@@ -10,6 +10,9 @@ import time
 from typing import Any, Callable
 
 from core.agent_capabilities import (
+    MEDIA_ASSET_LIST_INPUT_SCHEMA,
+    MEDIA_ASSET_LIST_OUTPUT_SCHEMA,
+    MEDIA_ASSET_TRANSFER_INPUT_SCHEMA,
     MEDIA_IMAGE_INPUT_SCHEMA,
     MEDIA_JOB_OUTPUT_SCHEMA,
     MEDIA_VIDEO_INPUT_SCHEMA,
@@ -57,10 +60,35 @@ class AgentBuiltinCapabilityProvider:
         self.matrix_factory = matrix_factory
 
     def operations(self) -> dict[str, Json]:
-        connected = callable(self.context_factory) and callable(
+        context_connected = callable(self.context_factory)
+        connected = context_connected and callable(
             getattr(self.job_manager, "submit_progress", None)
         )
         return {
+            "loom.media.assets.list": {
+                "executor": self._list_media_assets if context_connected else None,
+                "displayName": "查看本地素材",
+                "description": "查询麓鸣本地素材库中已经生成的图片和视频，避免重复生成。",
+                "domain": "media",
+                "targetScope": "none",
+                "permission": "read",
+                "risk": "read",
+                "timeoutSec": 15,
+                "inputSchema": MEDIA_ASSET_LIST_INPUT_SCHEMA,
+                "outputSchema": MEDIA_ASSET_LIST_OUTPUT_SCHEMA,
+            },
+            "loom.media.asset.transfer": {
+                "executor": self._submit_media_asset_transfer if connected else None,
+                "displayName": "传输素材到手机",
+                "description": "把本地素材库中已有的图片或视频传输到明确选择的手机相册。",
+                "domain": "media",
+                "targetScope": "matrix-write",
+                "permission": "control",
+                "risk": "control_safe",
+                "timeoutSec": 690,
+                "inputSchema": MEDIA_ASSET_TRANSFER_INPUT_SCHEMA,
+                "outputSchema": MEDIA_JOB_OUTPUT_SCHEMA,
+            },
             "loom.media.image.generate": {
                 "executor": (
                     lambda payload, cancellation_token=None: self._submit_media(
@@ -109,6 +137,162 @@ class AgentBuiltinCapabilityProvider:
                 "inputSchema": PHONE_PUBLISH_INPUT_SCHEMA,
                 "outputSchema": MEDIA_JOB_OUTPUT_SCHEMA,
             },
+        }
+
+    def _list_media_assets(self, payload: Json) -> Json:
+        if not callable(self.context_factory):
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "本地素材库尚未就绪",
+            )
+        try:
+            context = self.context_factory()
+            from api.routes_media import _media_library
+
+            return _media_library(context).list_assets(
+                payload.get("kind"),
+                str(payload.get("cursor") or ""),
+                int(payload.get("limit") or 20),
+            )
+        except (TypeError, ValueError) as exc:
+            raise CapabilityExecutionError(
+                "media_asset_query_invalid",
+                str(exc) or "素材查询参数无效",
+                recoverable=False,
+            ) from exc
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "media_library_unavailable",
+                "本地素材库暂时不可用",
+            ) from exc
+
+    def _submit_media_asset_transfer(
+        self,
+        payload: Json,
+        *,
+        cancellation_token: Any | None = None,
+    ) -> Json:
+        if not callable(self.context_factory) or not callable(
+            getattr(self.job_manager, "submit_progress", None)
+        ):
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "素材传输服务尚未就绪",
+            )
+        try:
+            context = self.context_factory()
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "素材传输服务尚未就绪",
+            ) from exc
+
+        from api.routes_media import (
+            _configured_phone_snapshot,
+            _media_library,
+            _transfer_generated_media_to_phones,
+        )
+        from services.media_library import MediaLibraryError
+
+        try:
+            asset = _media_library(context).resolve(str(payload.get("assetId") or ""))
+        except MediaLibraryError as exc:
+            raise CapabilityExecutionError(
+                "media_asset_not_found",
+                "素材不存在或已被删除",
+                recoverable=False,
+            ) from exc
+
+        targets = payload.get("targets") if isinstance(payload.get("targets"), dict) else {}
+        requested_device_ids = [
+            str(value).strip()
+            for value in targets.get("deviceIds", [])
+            if str(value).strip()
+        ] if isinstance(targets.get("deviceIds"), list) else []
+        requested_groups = [
+            str(value).strip()
+            for value in targets.get("groups", [])
+            if str(value).strip()
+        ] if isinstance(targets.get("groups"), list) else []
+        if requested_groups or targets.get("allOnline") is True:
+            for device_id in self._resolve_media_target_device_ids(
+                requested_groups,
+                all_online=targets.get("allOnline") is True,
+            ):
+                if device_id not in requested_device_ids:
+                    requested_device_ids.append(device_id)
+        if not requested_device_ids:
+            raise CapabilityExecutionError(
+                "phone_target_scope_required",
+                "请先明确选择要接收素材的手机或设备组",
+                recoverable=False,
+            )
+
+        phone_snapshot = _configured_phone_snapshot(context, requested_device_ids)
+        missing_ids = phone_snapshot.get("missingDeviceIds")
+        if isinstance(missing_ids, list) and missing_ids:
+            raise CapabilityExecutionError(
+                "phone_target_not_found",
+                f"手机配置不存在：{', '.join(str(item) for item in missing_ids)}",
+                recoverable=False,
+            )
+        devices = phone_snapshot.get("devices") if isinstance(phone_snapshot.get("devices"), list) else []
+        if not devices:
+            raise CapabilityExecutionError(
+                "phone_target_unavailable",
+                "未找到可用的手机配置",
+                recoverable=False,
+            )
+
+        files = [{"path": asset.path, "filename": asset.filename, "mime": asset.mime}]
+
+        def target(job_id: str) -> Json:
+            progress = getattr(self.job_manager, "progress", None)
+            if callable(progress):
+                progress(
+                    job_id,
+                    f"正在传送到 {len(devices)} 台手机相册",
+                    "neutral",
+                    phase="phone-transfer",
+                )
+            summary = _transfer_generated_media_to_phones(
+                context,
+                asset.kind,
+                files,
+                phone_snapshot=phone_snapshot,
+            )
+            return {**summary, "success": summary.get("status") == "succeeded"}
+
+        job = self.job_manager.submit_progress("media.transfer", "传输素材到手机", target)
+        job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
+        if not job_id:
+            raise CapabilityExecutionError("capability_failed", "素材传输任务创建失败")
+        terminal = self._wait_for_media_job(
+            job_id,
+            kind="transfer",
+            cancellation_token=cancellation_token,
+        )
+        result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
+        if terminal.get("status") == "cancelled":
+            raise CapabilityExecutionError("capability_cancelled", "素材传输任务已取消")
+        if terminal.get("status") != "succeeded" or result.get("success") is False:
+            failure = terminal.get("failure") if isinstance(terminal.get("failure"), dict) else {}
+            raise CapabilityExecutionError(
+                str(result.get("reason") or failure.get("code") or "media_transfer_failed"),
+                str(terminal.get("error") or result.get("message") or "素材传输失败"),
+                recoverable=bool(failure.get("retryable", True)),
+            )
+        return {
+            "jobId": job_id,
+            "kind": "media-transfer",
+            "status": "succeeded",
+            "asset": {
+                "id": asset.asset_id,
+                "kind": asset.kind,
+                "filename": asset.filename,
+                "path": asset.path,
+            },
+            "result": result,
         }
 
     def _submit_media(
@@ -309,7 +493,7 @@ class AgentBuiltinCapabilityProvider:
         get_job = getattr(self.job_manager, "get", None)
         if not callable(get_job):
             raise CapabilityExecutionError("capability_unavailable", "媒体任务状态服务尚未就绪")
-        wait_seconds = 570 if kind == "image" else 1770
+        wait_seconds = 570 if kind in {"image", "transfer"} else 1770
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             if cancellation_token is not None and bool(getattr(cancellation_token, "cancelled", False)):
@@ -328,6 +512,8 @@ class AgentBuiltinCapabilityProvider:
         cancel = getattr(self.job_manager, "cancel", None)
         if callable(cancel):
             cancel(job_id)
+        if kind == "transfer":
+            raise CapabilityExecutionError("media_transfer_timeout", "素材传输任务执行超时")
         raise CapabilityExecutionError("media_job_timeout", "媒体生成任务执行超时")
 
     def _submit_phone_publish(self, payload: Json, *, cancellation_token: Any | None = None) -> Json:

@@ -21,8 +21,12 @@ class AgentCapabilityRouterTests(unittest.TestCase):
             },
             {"name": "loom.media.image.generate", "domain": "media", "available": True},
             {"name": "loom.media.video.generate", "domain": "media", "available": True},
+            {"name": "loom.media.assets.list", "domain": "media", "available": True},
+            {"name": "loom.media.asset.transfer", "domain": "media", "available": True},
             {"name": "loom.phone.publish", "domain": "phone", "available": True},
             {"name": "loom.matrix.dispatch", "domain": "matrix", "available": True},
+            {"name": "loom.agent.install", "domain": "agent", "available": True},
+            {"name": "loom.schedule.add", "domain": "schedule", "available": True},
             {"name": "loom.cli.account.current", "domain": "account", "available": True},
             {"name": "loom.cli.logs.tail", "domain": "diagnostics", "available": True},
             {"name": "loom.settings.update.check", "domain": "settings", "available": True},
@@ -60,6 +64,48 @@ class AgentCapabilityRouterTests(unittest.TestCase):
         self.assertIn("loom.matrix.dispatch", names)
         self.assertNotIn("loom.media.image.generate", names)
         self.assertEqual(metadata["mode"], "focused")
+
+    def test_all_device_wording_keeps_matrix_dispatch_available(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        for prompt in (
+            "给全部设备下发打开抖音的任务",
+            "让所有手机同时打开小红书",
+            "把任务发给每台手机",
+        ):
+            with self.subTest(prompt=prompt):
+                selected, metadata = route_capabilities({"prompt": prompt}, self.capabilities)
+                names = {item["name"] for item in selected}
+
+                self.assertIn("loom.matrix.dispatch", names)
+                self.assertEqual(metadata["mode"], "focused")
+                self.assertIn("matrix", metadata["domains"])
+
+    def test_agent_product_install_wording_focuses_agent_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        for prompt in ("安装 Codex", "帮我检测 Claude Code", "启动 OpenClaw"):
+            with self.subTest(prompt=prompt):
+                selected, metadata = route_capabilities({"prompt": prompt}, self.capabilities)
+                names = {item["name"] for item in selected}
+
+                self.assertIn("loom.agent.install", names)
+                self.assertNotIn("loom.media.image.generate", names)
+                self.assertEqual(metadata["mode"], "focused")
+                self.assertIn("agent", metadata["domains"])
+
+    def test_natural_time_wording_focuses_schedule_tools(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        for prompt in ("明天九点执行一次", "今晚 8 点开始发布", "两小时后运行任务"):
+            with self.subTest(prompt=prompt):
+                selected, metadata = route_capabilities({"prompt": prompt}, self.capabilities)
+                names = {item["name"] for item in selected}
+
+                self.assertIn("loom.schedule.add", names)
+                self.assertNotIn("loom.media.image.generate", names)
+                self.assertEqual(metadata["mode"], "focused")
+                self.assertIn("schedule", metadata["domains"])
 
     def test_ambiguous_request_uses_full_catalog_but_catalog_request_forces_catalog_tool(self) -> None:
         from core.agent_capability_router import route_capabilities

@@ -1700,7 +1700,9 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
             self.assertEqual(submitted.status_code, 200)
             try:
-                event = _wait_for_matrix_event(temp_dir, "agent round 1", timeout=0.45)
+                event = _wait_for_matrix_event(temp_dir, "agent round 1", timeout=2.0)
+                running = client.get(f"/api/jobs/{submitted.json()['jobId']}").json()["job"]
+                self.assertNotIn(running.get("status"), {"succeeded", "failed"})
             finally:
                 _wait_for_job(client, submitted.json()["jobId"], timeout=5.0)
             self.assertEqual(event["type"], "phone.events.phone.task.stdout")

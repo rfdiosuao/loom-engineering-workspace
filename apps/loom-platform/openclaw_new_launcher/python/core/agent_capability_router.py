@@ -43,7 +43,9 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
         "phone", "device", "screenshot", "publish",
     ),
     "matrix": (
-        "矩阵", "多台", "批量", "设备组", "群控", "急停", "下发任务", "matrix", "fleet", "campaign",
+        "矩阵", "多台", "批量", "设备组", "群控", "急停", "下发任务", "全部设备", "所有设备",
+        "全部手机", "所有手机", "每台手机", "每一台手机", "全部在线", "所有在线", "在线设备",
+        "同时下发", "matrix", "fleet", "campaign",
     ),
     "acquisition": (
         "获客", "线索", "招聘", "简历", "boss直聘", "飞书", "客户", "lead", "acquisition", "feishu", "recruit",
@@ -52,12 +54,31 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "models": ("模型", "供应商", "api key", "apikey", "provider", "model"),
     "account": ("账号", "登录", "订阅", "额度", "账户", "account", "login", "quota"),
     "license": ("授权", "授权码", "许可证", "激活码", "商业授权", "license", "activation"),
-    "agent": ("智能体", "agent", "runtime", "运行时", "技能", "skill", "mcp", "cli"),
+    "agent": (
+        "智能体", "agent", "runtime", "运行时", "技能", "skill", "mcp", "cli",
+        "codex", "claude code", "claudecode", "openclaw", "opencode", "hermes",
+    ),
     "settings": ("设置", "主题", "深色", "浅色", "更新", "版本", "settings", "theme", "update", "version"),
     "diagnostics": (
         "诊断", "日志", "报错", "错误", "失败", "状态", "健康", "修复", "更新", "diagnostic", "log", "error", "status",
     ),
 }
+
+_TIME_NUMBER = r"(?:[0-2]?\d|[零一二两三四五六七八九十]{1,3})"
+_SCHEDULE_INTENT_PATTERNS = (
+    re.compile(
+        rf"(?:今天|明天|后天|今晚|每天|每周|每月).{{0,12}}"
+        rf"(?:{_TIME_NUMBER}\s*(?:点|时)|执行|运行|发布|开始)"
+    ),
+    re.compile(
+        rf"{_TIME_NUMBER}\s*(?:点|时)(?:\s*{_TIME_NUMBER}\s*分)?"
+        rf".{{0,8}}(?:执行|运行|发布|开始)"
+    ),
+    re.compile(
+        rf"(?:稍后|过\s*{_TIME_NUMBER}\s*(?:分钟|小时)|"
+        rf"{_TIME_NUMBER}\s*(?:分钟|小时)后).{{0,8}}(?:执行|运行|发布|开始|任务)"
+    ),
+)
 
 _CORE_NAME_PATTERNS = (
     ".capabilities.",
@@ -223,6 +244,8 @@ def _intent_domains(text: str, request: Mapping[str, Any]) -> set[str]:
         for domain, keywords in _DOMAIN_KEYWORDS.items()
         if any(keyword in text for keyword in keywords)
     }
+    if any(pattern.search(text) for pattern in _SCHEDULE_INTENT_PATTERNS):
+        domains.add("schedule")
     scope = request.get("requestScope")
     if isinstance(scope, Mapping):
         _add_target_domains(domains, scope)

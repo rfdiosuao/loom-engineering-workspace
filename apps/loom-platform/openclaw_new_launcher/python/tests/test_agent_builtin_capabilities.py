@@ -169,10 +169,116 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
 
                 self.assertTrue(capabilities["loom.media.image.generate"]["available"])
                 self.assertTrue(capabilities["loom.media.video.generate"]["available"])
+                self.assertTrue(capabilities["loom.media.assets.list"]["available"])
+                self.assertTrue(capabilities["loom.media.asset.transfer"]["available"])
+                self.assertEqual(capabilities["loom.media.asset.transfer"]["targetScope"], "matrix-write")
                 self.assertTrue(capabilities["loom.phone.publish"]["available"])
                 self.assertEqual(capabilities["loom.phone.publish"]["risk"], "outbound")
             finally:
                 service.shutdown()
+
+    def test_agent_can_list_existing_media_without_generating_again(self) -> None:
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+        from services.media_library import MediaLibrary
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            image_dir = os.path.join(paths.data_dir, "generated-images")
+            os.makedirs(image_dir, exist_ok=True)
+            image_path = os.path.join(image_dir, "existing-poster.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"existing-image")
+            recorded = MediaLibrary(paths.data_dir).record(image_path, {"prompt": "招聘海报"})
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs)
+            service = AgentService(
+                paths,
+                runtime=UnavailableRuntime(),
+                context_factory=lambda: context,
+                job_manager=jobs,
+            )
+            try:
+                result = service.capabilities.execute(
+                    "loom.media.assets.list",
+                    {"kind": "image", "limit": 10},
+                )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(result["items"][0]["id"], recorded["id"])
+        self.assertEqual(result["items"][0]["filename"], "existing-poster.png")
+        self.assertEqual(jobs.submissions, [])
+
+    def test_agent_can_transfer_existing_media_to_selected_phones(self) -> None:
+        import json
+
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+        from services.media_library import MediaLibrary
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            os.makedirs(paths.launcher_dir, exist_ok=True)
+            with open(os.path.join(paths.launcher_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "selectedDeviceId": "phone-1",
+                    "devices": [
+                        {"id": "phone-1", "name": "Phone One"},
+                        {"id": "phone-2", "name": "Phone Two"},
+                    ],
+                }, handle)
+            image_dir = os.path.join(paths.data_dir, "generated-images")
+            os.makedirs(image_dir, exist_ok=True)
+            image_path = os.path.join(image_dir, "existing-poster.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"existing-image")
+            asset = MediaLibrary(paths.data_dir).record(image_path, {"prompt": "招聘海报"})
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs)
+
+            def read_json(path, default):
+                if not os.path.isfile(path):
+                    return default
+                with open(path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+
+            context.read_json = read_json
+            observed: dict = {}
+
+            def transfer(_ctx, kind, files, *, phone_snapshot=None):
+                observed.update({"kind": kind, "files": files, "snapshot": phone_snapshot})
+                return {
+                    "status": "succeeded",
+                    "message": "transferred",
+                    "deviceCount": len(phone_snapshot.get("devices", [])),
+                    "succeededDeviceCount": len(phone_snapshot.get("devices", [])),
+                    "failedDeviceCount": 0,
+                }
+
+            service = AgentService(
+                paths,
+                runtime=UnavailableRuntime(),
+                context_factory=lambda: context,
+                job_manager=jobs,
+            )
+            try:
+                with patch("api.routes_media._transfer_generated_media_to_phones", side_effect=transfer):
+                    result = service.capabilities.execute(
+                        "loom.media.asset.transfer",
+                        {
+                            "assetId": asset["id"],
+                            "targets": {"deviceIds": ["phone-2"]},
+                        },
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["kind"], "media-transfer")
+        self.assertEqual(observed["kind"], "image")
+        self.assertEqual(observed["files"][0]["path"], image_path)
+        self.assertEqual([item["id"] for item in observed["snapshot"]["devices"]], ["phone-2"])
 
     def test_disconnected_agent_service_hides_media_from_model_catalog(self) -> None:
         from core.paths import AppPaths

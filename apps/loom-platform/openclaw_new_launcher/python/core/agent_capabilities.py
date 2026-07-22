@@ -133,6 +133,36 @@ MATRIX_TARGET_SCHEMA: Json = {
     ],
 }
 
+MEDIA_ASSET_LIST_INPUT_SCHEMA: Json = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": ["image", "video"]},
+        "cursor": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+    "additionalProperties": False,
+}
+
+MEDIA_ASSET_LIST_OUTPUT_SCHEMA: Json = {
+    "type": "object",
+    "required": ["items", "nextCursor", "hasMore"],
+    "properties": {
+        "items": {"type": "array", "items": {"type": "object"}},
+        "nextCursor": {"type": "string"},
+        "hasMore": {"type": "boolean"},
+    },
+}
+
+MEDIA_ASSET_TRANSFER_INPUT_SCHEMA: Json = {
+    "type": "object",
+    "required": ["assetId", "targets"],
+    "properties": {
+        "assetId": {"type": "string", "minLength": 1},
+        "targets": MATRIX_TARGET_SCHEMA,
+    },
+    "additionalProperties": False,
+}
+
 MATRIX_DISPATCH_INPUT_SCHEMA: Json = {
     "type": "object",
     "required": ["prompt"],
