@@ -168,13 +168,23 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
             worker = threading.Thread(target=run_process)
             worker.start()
-            self.assertTrue(_wait_for_path(started_path))
-            pid = _read_pid(started_path)
-            cancel_requested.set()
-            with open(cancel_path, "w", encoding="ascii") as handle:
-                handle.write("cancelled\n")
-            worker.join(timeout=5)
+            started = _wait_for_path(started_path, timeout=10.0)
+            pid = _read_pid(started_path) if started else 0
+            try:
+                cancel_requested.set()
+                with open(cancel_path, "w", encoding="ascii") as handle:
+                    handle.write("cancelled\n")
+                worker.join(timeout=12)
+            finally:
+                # Never leave a delayed Node startup alive when an assertion fails.
+                # Windows keeps the temporary directory locked until the child exits.
+                cancel_requested.set()
+                if not os.path.exists(cancel_path):
+                    with open(cancel_path, "w", encoding="ascii") as handle:
+                        handle.write("cancelled\n")
+                worker.join(timeout=12)
 
+            self.assertTrue(started)
             self.assertFalse(worker.is_alive())
             self.assertTrue(result["cancelled"])
             self.assertEqual(result["returncode"], 0)
@@ -1028,7 +1038,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
             try:
                 submitted = client.post("/api/phone/status", json={"deviceId": "phone-2"})
-                job = _wait_for_job(client, submitted.json()["jobId"])
+                job = _wait_for_job(client, submitted.json()["jobId"], timeout=10.0)
             finally:
                 server.shutdown()
                 server.server_close()
