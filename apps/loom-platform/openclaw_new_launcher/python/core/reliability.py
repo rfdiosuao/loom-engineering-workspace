@@ -93,6 +93,9 @@ def classify_failure(value: Any) -> dict[str, Any]:
     if not text:
         return _unknown("")
     folded = text.lower()
+    provider_failure = _provider_failure(value, text, folded)
+    if provider_failure:
+        return provider_failure
     for failure_class, label, retryable, severity, suggestion, patterns in FAILURE_RULES:
         if any(pattern in folded for pattern in patterns):
             return {
@@ -104,6 +107,109 @@ def classify_failure(value: Any) -> dict[str, Any]:
                 "evidence": _evidence(text),
             }
     return _unknown(text)
+
+
+def _provider_failure(value: Any, text: str, folded: str) -> dict[str, Any] | None:
+    code = _failure_code(value).upper()
+    if code == "AGENT_ACCOUNT_LOGIN_REQUIRED" or any(
+        marker in folded
+        for marker in ("managed model login is required", "account login required", "模型账号未登录")
+    ):
+        return _classified_failure(
+            "account_login_required",
+            "模型账号未登录",
+            False,
+            "danger",
+            "请先在模型账号页完成登录或重新绑定账号，再重试任务。",
+            text,
+        )
+
+    status = _http_status(text)
+    provider_context = any(
+        marker in folded
+        for marker in ("provider", "model", "gateway", "imageapierror", "videoapierror", "模型", "供应商", "生图", "视频")
+    )
+    if status == 429 or code in {"RATE_LIMIT", "PROVIDER_RATE_LIMITED"}:
+        return _classified_failure(
+            "provider_rate_limited",
+            "模型供应商限流",
+            True,
+            "warn",
+            "等待 Retry-After 指定的时间，或切换可用模型后再重试。",
+            text,
+        )
+    if status in {408, 504, 524} or code in {"PROVIDER_TIMEOUT", "MODEL_TIMEOUT"}:
+        return _classified_failure(
+            "provider_timeout",
+            "模型供应商响应超时",
+            True,
+            "warn",
+            "保留当前任务并稍后重试；若持续发生，请检查上游网关和生成任务超时配置。",
+            text,
+        )
+    if (
+        status in {500, 502, 503, 520, 521, 522, 523, 525, 526} and provider_context
+    ) or code in {"PROVIDER_UNAVAILABLE", "MODEL_UNAVAILABLE"}:
+        return _classified_failure(
+            "provider_unavailable",
+            "模型供应商暂不可用",
+            True,
+            "danger",
+            "先运行供应商连通性验证；服务恢复后可安全重试原任务。",
+            text,
+        )
+    if (status in {401, 403} and provider_context) or code in {
+        "PROVIDER_AUTH_FAILED",
+        "MODEL_AUTH_FAILED",
+    }:
+        return _classified_failure(
+            "provider_auth_failed",
+            "模型供应商鉴权失败",
+            False,
+            "danger",
+            "重新保存模型账号或 API Key，并运行供应商验证后再重试。",
+            text,
+        )
+    return None
+
+
+def _failure_code(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("code", "errorCode", "failureCode"):
+            if value.get(key):
+                return str(value[key])
+        error = value.get("error")
+        if isinstance(error, dict):
+            return _failure_code(error)
+    return ""
+
+
+def _http_status(text: str) -> int | None:
+    match = re.search(r"(?:http(?:\s+error)?|status(?:\s+code)?)\s*[:=]?\s*(\d{3})\b", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _classified_failure(
+    failure_class: str,
+    label: str,
+    retryable: bool,
+    severity: str,
+    suggestion: str,
+    text: str,
+) -> dict[str, Any]:
+    return {
+        "class": failure_class,
+        "label": label,
+        "retryable": retryable,
+        "severity": severity,
+        "suggestion": suggestion,
+        "evidence": _evidence(text),
+    }
 
 
 def build_reliability_snapshot(ctx, limit: int = 30) -> dict[str, Any]:

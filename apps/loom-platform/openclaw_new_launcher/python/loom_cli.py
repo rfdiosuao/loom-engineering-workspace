@@ -37,6 +37,7 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict
 
+from core.audit_log import append_jsonl, tail_lines
 from core.paths import AppPaths
 
 
@@ -774,11 +775,8 @@ def _logs(args: list[str], ctx: CliContext) -> Json:
             os.path.join(ctx.paths.data_dir, "logs", "bridge-service.log"),
         ]
     path = next((item for item in candidates if os.path.exists(item)), candidates[0])
-    lines: list[str] = []
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            lines = handle.readlines()[-limit:]
-    return {"path": path, "lines": [_redact(line.rstrip("\n")) for line in lines]}
+    lines = tail_lines(path, limit)
+    return {"path": path, "lines": [_redact(line) for line in lines]}
 
 
 def _account(args: list[str], ctx: CliContext) -> Json:
@@ -2209,10 +2207,8 @@ def audit_log_path(filename: str) -> str:
 
 def append_audit_record(filename: str, record: Json) -> str:
     path = audit_log_path(filename)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_redact_audit_record(record), ensure_ascii=False, separators=(",", ":")) + "\n")
-    return path
+    line = json.dumps(_redact_audit_record(record), ensure_ascii=False, separators=(",", ":"))
+    return append_jsonl(path, line)
 
 
 def write_json_artifact(filename: str, data: Json) -> str:

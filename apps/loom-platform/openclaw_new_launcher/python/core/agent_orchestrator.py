@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 from core.agent_capabilities import CapabilityError, CapabilityInputError, CapabilityRegistry
+from core.agent_capability_router import route_capabilities
 from core.agent_policy import AgentPolicyEngine, PolicyViolationError
 from core.agent_runtime import AgentRuntimeAdapter, RuntimeExecutionError, redact_sensitive
 from core.agent_sessions import RepositoryConflictError
@@ -155,6 +156,13 @@ class AgentOrchestrator:
             if control.cancel.is_set():
                 return self._finish_control_request(session_id, run_id, control)
             checkpoint["round"] = int(checkpoint.get("round", 0)) + 1
+            routed, routing = route_capabilities(
+                runtime_request,
+                self.capabilities.list_capabilities(available_only=True),
+                checkpoint,
+            )
+            runtime_request["capabilities"] = routed
+            runtime_request["capabilityRouting"] = routing
             runtime_request["toolResults"] = list(checkpoint.get("toolResults", []))
             runtime_request["round"] = checkpoint["round"]
             try:
@@ -926,7 +934,13 @@ class AgentOrchestrator:
         built.setdefault("sessionId", session_id)
         built.setdefault("runId", run["runId"])
         built.setdefault("runtimeProfileId", built.get("runtimeProfileId") or "default")
-        built["capabilities"] = self.capabilities.list_capabilities(available_only=True)
+        routed, routing = route_capabilities(
+            built,
+            self.capabilities.list_capabilities(available_only=True),
+            checkpoint,
+        )
+        built["capabilities"] = routed
+        built["capabilityRouting"] = routing
         built["toolResults"] = list(checkpoint.get("toolResults", []))
         return built
 
