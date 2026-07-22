@@ -307,6 +307,39 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       recoverable: true,
     };
   }
+  if (code === 'agent_runtime_output_too_large' || code === 'agent_model_output_too_large') {
+    return {
+      title: '智能体输出过多',
+      message: '麓鸣已停止本轮模型进程以保护工作台，尚未继续执行新的工具。请缩短任务、减少一次处理的内容或更换模型后重试。',
+      recoverable: true,
+    };
+  }
+  if (
+    code === 'agent_runtime_invalid_output'
+    || code === 'agent_runtime_empty_output'
+    || code === 'agent_runtime_invalid_tool_calls'
+    || code === 'agent_model_protocol_invalid'
+  ) {
+    return {
+      title: '模型响应格式异常',
+      message: '模型没有返回麓鸣可执行的结构化结果，本轮未继续执行新的工具。可以重试；若持续出现，请切换模型。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_runtime_event_failed') {
+    return {
+      title: '运行记录写入失败',
+      message: '麓鸣已停止智能体子进程，没有继续执行后续工具。请重试；若持续出现，请前往环境诊断导出日志。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_runtime_timeout' || code === 'agent_model_timeout') {
+    return {
+      title: '模型响应超时',
+      message: '本轮模型响应超过时间限制，麓鸣已停止等待，尚未继续执行新的工具。请检查网络或更换模型后重试。',
+      recoverable: true,
+    };
+  }
   if (code === 'capability_invalid_output') {
     return {
       title: '执行结果待确认',

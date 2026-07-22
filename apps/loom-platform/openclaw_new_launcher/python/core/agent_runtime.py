@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 Json = dict[str, Any]
 EmitCallback = Callable[[Json], None]
+MAX_RUNTIME_OUTPUT_BYTES = 2_000_000
 
 
 class AgentRuntimeAdapter(Protocol):
@@ -163,6 +164,7 @@ class LoomCliRuntimeAdapter:
         parsed_items: list[Json] = []
         result: Json | None = None
         streams_done: set[str] = set()
+        output_size = 0
 
         while len(streams_done) < 2 or process.poll() is None:
             if cancel.is_set():
@@ -178,6 +180,14 @@ class LoomCliRuntimeAdapter:
             if line is None:
                 streams_done.add(stream_name)
                 continue
+            output_size += len(line.encode("utf-8", errors="replace"))
+            if output_size > MAX_RUNTIME_OUTPUT_BYTES:
+                _terminate_process(process)
+                raise RuntimeExecutionError(
+                    "agent_runtime_output_too_large",
+                    "Agent runtime output exceeded 2 MB.",
+                    recoverable=False,
+                )
             if stream_name == "stderr":
                 stderr_lines.append(line)
                 continue
@@ -189,7 +199,7 @@ class LoomCliRuntimeAdapter:
             if item.get("type") == "result":
                 result = _result_data(item)
             else:
-                emit(redact_sensitive(item))
+                _emit_runtime_progress(emit, item, process)
 
         for reader in readers:
             reader.join(timeout=0.1)
@@ -203,7 +213,7 @@ class LoomCliRuntimeAdapter:
                 if item.get("type") == "result":
                     result = _result_data(item)
                 else:
-                    emit(redact_sensitive(item))
+                    _emit_runtime_progress(emit, item, process)
 
         invalid_lines = [line for line in stdout_lines if line.strip() and _parse_json_object(line) is None]
         if parsed_items and invalid_lines and _parse_json_object(raw_stdout) is None:
@@ -362,9 +372,13 @@ class LoomCliRuntimeAdapter:
                 streams_done.add(stream_name)
                 continue
             output_size += len(line.encode("utf-8", errors="replace"))
-            if output_size > 2_000_000:
+            if output_size > MAX_RUNTIME_OUTPUT_BYTES:
                 _terminate_process(process)
-                raise RuntimeExecutionError("agent_runtime_output_too_large", "Agent runtime output exceeded 2 MB.")
+                raise RuntimeExecutionError(
+                    "agent_runtime_output_too_large",
+                    "Agent runtime output exceeded 2 MB.",
+                    recoverable=False,
+                )
             chunks[stream_name].append(line)
         for reader in readers:
             reader.join(timeout=0.1)
@@ -627,10 +641,24 @@ def _profile_command(profile: Mapping[str, Any]) -> list[str]:
 def _read_stream(name: str, stream: Any, output: queue.Queue[tuple[str, str | None]]) -> None:
     try:
         if stream is not None:
-            for line in iter(stream.readline, ""):
+            while True:
+                line = stream.readline(MAX_RUNTIME_OUTPUT_BYTES + 1)
+                if line == "":
+                    break
                 output.put((name, line))
     finally:
         output.put((name, None))
+
+
+def _emit_runtime_progress(emit: EmitCallback, event: Json, process: Any) -> None:
+    try:
+        emit(redact_sensitive(event))
+    except Exception as exc:
+        _terminate_process(process)
+        raise RuntimeExecutionError(
+            "agent_runtime_event_failed",
+            "Agent runtime progress could not be persisted.",
+        ) from exc
 
 
 def _parse_json_object(raw: str) -> Json | None:

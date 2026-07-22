@@ -25,6 +25,14 @@ MAX_TOOL_INPUT_REPAIR_ATTEMPTS = 1
 MAX_TOOL_SELECTION_REPAIR_ATTEMPTS = 1
 MAX_TOOL_EXECUTION_REPAIR_ATTEMPTS = 1
 MAX_CONSECUTIVE_DEDUPLICATED_CALLS = 1
+RUNTIME_PROGRESS_EVENT_TYPES = frozenset({
+    "message.delta",
+    "plan.updated",
+    "model.usage",
+    "model.tool_call.delta",
+    "model.completed",
+    "model.failed",
+})
 
 
 class AgentRepositoryProtocol(Protocol):
@@ -1135,9 +1143,35 @@ class AgentOrchestrator:
     def _runtime_event(self, session_id: str, run_id: str, event: Any) -> None:
         if not isinstance(event, Mapping):
             return
-        event_type = str(event.get("type") or "runtime.event")
-        data = event.get("data", {})
-        self._emit(session_id, run_id, event_type, data if isinstance(data, Mapping) else {"value": data})
+        event_type = str(event.get("type") or "").strip()
+        if event_type not in RUNTIME_PROGRESS_EVENT_TYPES:
+            return
+        raw_data = event.get("data", {})
+        data = dict(raw_data) if isinstance(raw_data, Mapping) else {}
+        data.pop("sessionId", None)
+        data.pop("runId", None)
+        if event_type == "message.delta":
+            delta = str(data.get("delta", data.get("text", "")) or "")[:16000]
+            if not delta:
+                return
+            expected_prefix = f"message_{run_id}"
+            message_id = str(data.get("messageId") or "").strip()
+            if message_id != expected_prefix and not message_id.startswith(f"{expected_prefix}_round_"):
+                message_id = expected_prefix
+            data = {
+                "messageId": message_id,
+                "role": "assistant",
+                "delta": delta,
+            }
+        elif event_type == "plan.updated":
+            raw_steps = data.get("steps")
+            if not isinstance(raw_steps, list):
+                return
+            steps = [str(step).strip()[:500] for step in raw_steps if isinstance(step, str) and step.strip()][:32]
+            if not steps:
+                return
+            data = {"steps": steps}
+        self._emit(session_id, run_id, event_type, data)
 
     def _build_request(self, session_id: str, run: Json, request: Mapping[str, Any] | None, checkpoint: Json) -> Json:
         if request is not None:

@@ -238,6 +238,65 @@ test('invalid tool output warns against blindly retrying a completed side effect
   assert.doesNotMatch(JSON.stringify(summary), /capability_invalid_output|output\.receiptId|required/i);
 });
 
+test('oversized runtime output explains that no new tool was executed', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_runtime_output_too_large',
+      message: 'Agent runtime output exceeded 2 MB.',
+      recoverable: false,
+    },
+  });
+
+  assert.equal(summary.title, '智能体输出过多');
+  assert.match(summary.message, /尚未继续执行新的工具/);
+  assert.equal(summary.recoverable, true);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_runtime|exceeded|2 MB/i);
+});
+
+test('invalid model protocol is localized as a safe pre-tool failure', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'AGENT_MODEL_PROTOCOL_INVALID',
+      message: 'Managed gateway tool arguments were malformed JSON.',
+      recoverable: false,
+    },
+  });
+
+  assert.equal(summary.title, '模型响应格式异常');
+  assert.match(summary.message, /未继续执行新的工具/);
+  assert.equal(summary.recoverable, true);
+  assert.doesNotMatch(JSON.stringify(summary), /protocol|malformed|gateway/i);
+});
+
+test('runtime event persistence failure reports child termination and diagnostics', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_runtime_event_failed',
+      message: 'Agent runtime progress could not be persisted.',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(summary.title, '运行记录写入失败');
+  assert.match(summary.message, /停止智能体子进程/);
+  assert.match(summary.message, /环境诊断/);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_runtime|persisted/i);
+});
+
+test('runtime timeout is localized without exposing the adapter protocol', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_runtime_timeout',
+      message: 'Agent runtime exceeded its time limit.',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(summary.title, '模型响应超时');
+  assert.match(summary.message, /停止等待/);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_runtime|time limit/i);
+});
+
 test('phone publish login failures show the actionable manual handoff', () => {
   const summary = agentViewModel.userFacingAgentError({
     error: {

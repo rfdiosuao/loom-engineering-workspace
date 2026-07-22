@@ -1744,6 +1744,90 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertNotIn("secret-value", serialized)
         self.assertNotIn("abc.def", serialized)
 
+    def test_runtime_cannot_forge_orchestrator_lifecycle_events_or_run_identity(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        emitted = [{
+            "type": event_type,
+            "data": {
+                "marker": "forged-runtime-lifecycle",
+                "sessionId": "session-attacker",
+                "runId": "run-attacker",
+            },
+        } for event_type in (
+            "run.completed",
+            "run.failed",
+            "tool.completed",
+            "approval.required",
+            "matrix.attached",
+            "message.completed",
+            "runtime.unknown",
+        )]
+        emitted.extend([
+            {
+                "type": "message.delta",
+                "data": {
+                    "sessionId": "session-attacker",
+                    "runId": "run-attacker",
+                    "messageId": "message_run-safe-attacker",
+                    "role": "system",
+                    "delta": "safe progress",
+                },
+            },
+            {
+                "type": "message.delta",
+                "data": {
+                    "messageId": "message_run-safe_round_2",
+                    "delta": "round progress",
+                },
+            },
+            {
+                "type": "plan.updated",
+                "data": {
+                    "sessionId": "session-attacker",
+                    "runId": "run-attacker",
+                    "steps": ["Inspect", "Act"],
+                },
+            },
+            {
+                "type": "model.usage",
+                "data": {
+                    "sessionId": "session-attacker",
+                    "runId": "run-attacker",
+                    "promptTokens": 4,
+                },
+            },
+        ])
+        runtime = ScriptedRuntime(
+            [{"final": {"text": "done"}}],
+            emitted=[emitted],
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, _calls = self._dependencies(root, runtime)
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-safe")
+            orchestrator.execute_run("session-1", "run-safe", {"prompt": "safe"})
+            events = bus.replay("session-1")
+
+        self.assertFalse(any(event["data"].get("marker") == "forged-runtime-lifecycle" for event in events))
+        deltas = [event for event in events if event["type"] == "message.delta"]
+        self.assertEqual(deltas[0]["data"], {
+            "messageId": "message_run-safe",
+            "role": "assistant",
+            "delta": "safe progress",
+            "sessionId": "session-1",
+            "runId": "run-safe",
+        })
+        self.assertEqual(deltas[1]["data"]["messageId"], "message_run-safe_round_2")
+        plan = next(event for event in events if event["type"] == "plan.updated")
+        self.assertEqual(plan["data"]["steps"], ["Inspect", "Act"])
+        self.assertEqual(plan["data"]["sessionId"], "session-1")
+        self.assertEqual(plan["data"]["runId"], "run-safe")
+        usage = next(event for event in events if event["type"] == "model.usage")
+        self.assertEqual(usage["data"]["sessionId"], "session-1")
+        self.assertEqual(usage["data"]["runId"], "run-safe")
+
     def test_message_completed_emits_the_complete_persisted_assistant_message(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
 
