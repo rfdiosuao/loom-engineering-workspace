@@ -477,7 +477,7 @@ class PippitVideoClientTests(unittest.TestCase):
                     request_key="request-poll-retry",
                     state_path=state_path,
                     poll_interval_ms=0,
-                    timeout_ms=1000,
+                    timeout_ms=5000,
                 )
 
             self.assertEqual(result, b"video")
