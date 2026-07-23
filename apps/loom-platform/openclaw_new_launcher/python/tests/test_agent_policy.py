@@ -95,6 +95,43 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertEqual(phone_action.classification, "critical")
         self.assertTrue(phone_action.requires_approval)
 
+    def test_media_generation_with_request_scope_targets_is_outbound_and_approval_scoped(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="strong")
+        capability = {
+            "name": "loom.media.image.generate",
+            "displayName": "生成图片",
+            "permission": "control",
+            "risk": "control_safe",
+            "targetScope": "optional-device-write",
+        }
+
+        local_only = policy.evaluate(capability, {"prompt": "生成招聘海报"})
+        self.assertEqual(local_only.classification, "control_safe")
+        self.assertFalse(local_only.requires_approval)
+
+        for label, targets in (
+            ("devices", {"deviceIds": ["phone-1"]}),
+            ("groups", {"groups": ["招聘一组"]}),
+            ("all-online", {"allOnline": True}),
+        ):
+            with self.subTest(label=label):
+                tool_input = {"prompt": "生成并传到手机", **targets}
+                decision = policy.evaluate(capability, tool_input)
+                approval = policy.create_approval(
+                    session_id="session-media",
+                    run_id=f"run-{label}",
+                    tool_call_id=f"call-{label}",
+                    capability=capability,
+                    tool_input=tool_input,
+                )
+
+                self.assertEqual(decision.classification, "outbound")
+                self.assertTrue(decision.requires_approval)
+                self.assertEqual(approval["risk"], "outbound")
+                self.assertEqual(approval["targets"], targets)
+
     def test_outbound_and_critical_require_approval(self) -> None:
         from core.agent_policy import AgentPolicyEngine
 

@@ -109,6 +109,46 @@ def _media_attachments(kind: str, result: Json) -> list[Json]:
     return attachments
 
 
+def _media_capability_result(job_id: str, kind: str, result: Json) -> Json:
+    attachments = _media_attachments(kind, result)
+    phone_transfer = (
+        result.get("phoneTransfer")
+        if isinstance(result.get("phoneTransfer"), dict)
+        else None
+    )
+    result_status = str(result.get("status") or "").strip()
+    transfer_status = str((phone_transfer or {}).get("status") or "").strip()
+    if result_status not in {"partial_failure", "outcome_uncertain"}:
+        if transfer_status == "outcome_uncertain":
+            result_status = "outcome_uncertain"
+        elif transfer_status == "failed":
+            result_status = "partial_failure"
+        else:
+            result_status = "succeeded"
+    outcome_indeterminate = (
+        result_status == "outcome_uncertain"
+        or result.get("outcomeIndeterminate") is True
+        or (phone_transfer or {}).get("outcomeIndeterminate") is True
+    )
+    success = result_status == "succeeded"
+    response: Json = {
+        "jobId": job_id,
+        "kind": kind,
+        "status": result_status,
+        "success": success,
+        "result": result,
+        "attachments": attachments,
+        "phoneTransfer": phone_transfer,
+    }
+    if not success:
+        response.update({
+            "outcomeIndeterminate": outcome_indeterminate,
+            "retryable": False,
+            "regenerationAllowed": False,
+        })
+    return response
+
+
 class AgentBuiltinCapabilityProvider:
     def __init__(
         self,
@@ -410,21 +450,33 @@ class AgentBuiltinCapabilityProvider:
             _async_media_job_result,
             _configured_phone_snapshot,
             _image_generate_payload,
+            _local_only_phone_snapshot,
             _video_generate_payload,
         )
 
-        requested_device_ids = [
+        requested_device_ids = list(dict.fromkeys([
             str(value).strip()
             for value in payload.get("deviceIds", [])
             if str(value).strip()
-        ] if isinstance(payload.get("deviceIds"), list) else []
-        requested_groups = [
+        ])) if isinstance(payload.get("deviceIds"), list) else []
+        requested_groups = list(dict.fromkeys([
             str(value).strip()
             for value in payload.get("groups", [])
             if str(value).strip()
-        ] if isinstance(payload.get("groups"), list) else []
+        ])) if isinstance(payload.get("groups"), list) else []
         all_online = payload.get("allOnline") is True
         target_selector_present = bool(requested_device_ids or requested_groups or all_online)
+        selector_count = sum((
+            bool(requested_device_ids),
+            bool(requested_groups),
+            all_online,
+        ))
+        if selector_count > 1:
+            raise CapabilityExecutionError(
+                "phone_target_scope_required",
+                "每次生成只能选择手机、分组或全部在线手机中的一种目标",
+                recoverable=False,
+            )
         if requested_groups or all_online:
             requested_device_ids = self._resolve_media_target_device_ids(
                 requested_groups,
@@ -438,10 +490,25 @@ class AgentBuiltinCapabilityProvider:
             },
             "source": str(payload.get("source") or "agent"),
         }
-        phone_snapshot = _configured_phone_snapshot(
-            context,
-            requested_device_ids if target_selector_present else None,
+        phone_snapshot = (
+            _configured_phone_snapshot(context, requested_device_ids)
+            if target_selector_present
+            else _local_only_phone_snapshot()
         )
+        if target_selector_present:
+            missing_ids = phone_snapshot.get("missingDeviceIds")
+            if isinstance(missing_ids, list) and missing_ids:
+                raise CapabilityExecutionError(
+                    "phone_target_not_found",
+                    f"手机配置不存在：{', '.join(str(item) for item in missing_ids)}",
+                    recoverable=False,
+                )
+            if not phone_snapshot.get("devices"):
+                raise CapabilityExecutionError(
+                    "phone_target_unavailable",
+                    "未找到可用的手机配置",
+                    recoverable=False,
+                )
 
         def ensure_job_active(job_id: str) -> None:
             is_cancelled = getattr(self.job_manager, "is_cancelled", None)
@@ -477,7 +544,8 @@ class AgentBuiltinCapabilityProvider:
                     ),
                 )
             ensure_job_active(job_id)
-            update_progress(job_id, "正在传送到已配置手机相册", phase="phone-transfer")
+            if phone_snapshot.get("devices"):
+                update_progress(job_id, "正在传送到指定手机相册", phase="phone-transfer")
             return _async_media_job_result(
                 context,
                 kind,
@@ -510,6 +578,13 @@ class AgentBuiltinCapabilityProvider:
         if terminal.get("status") == "cancelled":
             raise _post_submission_error("capability_cancelled", "媒体生成任务已取消")
         if terminal.get("status") != "succeeded" or result.get("success") is False:
+            transfer = result.get("phoneTransfer") if isinstance(result.get("phoneTransfer"), dict) else {}
+            transfer_status = str(transfer.get("status") or "")
+            if _media_attachments(kind, result) and (
+                str(result.get("status") or "") in {"partial_failure", "outcome_uncertain"}
+                or transfer_status in {"failed", "outcome_uncertain"}
+            ):
+                return _media_capability_result(job_id, kind, result)
             failure = terminal.get("failure") if isinstance(terminal.get("failure"), dict) else {}
             code = str(result.get("errorCode") or failure.get("code") or "media_job_failed")
             message = str(
@@ -519,14 +594,7 @@ class AgentBuiltinCapabilityProvider:
                 or "媒体生成任务失败"
             )
             raise _post_submission_error(code, message)
-        return {
-            "jobId": job_id,
-            "kind": kind,
-            "status": "succeeded",
-            "result": result,
-            "attachments": _media_attachments(kind, result),
-            "phoneTransfer": result.get("phoneTransfer") if isinstance(result.get("phoneTransfer"), dict) else None,
-        }
+        return _media_capability_result(job_id, kind, result)
 
     def _resolve_media_target_device_ids(
         self,
@@ -537,10 +605,15 @@ class AgentBuiltinCapabilityProvider:
         try:
             matrix = self.matrix_factory()
             status = matrix.status()
-        except Exception:
-            return []
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "phone_target_unavailable",
+                "无法读取手机目标状态，请稍后重试",
+                recoverable=False,
+            ) from exc
         devices = status.get("devices") if isinstance(status, dict) else []
         requested_groups = set(groups)
+        available_groups: set[str] = set()
         resolved: list[str] = []
         for item in devices if isinstance(devices, list) else []:
             if not isinstance(item, dict):
@@ -554,9 +627,23 @@ class AgentBuiltinCapabilityProvider:
                 for value in [item.get("group"), *raw_groups]
                 if str(value or "").strip()
             }
+            available_groups.update(item_groups)
             selected = item.get("online") is True if all_online else bool(item_groups & requested_groups)
             if selected and device_id not in resolved:
                 resolved.append(device_id)
+        unknown_groups = [group for group in groups if group not in available_groups]
+        if unknown_groups:
+            raise CapabilityExecutionError(
+                "phone_target_not_found",
+                f"手机分组不存在：{', '.join(unknown_groups)}",
+                recoverable=False,
+            )
+        if not resolved:
+            raise CapabilityExecutionError(
+                "phone_target_unavailable",
+                "未找到符合目标条件的可用手机",
+                recoverable=False,
+            )
         return resolved
 
     def _wait_for_media_job(

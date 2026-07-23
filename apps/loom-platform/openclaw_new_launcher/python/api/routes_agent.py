@@ -84,6 +84,19 @@ def _sse_event(event: dict[str, Any]) -> str:
     return f"event: agent\ndata: {payload}\n\n"
 
 
+def _sse_stream_error() -> str:
+    payload = json.dumps(
+        {
+            "type": "agent_stream_error",
+            "code": "AGENT_STREAM_LEDGER_UNAVAILABLE",
+            "phase": "event_replay",
+            "retryable": True,
+        },
+        separators=(",", ":"),
+    )
+    return f"event: agent_stream_error\ndata: {payload}\n\n"
+
+
 def register_agent_routes(app, ctx) -> None:
     async def protected(request: Request, action: Callable[[], Any]):
         if error := ctx.auth_error(request):
@@ -263,7 +276,8 @@ def register_agent_routes(app, ctx) -> None:
                         after_seq=committed,
                     )
                 except Exception:
-                    events = []
+                    yield _sse_stream_error()
+                    return
                 if isinstance(events, dict):
                     events = events.get("events", [])
                 for event in events if isinstance(events, list) else []:

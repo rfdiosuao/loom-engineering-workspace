@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Luming AI Matrix Acquisition Workbench",
   "mainBinaryName": "LOOM",
-  "version": "2.3.13",
+  "version": "2.3.14",
   "identifier": "top.heang.loom",
   "build": {
     "frontendDist": "../dist",

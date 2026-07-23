@@ -236,6 +236,112 @@ class AgentSessionRepositoryTests(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(self.repository.get_approval("approval_cas")["decidedBy"], winners[0]["decidedBy"])
 
+    def test_run_lease_claim_has_one_winner_across_repository_instances(self) -> None:
+        from python.core.agent_sessions import RepositoryConflictError
+
+        self.repository.create_session(title="Run lease", session_id="session_run_lease")
+        self.repository.create_run(
+            {
+                "schema": "loom.agent.run.v1",
+                "runId": "run_lease",
+                "sessionId": "session_run_lease",
+                "status": "queued",
+                "campaignIds": [],
+                "checkpoint": json.dumps({"version": 1}),
+            }
+        )
+        second_repository = AgentSessionRepository(self.temp_dir.name)
+        ready = threading.Barrier(2)
+        winners: list[tuple[str, dict]] = []
+        conflicts: list[RepositoryConflictError] = []
+
+        def claim(repository: AgentSessionRepository, lease_id: str) -> None:
+            ready.wait()
+            try:
+                winners.append(
+                    (
+                        lease_id,
+                        repository.claim_run(
+                            "run_lease",
+                            lease_id=lease_id,
+                            expected_statuses=("queued",),
+                            session_id="session_run_lease",
+                        ),
+                    )
+                )
+            except RepositoryConflictError as exc:
+                conflicts.append(exc)
+
+        workers = [
+            threading.Thread(target=claim, args=(self.repository, "lease-first")),
+            threading.Thread(target=claim, args=(second_repository, "lease-second")),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(2)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(conflicts), 1)
+        stored = self.repository.get_run("run_lease", session_id="session_run_lease")
+        checkpoint = json.loads(stored["checkpoint"])
+        self.assertEqual(checkpoint["runLease"]["leaseId"], winners[0][0])
+
+    def test_stale_run_lease_cannot_overwrite_checkpoint_or_terminal_state(self) -> None:
+        from python.core.agent_sessions import RepositoryConflictError
+
+        self.repository.create_session(title="Run lease CAS", session_id="session_run_lease_cas")
+        self.repository.create_run(
+            {
+                "schema": "loom.agent.run.v1",
+                "runId": "run_lease_cas",
+                "sessionId": "session_run_lease_cas",
+                "status": "queued",
+                "campaignIds": [],
+                "checkpoint": json.dumps({"version": 1, "round": 0}),
+            }
+        )
+        first = AgentSessionRepository(self.temp_dir.name)
+        second = AgentSessionRepository(self.temp_dir.name)
+        first.claim_run(
+            "run_lease_cas",
+            lease_id="lease-old",
+            expected_statuses=("queued",),
+            session_id="session_run_lease_cas",
+        )
+        first.update_run_with_lease(
+            "run_lease_cas",
+            {"status": "queued", "checkpoint": json.dumps({"version": 1, "round": 1})},
+            lease_id="lease-old",
+            release_lease=True,
+            session_id="session_run_lease_cas",
+        )
+        second.claim_run(
+            "run_lease_cas",
+            lease_id="lease-current",
+            expected_statuses=("queued",),
+            session_id="session_run_lease_cas",
+        )
+
+        with self.assertRaises(RepositoryConflictError):
+            first.update_run_with_lease(
+                "run_lease_cas",
+                {
+                    "status": "completed",
+                    "checkpoint": json.dumps({"version": 1, "round": 99}),
+                },
+                lease_id="lease-old",
+                release_lease=True,
+                session_id="session_run_lease_cas",
+            )
+
+        stored = self.repository.get_run("run_lease_cas", session_id="session_run_lease_cas")
+        checkpoint = json.loads(stored["checkpoint"])
+        self.assertEqual(stored["status"], "queued")
+        self.assertEqual(checkpoint["round"], 1)
+        self.assertEqual(checkpoint["runLease"]["leaseId"], "lease-current")
+
     def test_approval_list_preserves_creation_order_when_timestamps_match(self) -> None:
         self.repository.create_session(title="Approval order", session_id="session_order")
         for approval_id in ("approval_z_first", "approval_a_second"):

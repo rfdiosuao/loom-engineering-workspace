@@ -375,6 +375,132 @@ class AgentSessionRepository:
                 raise KeyError(run_id)
             return copy.deepcopy(run)
 
+    def claim_run(
+        self,
+        run_id: str,
+        *,
+        lease_id: str,
+        expected_statuses: tuple[str, ...],
+        session_id: Optional[str] = None,
+    ) -> JsonObject:
+        if not isinstance(lease_id, str) or not lease_id.strip():
+            raise ValueError("lease_id is required")
+        allowed_statuses = frozenset(str(status) for status in expected_statuses if str(status))
+        if not allowed_statuses:
+            raise ValueError("expected_statuses is required")
+        with self._lock:
+            index = self._load_index_unlocked()
+            owner = session_id or index["runs"].get(run_id)
+            if not owner:
+                raise KeyError(run_id)
+            path = self._run_path(owner, run_id)
+            current = _read_json(path)
+            if not isinstance(current, dict):
+                raise KeyError(run_id)
+            checkpoint = _run_checkpoint(current.get("checkpoint"))
+            current_lease_id = _run_lease_id(checkpoint)
+            if current.get("status") not in allowed_statuses or current_lease_id:
+                raise RepositoryConflictError(
+                    f"run {run_id} cannot be claimed from status {current.get('status')} "
+                    f"with lease {current_lease_id or 'none'}"
+                )
+            checkpoint["runLease"] = {
+                "leaseId": lease_id,
+                "claimedAt": _utc_now(),
+            }
+            updated = dict(current)
+            updated["checkpoint"] = _dump_run_checkpoint(checkpoint)
+            _atomic_write_json(path, updated)
+            self._sync_active_run_unlocked(index, owner, updated)
+            self._write_index_unlocked(index)
+            return copy.deepcopy(updated)
+
+    def update_run_with_lease(
+        self,
+        run_id: str,
+        changes: JsonObject,
+        *,
+        lease_id: str,
+        release_lease: bool = False,
+        session_id: Optional[str] = None,
+        remove_fields: tuple[str, ...] = (),
+    ) -> JsonObject:
+        if not isinstance(lease_id, str) or not lease_id.strip():
+            raise ValueError("lease_id is required")
+        with self._lock:
+            index = self._load_index_unlocked()
+            owner = session_id or index["runs"].get(run_id)
+            if not owner:
+                raise KeyError(run_id)
+            path = self._run_path(owner, run_id)
+            current = _read_json(path)
+            if not isinstance(current, dict):
+                raise KeyError(run_id)
+            current_checkpoint = _run_checkpoint(current.get("checkpoint"))
+            current_lease_id = _run_lease_id(current_checkpoint)
+            if current_lease_id != lease_id:
+                raise RepositoryConflictError(
+                    f"run {run_id} expected lease {lease_id}, found {current_lease_id or 'none'}"
+                )
+
+            sanitized_changes = sanitize_for_storage(changes)
+            updated = dict(current)
+            updated.update(sanitized_changes)
+            if "checkpoint" in sanitized_changes:
+                next_checkpoint = _run_checkpoint(sanitized_changes.get("checkpoint"))
+            else:
+                next_checkpoint = current_checkpoint
+            if release_lease:
+                next_checkpoint.pop("runLease", None)
+            else:
+                next_checkpoint["runLease"] = copy.deepcopy(current_checkpoint["runLease"])
+            updated["checkpoint"] = _dump_run_checkpoint(next_checkpoint)
+            for field in remove_fields:
+                if field not in _REMOVABLE_RUN_FIELDS:
+                    raise ValueError(f"run field cannot be removed: {field}")
+                updated.pop(field, None)
+            _atomic_write_json(path, updated)
+            self._sync_active_run_unlocked(index, owner, updated)
+            self._write_index_unlocked(index)
+            return copy.deepcopy(updated)
+
+    def update_run_releasing_lease(
+        self,
+        run_id: str,
+        changes: JsonObject,
+        session_id: Optional[str] = None,
+        *,
+        remove_fields: tuple[str, ...] = (),
+    ) -> JsonObject:
+        with self._lock:
+            index = self._load_index_unlocked()
+            owner = session_id or index["runs"].get(run_id)
+            if not owner:
+                raise KeyError(run_id)
+            path = self._run_path(owner, run_id)
+            current = _read_json(path)
+            if not isinstance(current, dict):
+                raise KeyError(run_id)
+            if current.get("status") in {"completed", "failed", "cancelled"}:
+                return copy.deepcopy(current)
+
+            sanitized_changes = sanitize_for_storage(changes)
+            updated = dict(current)
+            updated.update(sanitized_changes)
+            checkpoint = _run_checkpoint(
+                sanitized_changes.get("checkpoint", current.get("checkpoint"))
+            )
+            checkpoint.pop("runLease", None)
+            updated["checkpoint"] = _dump_run_checkpoint(checkpoint)
+            for field in remove_fields:
+                if field not in _REMOVABLE_RUN_FIELDS:
+                    raise ValueError(f"run field cannot be removed: {field}")
+                updated.pop(field, None)
+            _atomic_write_json(path, updated)
+            self._sync_active_run_unlocked(index, owner, updated)
+            self._write_index_unlocked(index)
+            return copy.deepcopy(updated)
+
     def update_run(
         self,
         run_id: str,
@@ -969,3 +1095,32 @@ class AgentSessionRepository:
 
     def _write_index_unlocked(self, index: JsonObject) -> None:
         _atomic_write_json(self.index_path, index)
+
+
+def _run_checkpoint(raw: Any) -> JsonObject:
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = {}
+    elif isinstance(raw, dict):
+        parsed = raw
+    else:
+        parsed = {}
+    return copy.deepcopy(parsed) if isinstance(parsed, dict) else {}
+
+
+def _dump_run_checkpoint(checkpoint: JsonObject) -> str:
+    return json.dumps(
+        sanitize_for_storage(checkpoint),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _run_lease_id(checkpoint: JsonObject) -> str:
+    lease = checkpoint.get("runLease")
+    if not isinstance(lease, dict):
+        return ""
+    return str(lease.get("leaseId") or "").strip()

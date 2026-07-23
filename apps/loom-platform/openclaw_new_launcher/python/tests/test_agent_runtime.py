@@ -277,6 +277,36 @@ class LoomCliRuntimeAdapterTests(unittest.TestCase):
         self.assertIsNotNone(processes[0].poll())
         self.assertNotIn("event ledger unavailable", str(caught.exception))
 
+    def test_redact_sensitive_hides_login_code_without_hiding_error_codes(self) -> None:
+        from core.agent_runtime import redact_sensitive
+
+        safe = redact_sensitive({
+            "name": "loom.mcp.loom.loom_account_login_code",
+            "input": {
+                "email": "user@example.com",
+                "code": "246810",
+            },
+            "error": {
+                "code": "invalid_verification_code",
+                "message": "The verification code is invalid.",
+            },
+        })
+
+        self.assertEqual(safe["input"]["code"], "[REDACTED]")
+        self.assertEqual(safe["error"]["code"], "invalid_verification_code")
+
+    def test_redact_sensitive_preserves_noncredential_code_fields(self) -> None:
+        from core.agent_runtime import redact_sensitive
+
+        safe = redact_sensitive({
+            "language": "python",
+            "code": "print('hello')",
+            "error": {"code": "capability_failed"},
+        })
+
+        self.assertEqual(safe["code"], "print('hello')")
+        self.assertEqual(safe["error"]["code"], "capability_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

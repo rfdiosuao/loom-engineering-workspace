@@ -409,9 +409,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
                 {key: video[key] for key in ("jobId", "kind", "status")},
                 {"jobId": "job-video-3", "kind": "video", "status": "succeeded"},
             )
-            self.assertEqual(image["result"]["phoneTransfer"]["reason"], "no_configured_phones")
-            self.assertEqual(edited["result"]["phoneTransfer"]["reason"], "no_configured_phones")
-            self.assertEqual(video["result"]["phoneTransfer"]["reason"], "no_configured_phones")
+            self.assertEqual(image["result"]["phoneTransfer"]["reason"], "local_only")
+            self.assertEqual(edited["result"]["phoneTransfer"]["reason"], "local_only")
+            self.assertEqual(video["result"]["phoneTransfer"]["reason"], "local_only")
             self.assertEqual(len(image["attachments"]), 2)
             self.assertEqual(image["attachments"][0]["kind"], "image")
             self.assertEqual(image["attachments"][0]["mime"], "image/png")
@@ -419,8 +419,8 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             self.assertEqual(len(video["attachments"]), 1)
             self.assertEqual(video["attachments"][0]["kind"], "video")
             self.assertEqual(video["attachments"][0]["mime"], "video/mp4")
-            self.assertEqual(image["phoneTransfer"]["reason"], "no_configured_phones")
-            self.assertEqual(video["phoneTransfer"]["reason"], "no_configured_phones")
+            self.assertEqual(image["phoneTransfer"]["reason"], "local_only")
+            self.assertEqual(video["phoneTransfer"]["reason"], "local_only")
             self.assertEqual(image_client.calls[0]["count"], 2)
             self.assertIsNone(image_client.calls[0]["editImagePath"])
             self.assertEqual(image_client.calls[1]["editImagePath"], reference_path)
@@ -448,7 +448,7 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
         self.assertGreaterEqual(operations["loom.media.image.generate"]["timeoutSec"], 300)
         self.assertGreaterEqual(operations["loom.media.video.generate"]["timeoutSec"], 900)
 
-    def test_media_generation_passes_all_configured_phones_to_transfer_pipeline(self) -> None:
+    def test_media_generation_without_explicit_target_stays_local(self) -> None:
         import json
 
         from core.paths import AppPaths
@@ -480,9 +480,11 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             def transfer(_ctx, _kind, _files, *, phone_snapshot=None):
                 observed["snapshot"] = phone_snapshot
                 return {
-                    "status": "succeeded",
-                    "message": "transferred",
-                    "deviceCount": len(phone_snapshot.get("devices", [])),
+                    "status": "skipped",
+                    "reason": phone_snapshot.get("reason"),
+                    "message": "saved locally",
+                    "attempted": False,
+                    "deviceCount": 0,
                 }
 
             service = AgentService(
@@ -493,14 +495,17 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             )
             try:
                 with patch("api.routes_media._transfer_generated_media_to_phones", side_effect=transfer):
-                    service.capabilities.execute("loom.media.image.generate", {"prompt": "poster"})
+                    result = service.capabilities.execute(
+                        "loom.media.image.generate",
+                        {"prompt": "poster"},
+                    )
             finally:
                 service.shutdown()
 
-        self.assertEqual(
-            [item["id"] for item in observed["snapshot"]["devices"]],
-            ["phone-1", "phone-2"],
-        )
+        self.assertEqual(observed["snapshot"]["devices"], [])
+        self.assertEqual(observed["snapshot"]["reason"], "local_only")
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["phoneTransfer"]["reason"], "local_only")
 
     def test_media_capability_transfers_only_to_requested_phone_ids(self) -> None:
         import json
@@ -554,6 +559,83 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             [item["id"] for item in observed["snapshot"]["devices"]],
             ["phone-1"],
         )
+
+    def test_media_generation_rejects_unknown_phone_before_generation(self) -> None:
+        import json
+
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            os.makedirs(paths.launcher_dir, exist_ok=True)
+            with open(os.path.join(paths.launcher_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "devices": [{"id": "phone-1", "name": "Phone One"}],
+                }, handle)
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+
+            def read_json(path, default):
+                if not os.path.isfile(path):
+                    return default
+                with open(path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+
+            context.read_json = read_json
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: None,
+            )
+
+            with patch("api.routes_media._image_generate_payload") as generate:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    provider._submit_media(
+                        "image",
+                        {"prompt": "poster", "deviceIds": ["phone-404"]},
+                    )
+
+        self.assertEqual(raised.exception.code, "phone_target_not_found")
+        self.assertEqual(jobs.submissions, [])
+        generate.assert_not_called()
+
+    def test_media_generation_rejects_unknown_group_before_generation(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class Matrix:
+            def status(self):
+                return {
+                    "devices": [
+                        {
+                            "deviceId": "phone-1",
+                            "online": True,
+                            "group": "招聘一组",
+                        },
+                    ],
+                }
+
+        with tempfile.TemporaryDirectory() as root:
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=Matrix,
+            )
+
+            with patch("api.routes_media._image_generate_payload") as generate:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    provider._submit_media(
+                        "image",
+                        {"prompt": "poster", "groups": ["不存在的分组"]},
+                    )
+
+        self.assertEqual(raised.exception.code, "phone_target_not_found")
+        self.assertEqual(jobs.submissions, [])
+        generate.assert_not_called()
 
     def test_media_transfer_resolves_selected_group_to_its_devices(self) -> None:
         import json
@@ -633,12 +715,19 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             def resolve(groups, *, all_online):
                 observed_groups.append(list(groups))
                 self.assertFalse(all_online)
-                return []
+                return ["phone-1"]
 
             provider._resolve_media_target_device_ids = resolve
             with patch(
                 "api.routes_media._image_generate_payload",
                 return_value={"files": [], "count": 0},
+            ), patch(
+                "api.routes_media._configured_phone_snapshot",
+                return_value={
+                    "devices": [{"id": "phone-1"}],
+                    "reason": "",
+                    "missingDeviceIds": [],
+                },
             ), patch(
                 "api.routes_media._async_media_job_result",
                 return_value={
@@ -654,13 +743,30 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
 
         self.assertEqual(observed_groups, [["招聘一组", "招聘二组"]])
 
-    def test_media_job_failure_after_generation_is_indeterminate_and_not_auto_retryable(self) -> None:
-        from core.agent_capabilities import CapabilityExecutionError
+    def test_media_transfer_failure_preserves_attachment_and_blocks_regeneration(self) -> None:
+        import json
+
+        from core.paths import AppPaths
         from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
 
         with tempfile.TemporaryDirectory() as root:
+            generated_path = os.path.join(root, "generated.png")
+            with open(generated_path, "wb") as handle:
+                handle.write(b"generated")
+            paths = AppPaths(root)
+            os.makedirs(paths.launcher_dir, exist_ok=True)
+            with open(os.path.join(paths.launcher_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                json.dump({"devices": [{"id": "phone-1", "name": "Phone One"}]}, handle)
             jobs = RecordingJobManager()
             context = self._context(root, jobs, ImageClient(), VideoClient())
+
+            def read_json(path, default):
+                if not os.path.isfile(path):
+                    return default
+                with open(path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+
+            context.read_json = read_json
             provider = AgentBuiltinCapabilityProvider(
                 context_factory=lambda: context,
                 job_manager=jobs,
@@ -668,27 +774,34 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             )
             with patch(
                 "api.routes_media._image_generate_payload",
-                return_value={"files": [{"path": os.path.join(root, "generated.png")}], "count": 1},
+                return_value={"files": [{"path": generated_path}], "count": 1},
             ), patch(
                 "api.routes_media._async_media_job_result",
                 return_value={
                     "success": False,
+                    "status": "partial_failure",
                     "errorCode": "media_transfer_failed",
                     "message": "图片已生成，但一台手机传输失败",
-                    "files": [{"path": os.path.join(root, "generated.png")}],
-                    "phoneTransfer": {"status": "partial", "successCount": 1, "failureCount": 1},
+                    "files": [{"path": generated_path, "filename": "generated.png", "mime": "image/png"}],
+                    "phoneTransfer": {
+                        "status": "failed",
+                        "reason": "phone_upload_partial_failure",
+                        "succeededDeviceCount": 1,
+                        "failedDeviceCount": 1,
+                    },
                 },
             ):
-                with self.assertRaises(CapabilityExecutionError) as raised:
-                    provider._submit_media(
-                        "image",
-                        {"prompt": "generate once", "allOnline": True},
-                    )
+                result = provider._submit_media(
+                    "image",
+                    {"prompt": "generate once", "deviceIds": ["phone-1"]},
+                )
 
-        self.assertEqual(raised.exception.code, "media_transfer_failed")
-        self.assertFalse(raised.exception.recoverable)
-        self.assertTrue(raised.exception.outcome_indeterminate)
-        self.assertFalse(raised.exception.execution_may_continue)
+        self.assertEqual(result["status"], "partial_failure")
+        self.assertFalse(result["success"])
+        self.assertFalse(result["retryable"])
+        self.assertFalse(result["regenerationAllowed"])
+        self.assertEqual(result["attachments"][0]["path"], generated_path)
+        self.assertEqual(result["phoneTransfer"]["reason"], "phone_upload_partial_failure")
 
     def test_media_capability_cancellation_cancels_background_job(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError

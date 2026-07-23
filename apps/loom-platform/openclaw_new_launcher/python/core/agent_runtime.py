@@ -580,22 +580,32 @@ def _parse_provider_result(provider: str, raw: str) -> Json:
 
 def redact_sensitive(value: Any) -> Any:
     """Return a log/event-safe copy without reusable credentials or private bodies."""
+    return _redact_sensitive(value, sensitive_code_context=False)
+
+
+def _redact_sensitive(value: Any, *, sensitive_code_context: bool) -> Any:
     if isinstance(value, Mapping):
         safe: Json = {}
+        auth_code_context = sensitive_code_context or _looks_like_auth_code_input(value)
+        capability = str(value.get("name") or value.get("capability") or "")
+        capability_uses_code = _capability_uses_sensitive_code(capability)
         for key, item in value.items():
             name = str(key)
             lowered = re.sub(r"[^a-z0-9]", "", name.lower())
             if _is_sensitive_key(lowered):
                 safe[name] = "[REDACTED]"
+            elif lowered == "code" and auth_code_context:
+                safe[name] = "[REDACTED]"
             elif lowered in {"privatecontent", "privatebody", "contactlist", "addressbook", "filebody"}:
                 safe[name] = "[PRIVATE CONTENT REDACTED]"
             else:
-                safe[name] = redact_sensitive(item)
+                child_code_context = capability_uses_code and lowered in {"input", "arguments", "payload"}
+                safe[name] = _redact_sensitive(item, sensitive_code_context=child_code_context)
         return safe
     if isinstance(value, list):
-        return [redact_sensitive(item) for item in value]
+        return [_redact_sensitive(item, sensitive_code_context=False) for item in value]
     if isinstance(value, tuple):
-        return [redact_sensitive(item) for item in value]
+        return [_redact_sensitive(item, sensitive_code_context=False) for item in value]
     if isinstance(value, str):
         return redact_text(value)
     return value
@@ -618,6 +628,21 @@ def _is_sensitive_key(normalized_key: str) -> bool:
         marker in normalized_key
         for marker in ("apikey", "token", "secret", "password", "cookie", "authorization", "credential")
     )
+
+
+def _looks_like_auth_code_input(value: Mapping[str, Any]) -> bool:
+    normalized_keys = {
+        re.sub(r"[^a-z0-9]", "", str(key).lower())
+        for key in value
+    }
+    return "code" in normalized_keys and bool(
+        normalized_keys.intersection({"email", "phone", "mobile", "purpose", "verificationtype"})
+    )
+
+
+def _capability_uses_sensitive_code(capability: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", capability.lower())
+    return any(marker in normalized for marker in ("accountlogincode", "licenseactivate"))
 
 
 def _profile_command(profile: Mapping[str, Any]) -> list[str]:

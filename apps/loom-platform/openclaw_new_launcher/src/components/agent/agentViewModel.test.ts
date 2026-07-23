@@ -1,6 +1,7 @@
 import 'tsx/esm';
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -13,7 +14,11 @@ import {
   sanitizeDisplayValue,
 } from './agentViewModel.ts';
 import * as agentViewModel from './agentViewModel.ts';
-import { MessageBlockView, ToolExecutionGroup } from './messageBlocks.tsx';
+import {
+  MessageBlockView,
+  ToolExecutionGroup,
+  toolExecutionGroupSummary,
+} from './messageBlocks.tsx';
 
 const SESSION_ID = 'session_1';
 
@@ -1025,6 +1030,38 @@ test('terminal tool status never regresses to a later nonterminal update', () =>
   assert.equal(state.messages[0].status, 'completed');
 });
 
+test('terminal messages ignore later replayed deltas', () => {
+  for (const status of ['completed', 'failed'] as const) {
+    const initial = createAgentEventState([message(`message_${status}`, 'Final text', status)]);
+    const state = mergeAgentEvent(initial, event(1, 'message.delta', {
+      sessionId: SESSION_ID,
+      messageId: `message_${status}`,
+      runId: 'run_1',
+      delta: ' stale delta',
+    }), SESSION_ID);
+
+    assert.equal(state.messages[0].status, status);
+    assert.equal(state.messages[0].blocks[0].data.text, 'Final text');
+    assert.equal(state.lastSeq, 1);
+  }
+});
+
+test('terminal runs ignore later replayed run starts', () => {
+  for (const terminalType of ['run.completed', 'run.failed', 'run.cancelled'] as const) {
+    const terminalStatus = terminalType.slice('run.'.length);
+    const state = [
+      event(1, terminalType, { sessionId: SESSION_ID, runId: 'run_1' }),
+      event(2, 'run.started', { sessionId: SESSION_ID, runId: 'run_1' }),
+    ].reduce(
+      (current, item) => mergeAgentEvent(current, item, SESSION_ID),
+      createAgentEventState(),
+    );
+
+    assert.equal(state.runs.run_1.status, terminalStatus);
+    assert.equal(state.lastSeq, 2);
+  }
+});
+
 test('the same tool call ID remains distinct across runs', () => {
   const state = [
     event(1, 'tool.started', {
@@ -1068,6 +1105,37 @@ test('terminal run events reconcile only their nonterminal tool rows', () => {
     assert.equal(tools.find((block) => block.data.runId === 'run_1')?.data.status, expectedStatus);
     assert.equal(tools.find((block) => block.data.runId === 'run_2')?.data.status, 'running');
   }
+});
+
+test('terminal runs keep tool summaries terminal even when a stale active block remains', () => {
+  const summaryFor = (status: 'completed' | 'failed' | 'cancelled') => (
+    toolExecutionGroupSummary([{
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_1',
+        capability: 'loom.phone.control',
+        status: 'awaiting',
+      },
+    }], {
+      schema: 'loom.agent.run.v1',
+      runId: 'run_1',
+      sessionId: SESSION_ID,
+      status,
+      campaignIds: [],
+    })
+  );
+
+  assert.equal(summaryFor('completed').state, 'completed');
+  assert.equal(summaryFor('failed').state, 'failed');
+  assert.equal(summaryFor('cancelled').state, 'failed');
+});
+
+test('archive confirmation explains that an active run is cancelled before archiving', () => {
+  const source = readFileSync(new URL('./ConversationSidebar.tsx', import.meta.url), 'utf8');
+
+  assert.match(source, /先取消活动运行，再归档对话/);
+  assert.doesNotMatch(source, /运行中的后台任务不会被取消/);
 });
 
 test('approval cards remain independent from their related tool lifecycle', () => {

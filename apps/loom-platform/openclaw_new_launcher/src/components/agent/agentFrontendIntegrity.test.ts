@@ -451,3 +451,240 @@ test('accepted Agent resume is reflected as queued before realtime catches up', 
   assert.equal(resumed.status, 'queued');
   assert.equal(resumed.error, undefined);
 });
+
+test('Agent submission retries reuse one clientMessageId and same-tick duplicates allocate nothing', () => {
+  type SubmissionCoordinator = {
+    begin: (sessionId: string, fingerprint: string) => string | null;
+    rebindSession: (fromSessionId: string, toSessionId: string) => void;
+    settle: (sessionId: string, succeeded: boolean) => void;
+  };
+  const createCoordinator = (
+    agentWorkbench as typeof agentWorkbench & {
+      createAgentSubmissionCoordinator?: (createId: () => string) => SubmissionCoordinator;
+    }
+  ).createAgentSubmissionCoordinator;
+
+  assert.equal(typeof createCoordinator, 'function');
+  if (!createCoordinator) return;
+
+  let allocatedIds = 0;
+  const coordinator = createCoordinator(() => `client-message-${++allocatedIds}`);
+  const firstAttempt = coordinator.begin('local-session', 'same-draft');
+  const duplicateAttempt = coordinator.begin('local-session', 'same-draft');
+
+  assert.equal(firstAttempt, 'client-message-1');
+  assert.equal(duplicateAttempt, null);
+  assert.equal(allocatedIds, 1);
+
+  coordinator.rebindSession('local-session', 'remote-session');
+  coordinator.settle('remote-session', false);
+  assert.equal(coordinator.begin('remote-session', 'same-draft'), 'client-message-1');
+  assert.equal(allocatedIds, 1);
+
+  coordinator.settle('remote-session', true);
+  assert.equal(coordinator.begin('remote-session', 'same-draft'), 'client-message-2');
+  assert.equal(allocatedIds, 2);
+});
+
+test('Agent sequence gaps resume at the committed cursor and apply the missing event before later events', () => {
+  type RealtimeCoordinator = {
+    preserveCursor: (sessionId: string, cursor: number) => void;
+    cursorFor: (sessionId: string, storeCursor: number) => number;
+    accept: (
+      sessionId: string,
+      event: Record<string, unknown>,
+      snapshot: { messages: Array<Record<string, unknown>>; runs: Record<string, Record<string, unknown>> },
+    ) => boolean;
+  };
+  const realtimeApi = agentWorkbench as typeof agentWorkbench & {
+    createAgentRealtimeCoordinator?: () => RealtimeCoordinator;
+    agentSequenceGapRecoveryCursor?: (gap: { committedSeq: number; receivedSeq: number }) => number;
+  };
+
+  assert.equal(typeof realtimeApi.createAgentRealtimeCoordinator, 'function');
+  assert.equal(typeof realtimeApi.agentSequenceGapRecoveryCursor, 'function');
+  if (!realtimeApi.createAgentRealtimeCoordinator || !realtimeApi.agentSequenceGapRecoveryCursor) return;
+
+  const coordinator = realtimeApi.createAgentRealtimeCoordinator();
+  coordinator.preserveCursor('session-gap', 4);
+  assert.equal(
+    realtimeApi.agentSequenceGapRecoveryCursor({ committedSeq: 4, receivedSeq: 6 }),
+    4,
+  );
+
+  const applied: number[] = [];
+  for (const seq of [5, 6]) {
+    const event = {
+      schema: 'loom.realtime.event.v1',
+      eventId: `event-${seq}`,
+      seq,
+      timestamp: `2026-07-23T00:00:0${seq}.000Z`,
+      topic: 'agent',
+      entityId: 'run-gap',
+      type: seq === 5 ? 'run.started' : 'run.completed',
+      data: { runId: 'run-gap', sessionId: 'session-gap' },
+    };
+    if (coordinator.accept('session-gap', event, { messages: [], runs: {} })) applied.push(seq);
+  }
+
+  assert.deepEqual(applied, [5, 6]);
+  assert.equal(coordinator.cursorFor('session-gap', 0), 6);
+});
+
+test('Agent terminal snapshots reject replayed deltas and run starts while retaining a nonzero replay cursor', () => {
+  type RealtimeCoordinator = {
+    preserveCursor: (sessionId: string, cursor: number) => void;
+    cursorFor: (sessionId: string, storeCursor: number) => number;
+    accept: (
+      sessionId: string,
+      event: Record<string, unknown>,
+      snapshot: { messages: Array<Record<string, unknown>>; runs: Record<string, Record<string, unknown>> },
+    ) => boolean;
+  };
+  const createCoordinator = (
+    agentWorkbench as typeof agentWorkbench & {
+      createAgentRealtimeCoordinator?: () => RealtimeCoordinator;
+    }
+  ).createAgentRealtimeCoordinator;
+
+  assert.equal(typeof createCoordinator, 'function');
+  if (!createCoordinator) return;
+
+  const coordinator = createCoordinator();
+  coordinator.preserveCursor('session-terminal', 80);
+  const snapshot = {
+    messages: [{ messageId: 'message-terminal', status: 'completed' }],
+    runs: { 'run-terminal': { runId: 'run-terminal', status: 'completed' } },
+  };
+  const oldDelta = {
+    eventId: 'old-delta',
+    seq: 81,
+    entityId: 'run-terminal',
+    type: 'message.delta',
+    data: { messageId: 'message-terminal', runId: 'run-terminal' },
+  };
+  const oldRunStarted = {
+    eventId: 'old-run-started',
+    seq: 82,
+    entityId: 'run-terminal',
+    type: 'run.started',
+    data: { runId: 'run-terminal' },
+  };
+
+  assert.equal(coordinator.accept('session-terminal', oldDelta, snapshot), false);
+  assert.equal(coordinator.accept('session-terminal', oldRunStarted, snapshot), false);
+  assert.equal(coordinator.cursorFor('session-terminal', 0), 82);
+});
+
+test('archiving an Agent session cancels its active run before archive and then invokes store cleanup', async () => {
+  type ArchiveDependencies = {
+    runs: Record<string, Record<string, unknown>>;
+    cancelRun: (runId: string) => Promise<{ run: Record<string, unknown> }>;
+    archiveRemote: (sessionId: string) => Promise<{ session: Record<string, unknown> }>;
+    upsertRun: (run: Record<string, unknown>) => void;
+    removeSession: (sessionId: string) => void;
+  };
+  const archive = (
+    agentWorkbench as typeof agentWorkbench & {
+      archiveAgentSession?: (
+        session: Record<string, unknown>,
+        dependencies: ArchiveDependencies,
+      ) => Promise<void>;
+    }
+  ).archiveAgentSession;
+
+  assert.equal(typeof archive, 'function');
+  if (!archive) return;
+
+  const operations: string[] = [];
+  await archive({
+    sessionId: 'session-active',
+    status: 'active',
+    activeRunId: 'run-active',
+  }, {
+    runs: {
+      'run-active': {
+        runId: 'run-active',
+        sessionId: 'session-active',
+        status: 'running',
+      },
+    },
+    cancelRun: async (runId) => {
+      operations.push(`cancel:${runId}`);
+      return {
+        run: {
+          runId,
+          sessionId: 'session-active',
+          status: 'cancelled',
+        },
+      };
+    },
+    archiveRemote: async (sessionId) => {
+      operations.push(`archive:${sessionId}`);
+      return { session: { sessionId, status: 'archived' } };
+    },
+    upsertRun: (run) => operations.push(`upsert:${String(run.status)}`),
+    removeSession: (sessionId) => operations.push(`remove:${sessionId}`),
+  });
+
+  assert.deepEqual(operations, [
+    'cancel:run-active',
+    'upsert:cancelled',
+    'archive:session-active',
+    'remove:session-active',
+  ]);
+});
+
+test('archiving refuses to remove an Agent session when active-run cancellation is not terminal', async () => {
+  const archive = (
+    agentWorkbench as typeof agentWorkbench & {
+      archiveAgentSession?: (
+        session: Record<string, unknown>,
+        dependencies: {
+          runs: Record<string, Record<string, unknown>>;
+          cancelRun: (runId: string) => Promise<{ run: Record<string, unknown> }>;
+          archiveRemote: (sessionId: string) => Promise<{ session: Record<string, unknown> }>;
+          upsertRun: (run: Record<string, unknown>) => void;
+          removeSession: (sessionId: string) => void;
+        },
+      ) => Promise<void>;
+    }
+  ).archiveAgentSession;
+
+  assert.equal(typeof archive, 'function');
+  if (!archive) return;
+
+  let archived = false;
+  let removed = false;
+  await assert.rejects(() => archive({
+    sessionId: 'session-still-active',
+    status: 'active',
+    activeRunId: 'run-still-active',
+  }, {
+    runs: {
+      'run-still-active': {
+        runId: 'run-still-active',
+        sessionId: 'session-still-active',
+        status: 'running',
+      },
+    },
+    cancelRun: async () => ({
+      run: {
+        runId: 'run-still-active',
+        sessionId: 'session-still-active',
+        status: 'running',
+      },
+    }),
+    archiveRemote: async (sessionId) => {
+      archived = true;
+      return { session: { sessionId, status: 'archived' } };
+    },
+    upsertRun: () => undefined,
+    removeSession: () => {
+      removed = true;
+    },
+  }), /active run cancellation did not reach a terminal state/);
+
+  assert.equal(archived, false);
+  assert.equal(removed, false);
+});

@@ -51,9 +51,13 @@ class LoomMcpContractTests(unittest.TestCase):
         for tool in loom_mcp.tool_definitions():
             schema = tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {}
             properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            required_names = list(schema.get("required", []))
+            alternatives = schema.get("oneOf")
+            if isinstance(alternatives, list) and alternatives and isinstance(alternatives[0], dict):
+                required_names.extend(alternatives[0].get("required", []))
             arguments = {
                 name: _sample_schema_value(properties.get(name))
-                for name in schema.get("required", [])
+                for name in dict.fromkeys(required_names)
                 if name != "dryRun"
             }
             argv = loom_mcp._tool_to_cli_args(tool["name"], arguments)
@@ -75,11 +79,19 @@ class LoomMcpContractTests(unittest.TestCase):
 
         matrix_schema = tools["loom_matrix_dispatch"]["inputSchema"]
         self.assertEqual(
-            matrix_schema["anyOf"],
+            matrix_schema["oneOf"],
             [
                 {"required": ["deviceId"]},
                 {"required": ["group"]},
                 {"required": ["targets"]},
+            ],
+        )
+        self.assertEqual(
+            matrix_schema["properties"]["targets"]["oneOf"],
+            [
+                {"required": ["deviceIds"]},
+                {"required": ["groups"]},
+                {"required": ["allOnline"]},
             ],
         )
         self.assertIn("deviceId", tools["loom_template_run"]["inputSchema"]["required"])
@@ -446,7 +458,11 @@ class LoomMcpContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = loom_mcp.call_tool(
                 "loom_matrix_dispatch",
-                {"prompt": "批量评论并自动回复", "dryRun": True},
+                {
+                    "prompt": "批量评论并自动回复",
+                    "targets": {"allOnline": True},
+                    "dryRun": True,
+                },
                 permission="control",
                 base_path=temp_dir,
             )
@@ -507,6 +523,42 @@ class LoomMcpContractTests(unittest.TestCase):
 
         self.assertEqual(quick_task[quick_task.index("--device-id") + 1], "P01")
         self.assertEqual(dispatch[dispatch.index("--device") + 1], "P01,P02")
+
+    def test_mcp_matrix_dispatch_rejects_ambiguous_or_empty_targets(self) -> None:
+        import loom_mcp
+
+        invalid_requests = [
+            {
+                "prompt": "read screens",
+                "deviceId": "phone-a",
+                "targets": {"allOnline": True},
+            },
+            {
+                "prompt": "read screens",
+                "targets": {"allOnline": True, "deviceIds": ["phone-a"]},
+            },
+            {
+                "prompt": "read screens",
+                "targets": {"deviceIds": ["phone-a"], "groups": ["sales"]},
+            },
+            {
+                "prompt": "read screens",
+                "targets": {"allOnline": False},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for arguments in invalid_requests:
+                result = loom_mcp.call_tool(
+                    "loom_matrix_dispatch",
+                    {**arguments, "dryRun": True},
+                    permission="control",
+                    base_path=temp_dir,
+                    trusted_internal=True,
+                )
+                payload = json.loads(result["content"][0]["text"])
+                self.assertTrue(result["isError"], arguments)
+                self.assertEqual(payload["error"]["code"], "invalid_target", arguments)
 
     def test_mcp_expanded_capabilities_call_cli_dispatcher(self) -> None:
         import loom_mcp

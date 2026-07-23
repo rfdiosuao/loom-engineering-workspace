@@ -250,6 +250,91 @@ class MatrixRouteContractTests(unittest.TestCase):
         self.assertEqual(plan["evidence_body"]["assignmentId"], "assignment_route_b")
         self.assertEqual(job["result"]["results"][0]["assignmentId"], "assignment_route_b")
 
+    def test_canonical_dispatch_does_not_retry_structured_remote_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            attempts: list[dict] = []
+
+            def submit_phone(_ctx, **plan):
+                attempts.append(plan)
+                return {
+                    "success": False,
+                    "errorCode": "timeout",
+                    "error": "remote task may still be running",
+                    "taskId": "remote-task-42",
+                    "stdout": "",
+                    "stderr": "",
+                }
+
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            with patch("api.routes_matrix._submit_phone_job", side_effect=submit_phone):
+                submitted = client.post(
+                    "/api/matrix/dispatch",
+                    json={
+                        "schema": "loom.matrix.dispatch.v2",
+                        "campaignId": "campaign_uncertain",
+                        "concurrency": 1,
+                        "mode": "safe",
+                        "profile": "standard",
+                        "deviceAssignments": [
+                            {
+                                "assignmentId": "assignment_uncertain",
+                                "deviceId": "phone-a",
+                                "prompt": "read the current screen",
+                                "templateId": "screen_read_v1",
+                                "input": {},
+                                "timeoutSec": 180,
+                                "retryBudget": 3,
+                            }
+                        ],
+                    },
+                )
+                job = _wait_for_job(client, submitted.json()["jobId"])
+
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(len(attempts), 1)
+            result = job["result"]["results"][0]
+            self.assertEqual(result["attempts"], 1)
+            self.assertEqual(result["taskId"], "remote-task-42")
+            self.assertTrue(result["outcomeIndeterminate"])
+            status = client.get(
+                "/api/matrix/status",
+                params={"campaignId": "campaign_uncertain"},
+            ).json()
+            stored_task = status["campaigns"][0]["missions"][0]["deviceTasks"][0]
+            self.assertEqual(stored_task.get("taskId"), "remote-task-42")
+            self.assertTrue(stored_task.get("outcomeIndeterminate"))
+
+    def test_matrix_status_can_query_campaign_older_than_default_window(self) -> None:
+        from core.phone_matrix import MatrixControlPlane
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            campaign_ids = [
+                matrix.dispatch(
+                    {
+                        "prompt": f"read screen {index}",
+                        "mode": "observe",
+                        "target": {"deviceIds": ["phone-a"]},
+                    }
+                )["campaignId"]
+                for index in range(25)
+            ]
+
+            default_status = client.get("/api/matrix/status").json()
+            selected_status = client.get(
+                "/api/matrix/status",
+                params={"campaignId": campaign_ids[0]},
+            ).json()
+
+            self.assertNotIn(campaign_ids[0], [item["campaignId"] for item in default_status["campaigns"]])
+            self.assertEqual(
+                [item["campaignId"] for item in selected_status["campaigns"]],
+                [campaign_ids[0]],
+            )
+
     def test_matrix_observe_reuses_phone_control_fast_read_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _write_script(temp_dir, "openclaw-phone-vision.mjs")

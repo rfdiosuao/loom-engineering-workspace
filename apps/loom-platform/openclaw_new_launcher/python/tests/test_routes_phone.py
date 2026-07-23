@@ -1576,6 +1576,114 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(second_job["result"]["currentStep"], "cache")
             self.assertEqual(second_job["result"]["metrics"]["screenHash"], "hash-from-frame")
 
+    def test_phone_screenshot_cache_isolated_by_selected_device_when_device_id_is_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            counter_path = os.path.join(temp_dir, "screenshot-count.txt")
+            with open(os.path.join(scripts_dir, "openclaw-phone-vision.mjs"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import json, os\n"
+                    f"path = {counter_path!r}\n"
+                    "runtime = json.loads(os.environ['LOOM_PHONE_RUNTIME_CONFIG_JSON'])\n"
+                    "device_id = runtime['selectedDeviceId']\n"
+                    "try:\n"
+                    "    count = int(open(path, 'r', encoding='utf-8').read())\n"
+                    "except FileNotFoundError:\n"
+                    "    count = 0\n"
+                    "count += 1\n"
+                    "open(path, 'w', encoding='utf-8').write(str(count))\n"
+                    "print(json.dumps({"
+                    "'ok': True,"
+                    "'deviceId': device_id,"
+                    "'screenHash': 'same-screen-hash',"
+                    "'filePath': 'C:/tmp/' + device_id + '.jpg',"
+                    "'frame': {'screenHash': 'same-screen-hash', 'cached': False, 'imageOmitted': True}"
+                    "}, ensure_ascii=False))\n"
+                )
+
+            store_path = os.path.join(temp_dir, "phone-agents.json")
+            storage = {
+                store_path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [
+                        {"id": "phone-a", "name": "Phone A", "baseUrl": "http://127.0.0.1:19527"},
+                        {"id": "phone-b", "name": "Phone B", "baseUrl": "http://127.0.0.1:29527"},
+                    ],
+                }
+            }
+            logs: list[str] = []
+            job_mgr = JobManager(logs.append)
+            app = FastAPI()
+            ctx = _test_context(temp_dir, job_mgr, logs, storage)
+            register_phone_routes(app, ctx)
+            register_job_routes(app, ctx)
+            client = TestClient(app)
+
+            first = client.post("/api/phone/screenshot", json={}).json()
+            first_job = _wait_for_job(client, first["jobId"])
+            storage[store_path]["selectedDeviceId"] = "phone-b"
+            second = client.post("/api/phone/screenshot", json={}).json()
+            second_job = _wait_for_job(client, second["jobId"])
+
+            self.assertEqual(first_job["status"], "succeeded")
+            self.assertEqual(second_job["status"], "succeeded")
+            self.assertEqual(json.loads(first_job["result"]["stdout"])["deviceId"], "phone-a")
+            self.assertEqual(json.loads(second_job["result"]["stdout"])["deviceId"], "phone-b")
+            self.assertFalse(second_job["result"]["cacheHit"])
+            with open(counter_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "2")
+
+    def test_phone_read_cache_isolated_by_selected_device_when_device_id_is_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            with open(os.path.join(scripts_dir, "openclaw-phone-vision.mjs"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import json, os, sys\n"
+                    "runtime = json.loads(os.environ['LOOM_PHONE_RUNTIME_CONFIG_JSON'])\n"
+                    "device_id = runtime['selectedDeviceId']\n"
+                    "argv = sys.argv[1:]\n"
+                    "known_hash = argv[argv.index('--known-hash') + 1] if '--known-hash' in argv else ''\n"
+                    "print(json.dumps({"
+                    "'ok': True,"
+                    "'deviceId': device_id,"
+                    "'knownHash': known_hash,"
+                    "'screenHash': 'hash-' + device_id"
+                    "}, ensure_ascii=False))\n"
+                )
+
+            store_path = os.path.join(temp_dir, "phone-agents.json")
+            storage = {
+                store_path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [
+                        {"id": "phone-a", "name": "Phone A", "baseUrl": "http://127.0.0.1:19527"},
+                        {"id": "phone-b", "name": "Phone B", "baseUrl": "http://127.0.0.1:29527"},
+                    ],
+                }
+            }
+            logs: list[str] = []
+            job_mgr = JobManager(logs.append)
+            app = FastAPI()
+            ctx = _test_context(temp_dir, job_mgr, logs, storage)
+            register_phone_routes(app, ctx)
+            register_job_routes(app, ctx)
+            client = TestClient(app)
+
+            first = client.post("/api/phone/read", json={"prompt": "read phone a"}).json()
+            first_job = _wait_for_job(client, first["jobId"])
+            storage[store_path]["selectedDeviceId"] = "phone-b"
+            second = client.post("/api/phone/read", json={"prompt": "read phone b"}).json()
+            second_job = _wait_for_job(client, second["jobId"])
+
+            self.assertEqual(first_job["status"], "succeeded")
+            self.assertEqual(second_job["status"], "succeeded")
+            self.assertEqual(json.loads(first_job["result"]["stdout"])["deviceId"], "phone-a")
+            second_payload = json.loads(second_job["result"]["stdout"])
+            self.assertEqual(second_payload["deviceId"], "phone-b")
+            self.assertEqual(second_payload["knownHash"], "")
+
     def test_phone_screenshot_reuses_recent_read_hash_when_request_has_no_screen_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scripts_dir = os.path.join(temp_dir, "scripts")
@@ -2141,6 +2249,104 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(argv[0], "run")
             self.assertIn("--execution-layer", argv)
             self.assertEqual(argv[argv.index("--execution-layer") + 1], "agent")
+
+    def test_phone_task_nonzero_uncertain_payload_does_not_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            fallback_marker = os.path.join(temp_dir, "fallback-ran.txt")
+            with open(os.path.join(scripts_dir, "openclaw-phone-vision.mjs"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import json\n"
+                    "print(json.dumps({"
+                    "'ok': False,"
+                    "'errorCode': 'phone_poll_failed',"
+                    "'message': 'polling stopped after task submission',"
+                    "'details': {"
+                    "'taskId': 'remote-task-uncertain',"
+                    "'lastStatus': 'running',"
+                    "'executionMayContinue': True"
+                    "}"
+                    "}, ensure_ascii=False))\n"
+                    "raise SystemExit(9)\n"
+                )
+            with open(os.path.join(scripts_dir, "openclaw-phone-agent.mjs"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    f"open({fallback_marker!r}, 'w', encoding='utf-8').write('ran')\n"
+                    "print('{}')\n"
+                )
+
+            logs: list[str] = []
+            job_mgr = JobManager(logs.append)
+            app = FastAPI()
+            ctx = _test_context(temp_dir, job_mgr, logs)
+            register_phone_routes(app, ctx)
+            register_job_routes(app, ctx)
+            client = TestClient(app)
+
+            submitted = client.post(
+                "/api/phone/task",
+                json={
+                    "prompt": "open settings",
+                    "mode": "safe",
+                    "profile": "fast",
+                    "template": "open-settings",
+                },
+            )
+            job = _wait_for_job(client, submitted.json()["jobId"])
+
+            self.assertEqual(job["status"], "failed")
+            self.assertFalse(os.path.exists(fallback_marker))
+            self.assertEqual(job["result"]["errorCode"], "phone_poll_failed")
+            self.assertEqual(job["result"]["taskId"], "remote-task-uncertain")
+            self.assertTrue(job["result"]["outcomeIndeterminate"])
+            self.assertTrue(job["result"]["executionMayContinue"])
+
+    def test_phone_task_structured_timeout_does_not_fallback_without_continue_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            fallback_marker = os.path.join(temp_dir, "fallback-ran.txt")
+            with open(os.path.join(scripts_dir, "openclaw-phone-vision.mjs"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import json\n"
+                    "print(json.dumps({"
+                    "'ok': False,"
+                    "'errorCode': 'timeout',"
+                    "'message': 'timed out waiting for remote task',"
+                    "'details': {'taskId': 'remote-task-timeout', 'lastStatus': 'running'}"
+                    "}, ensure_ascii=False))\n"
+                )
+            with open(os.path.join(scripts_dir, "openclaw-phone-agent.mjs"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    f"open({fallback_marker!r}, 'w', encoding='utf-8').write('ran')\n"
+                    "print('{}')\n"
+                )
+
+            logs: list[str] = []
+            job_mgr = JobManager(logs.append)
+            app = FastAPI()
+            ctx = _test_context(temp_dir, job_mgr, logs)
+            register_phone_routes(app, ctx)
+            register_job_routes(app, ctx)
+            client = TestClient(app)
+
+            submitted = client.post(
+                "/api/phone/task",
+                json={
+                    "prompt": "open settings",
+                    "mode": "safe",
+                    "profile": "fast",
+                    "template": "open-settings",
+                },
+            )
+            job = _wait_for_job(client, submitted.json()["jobId"])
+
+            self.assertEqual(job["status"], "failed")
+            self.assertFalse(os.path.exists(fallback_marker))
+            self.assertEqual(job["result"]["errorCode"], "timeout")
+            self.assertEqual(job["result"]["taskId"], "remote-task-timeout")
+            self.assertTrue(job["result"]["outcomeIndeterminate"])
 
     def test_phone_task_route_auto_promotes_refresh_to_action_fast_template(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

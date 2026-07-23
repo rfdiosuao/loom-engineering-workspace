@@ -65,6 +65,8 @@ class AgentPolicyEngine:
         searchable = f"{name} {action_content}"
         if _is_real_acquisition_run(name, tool_input or {}):
             return "critical"
+        if _is_media_generation_capability(name) and _media_transfer_targets(tool_input or {}):
+            return "outbound"
         if any(marker in searchable for marker in _CRITICAL_MARKERS):
             return "critical"
         if any(marker in searchable for marker in _OUTBOUND_MARKERS):
@@ -80,7 +82,7 @@ class AgentPolicyEngine:
             capability_name,
             tool_input or {},
         )
-        targets = _targets(tool_input or {})
+        targets = _targets(tool_input or {}, capability_name)
         allowed = self._targets_allowed(targets)
         if not allowed:
             return PolicyDecision(classification, False, False, "Target is outside the authorized device scope.")
@@ -122,7 +124,8 @@ class AgentPolicyEngine:
             raise PolicyViolationError("target_not_authorized", decision.reason)
         if not decision.requires_approval:
             raise PolicyViolationError("approval_not_required", "This capability does not require approval.")
-        targets = _targets(tool_input)
+        capability_name = str(_capability_value(capability, "name", "") or "")
+        targets = _targets(tool_input, capability_name)
         target_scope = str(
             _capability_value(
                 capability,
@@ -134,7 +137,6 @@ class AgentPolicyEngine:
         if decision.classification == "critical" and target_scope != "none" and not targets:
             raise PolicyViolationError("critical_target_required", "Critical actions require an explicit target.")
         now = _aware_utc(self._clock())
-        capability_name = str(_capability_value(capability, "name", "") or "")
         capability_display_name = str(
             _capability_value(capability, "display_name", "")
             or _capability_value(capability, "displayName", "")
@@ -191,7 +193,7 @@ class AgentPolicyEngine:
             approval.get("toolCallId") == tool_call_id
             and approval.get("capability") == capability_name
             and approval.get("inputHash") == _input_hash(tool_input)
-            and approval.get("targetsHash") == _input_hash(_targets(tool_input))
+            and approval.get("targetsHash") == _input_hash(_targets(tool_input, capability_name))
         )
 
     def consume_approval(
@@ -291,16 +293,50 @@ def _action_content(capability: Any, tool_input: Mapping[str, Any]) -> str:
     return json.dumps(values, ensure_ascii=False, sort_keys=True, default=str).lower()
 
 
-def _targets(tool_input: Mapping[str, Any]) -> Json:
+def _targets(tool_input: Mapping[str, Any], capability_name: str = "") -> Json:
     for key in ("targets", "target"):
         value = tool_input.get(key)
         if isinstance(value, Mapping) and value:
             return redact_sensitive(dict(value))
+    if _is_media_generation_capability(capability_name):
+        media_targets = _media_transfer_targets(tool_input)
+        if media_targets:
+            return redact_sensitive(media_targets)
     if tool_input.get("deviceId"):
         return {"deviceIds": [str(tool_input["deviceId"])]}
     if tool_input.get("accountId"):
         return {"accountId": str(tool_input["accountId"])}
     return {}
+
+
+def _is_media_generation_capability(capability_name: str) -> bool:
+    return str(capability_name or "").strip().lower() in {
+        "loom.media.image.generate",
+        "loom.media.video.generate",
+    }
+
+
+def _media_transfer_targets(tool_input: Mapping[str, Any]) -> Json:
+    device_ids = _target_string_list(tool_input.get("deviceIds"))
+    groups = _target_string_list(tool_input.get("groups"))
+    if device_ids:
+        return {"deviceIds": device_ids}
+    if groups:
+        return {"groups": groups}
+    if tool_input.get("allOnline") is True:
+        return {"allOnline": True}
+    return {}
+
+
+def _target_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for raw in value:
+        item = str(raw or "").strip()[:80]
+        if item and item not in result:
+            result.append(item)
+    return result
 
 
 def _input_hash(tool_input: Mapping[str, Any]) -> str:

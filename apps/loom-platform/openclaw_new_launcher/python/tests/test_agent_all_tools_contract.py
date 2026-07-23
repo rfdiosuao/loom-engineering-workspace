@@ -45,9 +45,9 @@ def _minimal_value(schema: Mapping[str, Any]) -> Any:
             for key in schema.get("required", [])
             if isinstance(key, str)
         ] if isinstance(schema.get("required"), Sequence) else []
-        any_of = schema.get("anyOf")
-        if isinstance(any_of, Sequence) and not isinstance(any_of, (str, bytes)) and any_of:
-            first = any_of[0] if isinstance(any_of[0], Mapping) else {}
+        alternatives = schema.get("oneOf") or schema.get("anyOf")
+        if isinstance(alternatives, Sequence) and not isinstance(alternatives, (str, bytes)) and alternatives:
+            first = alternatives[0] if isinstance(alternatives[0], Mapping) else {}
             option_required = first.get("required") if isinstance(first.get("required"), Sequence) else []
             required.extend(str(key) for key in option_required if isinstance(key, str))
         result: dict[str, Any] = {}
@@ -536,6 +536,11 @@ class AgentAllToolsContractTests(unittest.TestCase):
                         )
                     )
                 elif name == "loom.matrix.retry":
+                    requires_approval = True
+                elif name in {
+                    "loom.media.image.generate",
+                    "loom.media.video.generate",
+                }:
                     requires_approval = True
                 expected_approvals += int(requires_approval)
 

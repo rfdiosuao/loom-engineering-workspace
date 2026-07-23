@@ -373,9 +373,20 @@ class MatrixControlPlane:
             self._write_json(self.devices_path, {"schema": "loom.matrix.devices.v1", "devices": next_devices})
         return {"removed": removed, "deviceId": safe_id}
 
-    def status(self) -> Json:
+    def status(self, campaign_id: str | None = None) -> Json:
         devices = [_public_device(item) for item in self._load_devices()]
         tasks = self._load_tasks().get("campaigns", [])
+        selected_campaign_id = str(campaign_id or "").strip()
+        campaigns = (
+            [
+                item
+                for item in tasks
+                if isinstance(item, dict)
+                and str(item.get("campaignId") or "") == selected_campaign_id
+            ]
+            if selected_campaign_id
+            else tasks[-20:]
+        )
         return {
             "schema": "loom.matrix.v1",
             "updatedAt": _now_iso(),
@@ -386,7 +397,7 @@ class MatrixControlPlane:
                 "busy": sum(1 for item in devices if item.get("busy")),
                 "failed": sum(1 for item in devices if int(item.get("failureCount") or 0) > 0),
             },
-            "campaigns": _redact_json(tasks[-20:]),
+            "campaigns": _redact_json(campaigns),
         }
 
     @_matrix_state_guard
@@ -2093,6 +2104,9 @@ class MatrixControlPlane:
         duration_ms: int,
         failure_reason: str = "",
         failure_code: str = "",
+        task_id: str = "",
+        outcome_indeterminate: bool = False,
+        execution_may_continue: bool = False,
     ) -> Json:
         tasks = self._load_tasks()
         found: Json | None = None
@@ -2122,6 +2136,13 @@ class MatrixControlPlane:
         found["durationMs"] = int(duration_ms)
         found["failureCode"] = "" if ok else _clip(failure_code, 100)
         found["failureReason"] = _clip(failure_reason, 200)
+        if not ok:
+            if task_id:
+                found["taskId"] = _clip(task_id, 160)
+            if outcome_indeterminate:
+                found["outcomeIndeterminate"] = True
+            if execution_may_continue:
+                found["executionMayContinue"] = True
         found["updatedAt"] = _now_iso()
         for step in found.get("steps", []):
             if step.get("status") == "running":
@@ -2163,6 +2184,12 @@ class MatrixControlPlane:
             "failureReason": _clip(failure_reason, 200),
             "promptHash": found.get("promptHash"),
         }
+        if not ok and task_id:
+            record["taskId"] = _clip(task_id, 160)
+        if not ok and outcome_indeterminate:
+            record["outcomeIndeterminate"] = True
+        if not ok and execution_may_continue:
+            record["executionMayContinue"] = True
         self._append_jsonl(self.experience_path, record)
         return {"ok": True, "record": _redact_json(record)}
 

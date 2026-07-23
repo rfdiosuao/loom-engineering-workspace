@@ -150,7 +150,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         )
         self.assertNotIn("TOP_SECRET_PHONE_TOKEN", json.dumps(result))
 
-    def test_sync_and_async_http_generation_bind_all_phones_at_request_start(self) -> None:
+    def test_sync_and_async_http_generation_without_target_stays_local(self) -> None:
         MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
         MatrixControlPlane(self.paths).register_device({"deviceId": "phone-b", "online": True})
         selected = {"value": "phone-a"}
@@ -229,12 +229,99 @@ class MediaPhoneTransferTests(unittest.TestCase):
                     else:
                         payload = response.json()
                         self.assertIn("images" if kind == "image" else "video", payload)
-                    self.assertEqual(payload["phoneTransfer"]["succeededDeviceCount"], 2)
-                    commands = [call.args[0] for call in run.call_args_list]
-                    self.assertCountEqual(
-                        [command[command.index("--device-id") + 1] for command in commands],
-                        ["phone-a", "phone-b"],
+                    self.assertEqual(payload["phoneTransfer"]["status"], "skipped")
+                    self.assertEqual(payload["phoneTransfer"]["reason"], "local_only")
+                    run.assert_not_called()
+
+    def test_http_generation_transfers_only_to_explicit_phone(self) -> None:
+        jobs = ImmediateJobManager()
+
+        async def body(request):
+            return await request.json()
+
+        app = FastAPI()
+        ctx = SimpleNamespace(
+            paths=self.paths,
+            auth_error=lambda _request: None,
+            protected_error=lambda _path: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+            get_job_mgr=lambda: jobs,
+        )
+        routes_media.register_media_routes(app, ctx)
+        generated = {
+            "images": ["base64"],
+            "files": [{"path": self.image_path, "filename": "result.png", "mime": "image/png"}],
+            "count": 1,
+        }
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "ok": True,
+                "uploadedCount": 1,
+                "totalCount": 1,
+                "uploaded": [{"kind": "image", "filename": "result.png"}],
+            }),
+            stderr="",
+        )
+
+        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch(
+            "api.routes_phone.node_executable",
+            return_value="node",
+        ), mock.patch("api.routes_phone.phone_process_env", return_value={}), mock.patch.object(
+            routes_media,
+            "_image_generate_payload",
+            return_value=generated,
+        ), mock.patch.object(routes_media.subprocess, "run", return_value=completed) as run:
+            response = TestClient(app).post(
+                "/api/image/generate",
+                json={"prompt": "send to one phone", "deviceIds": ["phone-b"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["phoneTransfer"]["status"], "succeeded")
+        self.assertEqual(payload["phoneTransfer"]["deviceId"], "phone-b")
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--device-id") + 1], "phone-b")
+
+    def test_http_generation_rejects_unknown_phone_before_sync_or_submit(self) -> None:
+        jobs = ImmediateJobManager()
+
+        async def body(request):
+            return await request.json()
+
+        app = FastAPI()
+        ctx = SimpleNamespace(
+            paths=self.paths,
+            auth_error=lambda _request: None,
+            protected_error=lambda _path: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+            get_job_mgr=lambda: jobs,
+        )
+        routes_media.register_media_routes(app, ctx)
+
+        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch.object(
+            routes_media,
+            "_image_generate_payload",
+        ) as generate, mock.patch.object(
+            routes_media,
+            "_transfer_generated_media_to_phones",
+            return_value={"status": "succeeded"},
+        ):
+            client = TestClient(app)
+            for endpoint in ("/api/image/generate", "/api/image/generate/submit"):
+                with self.subTest(endpoint=endpoint):
+                    response = client.post(
+                        endpoint,
+                        json={"prompt": "unknown target", "deviceIds": ["phone-404"]},
                     )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["errorCode"], "phone_target_not_found")
+
+        generate.assert_not_called()
+        self.assertEqual(jobs.results, {})
 
     def test_library_transfer_endpoint_targets_only_requested_phone(self) -> None:
         jobs = ImmediateJobManager()
@@ -466,13 +553,155 @@ class MediaPhoneTransferTests(unittest.TestCase):
             "run",
             return_value=completed,
         ):
-            result = async_result(self.ctx, "image", generated)
+            result = async_result(
+                self.ctx,
+                "image",
+                generated,
+                phone_snapshot={
+                    "devices": [{"id": "phone-a", "name": "Selected Phone"}],
+                    "reason": "",
+                    "missingDeviceIds": [],
+                },
+            )
 
         self.assertEqual(result["files"][0]["path"], self.image_path)
         self.assertNotIn("images", result)
         self.assertEqual(result["phoneTransfer"]["status"], "failed")
         self.assertEqual(result["phoneTransfer"]["reason"], "phone_request_failed")
         self.assertNotIn("TOP_SECRET_PHONE_TOKEN", json.dumps(result))
+
+    def test_async_media_result_without_target_cannot_expand_to_configured_phones(self) -> None:
+        generated = {
+            "images": ["large-base64"],
+            "files": [{"path": self.image_path, "filename": "result.png", "mime": "image/png"}],
+            "count": 1,
+        }
+
+        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch.object(
+            routes_media.subprocess,
+            "run",
+        ) as run:
+            result = routes_media._async_media_job_result(self.ctx, "image", generated)
+
+        self.assertEqual(result["phoneTransfer"]["status"], "skipped")
+        self.assertEqual(result["phoneTransfer"]["reason"], "local_only")
+        self.assertEqual(result["files"][0]["path"], self.image_path)
+        run.assert_not_called()
+
+    def test_generated_media_upload_failures_preserve_local_result_and_block_regeneration(self) -> None:
+        generated = {
+            "images": ["large-base64"],
+            "files": [{"path": self.image_path, "filename": "result.png", "mime": "image/png"}],
+            "count": 1,
+        }
+        phone_snapshot = {
+            "devices": [{"id": "phone-a", "name": "Selected Phone"}],
+            "reason": "",
+            "missingDeviceIds": [],
+        }
+        cases = (
+            (
+                "all-failed",
+                {
+                    "status": "failed",
+                    "reason": "phone_request_failed",
+                    "attempted": True,
+                    "deviceCount": 1,
+                    "succeededDeviceCount": 0,
+                    "failedDeviceCount": 1,
+                },
+                "partial_failure",
+                False,
+            ),
+            (
+                "partial",
+                {
+                    "status": "failed",
+                    "reason": "phone_upload_partial_failure",
+                    "attempted": True,
+                    "deviceCount": 2,
+                    "succeededDeviceCount": 1,
+                    "failedDeviceCount": 1,
+                },
+                "partial_failure",
+                False,
+            ),
+        )
+
+        for label, transfer_result, expected_status, indeterminate in cases:
+            with self.subTest(label=label), mock.patch.object(
+                routes_media,
+                "_transfer_generated_media_to_phones",
+                return_value=transfer_result,
+            ):
+                result = routes_media._async_media_job_result(
+                    self.ctx,
+                    "image",
+                    generated,
+                    phone_snapshot=phone_snapshot,
+                )
+
+            self.assertEqual(result["status"], expected_status)
+            self.assertFalse(result["success"])
+            self.assertEqual(result["outcomeIndeterminate"], indeterminate)
+            self.assertFalse(result["retryable"])
+            self.assertFalse(result["regenerationAllowed"])
+            self.assertEqual(result["files"][0]["path"], self.image_path)
+
+        with mock.patch.object(
+            routes_media,
+            "_transfer_generated_media_to_phones",
+            side_effect=RuntimeError("connection lost after upload"),
+        ):
+            uncertain = routes_media._async_media_job_result(
+                self.ctx,
+                "image",
+                generated,
+                phone_snapshot=phone_snapshot,
+            )
+
+        self.assertEqual(uncertain["status"], "outcome_uncertain")
+        self.assertFalse(uncertain["success"])
+        self.assertTrue(uncertain["outcomeIndeterminate"])
+        self.assertFalse(uncertain["retryable"])
+        self.assertFalse(uncertain["regenerationAllowed"])
+        self.assertEqual(uncertain["files"][0]["path"], self.image_path)
+
+    def test_upload_timeout_returns_uncertain_result_without_losing_local_file(self) -> None:
+        generated = {
+            "images": ["large-base64"],
+            "files": [{"path": self.image_path, "filename": "result.png", "mime": "image/png"}],
+            "count": 1,
+        }
+        phone_snapshot = {
+            "devices": [{"id": "phone-a", "name": "Selected Phone"}],
+            "reason": "",
+            "missingDeviceIds": [],
+        }
+
+        with mock.patch(
+            "api.routes_phone.node_executable",
+            return_value="node",
+        ), mock.patch("api.routes_phone.phone_process_env", return_value={}), mock.patch.object(
+            routes_media.subprocess,
+            "run",
+            side_effect=routes_media.subprocess.TimeoutExpired("upload", 180),
+        ):
+            result = routes_media._async_media_job_result(
+                self.ctx,
+                "image",
+                generated,
+                phone_snapshot=phone_snapshot,
+            )
+
+        self.assertEqual(result["status"], "outcome_uncertain")
+        self.assertFalse(result["success"])
+        self.assertTrue(result["outcomeIndeterminate"])
+        self.assertFalse(result["retryable"])
+        self.assertFalse(result["regenerationAllowed"])
+        self.assertEqual(result["files"][0]["path"], self.image_path)
+        self.assertEqual(result["phoneTransfer"]["status"], "outcome_uncertain")
+        self.assertEqual(result["phoneTransfer"]["reason"], "phone_upload_outcome_unknown")
 
     def test_async_video_generation_returns_actionable_public_failure(self) -> None:
         jobs = ImmediateJobManager()

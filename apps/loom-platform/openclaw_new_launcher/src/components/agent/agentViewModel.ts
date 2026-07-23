@@ -21,6 +21,13 @@ export interface AgentEventState {
   seenEventIds: string[];
 }
 
+export function isTerminalAgentRunStatus(status: unknown): status is Extract<
+  AgentRunStatus,
+  'completed' | 'failed' | 'cancelled'
+> {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
 export function agentModelSelectionState(
   sessionModelId: string | undefined,
   defaultModelId: string | undefined,
@@ -140,7 +147,7 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
-export type ToolLifecycleStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type ToolLifecycleStatus = 'queued' | 'awaiting' | 'running' | 'completed' | 'failed';
 
 export function normalizeAgentMessages(messages: AgentMessage[]): AgentMessage[] {
   const ranked = messages.map((message, index) => {
@@ -160,11 +167,13 @@ export function capabilityActionLabel(capability: unknown, status: unknown = 'ru
   const normalized = typeof capability === 'string'
     ? capability.toLowerCase().replace(/[^a-z0-9]+/g, '.')
     : '';
-  const lifecycle: ToolLifecycleStatus = status === 'queued'
-    || status === 'completed'
-    || status === 'failed'
-    ? status
-    : 'running';
+  const lifecycle: Exclude<ToolLifecycleStatus, 'awaiting'> = status === 'queued' || status === 'awaiting'
+    ? 'queued'
+    : status === 'completed'
+      ? 'completed'
+      : status === 'failed'
+        ? 'failed'
+        : 'running';
   const copy = (queued: string, running: string, completed: string, failed: string) => ({
     queued,
     running,
@@ -602,7 +611,11 @@ function toolMessageId(runId: string): string {
 }
 
 function toolStatus(value: unknown): ToolLifecycleStatus | undefined {
-  return value === 'queued' || value === 'running' || value === 'completed' || value === 'failed'
+  return value === 'queued'
+    || value === 'awaiting'
+    || value === 'running'
+    || value === 'completed'
+    || value === 'failed'
     ? value
     : undefined;
 }
@@ -613,7 +626,8 @@ function mergeToolStatus(
 ): ToolLifecycleStatus {
   if (current === 'completed' || current === 'failed') return current;
   if (incoming === 'completed' || incoming === 'failed') return incoming;
-  if (current === 'running' && incoming === 'queued') return current;
+  if (current === 'running' && (incoming === 'queued' || incoming === 'awaiting')) return current;
+  if (current === 'awaiting' && incoming === 'queued') return current;
   return incoming;
 }
 
@@ -628,7 +642,9 @@ function messageStatusForToolBlocks(blocks: AgentMessageBlock[]): AgentMessage['
     .filter((block) => block.type === 'tool')
     .map((block) => toolStatus(block.data.status));
   if (statuses.includes('failed')) return 'failed';
-  if (statuses.some((status) => status === 'queued' || status === 'running')) return 'streaming';
+  if (statuses.some((status) => status === 'queued' || status === 'awaiting' || status === 'running')) {
+    return 'streaming';
+  }
   return 'completed';
 }
 
@@ -705,14 +721,12 @@ function removeRejectedToolBlock(
   });
 }
 
-function reconcileTerminalToolRows(
+function reconcileTerminalToolRowsForRun(
   messages: AgentMessage[],
-  event: LoomRealtimeEvent,
+  runId: string,
   status: Extract<ToolLifecycleStatus, 'completed' | 'failed'>,
+  terminalData: Record<string, unknown> = {},
 ): AgentMessage[] {
-  const suppliedRun = isRecord(event.data.run) ? event.data.run : undefined;
-  const runId = stringValue(suppliedRun?.runId) || stringValue(event.data.runId) || event.entityId;
-  const terminalData = blockData(event.data);
   let changed = false;
   const next = messages.map((message) => {
     let messageChanged = false;
@@ -737,6 +751,26 @@ function reconcileTerminalToolRows(
     return { ...message, status: messageStatusForToolBlocks(blocks), blocks };
   });
   return changed ? next : messages;
+}
+
+function reconcileTerminalToolRows(
+  messages: AgentMessage[],
+  event: LoomRealtimeEvent,
+  status: Extract<ToolLifecycleStatus, 'completed' | 'failed'>,
+): AgentMessage[] {
+  const suppliedRun = isRecord(event.data.run) ? event.data.run : undefined;
+  const runId = stringValue(suppliedRun?.runId) || stringValue(event.data.runId) || event.entityId;
+  return reconcileTerminalToolRowsForRun(messages, runId, status, blockData(event.data));
+}
+
+export function reconcileAgentMessagesForTerminalRun(
+  messages: AgentMessage[],
+  run: AgentRun,
+): AgentMessage[] {
+  if (!isTerminalAgentRunStatus(run.status)) return messages;
+  const status = run.status === 'completed' ? 'completed' : 'failed';
+  const terminalData = run.error ? { error: run.error } : {};
+  return reconcileTerminalToolRowsForRun(messages, run.runId, status, terminalData);
 }
 
 function hasFailedToolForRun(messages: AgentMessage[], runId: string): boolean {
@@ -839,6 +873,7 @@ function mergeDelta(messages: AgentMessage[], event: LoomRealtimeEvent, sessionI
       { type: 'text', data: { text: delta, runId } },
     ], event.timestamp),
     (message) => {
+      if (message.status === 'completed' || message.status === 'failed') return message;
       const textIndex = message.blocks.findIndex((block) => block.type === 'text');
       const blocks = [...message.blocks];
       if (textIndex < 0) blocks.push({ type: 'text', data: { text: delta } });
@@ -934,6 +969,9 @@ function mergeRun(
     || (stringValue(supplied?.status) as AgentRunStatus | undefined);
   if (!status && !supplied) return runs;
   const existing = runs[runId];
+  if (existing && isTerminalAgentRunStatus(existing.status) && !isTerminalAgentRunStatus(status)) {
+    return runs;
+  }
   const campaignIds = stringArray(supplied?.campaignIds ?? event.data.campaignIds);
   const errorValue = isRecord(supplied?.error) ? supplied.error : isRecord(event.data.error) ? event.data.error : undefined;
   const next: AgentRun = {
@@ -1019,9 +1057,15 @@ export function mergeAgentEvent(
     || (isRecord(event.data.message) ? stringValue(event.data.message.sessionId) : undefined)
     || (isRecord(event.data.run) ? stringValue(event.data.run.sessionId) : undefined);
   if (eventSessionId && eventSessionId !== sessionId) return state;
+  const suppliedRun = isRecord(event.data.run) ? event.data.run : undefined;
+  const eventRunId = stringValue(suppliedRun?.runId) || stringValue(event.data.runId) || event.entityId;
+  const ignoreDeltaForTerminalRun = event.type === 'message.delta'
+    && isTerminalAgentRunStatus(state.runs[eventRunId]?.status);
 
   return {
-    messages: normalizeAgentMessages(mergeMessages(state.messages, event, sessionId)),
+    messages: ignoreDeltaForTerminalRun
+      ? state.messages
+      : normalizeAgentMessages(mergeMessages(state.messages, event, sessionId)),
     runs: mergeRun(state.runs, event, sessionId),
     lastSeq: event.seq,
     seenEventIds: [...state.seenEventIds, event.eventId].slice(-EVENT_ID_HISTORY_LIMIT),

@@ -47,6 +47,32 @@ RUNTIME_PROGRESS_EVENT_TYPES = frozenset({
 class AgentRepositoryProtocol(Protocol):
     def create_run(self, run: Json) -> Json: ...
     def get_run(self, run_id: str, session_id: str | None = None) -> Json: ...
+    def claim_run(
+        self,
+        run_id: str,
+        *,
+        lease_id: str,
+        expected_statuses: tuple[str, ...],
+        session_id: str | None = None,
+    ) -> Json: ...
+    def update_run_with_lease(
+        self,
+        run_id: str,
+        changes: Json,
+        *,
+        lease_id: str,
+        release_lease: bool = False,
+        session_id: str | None = None,
+        remove_fields: tuple[str, ...] = (),
+    ) -> Json: ...
+    def update_run_releasing_lease(
+        self,
+        run_id: str,
+        changes: Json,
+        session_id: str | None = None,
+        *,
+        remove_fields: tuple[str, ...] = (),
+    ) -> Json: ...
     def update_run(
         self,
         run_id: str,
@@ -132,9 +158,40 @@ class AgentOrchestrator:
         run_id: str,
         request: Mapping[str, Any] | None = None,
     ) -> Json:
+        try:
+            return self._execute_run(session_id, run_id, request)
+        except RepositoryConflictError:
+            return self.repository.get_run(run_id, session_id=session_id)
+
+    def _execute_run(
+        self,
+        session_id: str,
+        run_id: str,
+        request: Mapping[str, Any] | None = None,
+    ) -> Json:
         run = self.repository.get_run(run_id, session_id=session_id)
         if run.get("status") in TERMINAL_STATUSES:
             return run
+        previous_status = str(run.get("status") or "")
+        checkpoint = _load_checkpoint(run.get("checkpoint"))
+        pending_approval = checkpoint.get("pendingApproval")
+        if isinstance(pending_approval, Mapping):
+            approval_id = str(pending_approval.get("approvalId") or "")
+            if not approval_id:
+                return run
+            approval = self.repository.get_approval(approval_id, session_id=session_id)
+            if approval.get("status") != "approved":
+                return run
+        elif previous_status != "queued":
+            return run
+        if previous_status not in {"queued", "waiting_approval"}:
+            return run
+        run = self.repository.claim_run(
+            run_id,
+            lease_id=f"runlease_{uuid.uuid4().hex}",
+            expected_statuses=(previous_status,),
+            session_id=session_id,
+        )
         control = self._control(run_id, reset=run.get("status") == "paused")
         if control.action == "cancel" or control.cancel.is_set() and control.action == "cancel":
             return self.cancel_run(run_id, session_id=session_id)
@@ -143,24 +200,30 @@ class AgentOrchestrator:
         _capture_request_scope(checkpoint, run, request)
         if checkpoint.get("inFlightToolCall") and run.get("status") == "paused":
             return run
-        if run.get("status") == "waiting_approval":
+        if isinstance(checkpoint.get("pendingApproval"), Mapping):
             resumed = self._resume_approved_tool(session_id, run, checkpoint)
             if resumed is None:
-                return self.repository.get_run(run_id, session_id=session_id)
+                return self._update_claimed_run(
+                    session_id,
+                    run_id,
+                    checkpoint,
+                    {},
+                    release_lease=True,
+                )
             run, checkpoint = resumed
             if run.get("status") != "running":
                 return run
 
         runtime_request = self._build_request(session_id, run, request, checkpoint)
-        previous_status = str(run.get("status") or "")
         started_at = run.get("startedAt") or _utc_now()
         with self._lock:
             if control.cancel.is_set():
                 return self._finish_control_request(session_id, run_id, control)
-            run = self.repository.update_run(
+            run = self._update_claimed_run(
+                session_id,
                 run_id,
+                checkpoint,
                 {"status": "running", "startedAt": started_at, "checkpoint": _dump_checkpoint(checkpoint)},
-                session_id=session_id,
             )
         if previous_status != "running":
             self._emit(session_id, run_id, "run.started", {"status": "running", "startedAt": started_at})
@@ -355,10 +418,11 @@ class AgentOrchestrator:
                         checkpoint["toolInputRepairAttempts"] = repair_attempts
                     repair_count = int(repair_attempts.get(call["name"], 0) or 0) + 1
                     repair_attempts[call["name"]] = repair_count
-                    self.repository.update_run(
+                    self._update_claimed_run(
+                        session_id,
                         run_id,
+                        checkpoint,
                         {"checkpoint": _dump_checkpoint(checkpoint)},
-                        session_id=session_id,
                     )
                     self._emit(
                         session_id,
@@ -409,10 +473,11 @@ class AgentOrchestrator:
                         _close_failed_tool_checkpoint(checkpoint, call, {**error, "recoverable": True})
                         repair_count = int(checkpoint.get("toolSelectionRepairAttempts", 0) or 0) + 1
                         checkpoint["toolSelectionRepairAttempts"] = repair_count
-                        self.repository.update_run(
+                        self._update_claimed_run(
+                            session_id,
                             run_id,
+                            checkpoint,
                             {"checkpoint": _dump_checkpoint(checkpoint)},
-                            session_id=session_id,
                         )
                         if repair_count <= MAX_TOOL_SELECTION_REPAIR_ATTEMPTS:
                             self._emit(
@@ -441,10 +506,11 @@ class AgentOrchestrator:
                         repair_key = f"{call['name']}:{code}"
                         repair_count = int(repair_attempts.get(repair_key, 0) or 0) + 1
                         repair_attempts[repair_key] = repair_count
-                        self.repository.update_run(
+                        self._update_claimed_run(
+                            session_id,
                             run_id,
+                            checkpoint,
                             {"checkpoint": _dump_checkpoint(checkpoint)},
-                            session_id=session_id,
                         )
                         if repair_count <= MAX_TOOL_EXECUTION_REPAIR_ATTEMPTS:
                             self._emit(
@@ -515,7 +581,12 @@ class AgentOrchestrator:
                         {"toolCallId": call_id, "capability": call["name"], "error": {"code": "tool_failed", "message": str(exc)}},
                     )
                     return self._fail_run(session_id, run_id, "tool_failed", str(exc), True, checkpoint)
-            self.repository.update_run(run_id, {"checkpoint": _dump_checkpoint(checkpoint)}, session_id=session_id)
+            self._update_claimed_run(
+                session_id,
+                run_id,
+                checkpoint,
+                {"checkpoint": _dump_checkpoint(checkpoint)},
+            )
 
         return self._fail_run(
             session_id,
@@ -535,7 +606,11 @@ class AgentOrchestrator:
             control = self._control(run_id)
             control.action = "pause"
             control.cancel.set()
-            updated = self.repository.update_run(run_id, {"status": "paused"}, session_id=session_id)
+            updated = self.repository.update_run_releasing_lease(
+                run_id,
+                {"status": "paused"},
+                session_id=session_id,
+            )
         self._emit(session_id, run_id, "run.paused", {"checkpoint": updated.get("checkpoint")})
         return updated
 
@@ -552,7 +627,7 @@ class AgentOrchestrator:
         session_id = str(run["sessionId"])
         with self._lock:
             self._controls[run_id] = _RunControl()
-        self.repository.update_run(
+        self.repository.update_run_releasing_lease(
             run_id,
             {"status": "queued"},
             session_id=session_id,
@@ -569,7 +644,7 @@ class AgentOrchestrator:
             control = self._control(run_id)
             control.action = "cancel"
             control.cancel.set()
-            updated = self.repository.update_run(
+            updated = self.repository.update_run_releasing_lease(
                 run_id,
                 {"status": "cancelled", "completedAt": _utc_now()},
                 session_id=session_id,
@@ -635,7 +710,7 @@ class AgentOrchestrator:
                     "error": error,
                 },
             )
-            run = self.repository.update_run(
+            run = self.repository.update_run_releasing_lease(
                 run_id,
                 {
                     "status": "paused",
@@ -656,6 +731,30 @@ class AgentOrchestrator:
     def recover_unfinished_runs(self) -> list[Json]:
         recovered: list[Json] = []
         for run in self.repository.recover_unfinished_runs():
+            if run.get("status") == "waiting_approval":
+                checkpoint = _load_checkpoint(run.get("checkpoint"))
+                pending = checkpoint.get("pendingApproval")
+                approval_id = (
+                    str(pending.get("approvalId") or "")
+                    if isinstance(pending, Mapping)
+                    else ""
+                )
+                approval = (
+                    self.repository.get_approval(
+                        approval_id,
+                        session_id=str(run["sessionId"]),
+                    )
+                    if approval_id
+                    else None
+                )
+                if isinstance(approval, Mapping) and approval.get("status") == "approved":
+                    run = self.repository.update_run_releasing_lease(
+                        str(run["runId"]),
+                        {"status": "queued"},
+                        session_id=str(run["sessionId"]),
+                    )
+                recovered.append(run)
+                continue
             if run.get("status") != "running":
                 recovered.append(run)
                 continue
@@ -688,7 +787,7 @@ class AgentOrchestrator:
             }
             if in_flight:
                 changes["completedAt"] = _utc_now()
-            updated = self.repository.update_run(
+            updated = self.repository.update_run_releasing_lease(
                 run["runId"],
                 changes,
                 session_id=run["sessionId"],
@@ -743,7 +842,7 @@ class AgentOrchestrator:
             current = self.repository.get_run(run_id, session_id=session_id)
             if current.get("status") in TERMINAL_STATUSES:
                 return current
-            updated = self.repository.update_run(
+            updated = self.repository.update_run_releasing_lease(
                 run_id,
                 {
                     "status": "failed",
@@ -788,11 +887,18 @@ class AgentOrchestrator:
         checkpoint["pendingApproval"] = {
             "approvalId": approval["approvalId"],
             "toolCall": redact_sensitive(call),
+            "approvalContext": _approval_authorization_context(
+                capability,
+                call["input"],
+                self.policy,
+            ),
         }
-        updated = self.repository.update_run(
+        updated = self._update_claimed_run(
+            session_id,
             run_id,
+            checkpoint,
             {"status": "waiting_approval", "checkpoint": _dump_checkpoint(checkpoint)},
-            session_id=session_id,
+            release_lease=True,
         )
         self._emit(
             session_id,
@@ -835,22 +941,56 @@ class AgentOrchestrator:
         raw_input = self._pending_inputs.get((run["runId"], normalized["toolCallId"]), normalized["input"])
         normalized["input"] = raw_input
         capability = self.capabilities.get(normalized["name"])
-        if not self.policy.is_authorized(approval, normalized["toolCallId"], normalized["name"], raw_input):
+        scope_matches = (
+            approval.get("sessionId") == session_id
+            and approval.get("runId") == run.get("runId")
+            and self.policy.is_authorized(
+                approval,
+                normalized["toolCallId"],
+                normalized["name"],
+                raw_input,
+            )
+        )
+        authorization_context = pending.get("approvalContext")
+        context_matches = False
+        if scope_matches and isinstance(authorization_context, Mapping):
+            try:
+                self.capabilities.validate_input(normalized["name"], raw_input)
+                current_context = _approval_authorization_context(
+                    capability,
+                    raw_input,
+                    self.policy,
+                )
+                context_matches = (
+                    dict(authorization_context) == current_context
+                    and approval.get("risk") == current_context["risk"]
+                    and approval.get("inputHash") == current_context["inputHash"]
+                )
+            except CapabilityError:
+                context_matches = False
+        if not scope_matches or not context_matches:
+            error_code = "approval_scope_mismatch" if not scope_matches else "approval_context_changed"
             error = {
-                "code": "approval_scope_mismatch",
-                "message": "Approval no longer matches the pending tool call.",
+                "code": error_code,
+                "message": (
+                    "Approval no longer matches the pending tool call."
+                    if not scope_matches
+                    else "Capability or policy context changed after approval."
+                ),
                 "recoverable": True,
             }
             _close_failed_tool_checkpoint(checkpoint, normalized, error)
             self._pending_inputs.pop((run["runId"], normalized["toolCallId"]), None)
-            failed = self.repository.update_run(
-                run["runId"],
+            failed = self._update_claimed_run(
+                session_id,
+                str(run["runId"]),
+                checkpoint,
                 {
                     "status": "paused",
                     "error": error,
                     "checkpoint": _dump_checkpoint(checkpoint),
                 },
-                session_id=session_id,
+                release_lease=True,
             )
             self._emit(
                 session_id,
@@ -863,16 +1003,17 @@ class AgentOrchestrator:
                     "error": error,
                 },
             )
-            self._emit(session_id, run["runId"], "run.paused", {"reason": "approval_scope_mismatch"})
+            self._emit(session_id, run["runId"], "run.paused", {"reason": error_code})
             return failed, checkpoint
         control = self._control(str(run["runId"]))
         with self._lock:
             if control.cancel.is_set():
                 return self._finish_control_request(session_id, str(run["runId"]), control), checkpoint
-            run = self.repository.update_run(
-                run["runId"],
+            run = self._update_claimed_run(
+                session_id,
+                str(run["runId"]),
+                checkpoint,
                 {"status": "running", "checkpoint": _dump_checkpoint(checkpoint)},
-                session_id=session_id,
             )
         try:
             self._execute_tool(session_id, run["runId"], normalized, capability, checkpoint, approval=approval)
@@ -900,10 +1041,11 @@ class AgentOrchestrator:
                 repair_count = int(repair_attempts.get(repair_key, 0) or 0) + 1
                 repair_attempts[repair_key] = repair_count
                 if repair_count <= MAX_TOOL_EXECUTION_REPAIR_ATTEMPTS:
-                    run = self.repository.update_run(
-                        run["runId"],
+                    run = self._update_claimed_run(
+                        session_id,
+                        str(run["runId"]),
+                        checkpoint,
                         {"status": "running", "checkpoint": _dump_checkpoint(checkpoint)},
-                        session_id=session_id,
                     )
                     self._emit(
                         session_id,
@@ -984,10 +1126,11 @@ class AgentOrchestrator:
         with self._lock:
             if control.cancel.is_set():
                 return self._finish_control_request(session_id, str(run["runId"]), control), checkpoint
-            run = self.repository.update_run(
-                run["runId"],
+            run = self._update_claimed_run(
+                session_id,
+                str(run["runId"]),
+                checkpoint,
                 {"status": "running", "checkpoint": _dump_checkpoint(checkpoint)},
-                session_id=session_id,
             )
         return run, checkpoint
 
@@ -1107,7 +1250,12 @@ class AgentOrchestrator:
     ) -> Any:
         call_id = call["toolCallId"]
         checkpoint["inFlightToolCall"] = redact_sensitive(call)
-        self.repository.update_run(run_id, {"checkpoint": _dump_checkpoint(checkpoint)}, session_id=session_id)
+        self._update_claimed_run(
+            session_id,
+            run_id,
+            checkpoint,
+            {"checkpoint": _dump_checkpoint(checkpoint)},
+        )
         if approval is not None:
             consumed = self.policy.consume_approval(approval, call_id, call["name"], call["input"])
             try:
@@ -1130,7 +1278,13 @@ class AgentOrchestrator:
         completed_checkpoint = copy.deepcopy(checkpoint)
         try:
             safe_result = redact_sensitive(result)
-            self._attach_matrix_result(session_id, run_id, call, safe_result)
+            self._attach_matrix_result(
+                session_id,
+                run_id,
+                call,
+                safe_result,
+                completed_checkpoint,
+            )
             completed_checkpoint["completedToolCallIds"].append(call_id)
             completed_checkpoint["toolResults"].append(
                 {
@@ -1144,10 +1298,11 @@ class AgentOrchestrator:
             )
             completed_checkpoint["inFlightToolCall"] = None
             completed_checkpoint.pop("pendingApproval", None)
-            self.repository.update_run(
+            self._update_claimed_run(
+                session_id,
                 run_id,
+                completed_checkpoint,
                 {"checkpoint": _dump_checkpoint(completed_checkpoint)},
-                session_id=session_id,
             )
         except Exception as exc:
             raise CapabilityExecutionError(
@@ -1210,10 +1365,11 @@ class AgentOrchestrator:
             "deduplicated": True,
         })
         checkpoint["inFlightToolCall"] = None
-        self.repository.update_run(
+        self._update_claimed_run(
+            session_id,
             run_id,
+            checkpoint,
             {"checkpoint": _dump_checkpoint(checkpoint)},
-            session_id=session_id,
         )
         self._emit(
             session_id,
@@ -1227,7 +1383,14 @@ class AgentOrchestrator:
             },
         )
 
-    def _attach_matrix_result(self, session_id: str, run_id: str, call: Json, result: Any) -> None:
+    def _attach_matrix_result(
+        self,
+        session_id: str,
+        run_id: str,
+        call: Json,
+        result: Any,
+        checkpoint: Json,
+    ) -> None:
         if not isinstance(result, Mapping):
             return
         campaign_id = str(result.get("campaignId") or "")
@@ -1235,7 +1398,12 @@ class AgentOrchestrator:
             return
         run = self.repository.get_run(run_id, session_id=session_id)
         campaign_ids = list(dict.fromkeys([*run.get("campaignIds", []), campaign_id]))
-        self.repository.update_run(run_id, {"campaignIds": campaign_ids}, session_id=session_id)
+        self._update_claimed_run(
+            session_id,
+            run_id,
+            checkpoint,
+            {"campaignIds": campaign_ids},
+        )
         tasks = result.get("deviceTasks", [])
         failed_ids = [
             str(task.get("deviceId"))
@@ -1284,10 +1452,12 @@ class AgentOrchestrator:
             message = self._append_assistant_message(session_id, safe_final, message_id=message_id)
             event_data = {"message": message} if message is not None else {"text": _final_text(safe_final)}
             self._emit(session_id, run_id, "message.completed", event_data)
-            run = self.repository.update_run(
+            run = self._update_claimed_run(
+                session_id,
                 run_id,
+                checkpoint,
                 {"status": "completed", "completedAt": _utc_now(), "checkpoint": _dump_checkpoint(checkpoint)},
-                session_id=session_id,
+                release_lease=True,
             )
         self._emit(session_id, run_id, "run.completed", {"campaignIds": run.get("campaignIds", [])})
         return run
@@ -1382,13 +1552,35 @@ class AgentOrchestrator:
             control = self._control(run_id)
             if control.cancel.is_set():
                 return self._finish_control_request(session_id, run_id, control)
-            run = self.repository.update_run(
+            run = self._update_claimed_run(
+                session_id,
                 run_id,
+                checkpoint,
                 {"status": "failed", "completedAt": _utc_now(), "checkpoint": _dump_checkpoint(checkpoint), "error": error},
-                session_id=session_id,
+                release_lease=True,
             )
         self._emit(session_id, run_id, "run.failed", {"error": error})
         return run
+
+    def _update_claimed_run(
+        self,
+        session_id: str,
+        run_id: str,
+        checkpoint: Json,
+        changes: Json,
+        *,
+        release_lease: bool = False,
+    ) -> Json:
+        lease_id = _run_lease_id(checkpoint)
+        if not lease_id:
+            raise RepositoryConflictError(f"run {run_id} has no execution lease")
+        return self.repository.update_run_with_lease(
+            run_id,
+            changes,
+            lease_id=lease_id,
+            release_lease=release_lease,
+            session_id=session_id,
+        )
 
     def _finish_control_request(self, session_id: str, run_id: str, control: _RunControl) -> Json:
         if control.action == "pause":
@@ -1443,6 +1635,134 @@ def _tool_fingerprint(capability_name: str, tool_input: Mapping[str, Any]) -> st
         default=str,
     )
     return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _run_lease_id(checkpoint: Mapping[str, Any]) -> str:
+    lease = checkpoint.get("runLease")
+    if not isinstance(lease, Mapping):
+        return ""
+    return str(lease.get("leaseId") or "").strip()
+
+
+def _approval_authorization_context(
+    capability: Any,
+    tool_input: Mapping[str, Any],
+    policy: AgentPolicyEngine,
+) -> Json:
+    decision = policy.evaluate(capability, tool_input)
+    capability_contract = (
+        capability.to_dict()
+        if callable(getattr(capability, "to_dict", None))
+        else {
+            key: getattr(capability, key, None)
+            for key in (
+                "name",
+                "source",
+                "permission",
+                "risk",
+                "timeout_sec",
+                "input_schema",
+                "output_schema",
+                "target_scope",
+            )
+        }
+    )
+    capability_contract = dict(capability_contract)
+    capability_contract.pop("available", None)
+    capability_contract["executor"] = _callable_implementation(capability.executor)
+    authorized_device_ids = getattr(policy, "authorized_device_ids", None)
+    policy_contract = {
+        "type": f"{type(policy).__module__}.{type(policy).__qualname__}",
+        "approvalMode": getattr(policy, "approval_mode", None),
+        "approvalTtlSec": getattr(policy, "approval_ttl_sec", None),
+        "authorizedDeviceIds": (
+            sorted(str(item) for item in authorized_device_ids)
+            if authorized_device_ids is not None
+            else None
+        ),
+        "decision": decision.to_dict(),
+        "evaluateImplementation": _callable_implementation(policy.evaluate),
+    }
+    return {
+        "version": 1,
+        "risk": decision.classification,
+        "inputHash": _input_hash(tool_input),
+        "capabilityFingerprint": _stable_hash(capability_contract),
+        "policyFingerprint": _stable_hash(policy_contract),
+    }
+
+
+def _input_hash(tool_input: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        dict(tool_input),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def _stable_hash(value: Any) -> str:
+    canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def _callable_implementation(value: Any) -> Json:
+    target = getattr(value, "__func__", value)
+    partial_function = getattr(target, "func", None)
+    if callable(partial_function) and hasattr(target, "args") and hasattr(target, "keywords"):
+        return {
+            "kind": "partial",
+            "function": _callable_implementation(partial_function),
+            "args": _callable_value(getattr(target, "args", ())),
+            "keywords": _callable_value(getattr(target, "keywords", {})),
+        }
+    code = getattr(target, "__code__", None)
+    if code is None and callable(target):
+        call_method = getattr(type(target), "__call__", None)
+        code = getattr(call_method, "__code__", None)
+    descriptor: Json = {
+        "module": str(getattr(target, "__module__", type(target).__module__) or ""),
+        "qualname": str(getattr(target, "__qualname__", type(target).__qualname__) or ""),
+    }
+    if code is not None:
+        descriptor["code"] = _code_implementation(code)
+        descriptor["defaults"] = _callable_value(getattr(target, "__defaults__", None))
+        descriptor["kwdefaults"] = _callable_value(getattr(target, "__kwdefaults__", None))
+    return descriptor
+
+
+def _code_implementation(code: Any) -> Json:
+    return {
+        "bytecode": bytes(code.co_code).hex(),
+        "constants": [_callable_value(item) for item in code.co_consts],
+        "names": list(code.co_names),
+        "variables": list(code.co_varnames),
+        "filename": str(code.co_filename),
+        "firstLine": int(code.co_firstlineno),
+    }
+
+
+def _callable_value(value: Any) -> Any:
+    if hasattr(value, "co_code") and hasattr(value, "co_consts"):
+        return {"code": _code_implementation(value)}
+    if isinstance(value, Mapping):
+        return {
+            str(key): _callable_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_callable_value(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return {"type": f"{type(value).__module__}.{type(value).__qualname__}"}
 
 
 def _previous_completed_tool_result(checkpoint: Mapping[str, Any], fingerprint: str) -> Json | None:

@@ -87,13 +87,28 @@ def _matrix_concurrency_limit(body: dict, device_count: int) -> int:
     return max(1, min(value, safe_device_count, _MATRIX_MAX_CONCURRENCY))
 
 
+def _matrix_execution_is_uncertain(result: dict) -> bool:
+    error_code = str(result.get("errorCode") or result.get("code") or "").strip().lower()
+    return bool(
+        result.get("outcomeIndeterminate") is True
+        or result.get("executionMayContinue") is True
+        or (error_code == "timeout" and str(result.get("taskId") or "").strip())
+    )
+
+
 def register_matrix_routes(app, ctx) -> None:
     @app.api_route("/api/matrix/status", methods=["GET", "POST"])
     async def matrix_status(request: Request):
         if error := ctx.auth_error(request):
             return error
+        body = await ctx.body(request) if request.method == "POST" else {}
+        campaign_id = str(
+            body.get("campaignId")
+            or request.query_params.get("campaignId")
+            or ""
+        ).strip()
         _matrix_event_sync_best_effort(ctx)
-        return ctx.fastapi_json(_matrix(ctx).status())
+        return ctx.fastapi_json(_matrix(ctx).status(campaign_id or None))
 
     @app.get("/api/matrix/devices/{device_id}/screen")
     async def matrix_device_screen(device_id: str, request: Request):
@@ -1481,7 +1496,13 @@ def _run_matrix_device_task(
                 raise RuntimeError("手机任务执行器未返回有效结果")
             if raw_result.get("cancelled") is True or job_manager.is_cancelled(job_id):
                 return cancelled_result()
-            if raw_result.get("success") is True or attempt >= retry_budget:
+            if _matrix_execution_is_uncertain(raw_result):
+                raw_result["outcomeIndeterminate"] = True
+            if (
+                raw_result.get("success") is True
+                or _matrix_execution_is_uncertain(raw_result)
+                or attempt >= retry_budget
+            ):
                 break
             attempt += 1
             matrix.append_task_event(
@@ -1513,6 +1534,9 @@ def _run_matrix_device_task(
             duration_ms=duration_ms,
             failure_reason=error,
             failure_code=error_code,
+            task_id=str(raw_result.get("taskId") or ""),
+            outcome_indeterminate=raw_result.get("outcomeIndeterminate") is True,
+            execution_may_continue=raw_result.get("executionMayContinue") is True,
         )
         result = {
             "success": ok,
@@ -1541,6 +1565,10 @@ def _run_matrix_device_task(
             result["metrics"] = _redact_matrix_json(metrics)
         if isinstance(raw_result.get("fallback"), dict):
             result["fallback"] = _redact_matrix_json(raw_result["fallback"])
+        for key in ("taskId", "outcomeIndeterminate", "executionMayContinue"):
+            value = raw_result.get(key)
+            if value not in (None, "", False):
+                result[key] = _redact_matrix_json(value)
         return result
     except Exception as exc:
         error = _redact_matrix_output(str(exc))[:300]

@@ -50,7 +50,7 @@ MEDIA_IMAGE_INPUT_SCHEMA: Json = {
             "minItems": 1,
             "items": {"type": "string", "minLength": 1},
         },
-        "allOnline": {"type": "boolean"},
+        "allOnline": {"type": "boolean", "enum": [True]},
     },
 }
 
@@ -124,13 +124,14 @@ MATRIX_TARGET_SCHEMA: Json = {
             "minItems": 1,
             "items": {"type": "string", "minLength": 1},
         },
-        "allOnline": {"type": "boolean"},
+        "allOnline": {"type": "boolean", "enum": [True]},
     },
-    "anyOf": [
+    "oneOf": [
         {"required": ["deviceIds"]},
         {"required": ["groups"]},
         {"required": ["allOnline"]},
     ],
+    "additionalProperties": False,
 }
 
 MEDIA_ASSET_LIST_INPUT_SCHEMA: Json = {
@@ -173,7 +174,7 @@ MATRIX_DISPATCH_INPUT_SCHEMA: Json = {
         "targets": MATRIX_TARGET_SCHEMA,
         "mode": {"type": "string", "enum": ["observe", "safe", "full", "deep"]},
     },
-    "anyOf": [
+    "oneOf": [
         {"required": ["deviceId"]},
         {"required": ["group"]},
         {"required": ["targets"]},
@@ -922,7 +923,20 @@ class CapabilityRegistry:
                             permission=permission,
                             risk=risk,
                         )
-                    return result
+                    payload = _mcp_success_payload(result)
+                    if (
+                        server == "loom"
+                        and isinstance(result, Mapping)
+                        and "isError" in result
+                        and payload is result
+                    ):
+                        raise _mcp_malformed_success_error(
+                            server,
+                            tool,
+                            permission=permission,
+                            risk=risk,
+                        )
+                    return payload
             localized = _external_capability_metadata("mcp", tool, server=server)
             capabilities.append(
                 _capability_from_spec(
@@ -1270,6 +1284,29 @@ def _validate_schema(value: Any, schema: Mapping[str, Any], *, path: str) -> Non
             ]
             detail = f": {' or '.join(required_options)}" if required_options else ""
             raise CapabilityInputError(f"{path} must satisfy one allowed parameter combination{detail}")
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, Sequence) and not isinstance(one_of, (str, bytes)) and one_of:
+        matches = 0
+        for option in one_of:
+            if not isinstance(option, Mapping):
+                continue
+            try:
+                _validate_schema(value, option, path=path)
+            except CapabilityInputError:
+                continue
+            matches += 1
+        if matches != 1:
+            required_options = [
+                "/".join(str(key) for key in option.get("required", []))
+                for option in one_of
+                if isinstance(option, Mapping)
+                and isinstance(option.get("required"), Sequence)
+                and not isinstance(option.get("required"), (str, bytes))
+            ]
+            detail = f": {' or '.join(required_options)}" if required_options else ""
+            raise CapabilityInputError(
+                f"{path} must satisfy exactly one allowed parameter combination{detail}"
+            )
 
 
 def _default_skill_provider() -> Any:
@@ -1350,6 +1387,55 @@ def _mcp_execution_error(
             execution_may_continue=False,
         )
     return CapabilityExecutionError(code, message, recoverable=recoverable)
+
+
+def _mcp_success_payload(result: Any) -> Any:
+    if not isinstance(result, Mapping) or result.get("isError") is True:
+        return result
+
+    structured = result.get("structuredContent")
+    if isinstance(structured, Mapping):
+        return dict(structured)
+
+    content = result.get("content")
+    if not isinstance(content, Sequence) or isinstance(content, (str, bytes)):
+        return result
+    for item in content:
+        if not isinstance(item, Mapping) or item.get("type") != "text":
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, Mapping):
+            return dict(payload)
+    return result
+
+
+def _mcp_malformed_success_error(
+    server: str,
+    tool: str,
+    *,
+    permission: str = "read",
+    risk: str = "read",
+) -> CapabilityExecutionError:
+    message = f"MCP tool returned a success response without a structured result: {server}/{tool}"
+    if permission != "read" or risk != "read":
+        return CapabilityExecutionError(
+            "capability_execution_unknown",
+            f"MCP control outcome is unknown because its success receipt was malformed: {server}/{tool}",
+            recoverable=False,
+            outcome_indeterminate=True,
+            execution_may_continue=False,
+        )
+    return CapabilityExecutionError(
+        "capability_invalid_output",
+        message,
+        recoverable=True,
+    )
 
 
 def _error_is_definitely_pre_execution(code: str) -> bool:

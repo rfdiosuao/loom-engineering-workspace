@@ -36,6 +36,12 @@ Json = Dict[str, Any]
 DEFAULT_PERMISSION = os.environ.get("LOOM_MCP_PERMISSION", "read").strip().lower() or "read"
 
 
+class McpInputError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 def _launcher_package_version() -> str:
     for root in [Path(__file__).resolve().parent, *Path(__file__).resolve().parents]:
         package_json = root / "package.json"
@@ -361,7 +367,7 @@ def tool_definitions() -> list[Json]:
                         "groups": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                         "allOnline": {"type": "boolean"},
                     },
-                    "anyOf": [
+                    "oneOf": [
                         {"required": ["deviceIds"]},
                         {"required": ["groups"]},
                         {"required": ["allOnline"]},
@@ -372,7 +378,7 @@ def tool_definitions() -> list[Json]:
                 "confirmed": {"type": "boolean", "required": False},
             },
             target_scope="matrix-write",
-            any_of=[
+            one_of=[
                 {"required": ["deviceId"]},
                 {"required": ["group"]},
                 {"required": ["targets"]},
@@ -452,6 +458,13 @@ def call_tool(
         return {
             "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}],
             "isError": not ok,
+        }
+    except McpInputError as exc:
+        error = exc.code
+        payload = {"ok": False, "command": name, "error": {"code": exc.code, "message": str(exc)}}
+        return {
+            "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}],
+            "isError": True,
         }
     except Exception as exc:  # pragma: no cover - defensive stdio boundary
         error = str(exc)[:300]
@@ -772,19 +785,8 @@ def _tool_to_cli_args(name: str, args: Json) -> list[str]:
         return ["matrix", "status"]
     if name == "loom_matrix_dispatch":
         argv = ["matrix", "dispatch", "--prompt", _required(args, "prompt")]
-        targets = args.get("targets") if isinstance(args.get("targets"), dict) else {}
-        device_ids = targets.get("deviceIds") if isinstance(targets.get("deviceIds"), list) else []
-        groups = targets.get("groups") if isinstance(targets.get("groups"), list) else []
-        if targets.get("allOnline"):
-            argv.extend(["--target", "all"])
-        elif device_ids:
-            argv.extend(["--device", ",".join(str(item) for item in device_ids)])
-        elif groups:
-            argv.extend(["--group", ",".join(str(item) for item in groups)])
-        elif args.get("deviceId"):
-            argv.extend(["--device", str(args["deviceId"])])
-        elif args.get("group"):
-            argv.extend(["--group", str(args["group"])])
+        target_flag, target_value = _matrix_dispatch_target(args)
+        argv.extend([target_flag, target_value])
         if args.get("mode"):
             argv.extend(["--mode", str(args["mode"])])
         if args.get("confirmed"):
@@ -908,6 +910,7 @@ def _tool(
     *,
     target_scope: str = "none",
     any_of: Any = None,
+    one_of: Any = None,
     risk: str | None = None,
 ) -> Json:
     required = []
@@ -936,6 +939,8 @@ def _tool(
     }
     if any_of:
         input_schema["anyOf"] = list(any_of)
+    if one_of:
+        input_schema["oneOf"] = list(one_of)
     return {
         "name": name,
         "description": f"{description} 权限：{permission}。",
@@ -962,6 +967,52 @@ def _required(args: Json, key: str) -> str:
     if not value:
         raise ValueError(f"Missing required argument: {key}")
     return value
+
+
+def _matrix_dispatch_target(args: Json) -> tuple[str, str]:
+    targets_value = args.get("targets")
+    if targets_value is not None and not isinstance(targets_value, dict):
+        raise McpInputError("invalid_target", "targets must be an object.")
+    targets = targets_value if isinstance(targets_value, dict) else {}
+
+    selectors: list[tuple[str, str]] = []
+    device_id = str(args.get("deviceId") or "").strip()
+    group = str(args.get("group") or "").strip()
+    if device_id:
+        selectors.append(("--device", device_id))
+    if group:
+        selectors.append(("--group", group))
+
+    if "deviceIds" in targets:
+        device_ids = targets.get("deviceIds")
+        if not isinstance(device_ids, list) or not device_ids:
+            raise McpInputError("invalid_target", "targets.deviceIds must contain at least one device ID.")
+        normalized = [str(item).strip() for item in device_ids]
+        if any(not item for item in normalized):
+            raise McpInputError("invalid_target", "targets.deviceIds cannot contain empty device IDs.")
+        selectors.append(("--device", ",".join(normalized)))
+
+    if "groups" in targets:
+        groups = targets.get("groups")
+        if not isinstance(groups, list) or not groups:
+            raise McpInputError("invalid_target", "targets.groups must contain at least one group.")
+        normalized = [str(item).strip() for item in groups]
+        if any(not item for item in normalized):
+            raise McpInputError("invalid_target", "targets.groups cannot contain empty groups.")
+        selectors.append(("--group", ",".join(normalized)))
+
+    if "allOnline" in targets:
+        all_online = targets.get("allOnline")
+        if not isinstance(all_online, bool) or not all_online:
+            raise McpInputError("invalid_target", "targets.allOnline must be true when selected.")
+        selectors.append(("--target", "all"))
+
+    if len(selectors) != 1:
+        raise McpInputError(
+            "invalid_target",
+            "Select exactly one Matrix target: deviceId, group, targets.deviceIds, targets.groups, or targets.allOnline.",
+        )
+    return selectors[0]
 
 
 def _rpc_result(request_id: Any, result: Json) -> Json:
