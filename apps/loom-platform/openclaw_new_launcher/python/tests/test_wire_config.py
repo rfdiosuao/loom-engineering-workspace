@@ -597,6 +597,69 @@ class WireServiceTests(unittest.TestCase):
             for path in session_paths:
                 self.assertTrue(os.path.isfile(path))
 
+    def test_codex_switching_relay_preserves_all_existing_session_files_and_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            codex_home = os.path.join(temp_dir, "customer-codex-home")
+            active_path = os.path.join(
+                codex_home,
+                "sessions",
+                "2026",
+                "07",
+                "old-relay-active.jsonl",
+            )
+            archived_path = os.path.join(
+                codex_home,
+                "archived_sessions",
+                "old-relay-archived.jsonl",
+            )
+            index_path = os.path.join(codex_home, "session_index.jsonl")
+            state_path = os.path.join(codex_home, "state_5.sqlite")
+            expected_files = {
+                active_path: b'{"type":"session_meta","provider":"old-relay"}\n',
+                archived_path: b'{"type":"session_meta","provider":"older-relay"}\n',
+                index_path: b'{"thread_id":"old-relay-thread"}\n',
+                state_path: b"sqlite-session-index-sentinel",
+            }
+            for path, content in expected_files.items():
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as handle:
+                    handle.write(content)
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": codex_home}, clear=False):
+                service.sync_custom_provider(
+                    provider="old-relay",
+                    base_url="https://old-relay.example.invalid/v1",
+                    api_key="sk-old-relay-not-real",
+                    text_model="old-relay-model",
+                    targets=(),
+                )
+                service.sync_agent_model_config(
+                    "codex-desktop",
+                    model="old-relay-model",
+                )
+
+                service.sync_custom_provider(
+                    provider="new-relay",
+                    base_url="https://new-relay.example.invalid/v1",
+                    api_key="sk-new-relay-not-real",
+                    text_model="new-relay-model",
+                    targets=(),
+                )
+                status = service.sync_agent_model_config(
+                    "codex-desktop",
+                    model="new-relay-model",
+                )
+
+            self.assertEqual(status["baseUrl"], "https://new-relay.example.invalid/v1")
+            self.assertEqual(status["sessionPreservation"]["status"], "protected")
+            self.assertEqual(status["sessionPreservation"]["totalThreads"], 2)
+            self.assertEqual(status["sessionPreservation"]["homePath"], codex_home)
+            for path, expected in expected_files.items():
+                with open(path, "rb") as handle:
+                    self.assertEqual(handle.read(), expected)
+
     def test_codex_transaction_rolls_back_when_session_inventory_drops(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)
