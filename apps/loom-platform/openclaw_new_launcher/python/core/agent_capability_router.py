@@ -209,6 +209,65 @@ _CORE_NAME_PATTERNS = (
     "loom_status",
 )
 
+_NEGATION_MARKERS = (
+    "不要",
+    "不需要",
+    "无需",
+    "不用",
+    "不必",
+    "别",
+    "禁止",
+    "避免",
+    "请勿",
+    "勿",
+)
+_NEGATION_BOUNDARIES = (
+    "\n",
+    "，",
+    ",",
+    "。",
+    ".",
+    "；",
+    ";",
+    "！",
+    "!",
+    "？",
+    "?",
+    "但是",
+    "不过",
+    "而是",
+    "但",
+    "而",
+    "只",
+)
+_NEGATION_LOOKBACK = 24
+
+
+def _has_positive_term(text: str, terms: Sequence[str]) -> bool:
+    for term in terms:
+        if not term:
+            continue
+        start = 0
+        while True:
+            index = text.find(term, start)
+            if index < 0:
+                break
+            if not _is_negated_occurrence(text, index):
+                return True
+            start = index + max(1, len(term))
+    return False
+
+
+def _is_negated_occurrence(text: str, index: int) -> bool:
+    context = text[max(0, index - _NEGATION_LOOKBACK):index]
+    boundary_end = 0
+    for boundary in _NEGATION_BOUNDARIES:
+        boundary_index = context.rfind(boundary)
+        if boundary_index >= 0:
+            boundary_end = max(boundary_end, boundary_index + len(boundary))
+    scope = context[boundary_end:]
+    return any(marker in scope for marker in _NEGATION_MARKERS)
+
 
 def route_capabilities(
     request: Mapping[str, Any],
@@ -227,7 +286,7 @@ def route_capabilities(
     catalog_capability = _capability_catalog(available)
     if (
         explicit_mode != "full"
-        and any(pattern in folded for pattern in _BROAD_INTENT_PATTERNS)
+        and _has_positive_term(folded, _BROAD_INTENT_PATTERNS)
         and catalog_capability is not None
     ):
         catalog_name = str(catalog_capability.get("name") or "").strip()
@@ -256,7 +315,7 @@ def route_capabilities(
         fallback_reason = "requested_full_catalog"
     elif int(checkpoint.get("toolSelectionRepairAttempts", 0) or 0) > 0:
         fallback_reason = "selection_repair"
-    elif any(pattern in folded for pattern in _BROAD_INTENT_PATTERNS):
+    elif _has_positive_term(folded, _BROAD_INTENT_PATTERNS):
         fallback_reason = "broad_capability_intent"
 
     domains = _intent_domains(folded, request)
@@ -363,19 +422,20 @@ def _intent_domains(text: str, request: Mapping[str, Any]) -> set[str]:
     domains = {
         domain
         for domain, keywords in _DOMAIN_KEYWORDS.items()
-        if any(keyword in text for keyword in keywords)
+        if _has_positive_term(text, keywords)
     }
     if any(pattern.search(text) for pattern in _SCHEDULE_INTENT_PATTERNS):
         domains.add("schedule")
-    if not domains and any(term in text for term in ("失败", "状态", "异常", "更新")):
+    if not domains and _has_positive_term(text, ("失败", "状态", "异常", "更新")):
         domains.add("diagnostics")
     if _MULTI_DEVICE_TARGET_PATTERN.search(text) or _NAMED_DEVICE_GROUP_TARGET_PATTERN.search(text):
         domains.add("matrix")
     if (
-        any(term in text for term in _PHONE_REPAIR_TERMS)
-        and any(term in text for term in ("手机", "设备", "phone", "adb", "无障碍"))
-        and not any(term in text for term in ("系统诊断", "环境诊断", "导出诊断", "诊断包", "运行日志"))
+        _has_positive_term(text, _PHONE_REPAIR_TERMS)
+        and _has_positive_term(text, ("手机", "设备", "phone", "adb", "无障碍"))
+        and not _has_positive_term(text, ("系统诊断", "环境诊断", "导出诊断", "诊断包", "运行日志"))
     ):
+        domains.add("phone")
         domains.discard("diagnostics")
     if _is_phone_settings_navigation(text):
         domains.discard("settings")
@@ -401,51 +461,52 @@ def _prune_capabilities_for_intent(
     hinted: set[str],
     domains: set[str],
 ) -> list[Json]:
-    reuse_media = "media" in {_domain for item in capabilities for _domain in _capability_domains(item)} and any(
-        term in text for term in _MEDIA_REUSE_TERMS
+    reuse_media = (
+        "media" in {_domain for item in capabilities for _domain in _capability_domains(item)}
+        and _has_positive_term(text, _MEDIA_REUSE_TERMS)
     )
-    regenerate_media = any(term in text for term in _MEDIA_REGENERATE_TERMS)
-    media_config = any(term in text for term in _MEDIA_CONFIG_TERMS)
-    media_execution = any(term in text for term in _MEDIA_EXECUTION_TERMS)
-    image_generation = any(term in text for term in _IMAGE_GENERATION_ACTION_TERMS)
-    video_generation = any(term in text for term in _VIDEO_GENERATION_ACTION_TERMS)
-    image_media = any(term in text for term in _IMAGE_MEDIA_TERMS)
-    video_media = any(term in text for term in _VIDEO_MEDIA_TERMS)
-    album_transfer = any(term in text for term in _ALBUM_TRANSFER_TERMS)
-    media_transfer = album_transfer or any(term in text for term in _MEDIA_TRANSFER_ACTION_TERMS)
-    outbound_publish = any(term in text for term in _OUTBOUND_PUBLISH_ACTION_TERMS)
-    if album_transfer and not any(term in text for term in _OUTBOUND_PUBLISH_DESTINATION_TERMS):
+    regenerate_media = _has_positive_term(text, _MEDIA_REGENERATE_TERMS)
+    media_config = _has_positive_term(text, _MEDIA_CONFIG_TERMS)
+    media_execution = _has_positive_term(text, _MEDIA_EXECUTION_TERMS)
+    image_generation = _has_positive_term(text, _IMAGE_GENERATION_ACTION_TERMS)
+    video_generation = _has_positive_term(text, _VIDEO_GENERATION_ACTION_TERMS)
+    image_media = _has_positive_term(text, _IMAGE_MEDIA_TERMS)
+    video_media = _has_positive_term(text, _VIDEO_MEDIA_TERMS)
+    album_transfer = _has_positive_term(text, _ALBUM_TRANSFER_TERMS)
+    media_transfer = album_transfer or _has_positive_term(text, _MEDIA_TRANSFER_ACTION_TERMS)
+    outbound_publish = _has_positive_term(text, _OUTBOUND_PUBLISH_ACTION_TERMS)
+    if album_transfer and not _has_positive_term(text, _OUTBOUND_PUBLISH_DESTINATION_TERMS):
         outbound_publish = False
-    phone_repair = any(term in text for term in _PHONE_REPAIR_TERMS)
-    phone_events = any(term in text for term in _PHONE_EVENT_TERMS)
-    non_publish_phone_action = any(term in text for term in _PHONE_NON_PUBLISH_ACTION_TERMS)
+    phone_repair = _has_positive_term(text, _PHONE_REPAIR_TERMS)
+    phone_events = _has_positive_term(text, _PHONE_EVENT_TERMS)
+    non_publish_phone_action = _has_positive_term(text, _PHONE_NON_PUBLISH_ACTION_TERMS)
     matrix_intent = "matrix" in domains
     media_flow = reuse_media or media_execution or media_transfer
-    matrix_cancel = any(term in text for term in _MATRIX_CANCEL_TERMS)
-    matrix_retry = any(term in text for term in _MATRIX_RETRY_TERMS)
-    matrix_screen = any(term in text for term in _MATRIX_SCREEN_TERMS)
-    matrix_status = any(term in text for term in _MATRIX_STATUS_TERMS)
-    matrix_experience = any(term in text for term in _MATRIX_EXPERIENCE_TERMS)
-    matrix_template = any(term in text for term in _MATRIX_TEMPLATE_TERMS)
+    matrix_cancel = _has_positive_term(text, _MATRIX_CANCEL_TERMS)
+    matrix_retry = _has_positive_term(text, _MATRIX_RETRY_TERMS)
+    matrix_screen = _has_positive_term(text, _MATRIX_SCREEN_TERMS)
+    matrix_status = _has_positive_term(text, _MATRIX_STATUS_TERMS)
+    matrix_experience = _has_positive_term(text, _MATRIX_EXPERIENCE_TERMS)
+    matrix_template = _has_positive_term(text, _MATRIX_TEMPLATE_TERMS)
     matrix_dispatch = (
         matrix_intent
-        and any(term in text for term in _MATRIX_DISPATCH_ACTION_TERMS)
+        and _has_positive_term(text, _MATRIX_DISPATCH_ACTION_TERMS)
         and not media_flow
         and not matrix_cancel
         and not matrix_retry
     )
-    phone_direct = any(term in text for term in _PHONE_DIRECT_CONTROL_TERMS)
-    phone_read = any(term in text for term in _PHONE_READ_TERMS)
-    phone_status = any(term in text for term in _PHONE_STATUS_TERMS)
-    phone_event_start = any(term in text for term in _PHONE_EVENT_START_TERMS)
-    phone_event_stop = any(term in text for term in _PHONE_EVENT_STOP_TERMS)
-    phone_event_status = any(term in text for term in _PHONE_EVENT_STATUS_TERMS)
-    settings_theme = any(term in text for term in _SETTINGS_THEME_TERMS)
-    settings_theme_list = any(term in text for term in _SETTINGS_THEME_LIST_TERMS)
-    settings_update = any(term in text for term in _SETTINGS_UPDATE_TERMS)
-    settings_update_install = any(term in text for term in _SETTINGS_UPDATE_INSTALL_TERMS)
-    media_config_save = any(term in text for term in _MEDIA_CONFIG_SAVE_TERMS)
-    media_config_test = any(term in text for term in _MEDIA_CONFIG_TEST_TERMS)
+    phone_direct = _has_positive_term(text, _PHONE_DIRECT_CONTROL_TERMS)
+    phone_read = _has_positive_term(text, _PHONE_READ_TERMS)
+    phone_status = _has_positive_term(text, _PHONE_STATUS_TERMS)
+    phone_event_start = _has_positive_term(text, _PHONE_EVENT_START_TERMS)
+    phone_event_stop = _has_positive_term(text, _PHONE_EVENT_STOP_TERMS)
+    phone_event_status = _has_positive_term(text, _PHONE_EVENT_STATUS_TERMS)
+    settings_theme = _has_positive_term(text, _SETTINGS_THEME_TERMS)
+    settings_theme_list = _has_positive_term(text, _SETTINGS_THEME_LIST_TERMS)
+    settings_update = _has_positive_term(text, _SETTINGS_UPDATE_TERMS)
+    settings_update_install = _has_positive_term(text, _SETTINGS_UPDATE_INSTALL_TERMS)
+    media_config_save = _has_positive_term(text, _MEDIA_CONFIG_SAVE_TERMS)
+    media_config_test = _has_positive_term(text, _MEDIA_CONFIG_TEST_TERMS)
 
     selected: list[Json] = []
     for capability in capabilities:
@@ -532,18 +593,18 @@ def _prune_capabilities_for_intent(
 
 def _is_phone_settings_navigation(text: str) -> bool:
     return (
-        "设置" in text
-        and any(term in text for term in ("手机", "phone", "device", "设备"))
-        and any(term in text for term in _PHONE_SETTINGS_ACTION_TERMS)
-        and not any(term in text for term in _LOOM_SETTINGS_TERMS)
+        _has_positive_term(text, ("设置",))
+        and _has_positive_term(text, ("手机", "phone", "device", "设备"))
+        and _has_positive_term(text, _PHONE_SETTINGS_ACTION_TERMS)
+        and not _has_positive_term(text, _LOOM_SETTINGS_TERMS)
     )
 
 
 def _is_recruitment_media_subject(text: str) -> bool:
     return (
-        any(term in text for term in _ACQUISITION_SUBJECT_TERMS)
-        and any(term in text for term in _MEDIA_CONTENT_TERMS)
-        and not any(term in text for term in _ACQUISITION_OPERATION_TERMS)
+        _has_positive_term(text, _ACQUISITION_SUBJECT_TERMS)
+        and _has_positive_term(text, _MEDIA_CONTENT_TERMS)
+        and not _has_positive_term(text, _ACQUISITION_OPERATION_TERMS)
     )
 
 

@@ -520,6 +520,143 @@ class AgentCapabilityRouterTests(unittest.TestCase):
         self.assertIn("loom.mcp.loom.loom_settings_update_check", names)
         self.assertIn("settings", metadata["domains"])
 
+    def test_negated_media_actions_are_not_exposed(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        cases = (
+            (
+                "只生成一张招聘海报，不要传到手机，也不要发布",
+                {"loom.media.image.generate"},
+                {"loom.media.asset.transfer", "loom.phone.publish", "loom.acquisition.run"},
+            ),
+            (
+                "不要重新生成，把已有图片传到手机相册",
+                {"loom.media.assets.list", "loom.media.asset.transfer"},
+                {"loom.media.image.generate", "loom.phone.publish"},
+            ),
+            (
+                "不要生成图片，只生成一段视频",
+                {"loom.media.video.generate"},
+                {"loom.media.image.generate"},
+            ),
+        )
+        for prompt, required, forbidden in cases:
+            with self.subTest(prompt=prompt):
+                selected, _metadata = route_capabilities({"prompt": prompt}, self.capabilities)
+                names = {item["name"] for item in selected}
+
+                self.assertTrue(required.issubset(names), names)
+                self.assertTrue(forbidden.isdisjoint(names), names)
+
+    def test_negated_matrix_and_settings_actions_are_not_exposed(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        cases = (
+            (
+                "不要下发新任务，只查看矩阵状态",
+                {"loom.matrix.status"},
+                {"loom.matrix.dispatch"},
+            ),
+            (
+                "不要重试，取消刚才的矩阵任务",
+                {"loom.matrix.cancel"},
+                {"loom.matrix.retry"},
+            ),
+            (
+                "不要安装更新，只检查有没有新版本",
+                {"loom.mcp.loom.loom_settings_update_check"},
+                {"loom.mcp.loom.loom_settings_update_install"},
+            ),
+            (
+                "不要检查更新，只把界面设置成深色主题",
+                {"loom.mcp.loom.loom_settings_theme"},
+                {"loom.mcp.loom.loom_settings_update_check"},
+            ),
+        )
+        for prompt, required, forbidden in cases:
+            with self.subTest(prompt=prompt):
+                selected, _metadata = route_capabilities({"prompt": prompt}, self.capabilities)
+                names = {item["name"] for item in selected}
+
+                self.assertTrue(required.issubset(names), names)
+                self.assertTrue(forbidden.isdisjoint(names), names)
+
+    def test_negated_event_and_media_config_actions_are_not_exposed(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        cases = (
+            (
+                "启动手机事件同步，不要检查状态",
+                {"loom.mcp.loom.loom_phone_events_start"},
+                {"loom.mcp.loom.loom_phone_events_status"},
+            ),
+            (
+                "停止手机事件同步，不要重新启动",
+                {"loom.mcp.loom.loom_phone_events_stop"},
+                {"loom.mcp.loom.loom_phone_events_start"},
+            ),
+            (
+                "查看手机事件同步状态，不要启动或停止",
+                {"loom.mcp.loom.loom_phone_events_status"},
+                {
+                    "loom.mcp.loom.loom_phone_events_start",
+                    "loom.mcp.loom.loom_phone_events_stop",
+                },
+            ),
+            (
+                "保存图片生成配置，不要测试接口",
+                {"loom.mcp.loom.loom_media_save_image_config"},
+                {"loom.mcp.loom.loom_media_test_image"},
+            ),
+            (
+                "测试视频生成接口，不要保存配置",
+                {"loom.mcp.loom.loom_media_test_video"},
+                {"loom.mcp.loom.loom_media_save_video_config"},
+            ),
+        )
+        for prompt, required, forbidden in cases:
+            with self.subTest(prompt=prompt):
+                selected, _metadata = route_capabilities({"prompt": prompt}, self.capabilities)
+                names = {item["name"] for item in selected}
+
+                self.assertTrue(required.issubset(names), names)
+                self.assertTrue(forbidden.isdisjoint(names), names)
+
+    def test_negated_cross_domain_subject_does_not_open_the_other_domain(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        media, media_metadata = route_capabilities(
+            {"prompt": "生成招聘海报，不要启动获客任务"},
+            self.capabilities,
+        )
+        acquisition, acquisition_metadata = route_capabilities(
+            {"prompt": "启动招聘获客任务，不要生成海报"},
+            self.capabilities,
+        )
+        media_names = {item["name"] for item in media}
+        acquisition_names = {item["name"] for item in acquisition}
+
+        self.assertIn("loom.media.image.generate", media_names)
+        self.assertNotIn("loom.acquisition.run", media_names)
+        self.assertNotIn("acquisition", media_metadata["domains"])
+        self.assertIn("loom.acquisition.run", acquisition_names)
+        self.assertNotIn("loom.media.image.generate", acquisition_names)
+        self.assertNotIn("media", acquisition_metadata["domains"])
+
+    def test_positive_adb_repair_keeps_phone_domain_when_phone_task_is_negated(self) -> None:
+        from core.agent_capability_router import route_capabilities
+
+        selected, metadata = route_capabilities(
+            {"prompt": "修复 ADB 连接，但不要执行手机任务"},
+            self.capabilities,
+        )
+        names = {item["name"] for item in selected}
+
+        self.assertIn("loom.mcp.loom.loom_phone_adb_doctor", names)
+        self.assertNotIn("loom.cli.phone.quick-task", names)
+        self.assertIn("phone", metadata["domains"])
+        self.assertNotEqual(metadata["mode"], "full")
+
     def test_named_device_group_target_enters_matrix_without_acquisition_tools(self) -> None:
         from core.agent_capability_router import route_capabilities
 
