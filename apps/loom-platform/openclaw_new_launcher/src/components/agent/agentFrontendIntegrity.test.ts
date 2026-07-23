@@ -1,7 +1,7 @@
 import 'tsx/esm';
 
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { test } from 'node:test';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -125,7 +125,7 @@ test('long conversations render every message and contain horizontal overflow', 
   assert.match(source, /break-words/);
 });
 
-test('Agent visual identity uses the shared raster mark with restrained status motion', async () => {
+test('Agent visual identity uses a bundled brand mark with restrained status motion', async () => {
   const brand = utf8.decode(await readFile(join(agentDirectory, '..', 'brand', 'LoomBrand.tsx')));
   const header = utf8.decode(await readFile(join(agentDirectory, 'AgentHeader.tsx')));
   const stream = utf8.decode(await readFile(join(agentDirectory, 'ConversationStream.tsx')));
@@ -134,7 +134,11 @@ test('Agent visual identity uses the shared raster mark with restrained status m
   const styles = utf8.decode(await readFile(join(agentDirectory, '..', '..', 'styles', 'index.css')));
 
   assert.match(brand, /export const LoomAgentMark/);
-  assert.match(brand, /\/loom-motion\/agent-core-v1\.png/);
+  assert.match(brand, /new URL\('\.\.\/\.\.\/assets\/luming-logo\.svg', import\.meta\.url\)/);
+  assert.match(brand, /const LoomBrandImage/);
+  assert.match(brand, /onError=\{\(\) => setFailed\(true\)\}/);
+  assert.doesNotMatch(brand, /\/loom-motion\/(?:agent-core-v1|luming-wordmark(?:-light|-gold)?)\.png/);
+  assert.equal((await stat(join(agentDirectory, '..', '..', 'assets', 'luming-logo.svg'))).isFile(), true);
   assert.match(brand, /data-agent-executing/);
 
   assert.match(header, /<LoomAgentMark/);
@@ -158,6 +162,21 @@ test('Agent visual identity uses the shared raster mark with restrained status m
   assert.match(sidebar, /Pencil/);
   assert.match(sidebar, /Archive/);
   assert.doesNotMatch(sidebar, />\s*[+\u2315\u270e\u25a1]\s*</u);
+});
+
+test('brand runtime asset routes always resolve to shipped files', async () => {
+  const brandDirectory = join(agentDirectory, '..', 'brand');
+  const publicDirectory = join(agentDirectory, '..', '..', '..', 'public');
+  const files = await readdir(brandDirectory, { withFileTypes: true });
+
+  for (const file of files.filter((entry) => entry.isFile() && /\.tsx?$/.test(entry.name))) {
+    const source = utf8.decode(await readFile(join(brandDirectory, file.name)));
+    const routes = source.matchAll(/['\"](\/loom-motion\/[^'\"]+)['\"]/g);
+    for (const route of routes) {
+      const assetPath = join(publicDirectory, ...route[1].slice(1).split('/'));
+      assert.equal((await stat(assetPath)).isFile(), true, `${file.name} references a missing bundled asset: ${route[1]}`);
+    }
+  }
 });
 
 test('run details use an opaque contextual debugger and return focus on close', async () => {

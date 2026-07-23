@@ -2,10 +2,31 @@ import React from 'react';
 import { APP_DISPLAY_NAME } from '../../version';
 
 const LOGO_SRC = new URL('../../assets/luming-logo.svg', import.meta.url).href;
-const AGENT_CORE_SRC = '/loom-motion/agent-core-v1.png';
-const LUMING_WORDMARK_DARK_SRC = '/loom-motion/luming-wordmark.png';
-const LUMING_WORDMARK_LIGHT_SRC = '/loom-motion/luming-wordmark-light.png';
-const LUMING_WORDMARK_GOLD_SRC = '/loom-motion/luming-wordmark-gold.png';
+
+const LoomBrandFallbackGlyph: React.FC<{ className?: string }> = ({ className = '' }) => (
+  <svg viewBox="0 0 64 64" className={className} focusable="false" aria-hidden="true">
+    <path d="M8 45 26 15l8 14 7-10 15 26H8Z" fill="#18B5C5" />
+    <path d="m16 45 12-20 6 10 7-10 9 20H16Z" fill="#9FE7DE" opacity=".9" />
+    <path d="M13 49h38" stroke="#F4EAD1" strokeWidth="3" strokeLinecap="round" />
+    <path d="M20 54h24" stroke="#44D6B8" strokeWidth="3" strokeLinecap="round" />
+  </svg>
+);
+
+const LoomBrandImage: React.FC<{ className?: string }> = ({ className = '' }) => {
+  const [failed, setFailed] = React.useState(false);
+
+  if (failed) return <LoomBrandFallbackGlyph className={className} />;
+
+  return (
+    <img
+      src={LOGO_SRC}
+      alt=""
+      className={className}
+      draggable={false}
+      onError={() => setFailed(true)}
+    />
+  );
+};
 
 export const LoomLogoMark: React.FC<{ className?: string }> = ({ className = '' }) => (
   <span
@@ -13,7 +34,7 @@ export const LoomLogoMark: React.FC<{ className?: string }> = ({ className = '' 
     data-loom-logo
     aria-hidden="true"
   >
-    <img src={LOGO_SRC} alt="" className="h-full w-full max-w-none object-contain" draggable={false} />
+    <LoomBrandImage className="h-full w-full max-w-none object-contain" />
   </span>
 );
 
@@ -28,12 +49,7 @@ export const LoomAgentMark: React.FC<{
     aria-hidden="true"
   >
     <span className="loom-agent-mark__asset flex h-full w-full items-center justify-center">
-      <img
-        src={AGENT_CORE_SRC}
-        alt=""
-        className="h-full w-full max-w-none scale-[1.32] select-none object-contain"
-        draggable={false}
-      />
+      <LoomBrandImage className="h-full w-full max-w-none scale-[1.08] select-none object-contain" />
     </span>
   </span>
 );
@@ -68,22 +84,14 @@ export const LoomWordmark: React.FC<{ className?: string; title?: string }> = ({
 export const LumingWordmarkImage: React.FC<{
   className?: string;
   tone?: 'dark' | 'light' | 'gold';
-}> = ({ className = '', tone = 'dark' }) => {
-  const src =
-    tone === 'light'
-      ? LUMING_WORDMARK_LIGHT_SRC
-      : tone === 'gold'
-        ? LUMING_WORDMARK_GOLD_SRC
-        : LUMING_WORDMARK_DARK_SRC;
-  return (
-    <img
-      src={src}
-      alt={APP_DISPLAY_NAME}
-      className={`luming-wordmark select-none object-contain ${className}`}
-      draggable={false}
-    />
-  );
-};
+}> = ({ className = '', tone = 'dark' }) => (
+  <LoomWordmark
+    title={APP_DISPLAY_NAME}
+    className={`luming-wordmark select-none ${
+      tone === 'dark' ? 'text-text' : tone === 'gold' ? 'text-[#F4EAD1]' : 'text-white'
+    } ${className}`}
+  />
+);
 
 export const LoomTitleLockup: React.FC<{
   title?: string;
