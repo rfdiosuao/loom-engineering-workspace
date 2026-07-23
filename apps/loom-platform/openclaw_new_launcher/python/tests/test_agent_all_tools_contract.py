@@ -208,6 +208,98 @@ class AgentAllToolsContractTests(unittest.TestCase):
                     f"{metadata_field}: {capability['name']} -> {metadata}",
                 )
 
+    def test_every_builtin_mcp_tool_display_name_uses_a_bounded_route(self) -> None:
+        import loom_mcp
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_capability_router import route_capabilities
+
+        definitions = loom_mcp.tool_definitions()
+        registry = CapabilityRegistry(
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{"server": "loom", **tool} for tool in definitions],
+            mcp_executor=lambda _server, _tool, _payload: {"ok": True},
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+        capabilities = registry.list_capabilities(available_only=True)
+
+        for capability in capabilities:
+            selected, metadata = route_capabilities(
+                {"prompt": capability["displayName"]},
+                capabilities,
+            )
+            self.assertIn(
+                capability["name"],
+                {item["name"] for item in selected},
+                capability["name"],
+            )
+            self.assertNotEqual(
+                metadata["mode"],
+                "full",
+                f"{capability['displayName']}: {capability['name']} -> {metadata}",
+            )
+
+    def test_full_production_catalog_routes_each_display_name_without_tool_sprawl(self) -> None:
+        from core.agent_capability_router import route_capabilities
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        class _ConnectedJobManager:
+            def submit_progress(self, *_args, **_kwargs):
+                return {"id": "unused-contract-job"}
+
+        allowed_preflight_routes = {
+            "loom.mcp.loom.loom_phone_adb_doctor": {
+                "loom.cli.phone.status",
+                "loom.mcp.loom.loom_phone_adb_doctor",
+            },
+            "loom.mcp.loom.loom_settings_update_install": {
+                "loom.mcp.loom.loom_settings_update_check",
+                "loom.mcp.loom.loom_settings_update_install",
+            },
+            "loom.mcp.loom.loom_wire_rollback": {
+                "loom.mcp.loom.loom_wire_current",
+                "loom.mcp.loom.loom_wire_rollback",
+            },
+            "loom.mcp.loom.loom_wire_sync": {
+                "loom.mcp.loom.loom_wire_current",
+                "loom.mcp.loom.loom_wire_sync",
+            },
+            "loom.media.asset.transfer": {
+                "loom.media.assets.list",
+                "loom.media.asset.transfer",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=object(),
+                context_factory=lambda: object(),
+                job_manager=_ConnectedJobManager(),
+            )
+            try:
+                capabilities = service.capabilities.list_capabilities(available_only=True)
+                self.assertGreaterEqual(len(capabilities), 80)
+                for capability in capabilities:
+                    selected, metadata = route_capabilities(
+                        {"prompt": capability["displayName"]},
+                        capabilities,
+                    )
+                    selected_names = {item["name"] for item in selected}
+                    expected = allowed_preflight_routes.get(
+                        capability["name"],
+                        {capability["name"]},
+                    )
+
+                    self.assertEqual(
+                        selected_names,
+                        expected,
+                        f"{capability['displayName']}: {capability['name']} -> {metadata}",
+                    )
+                    self.assertNotEqual(metadata["mode"], "full", capability["name"])
+            finally:
+                service.shutdown()
+
     def test_every_builtin_mcp_tool_round_trips_through_agent_registry(self) -> None:
         import loom_mcp
         from core.agent_capabilities import CapabilityRegistry
