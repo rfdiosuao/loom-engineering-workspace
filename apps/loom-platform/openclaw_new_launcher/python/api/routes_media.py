@@ -33,6 +33,12 @@ IMAGE_RATIO_TO_SIZE = {
 IMAGE_SIZE_TO_RATIO = {size: ratio for ratio, size in IMAGE_RATIO_TO_SIZE.items()}
 
 
+class MediaTargetError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 def _text(value: object) -> str:
     return str(value or "").strip()
 
@@ -103,6 +109,7 @@ def _phone_transfer_summary(
     uploaded_count: int = 0,
     total_count: int = 0,
     uploaded_files: list[str] | None = None,
+    outcome_indeterminate: bool = False,
 ) -> dict:
     selected = device if isinstance(device, dict) else {}
     summary = {
@@ -113,6 +120,8 @@ def _phone_transfer_summary(
         "uploadedCount": max(0, int(uploaded_count or 0)),
         "totalCount": max(0, int(total_count or 0)),
     }
+    if outcome_indeterminate:
+        summary["outcomeIndeterminate"] = True
     device_id = _text(selected.get("id") or selected.get("deviceId"))[:80]
     if device_id:
         summary["deviceId"] = device_id
@@ -221,6 +230,109 @@ def _configured_phone_snapshot(ctx, device_ids: list[str] | None = None) -> dict
         "reason": "" if public_devices else "no_configured_phones",
         "missingDeviceIds": missing_ids,
     }
+
+
+def _local_only_phone_snapshot() -> dict:
+    return {
+        "devices": [],
+        "reason": "local_only",
+        "missingDeviceIds": [],
+    }
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for raw in value:
+        item = _text(raw)[:80]
+        if item and item not in items:
+            items.append(item)
+    return items
+
+
+def _resolve_http_media_target_ids(ctx, groups: list[str], *, all_online: bool) -> list[str]:
+    try:
+        from core.phone_matrix import MatrixControlPlane
+
+        status = MatrixControlPlane(ctx.paths).status()
+    except Exception as exc:
+        raise MediaTargetError(
+            "phone_target_unavailable",
+            "无法读取手机目标状态，请稍后重试",
+        ) from exc
+
+    devices = status.get("devices") if isinstance(status, dict) else []
+    devices = devices if isinstance(devices, list) else []
+    available_groups: set[str] = set()
+    resolved: list[str] = []
+    requested_groups = set(groups)
+    for item in devices:
+        if not isinstance(item, dict):
+            continue
+        device_id = _text(item.get("deviceId") or item.get("id"))[:80]
+        raw_groups = item.get("groups") if isinstance(item.get("groups"), list) else []
+        item_groups = {
+            _text(value)[:80]
+            for value in [item.get("group"), *raw_groups]
+            if _text(value)
+        }
+        available_groups.update(item_groups)
+        selected = item.get("online") is True if all_online else bool(item_groups & requested_groups)
+        if selected and device_id and device_id not in resolved:
+            resolved.append(device_id)
+
+    unknown_groups = [group for group in groups if group not in available_groups]
+    if unknown_groups:
+        raise MediaTargetError(
+            "phone_target_not_found",
+            f"手机分组不存在：{', '.join(unknown_groups)}",
+        )
+    if not resolved:
+        raise MediaTargetError(
+            "phone_target_unavailable",
+            "未找到符合目标条件的可用手机",
+        )
+    return resolved
+
+
+def _media_generation_phone_snapshot(ctx, body: dict) -> dict:
+    requested_device_ids = _string_list(body.get("deviceIds"))
+    requested_groups = _string_list(body.get("groups"))
+    all_online = body.get("allOnline") is True
+    selector_count = sum((
+        bool(requested_device_ids),
+        bool(requested_groups),
+        all_online,
+    ))
+    if selector_count == 0:
+        return _local_only_phone_snapshot()
+    if selector_count > 1:
+        raise MediaTargetError(
+            "phone_target_scope_required",
+            "每次生成只能选择手机、分组或全部在线手机中的一种目标",
+        )
+
+    target_ids = requested_device_ids
+    if requested_groups or all_online:
+        target_ids = _resolve_http_media_target_ids(
+            ctx,
+            requested_groups,
+            all_online=all_online,
+        )
+    snapshot = _configured_phone_snapshot(ctx, target_ids)
+    missing_ids = snapshot.get("missingDeviceIds")
+    if isinstance(missing_ids, list) and missing_ids:
+        raise MediaTargetError(
+            "phone_target_not_found",
+            f"手机配置不存在：{', '.join(str(item) for item in missing_ids)}",
+        )
+    if not snapshot.get("devices"):
+        raise MediaTargetError(
+            "phone_target_unavailable",
+            "未找到可用的手机配置",
+        )
+    return snapshot
 
 
 def _uploaded_filenames(payload: object) -> list[str]:
@@ -384,12 +496,13 @@ def _transfer_generated_media_to_phone(
     except Exception:
         reason = "phone_upload_failed"
     return _phone_transfer_summary(
-        "failed",
+        "outcome_uncertain",
         reason,
-        "本地生成成功，传到手机失败",
+        "本地生成成功，但无法确认手机传送结果",
         attempted=True,
         device=selected,
         total_count=len(paths),
+        outcome_indeterminate=True,
     )
 
 
@@ -404,10 +517,15 @@ def _transfer_generated_media_to_phones(
     devices = snapshot.get("devices") if isinstance(snapshot.get("devices"), list) else []
     devices = [device for device in devices if isinstance(device, dict) and _text(device.get("id") or device.get("deviceId"))]
     if not devices:
+        reason = _text(snapshot.get("reason")) or "no_configured_phones"
         return {
             "status": "skipped",
-            "reason": _text(snapshot.get("reason")) or "no_configured_phones",
-            "message": "未配置手机，素材仅保存在本地",
+            "reason": reason,
+            "message": (
+                "未选择传输目标，素材仅保存在本地"
+                if reason == "local_only"
+                else "未配置手机，素材仅保存在本地"
+            ),
             "attempted": False,
             "deviceCount": 0,
             "succeededDeviceCount": 0,
@@ -430,10 +548,15 @@ def _transfer_generated_media_to_phones(
         device_results = list(executor.map(transfer, devices))
 
     succeeded_count = sum(1 for result in device_results if result.get("status") == "succeeded")
+    uncertain_count = sum(1 for result in device_results if result.get("status") == "outcome_uncertain")
     failed_count = len(device_results) - succeeded_count
     uploaded_count = sum(max(0, int(result.get("uploadedCount") or 0)) for result in device_results)
     total_count = sum(max(0, int(result.get("totalCount") or 0)) for result in device_results)
-    if failed_count == 0:
+    if uncertain_count:
+        status = "outcome_uncertain"
+        reason = "phone_upload_outcome_unknown"
+        message = f"已确认传到 {succeeded_count}/{len(device_results)} 台手机，另有 {uncertain_count} 台结果无法确认"
+    elif failed_count == 0:
         status = "succeeded"
         reason = "uploaded_all"
         message = f"已传到 {succeeded_count} 台手机相册"
@@ -460,10 +583,13 @@ def _transfer_generated_media_to_phones(
         "deviceCount": len(device_results),
         "succeededDeviceCount": succeeded_count,
         "failedDeviceCount": failed_count,
+        "uncertainDeviceCount": uncertain_count,
         "uploadedCount": uploaded_count,
         "totalCount": total_count,
         "deviceResults": device_results,
     }
+    if uncertain_count:
+        summary["outcomeIndeterminate"] = True
     if len(device_results) == 1:
         for key in ("deviceId", "deviceName", "album"):
             if device_results[0].get(key):
@@ -480,6 +606,11 @@ def _async_media_job_result(
     compact: bool = True,
 ) -> dict:
     result = _compact_media_job_result(generated) if compact else dict(generated)
+    bound_phone_snapshot = (
+        phone_snapshot
+        if isinstance(phone_snapshot, dict)
+        else _local_only_phone_snapshot()
+    )
     if kind == "video":
         files = [{
             "path": generated.get("path"),
@@ -489,20 +620,37 @@ def _async_media_job_result(
     else:
         files = generated.get("files") if isinstance(generated.get("files"), list) else []
     try:
-        result["phoneTransfer"] = _transfer_generated_media_to_phones(
+        phone_transfer = _transfer_generated_media_to_phones(
             ctx,
             kind,
             files,
-            phone_snapshot=phone_snapshot,
+            phone_snapshot=bound_phone_snapshot,
         )
     except Exception:
-        result["phoneTransfer"] = _phone_transfer_summary(
-            "failed",
-            "phone_upload_failed",
-            "本地生成成功，传到手机失败",
+        phone_transfer = _phone_transfer_summary(
+            "outcome_uncertain",
+            "phone_upload_outcome_unknown",
+            "本地生成成功，但无法确认手机传送结果",
             attempted=True,
             total_count=len(files),
+            outcome_indeterminate=True,
         )
+    result["phoneTransfer"] = phone_transfer
+    transfer_status = _text(phone_transfer.get("status"))
+    if transfer_status in {"failed", "outcome_uncertain"}:
+        outcome_indeterminate = (
+            transfer_status == "outcome_uncertain"
+            or phone_transfer.get("outcomeIndeterminate") is True
+        )
+        result.update({
+            "success": False,
+            "status": "outcome_uncertain" if outcome_indeterminate else "partial_failure",
+            "errorCode": _text(phone_transfer.get("reason")) or "media_transfer_failed",
+            "message": _text(phone_transfer.get("message")) or "媒体已生成，但手机传送未完成",
+            "outcomeIndeterminate": outcome_indeterminate,
+            "retryable": False,
+            "regenerationAllowed": False,
+        })
     return result
 
 
@@ -1058,7 +1206,10 @@ def register_media_routes(app, ctx) -> None:
             return error
 
         body = await ctx.body(request)
-        phone_snapshot = _configured_phone_snapshot(ctx)
+        try:
+            phone_snapshot = _media_generation_phone_snapshot(ctx, body)
+        except MediaTargetError as exc:
+            return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
         try:
             generated = _image_generate_payload(ctx, body)
             return ctx.fastapi_json(
@@ -1082,7 +1233,10 @@ def register_media_routes(app, ctx) -> None:
             return error
 
         body = await ctx.body(request)
-        phone_snapshot = _configured_phone_snapshot(ctx)
+        try:
+            phone_snapshot = _media_generation_phone_snapshot(ctx, body)
+        except MediaTargetError as exc:
+            return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
 
         def target(job_id: str) -> dict:
             ctx.get_job_mgr().progress(job_id, "正在生成图片", "neutral")
@@ -1091,7 +1245,8 @@ def register_media_routes(app, ctx) -> None:
             except (ImageApiError, ValueError) as exc:
                 _log_image_generation_failure(ctx, job_id, exc)
                 return _image_generation_failure(exc)
-            ctx.get_job_mgr().progress(job_id, "正在传送到全部已配置手机相册", "neutral", phase="phone-transfer")
+            if phone_snapshot.get("devices"):
+                ctx.get_job_mgr().progress(job_id, "正在传送到指定手机相册", "neutral", phase="phone-transfer")
             return _async_media_job_result(
                 ctx,
                 "image",
@@ -1110,7 +1265,10 @@ def register_media_routes(app, ctx) -> None:
             return error
 
         body = await ctx.body(request)
-        phone_snapshot = _configured_phone_snapshot(ctx)
+        try:
+            phone_snapshot = _media_generation_phone_snapshot(ctx, body)
+        except MediaTargetError as exc:
+            return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
         try:
             generated = _video_generate_payload(ctx, body)
             return ctx.fastapi_json(
@@ -1134,7 +1292,10 @@ def register_media_routes(app, ctx) -> None:
             return error
 
         body = await ctx.body(request)
-        phone_snapshot = _configured_phone_snapshot(ctx)
+        try:
+            phone_snapshot = _media_generation_phone_snapshot(ctx, body)
+        except MediaTargetError as exc:
+            return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
 
         def target(job_id: str) -> dict:
             ctx.get_job_mgr().progress(job_id, "正在提交视频任务", "neutral", phase="submitting")
@@ -1152,7 +1313,8 @@ def register_media_routes(app, ctx) -> None:
             except (VideoApiError, ValueError) as exc:
                 _log_video_generation_failure(ctx, job_id, exc)
                 return _video_generation_failure(exc)
-            ctx.get_job_mgr().progress(job_id, "正在传送到全部已配置手机相册", "neutral", phase="phone-transfer")
+            if phone_snapshot.get("devices"):
+                ctx.get_job_mgr().progress(job_id, "正在传送到指定手机相册", "neutral", phase="phone-transfer")
             return _async_media_job_result(
                 ctx,
                 "video",

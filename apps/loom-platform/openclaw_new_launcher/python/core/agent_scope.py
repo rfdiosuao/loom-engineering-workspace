@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from core.agent_language import has_positive_term, is_negated_occurrence
+
 
 _ALL_ONLINE_PHRASES = (
     "全部在线设备",
@@ -12,6 +14,10 @@ _ALL_ONLINE_PHRASES = (
     "全部在线手机",
     "所有在线手机",
     "全体在线设备",
+    "全部手机",
+    "所有手机",
+    "全部设备",
+    "所有设备",
     "all online devices",
     "all online phones",
 )
@@ -30,6 +36,17 @@ _PHONE_ACTION_TERMS = (
     "登录",
     "发布",
     "发送",
+    "传到",
+    "传入",
+    "传给",
+    "传输",
+    "上传",
+    "导入",
+    "保存到",
+    "查看",
+    "检查",
+    "检测",
+    "看看",
     "读取",
     "读屏",
     "截图",
@@ -46,10 +63,25 @@ _MOBILE_PLATFORM_TERMS = (
     "\u5feb\u624b",
     "\u5fae\u535a",
     "\u5fae\u4fe1",
+    "qq",
+    "\u95f2\u9c7c",
+    "\u54b8\u9c7c",
+    "\u6dd8\u5b9d",
+    "\u4eac\u4e1c",
+    "\u62fc\u591a\u591a",
+    "\u7f8e\u56e2",
+    "\u77e5\u4e4e",
+    "boss\u76f4\u8058",
+    "\u98de\u4e66",
+    "\u9489\u9489",
+    "\u6d4f\u89c8\u5668",
+    "\u76f8\u673a",
+    "\u76f8\u518c",
     "douyin",
     "xiaohongshu",
     "rednote",
 )
+_RESERVED_SELECTOR_LABELS = frozenset(term.casefold() for term in _MOBILE_PLATFORM_TERMS)
 _DEVICE_LIKE_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(?:P|PHONE|ANDROID)[-_]?\d[A-Za-z0-9_-]*(?![A-Za-z0-9_-])", re.IGNORECASE)
 
 
@@ -87,15 +119,21 @@ class ScopeResolution:
 def resolve_request_scope(text: str, explicit_scope: Mapping[str, Any] | None, matrix_status: Mapping[str, Any] | None) -> ScopeResolution:
     scope = dict(explicit_scope) if isinstance(explicit_scope, Mapping) else {}
     mode = "manual" if str(scope.get("mode") or "auto").strip().lower() == "manual" else "auto"
-    devices, groups, online_device_ids = _matrix_facts(matrix_status)
+    devices, groups, online_device_ids, device_aliases = _matrix_facts(matrix_status)
     online_count = len(online_device_ids)
     if mode == "manual":
         return _resolve_manual_scope(scope, devices, groups, online_count)
 
     content = str(text or "").strip()
-    device_ids = [device_id for device_id in devices if _contains_identifier(content, device_id)]
-    matched_groups = [group for group in groups if _contains_label(content, group)]
-    all_online = any(phrase.casefold() in content.casefold() for phrase in _ALL_ONLINE_PHRASES)
+    direct_device_ids = [device_id for device_id in devices if _contains_identifier(content, device_id)]
+    alias_device_ids, ambiguous_alias = _resolve_device_aliases(content, device_aliases)
+    if ambiguous_alias:
+        return _ambiguous(mode, "设备名称对应多台手机，请改用设备 ID")
+    selected_device_ids = set([*direct_device_ids, *alias_device_ids])
+    device_ids = [device_id for device_id in devices if device_id in selected_device_ids]
+    matched_groups = [group for group in groups if _contains_group_label(content, group)]
+    folded = content.casefold()
+    all_online = has_positive_term(folded, tuple(phrase.casefold() for phrase in _ALL_ONLINE_PHRASES))
     selector_count = sum(bool(value) for value in (device_ids, matched_groups, all_online))
     if selector_count > 1:
         return _ambiguous(mode, "请求同时包含不同类型的设备范围")
@@ -172,11 +210,14 @@ def _resolve_manual_scope(
     return ScopeResolution("resolved", "manual", all_online=True, summary=f"已手动选择全部 {online_count} 台在线设备")
 
 
-def _matrix_facts(matrix_status: Mapping[str, Any] | None) -> tuple[list[str], list[str], list[str]]:
+def _matrix_facts(
+    matrix_status: Mapping[str, Any] | None,
+) -> tuple[list[str], list[str], list[str], dict[str, list[str]]]:
     raw_devices = matrix_status.get("devices", []) if isinstance(matrix_status, Mapping) else []
     devices: list[str] = []
     groups: list[str] = []
     online_device_ids: list[str] = []
+    device_aliases: dict[str, list[str]] = {}
     for item in raw_devices if isinstance(raw_devices, Sequence) and not isinstance(raw_devices, (str, bytes)) else []:
         if not isinstance(item, Mapping):
             continue
@@ -185,35 +226,141 @@ def _matrix_facts(matrix_status: Mapping[str, Any] | None) -> tuple[list[str], l
             devices.append(device_id)
         if device_id and item.get("online") is True and device_id not in online_device_ids:
             online_device_ids.append(device_id)
+        for raw_alias in (item.get("name"), item.get("displayName"), item.get("alias")):
+            alias = str(raw_alias or "").strip()
+            if not device_id or not alias or alias.casefold() == device_id.casefold():
+                continue
+            alias_ids = device_aliases.setdefault(alias, [])
+            if device_id not in alias_ids:
+                alias_ids.append(device_id)
         raw_groups = item.get("groups") if isinstance(item.get("groups"), list) else []
         group_values = [item.get("group"), *raw_groups]
         for raw_group in group_values:
             group = str(raw_group or "").strip()
             if group and group not in groups:
                 groups.append(group)
-    return devices, groups, online_device_ids
+    return devices, groups, online_device_ids, device_aliases
+
+
+def _resolve_device_aliases(text: str, aliases: Mapping[str, Sequence[str]]) -> tuple[list[str], bool]:
+    matched_labels = []
+    for label in aliases:
+        spans = _device_alias_spans(text, label)
+        if spans:
+            matched_labels.append((label, spans))
+    matched_labels.sort(key=lambda item: len(item[0]), reverse=True)
+    specific_labels: list[str] = []
+    covered_spans: list[tuple[int, int]] = []
+    for label, spans in matched_labels:
+        if not any(
+            not any(start >= covered_start and end <= covered_end for covered_start, covered_end in covered_spans)
+            for start, end in spans
+        ):
+            continue
+        specific_labels.append(label)
+        covered_spans.extend(spans)
+
+    device_ids: list[str] = []
+    for label in specific_labels:
+        alias_ids = [str(item).strip() for item in aliases.get(label, []) if str(item).strip()]
+        if len(alias_ids) != 1:
+            return [], True
+        if alias_ids[0] not in device_ids:
+            device_ids.append(alias_ids[0])
+    return device_ids, False
 
 
 def _contains_identifier(text: str, identifier: str) -> bool:
-    return re.search(
+    matches = re.finditer(
         rf"(?<![A-Za-z0-9_-]){re.escape(identifier)}(?![A-Za-z0-9_-])",
         text,
         re.IGNORECASE,
-    ) is not None
+    )
+    return any(not is_negated_occurrence(text, match.start()) for match in matches)
 
 
 def _contains_label(text: str, label: str) -> bool:
+    return bool(_label_spans(text, label))
+
+
+def _contains_group_label(text: str, label: str) -> bool:
+    spans = _label_spans(text, label)
+    if not _requires_explicit_selector_context(label):
+        return bool(spans)
+    return any(_has_explicit_group_context(text, start, end) for start, end in spans)
+
+
+def _device_alias_spans(text: str, label: str) -> list[tuple[int, int]]:
+    spans = _label_spans(text, label)
+    if not _requires_explicit_selector_context(label):
+        return spans
+    return [
+        (start, end)
+        for start, end in spans
+        if _has_explicit_device_context(text, start, end)
+    ]
+
+
+def _requires_explicit_selector_context(label: str) -> bool:
+    return str(label or "").strip().casefold() in _RESERVED_SELECTOR_LABELS
+
+
+def _has_explicit_device_context(text: str, start: int, end: int) -> bool:
+    prefix = text[max(0, start - 24):start]
+    suffix = text[end:min(len(text), end + 24)]
+    explicit_prefix = re.search(
+        r"(?:设备名(?:称)?|手机名(?:称)?|终端名(?:称)?)(?:为|是|叫(?:作|做)?)?\s*$",
+        prefix,
+        re.IGNORECASE,
+    )
+    explicit_suffix = re.match(
+        r"^\s*(?:的\s*)?(?:(?:这|那)\s*)?(?:台\s*)?(?:手机|设备|终端|机器)",
+        suffix,
+        re.IGNORECASE,
+    )
+    english_prefix = re.search(r"(?:device|phone)(?:\s+(?:name|named))?\s*$", prefix, re.IGNORECASE)
+    english_suffix = re.match(r"^\s+(?:device|phone)\b", suffix, re.IGNORECASE)
+    return bool(explicit_prefix or explicit_suffix or english_prefix or english_suffix)
+
+
+def _has_explicit_group_context(text: str, start: int, end: int) -> bool:
+    prefix = text[max(0, start - 24):start]
+    suffix = text[end:min(len(text), end + 24)]
+    explicit_prefix = re.search(
+        r"(?:设备组|分组|组名(?:称)?)(?:为|是|叫(?:作|做)?)?\s*$",
+        prefix,
+        re.IGNORECASE,
+    )
+    explicit_suffix = re.match(
+        r"^\s*(?:的\s*)?(?:(?:这|那)\s*)?(?:个\s*)?(?:设备组|分组|组)",
+        suffix,
+        re.IGNORECASE,
+    )
+    english_prefix = re.search(r"(?:device\s+group|group(?:\s+(?:name|named))?)\s*$", prefix, re.IGNORECASE)
+    english_suffix = re.match(r"^\s+(?:device\s+group|group)\b", suffix, re.IGNORECASE)
+    return bool(explicit_prefix or explicit_suffix or english_prefix or english_suffix)
+
+
+def _label_spans(text: str, label: str) -> list[tuple[int, int]]:
     if not label:
-        return False
-    if re.search(r"[\u3400-\u9fff]", label):
-        return label in text
-    return _contains_identifier(text, label)
+        return []
+    pattern = re.escape(label)
+    if not re.search(r"[\u3400-\u9fff]", label):
+        pattern = rf"(?<![A-Za-z0-9_-]){pattern}(?![A-Za-z0-9_-])"
+    return [
+        match.span()
+        for match in re.finditer(pattern, text, re.IGNORECASE)
+        if not is_negated_occurrence(text, match.start())
+    ]
 
 
 def _requires_phone_target(text: str) -> bool:
     folded = text.casefold()
-    has_action = any(term.casefold() in folded for term in _PHONE_ACTION_TERMS)
-    has_context = any(term.casefold() in folded for term in (*_PHONE_CONTEXT_TERMS, *_MOBILE_PLATFORM_TERMS))
+    has_action = has_positive_term(folded, tuple(term.casefold() for term in _PHONE_ACTION_TERMS))
+    has_context = has_positive_term(
+        folded,
+        tuple(term.casefold() for term in (*_PHONE_CONTEXT_TERMS, *_MOBILE_PLATFORM_TERMS)),
+    )
     return has_action and (has_context or _DEVICE_LIKE_PATTERN.search(text) is not None)
 
 

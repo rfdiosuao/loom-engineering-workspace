@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 Json = dict[str, Any]
 EmitCallback = Callable[[Json], None]
+MAX_RUNTIME_OUTPUT_BYTES = 2_000_000
 
 
 class AgentRuntimeAdapter(Protocol):
@@ -163,6 +164,7 @@ class LoomCliRuntimeAdapter:
         parsed_items: list[Json] = []
         result: Json | None = None
         streams_done: set[str] = set()
+        output_size = 0
 
         while len(streams_done) < 2 or process.poll() is None:
             if cancel.is_set():
@@ -178,6 +180,14 @@ class LoomCliRuntimeAdapter:
             if line is None:
                 streams_done.add(stream_name)
                 continue
+            output_size += len(line.encode("utf-8", errors="replace"))
+            if output_size > MAX_RUNTIME_OUTPUT_BYTES:
+                _terminate_process(process)
+                raise RuntimeExecutionError(
+                    "agent_runtime_output_too_large",
+                    "Agent runtime output exceeded 2 MB.",
+                    recoverable=False,
+                )
             if stream_name == "stderr":
                 stderr_lines.append(line)
                 continue
@@ -189,7 +199,7 @@ class LoomCliRuntimeAdapter:
             if item.get("type") == "result":
                 result = _result_data(item)
             else:
-                emit(redact_sensitive(item))
+                _emit_runtime_progress(emit, item, process)
 
         for reader in readers:
             reader.join(timeout=0.1)
@@ -203,7 +213,7 @@ class LoomCliRuntimeAdapter:
                 if item.get("type") == "result":
                     result = _result_data(item)
                 else:
-                    emit(redact_sensitive(item))
+                    _emit_runtime_progress(emit, item, process)
 
         invalid_lines = [line for line in stdout_lines if line.strip() and _parse_json_object(line) is None]
         if parsed_items and invalid_lines and _parse_json_object(raw_stdout) is None:
@@ -362,9 +372,13 @@ class LoomCliRuntimeAdapter:
                 streams_done.add(stream_name)
                 continue
             output_size += len(line.encode("utf-8", errors="replace"))
-            if output_size > 2_000_000:
+            if output_size > MAX_RUNTIME_OUTPUT_BYTES:
                 _terminate_process(process)
-                raise RuntimeExecutionError("agent_runtime_output_too_large", "Agent runtime output exceeded 2 MB.")
+                raise RuntimeExecutionError(
+                    "agent_runtime_output_too_large",
+                    "Agent runtime output exceeded 2 MB.",
+                    recoverable=False,
+                )
             chunks[stream_name].append(line)
         for reader in readers:
             reader.join(timeout=0.1)
@@ -566,22 +580,32 @@ def _parse_provider_result(provider: str, raw: str) -> Json:
 
 def redact_sensitive(value: Any) -> Any:
     """Return a log/event-safe copy without reusable credentials or private bodies."""
+    return _redact_sensitive(value, sensitive_code_context=False)
+
+
+def _redact_sensitive(value: Any, *, sensitive_code_context: bool) -> Any:
     if isinstance(value, Mapping):
         safe: Json = {}
+        auth_code_context = sensitive_code_context or _looks_like_auth_code_input(value)
+        capability = str(value.get("name") or value.get("capability") or "")
+        capability_uses_code = _capability_uses_sensitive_code(capability)
         for key, item in value.items():
             name = str(key)
             lowered = re.sub(r"[^a-z0-9]", "", name.lower())
             if _is_sensitive_key(lowered):
                 safe[name] = "[REDACTED]"
+            elif lowered == "code" and auth_code_context:
+                safe[name] = "[REDACTED]"
             elif lowered in {"privatecontent", "privatebody", "contactlist", "addressbook", "filebody"}:
                 safe[name] = "[PRIVATE CONTENT REDACTED]"
             else:
-                safe[name] = redact_sensitive(item)
+                child_code_context = capability_uses_code and lowered in {"input", "arguments", "payload"}
+                safe[name] = _redact_sensitive(item, sensitive_code_context=child_code_context)
         return safe
     if isinstance(value, list):
-        return [redact_sensitive(item) for item in value]
+        return [_redact_sensitive(item, sensitive_code_context=False) for item in value]
     if isinstance(value, tuple):
-        return [redact_sensitive(item) for item in value]
+        return [_redact_sensitive(item, sensitive_code_context=False) for item in value]
     if isinstance(value, str):
         return redact_text(value)
     return value
@@ -606,6 +630,21 @@ def _is_sensitive_key(normalized_key: str) -> bool:
     )
 
 
+def _looks_like_auth_code_input(value: Mapping[str, Any]) -> bool:
+    normalized_keys = {
+        re.sub(r"[^a-z0-9]", "", str(key).lower())
+        for key in value
+    }
+    return "code" in normalized_keys and bool(
+        normalized_keys.intersection({"email", "phone", "mobile", "purpose", "verificationtype"})
+    )
+
+
+def _capability_uses_sensitive_code(capability: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", capability.lower())
+    return any(marker in normalized for marker in ("accountlogincode", "licenseactivate"))
+
+
 def _profile_command(profile: Mapping[str, Any]) -> list[str]:
     raw = profile.get("command")
     if isinstance(raw, str):
@@ -627,10 +666,24 @@ def _profile_command(profile: Mapping[str, Any]) -> list[str]:
 def _read_stream(name: str, stream: Any, output: queue.Queue[tuple[str, str | None]]) -> None:
     try:
         if stream is not None:
-            for line in iter(stream.readline, ""):
+            while True:
+                line = stream.readline(MAX_RUNTIME_OUTPUT_BYTES + 1)
+                if line == "":
+                    break
                 output.put((name, line))
     finally:
         output.put((name, None))
+
+
+def _emit_runtime_progress(emit: EmitCallback, event: Json, process: Any) -> None:
+    try:
+        emit(redact_sensitive(event))
+    except Exception as exc:
+        _terminate_process(process)
+        raise RuntimeExecutionError(
+            "agent_runtime_event_failed",
+            "Agent runtime progress could not be persisted.",
+        ) from exc
 
 
 def _parse_json_object(raw: str) -> Json | None:

@@ -1044,7 +1044,20 @@ class MatrixControlPlaneTests(unittest.TestCase):
 
         self.assertFalse(result["cancelled"])
         self.assertTrue(result["alreadyTerminal"])
+        self.assertEqual(result["status"], "succeeded")
         self.assertEqual(campaign["status"], "succeeded")
+
+    def test_cancel_missing_campaign_fails_instead_of_returning_false_success(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane, MatrixTargetError
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+
+            with self.assertRaises(MatrixTargetError) as raised:
+                matrix.cancel("campaign-missing")
+
+        self.assertEqual(raised.exception.code, "matrix_campaign_not_found")
 
     def test_cancel_preserves_succeeded_child_in_mixed_campaign(self) -> None:
         from core.paths import AppPaths
@@ -1440,7 +1453,61 @@ class MatrixControlPlaneTests(unittest.TestCase):
         retry_device_task = retried["task"]["missions"][0]["deviceTasks"][0]
         self.assertEqual(retry_device_task["deviceId"], "phone-a")
         self.assertEqual(retry_device_task["executionLayer"], "direct")
+        self.assertEqual(
+            retried["failureReasons"],
+            [{
+                "deviceTaskId": device_task_id,
+                "deviceId": "phone-a",
+                "code": "",
+                "reason": "设备离线",
+            }],
+        )
         self.assertIn("retry", [event["type"] for event in events["events"]])
+
+    def test_retry_missing_campaign_fails_instead_of_returning_false_success(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane, MatrixTargetError
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+
+            with self.assertRaises(MatrixTargetError) as raised:
+                matrix.retry_failed("campaign-missing", {})
+
+        self.assertEqual(raised.exception.code, "matrix_campaign_not_found")
+
+    def test_indeterminate_result_requires_human_and_blocks_immediate_retry(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            task = matrix.dispatch(
+                {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
+            )
+            device_task_id = task["missions"][0]["deviceTasks"][0]["deviceTaskId"]
+
+            matrix.record_result(
+                device_task_id,
+                ok=False,
+                duration_ms=1000,
+                failure_code="timeout",
+                failure_reason="remote task may still be running",
+                task_id="remote-task-42",
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+            campaign = matrix.status(task["campaignId"])["campaigns"][0]
+            retry = matrix.retry_failed(task["campaignId"], {})
+
+        stored_task = campaign["missions"][0]["deviceTasks"][0]
+        self.assertEqual(stored_task["status"], "needs_human")
+        self.assertFalse(retry["retried"])
+        self.assertFalse(retry["retryable"])
+        self.assertTrue(retry["outcomeIndeterminate"])
+        self.assertTrue(retry["executionMayContinue"])
+        self.assertIn("check", retry["reason"].lower())
 
     def test_canonical_retry_preserves_each_failed_assignment_contract(self) -> None:
         from core.paths import AppPaths

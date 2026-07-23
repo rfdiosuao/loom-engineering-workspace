@@ -87,13 +87,28 @@ def _matrix_concurrency_limit(body: dict, device_count: int) -> int:
     return max(1, min(value, safe_device_count, _MATRIX_MAX_CONCURRENCY))
 
 
+def _matrix_execution_is_uncertain(result: dict) -> bool:
+    error_code = str(result.get("errorCode") or result.get("code") or "").strip().lower()
+    return bool(
+        result.get("outcomeIndeterminate") is True
+        or result.get("executionMayContinue") is True
+        or (error_code == "timeout" and str(result.get("taskId") or "").strip())
+    )
+
+
 def register_matrix_routes(app, ctx) -> None:
     @app.api_route("/api/matrix/status", methods=["GET", "POST"])
     async def matrix_status(request: Request):
         if error := ctx.auth_error(request):
             return error
+        body = await ctx.body(request) if request.method == "POST" else {}
+        campaign_id = str(
+            body.get("campaignId")
+            or request.query_params.get("campaignId")
+            or ""
+        ).strip()
         _matrix_event_sync_best_effort(ctx)
-        return ctx.fastapi_json(_matrix(ctx).status())
+        return ctx.fastapi_json(_matrix(ctx).status(campaign_id or None))
 
     @app.get("/api/matrix/devices/{device_id}/screen")
     async def matrix_device_screen(device_id: str, request: Request):
@@ -396,11 +411,49 @@ def register_matrix_routes(app, ctx) -> None:
         campaign_id = str(body.get("campaignId") or body.get("id") or "").strip()
         if not campaign_id:
             return ctx.fastapi_json({"error": "campaignId is required"}, 400)
+        matrix = _matrix(ctx)
+        try:
+            result = matrix.cancel(campaign_id)
+        except MatrixTargetError as exc:
+            return _matrix_target_error_response(ctx, exc)
+        status = matrix.status(campaign_id)
+        campaign = _matrix_campaign_from_status(status, campaign_id)
+        campaign_status = str(campaign.get("status") or "") if campaign else ""
+        if result.get("cancelled") is not True:
+            execution_may_continue = campaign_status not in {
+                "succeeded",
+                "completed",
+                "failed",
+                "needs_human",
+                "cancelled",
+            }
+            return ctx.fastapi_json({
+                **result,
+                "error": "Matrix campaign cancellation was not applied.",
+                "code": "matrix_cancel_not_applied",
+                "campaignStatus": campaign_status,
+                "status": status,
+                "retryable": False,
+                "outcomeIndeterminate": execution_may_continue,
+                "executionMayContinue": execution_may_continue,
+            }, 409)
         job_ids = job_manager.cancel_matching(
             lambda job: str((job.get("progress") or {}).get("campaignId") or "") == campaign_id
         )
-        result = _matrix(ctx).cancel(campaign_id)
         result["cancelledJobIds"] = job_ids
+        if not campaign:
+            return ctx.fastapi_json({
+                **result,
+                "error": "Cancellation was requested, but authoritative campaign status is unavailable.",
+                "code": "matrix_cancel_status_unknown",
+                "campaignStatus": "",
+                "status": status,
+                "retryable": False,
+                "outcomeIndeterminate": True,
+                "executionMayContinue": True,
+            }, 409)
+        result["campaignStatus"] = campaign_status
+        result["status"] = status
         return ctx.fastapi_json(result)
 
     @app.post("/api/matrix/emergency-stop")
@@ -478,11 +531,20 @@ def register_matrix_routes(app, ctx) -> None:
         except MatrixSafetyError as exc:
             return ctx.fastapi_json({"error": exc.message, "code": exc.code}, 403)
         except MatrixTargetError as exc:
-            return ctx.fastapi_json({"error": exc.message, "code": exc.code}, 409)
+            return _matrix_target_error_response(ctx, exc)
         task = retry.get("task") if isinstance(retry.get("task"), dict) else None
         dispatch_body = retry.get("dispatchBody") if isinstance(retry.get("dispatchBody"), dict) else body
         if not task:
-            return ctx.fastapi_json({"retry": retry, "status": matrix.status()})
+            reason = str(retry.get("reason") or "Matrix retry was not started.")
+            return ctx.fastapi_json({
+                "error": reason,
+                "code": str(retry.get("code") or "matrix_retry_not_started"),
+                "retryable": retry.get("retryable") is not False,
+                "outcomeIndeterminate": retry.get("outcomeIndeterminate") is True,
+                "executionMayContinue": retry.get("executionMayContinue") is True,
+                "retry": retry,
+                "status": matrix.status(campaign_id),
+            }, 409)
 
         def run(job_id: str) -> dict:
             ctx.get_job_mgr().progress(
@@ -832,13 +894,24 @@ def _submit_matrix_resume_job(ctx, matrix: MatrixControlPlane, device_task_id: s
 
 
 def _matrix_target_error_response(ctx, exc: MatrixTargetError):
-    if exc.code in {"matrix_target_not_found", "matrix_task_not_found"}:
+    if exc.code in {"matrix_target_not_found", "matrix_task_not_found", "matrix_campaign_not_found"}:
         status = 404
     elif exc.code in {"matrix_invalid_lease", "matrix_invalid_control"}:
         status = 400
     else:
         status = 409
     return ctx.fastapi_json({"error": exc.message, "code": exc.code}, status)
+
+
+def _matrix_campaign_from_status(status: dict, campaign_id: str) -> dict | None:
+    campaigns = status.get("campaigns") if isinstance(status, dict) else None
+    for campaign in campaigns if isinstance(campaigns, list) else []:
+        if (
+            isinstance(campaign, dict)
+            and str(campaign.get("campaignId") or "") == campaign_id
+        ):
+            return campaign
+    return None
 
 
 def _normalize_matrix_control_request(raw: dict) -> dict:
@@ -1481,7 +1554,13 @@ def _run_matrix_device_task(
                 raise RuntimeError("手机任务执行器未返回有效结果")
             if raw_result.get("cancelled") is True or job_manager.is_cancelled(job_id):
                 return cancelled_result()
-            if raw_result.get("success") is True or attempt >= retry_budget:
+            if _matrix_execution_is_uncertain(raw_result):
+                raw_result["outcomeIndeterminate"] = True
+            if (
+                raw_result.get("success") is True
+                or _matrix_execution_is_uncertain(raw_result)
+                or attempt >= retry_budget
+            ):
                 break
             attempt += 1
             matrix.append_task_event(
@@ -1513,6 +1592,9 @@ def _run_matrix_device_task(
             duration_ms=duration_ms,
             failure_reason=error,
             failure_code=error_code,
+            task_id=str(raw_result.get("taskId") or ""),
+            outcome_indeterminate=raw_result.get("outcomeIndeterminate") is True,
+            execution_may_continue=raw_result.get("executionMayContinue") is True,
         )
         result = {
             "success": ok,
@@ -1541,6 +1623,10 @@ def _run_matrix_device_task(
             result["metrics"] = _redact_matrix_json(metrics)
         if isinstance(raw_result.get("fallback"), dict):
             result["fallback"] = _redact_matrix_json(raw_result["fallback"])
+        for key in ("taskId", "outcomeIndeterminate", "executionMayContinue"):
+            value = raw_result.get(key)
+            if value not in (None, "", False):
+                result[key] = _redact_matrix_json(value)
         return result
     except Exception as exc:
         error = _redact_matrix_output(str(exc))[:300]

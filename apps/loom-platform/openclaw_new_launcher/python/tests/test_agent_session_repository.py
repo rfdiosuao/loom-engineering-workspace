@@ -1,13 +1,154 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
+import queue
 import tempfile
 import threading
+import time
+import traceback
 import unittest
 from unittest.mock import patch
 
 from python.core.agent_sessions import AgentSessionRepository
+
+
+def _repository_process_worker(
+    operation: str,
+    data_root: str,
+    worker_id: int,
+    ready: object,
+    results: object,
+) -> None:
+    from python.core import agent_sessions as agent_sessions_module
+
+    try:
+        repository = agent_sessions_module.AgentSessionRepository(data_root)
+        if operation == "append_event":
+            original_read_jsonl = agent_sessions_module._read_jsonl
+
+            def slow_event_read(path: str) -> list[dict]:
+                records = original_read_jsonl(path)
+                if os.path.basename(path) == "events.jsonl":
+                    time.sleep(0.2)
+                return records
+
+            with patch.object(agent_sessions_module, "_read_jsonl", slow_event_read):
+                ready.wait(timeout=20)
+                event = repository.append_event(
+                    "session_process_events",
+                    {
+                        "eventId": f"event_process_{worker_id}",
+                        "sessionId": "session_process_events",
+                        "type": "run.updated",
+                        "data": {"workerId": worker_id},
+                    },
+                )
+            results.put({"status": "ok", "seq": event["seq"], "eventId": event["eventId"]})
+            return
+
+        if operation == "claim_run":
+            original_read_json = agent_sessions_module._read_json
+
+            def slow_run_read(path: str) -> object:
+                value = original_read_json(path)
+                if os.path.basename(path) == "run_process_claim.json":
+                    time.sleep(0.2)
+                return value
+
+            with patch.object(agent_sessions_module, "_read_json", slow_run_read):
+                ready.wait(timeout=20)
+                claimed = repository.claim_run(
+                    "run_process_claim",
+                    lease_id=f"lease-process-{worker_id}",
+                    expected_statuses=("queued",),
+                    session_id="session_process_claim",
+                )
+            checkpoint = json.loads(claimed["checkpoint"])
+            results.put(
+                {
+                    "status": "ok",
+                    "leaseId": checkpoint["runLease"]["leaseId"],
+                }
+            )
+            return
+
+        if operation == "approval_cas":
+            original_read_json = agent_sessions_module._read_json
+
+            def slow_approval_read(path: str) -> object:
+                value = original_read_json(path)
+                if os.path.basename(path) == "approval_process_cas.json":
+                    time.sleep(0.2)
+                return value
+
+            with patch.object(agent_sessions_module, "_read_json", slow_approval_read):
+                ready.wait(timeout=20)
+                approval = repository.compare_and_update_approval(
+                    "approval_process_cas",
+                    {"status": "approved", "decidedBy": f"process-{worker_id}"},
+                    expected_status="pending",
+                    session_id="session_process_approval",
+                )
+            results.put({"status": "ok", "decidedBy": approval["decidedBy"]})
+            return
+
+        if operation == "create_message_run":
+            original_read_json = agent_sessions_module._read_json
+
+            def slow_missing_transaction_read(path: str) -> object:
+                value = original_read_json(path)
+                if (
+                    os.path.basename(os.path.dirname(path)) == "transactions"
+                    and value is None
+                ):
+                    time.sleep(0.2)
+                return value
+
+            with patch.object(agent_sessions_module, "_read_json", slow_missing_transaction_read):
+                ready.wait(timeout=20)
+                outcome = repository.create_message_run(
+                    "session_process_message",
+                    "client-process-message",
+                    {
+                        "schema": "loom.agent.message.v1",
+                        "messageId": f"message_process_{worker_id}",
+                        "sessionId": "session_process_message",
+                        "role": "user",
+                        "status": "completed",
+                        "blocks": [
+                            {
+                                "type": "text",
+                                "data": {"text": f"Message from process {worker_id}"},
+                            }
+                        ],
+                        "createdAt": "2026-07-23T00:00:00+00:00",
+                        "completedAt": "2026-07-23T00:00:00+00:00",
+                    },
+                    {
+                        "schema": "loom.agent.run.v1",
+                        "runId": f"run_process_message_{worker_id}",
+                        "sessionId": "session_process_message",
+                        "status": "queued",
+                        "campaignIds": [],
+                    },
+                )
+            results.put(
+                {
+                    "status": "ok",
+                    "created": outcome["created"],
+                    "messageId": outcome["message"]["messageId"],
+                    "runId": outcome["run"]["runId"],
+                }
+            )
+            return
+
+        raise ValueError(f"unsupported process operation: {operation}")
+    except agent_sessions_module.RepositoryConflictError as error:
+        results.put({"status": "conflict", "error": str(error)})
+    except BaseException:
+        results.put({"status": "error", "error": traceback.format_exc()})
 
 
 class AgentSessionRepositoryTests(unittest.TestCase):
@@ -236,6 +377,220 @@ class AgentSessionRepositoryTests(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(self.repository.get_approval("approval_cas")["decidedBy"], winners[0]["decidedBy"])
 
+    def test_run_lease_claim_has_one_winner_across_repository_instances(self) -> None:
+        from python.core.agent_sessions import RepositoryConflictError
+
+        self.repository.create_session(title="Run lease", session_id="session_run_lease")
+        self.repository.create_run(
+            {
+                "schema": "loom.agent.run.v1",
+                "runId": "run_lease",
+                "sessionId": "session_run_lease",
+                "status": "queued",
+                "campaignIds": [],
+                "checkpoint": json.dumps({"version": 1}),
+            }
+        )
+        second_repository = AgentSessionRepository(self.temp_dir.name)
+        ready = threading.Barrier(2)
+        winners: list[tuple[str, dict]] = []
+        conflicts: list[RepositoryConflictError] = []
+
+        def claim(repository: AgentSessionRepository, lease_id: str) -> None:
+            ready.wait()
+            try:
+                winners.append(
+                    (
+                        lease_id,
+                        repository.claim_run(
+                            "run_lease",
+                            lease_id=lease_id,
+                            expected_statuses=("queued",),
+                            session_id="session_run_lease",
+                        ),
+                    )
+                )
+            except RepositoryConflictError as exc:
+                conflicts.append(exc)
+
+        workers = [
+            threading.Thread(target=claim, args=(self.repository, "lease-first")),
+            threading.Thread(target=claim, args=(second_repository, "lease-second")),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(2)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(conflicts), 1)
+        stored = self.repository.get_run("run_lease", session_id="session_run_lease")
+        checkpoint = json.loads(stored["checkpoint"])
+        self.assertEqual(checkpoint["runLease"]["leaseId"], winners[0][0])
+
+    def test_append_event_assigns_unique_sequences_across_processes(self) -> None:
+        self.repository.create_session(
+            title="Process events",
+            session_id="session_process_events",
+        )
+
+        outcomes = self._run_process_race("append_event", worker_count=4)
+
+        self.assertEqual({outcome["status"] for outcome in outcomes}, {"ok"})
+        self.assertEqual(sorted(outcome["seq"] for outcome in outcomes), [1, 2, 3, 4])
+        replayed = self.repository.replay_events("session_process_events")
+        self.assertEqual([event["seq"] for event in replayed], [1, 2, 3, 4])
+        self.assertEqual(len({event["eventId"] for event in replayed}), 4)
+
+    def test_run_claim_cas_has_one_winner_across_processes(self) -> None:
+        self.repository.create_session(
+            title="Process run claim",
+            session_id="session_process_claim",
+        )
+        self.repository.create_run(
+            {
+                "schema": "loom.agent.run.v1",
+                "runId": "run_process_claim",
+                "sessionId": "session_process_claim",
+                "status": "queued",
+                "campaignIds": [],
+                "checkpoint": json.dumps({"version": 1}),
+            }
+        )
+
+        outcomes = self._run_process_race("claim_run", worker_count=4)
+
+        winners = [outcome for outcome in outcomes if outcome["status"] == "ok"]
+        conflicts = [outcome for outcome in outcomes if outcome["status"] == "conflict"]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(conflicts), 3)
+        stored = self.repository.get_run(
+            "run_process_claim",
+            session_id="session_process_claim",
+        )
+        checkpoint = json.loads(stored["checkpoint"])
+        self.assertEqual(checkpoint["runLease"]["leaseId"], winners[0]["leaseId"])
+
+    def test_approval_cas_has_one_winner_across_processes(self) -> None:
+        self.repository.create_session(
+            title="Process approval",
+            session_id="session_process_approval",
+        )
+        self.repository.create_approval(
+            {
+                "approvalId": "approval_process_cas",
+                "sessionId": "session_process_approval",
+                "runId": "run_process_approval",
+                "status": "pending",
+            }
+        )
+
+        outcomes = self._run_process_race("approval_cas", worker_count=4)
+
+        winners = [outcome for outcome in outcomes if outcome["status"] == "ok"]
+        conflicts = [outcome for outcome in outcomes if outcome["status"] == "conflict"]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(conflicts), 3)
+        stored = self.repository.get_approval(
+            "approval_process_cas",
+            session_id="session_process_approval",
+        )
+        self.assertEqual(stored["decidedBy"], winners[0]["decidedBy"])
+
+    def test_create_message_run_is_idempotent_across_processes(self) -> None:
+        self.repository.create_session(
+            title="Process message",
+            session_id="session_process_message",
+        )
+
+        outcomes = self._run_process_race("create_message_run", worker_count=4)
+
+        self.assertEqual({outcome["status"] for outcome in outcomes}, {"ok"})
+        self.assertEqual(sum(bool(outcome["created"]) for outcome in outcomes), 1)
+        self.assertEqual(len({outcome["messageId"] for outcome in outcomes}), 1)
+        self.assertEqual(len({outcome["runId"] for outcome in outcomes}), 1)
+        messages = self.repository.page_messages("session_process_message")["messages"]
+        runs = self.repository.list_runs("session_process_message")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(messages[0]["messageId"], outcomes[0]["messageId"])
+        self.assertEqual(runs[0]["runId"], outcomes[0]["runId"])
+
+    def test_stale_run_lease_cannot_overwrite_checkpoint_or_terminal_state(self) -> None:
+        from python.core.agent_sessions import RepositoryConflictError
+
+        self.repository.create_session(title="Run lease CAS", session_id="session_run_lease_cas")
+        self.repository.create_run(
+            {
+                "schema": "loom.agent.run.v1",
+                "runId": "run_lease_cas",
+                "sessionId": "session_run_lease_cas",
+                "status": "queued",
+                "campaignIds": [],
+                "checkpoint": json.dumps({"version": 1, "round": 0}),
+            }
+        )
+        first = AgentSessionRepository(self.temp_dir.name)
+        second = AgentSessionRepository(self.temp_dir.name)
+        first.claim_run(
+            "run_lease_cas",
+            lease_id="lease-old",
+            expected_statuses=("queued",),
+            session_id="session_run_lease_cas",
+        )
+        first.update_run_with_lease(
+            "run_lease_cas",
+            {"status": "queued", "checkpoint": json.dumps({"version": 1, "round": 1})},
+            lease_id="lease-old",
+            release_lease=True,
+            session_id="session_run_lease_cas",
+        )
+        second.claim_run(
+            "run_lease_cas",
+            lease_id="lease-current",
+            expected_statuses=("queued",),
+            session_id="session_run_lease_cas",
+        )
+
+        with self.assertRaises(RepositoryConflictError):
+            first.update_run_with_lease(
+                "run_lease_cas",
+                {
+                    "status": "completed",
+                    "checkpoint": json.dumps({"version": 1, "round": 99}),
+                },
+                lease_id="lease-old",
+                release_lease=True,
+                session_id="session_run_lease_cas",
+            )
+
+        stored = self.repository.get_run("run_lease_cas", session_id="session_run_lease_cas")
+        checkpoint = json.loads(stored["checkpoint"])
+        self.assertEqual(stored["status"], "queued")
+        self.assertEqual(checkpoint["round"], 1)
+        self.assertEqual(checkpoint["runLease"]["leaseId"], "lease-current")
+
+    def test_approval_list_preserves_creation_order_when_timestamps_match(self) -> None:
+        self.repository.create_session(title="Approval order", session_id="session_order")
+        for approval_id in ("approval_z_first", "approval_a_second"):
+            self.repository.create_approval(
+                {
+                    "approvalId": approval_id,
+                    "sessionId": "session_order",
+                    "runId": "run_order",
+                    "status": "pending",
+                    "requestedAt": "2026-07-23T06:01:05Z",
+                }
+            )
+
+        approvals = self.repository.list_approvals("session_order", run_id="run_order")
+
+        self.assertEqual(
+            [approval["approvalId"] for approval in approvals],
+            ["approval_z_first", "approval_a_second"],
+        )
+
     def test_recover_unfinished_runs_after_restart(self) -> None:
         self.repository.create_session(title="Recovery", session_id="session_runs")
         for run_id, status in (
@@ -258,6 +613,41 @@ class AgentSessionRepositoryTests(unittest.TestCase):
 
         self.assertEqual({run["runId"] for run in recovered}, {"run_running", "run_paused"})
         self.assertEqual(restarted.get_session("session_runs")["activeRunId"], "run_paused")
+
+    def test_run_update_only_removes_allowlisted_transient_fields(self) -> None:
+        self.repository.create_session(title="Transient fields", session_id="session_transient")
+        self.repository.create_run(
+            {
+                "schema": "loom.agent.run.v1",
+                "runId": "run_transient",
+                "sessionId": "session_transient",
+                "status": "paused",
+                "campaignIds": [],
+                "error": {
+                    "code": "agent_restart_recovery",
+                    "message": "safe to resume",
+                    "recoverable": True,
+                },
+                "completedAt": "2026-07-23T00:00:00Z",
+            }
+        )
+
+        updated = self.repository.update_run(
+            "run_transient",
+            {"status": "queued"},
+            remove_fields=("error", "completedAt"),
+        )
+
+        self.assertEqual(updated["status"], "queued")
+        self.assertNotIn("error", updated)
+        self.assertNotIn("completedAt", updated)
+        with self.assertRaisesRegex(ValueError, "run field cannot be removed"):
+            self.repository.update_run(
+                "run_transient",
+                {},
+                remove_fields=("runId",),
+            )
+        self.assertEqual(self.repository.get_run("run_transient")["runId"], "run_transient")
 
     def test_client_message_id_is_idempotent_after_restart_and_index_rebuild(self) -> None:
         self.repository.create_session(title="Idempotency", session_id="session_idempotent")
@@ -402,6 +792,49 @@ class AgentSessionRepositoryTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, persisted)
         self.assertIn("[REDACTED]", persisted)
+
+    def _run_process_race(self, operation: str, worker_count: int) -> list[dict]:
+        context = multiprocessing.get_context("spawn")
+        ready = context.Barrier(worker_count + 1)
+        results = context.Queue()
+        workers = [
+            context.Process(
+                target=_repository_process_worker,
+                args=(operation, self.temp_dir.name, worker_id, ready, results),
+            )
+            for worker_id in range(worker_count)
+        ]
+        for worker in workers:
+            worker.start()
+
+        try:
+            ready.wait(timeout=20)
+            for worker in workers:
+                worker.join(20)
+            alive = [worker for worker in workers if worker.is_alive()]
+            for worker in alive:
+                worker.terminate()
+            for worker in alive:
+                worker.join(5)
+            self.assertFalse(alive, f"{operation} worker processes deadlocked")
+            self.assertTrue(
+                all(worker.exitcode == 0 for worker in workers),
+                [(worker.pid, worker.exitcode) for worker in workers],
+            )
+            outcomes = [results.get(timeout=5) for _worker in workers]
+        except (queue.Empty, threading.BrokenBarrierError):
+            for worker in workers:
+                if worker.is_alive():
+                    worker.terminate()
+                    worker.join(5)
+            raise
+        finally:
+            results.close()
+            results.join_thread()
+
+        errors = [outcome["error"] for outcome in outcomes if outcome["status"] == "error"]
+        self.assertEqual(errors, [])
+        return outcomes
 
     @staticmethod
     def _message(message_id: str, session_id: str, text: str, extra: dict | None = None) -> dict:

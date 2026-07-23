@@ -1,13 +1,14 @@
 import 'tsx/esm';
 
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { test } from 'node:test';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as agentWorkbench from './AgentWorkbenchPage.tsx';
+import { AgentComposer } from './AgentComposer.tsx';
 import { ConversationSidebar } from './ConversationSidebar.tsx';
 import { AgentMarkdown } from './messageBlocks.tsx';
 
@@ -62,6 +63,8 @@ test('Agent command buttons route to concrete callbacks', async () => {
     'AgentComposer.tsx': [
       /onClick=\{\(\) => onChange\(\{ attachments:/,
       /onClick=\{\(\) => fileInputRef\.current\?\.click\(\)\}/,
+      /onClick=\{onResume\}/,
+      /onClick=\{onStop\}/,
       /onClick=\{onSubmit\}/,
     ],
     'AgentApprovalCard.tsx': [/onClick=\{\(\) => void approve\(\)\}/, /onResolve\(approvalId, 'reject'\)/],
@@ -122,7 +125,7 @@ test('long conversations render every message and contain horizontal overflow', 
   assert.match(source, /break-words/);
 });
 
-test('Agent visual identity uses the shared raster mark with restrained status motion', async () => {
+test('Agent visual identity uses a bundled brand mark with restrained status motion', async () => {
   const brand = utf8.decode(await readFile(join(agentDirectory, '..', 'brand', 'LoomBrand.tsx')));
   const header = utf8.decode(await readFile(join(agentDirectory, 'AgentHeader.tsx')));
   const stream = utf8.decode(await readFile(join(agentDirectory, 'ConversationStream.tsx')));
@@ -131,7 +134,11 @@ test('Agent visual identity uses the shared raster mark with restrained status m
   const styles = utf8.decode(await readFile(join(agentDirectory, '..', '..', 'styles', 'index.css')));
 
   assert.match(brand, /export const LoomAgentMark/);
-  assert.match(brand, /\/loom-motion\/agent-core-v1\.png/);
+  assert.match(brand, /new URL\('\.\.\/\.\.\/assets\/luming-logo\.svg', import\.meta\.url\)/);
+  assert.match(brand, /const LoomBrandImage/);
+  assert.match(brand, /onError=\{\(\) => setFailed\(true\)\}/);
+  assert.doesNotMatch(brand, /\/loom-motion\/(?:agent-core-v1|luming-wordmark(?:-light|-gold)?)\.png/);
+  assert.equal((await stat(join(agentDirectory, '..', '..', 'assets', 'luming-logo.svg'))).isFile(), true);
   assert.match(brand, /data-agent-executing/);
 
   assert.match(header, /<LoomAgentMark/);
@@ -155,6 +162,21 @@ test('Agent visual identity uses the shared raster mark with restrained status m
   assert.match(sidebar, /Pencil/);
   assert.match(sidebar, /Archive/);
   assert.doesNotMatch(sidebar, />\s*[+\u2315\u270e\u25a1]\s*</u);
+});
+
+test('brand runtime asset routes always resolve to shipped files', async () => {
+  const brandDirectory = join(agentDirectory, '..', 'brand');
+  const publicDirectory = join(agentDirectory, '..', '..', '..', 'public');
+  const files = await readdir(brandDirectory, { withFileTypes: true });
+
+  for (const file of files.filter((entry) => entry.isFile() && /\.tsx?$/.test(entry.name))) {
+    const source = utf8.decode(await readFile(join(brandDirectory, file.name)));
+    const routes = source.matchAll(/['\"](\/loom-motion\/[^'\"]+)['\"]/g);
+    for (const route of routes) {
+      const assetPath = join(publicDirectory, ...route[1].slice(1).split('/'));
+      assert.equal((await stat(assetPath)).isFile(), true, `${file.name} references a missing bundled asset: ${route[1]}`);
+    }
+  }
 });
 
 test('run details use an opaque contextual debugger and return focus on close', async () => {
@@ -391,4 +413,297 @@ test('Agent composer owns model and scope routing without exposing capability pl
   assert.match(workbench, /accountApi\.selectModels/);
   assert.match(workbench, /agentApi\.updateSession\([^,]+, agentModelUpdateRequest\(modelId\)\)/);
   assert.doesNotMatch(workbench, /capabilityHints: outgoing|targets: outgoing/);
+});
+
+test('a safely paused Agent run exposes resume and cancel controls', () => {
+  const markup = renderToStaticMarkup(React.createElement(AgentComposer, {
+    draft: {
+      text: '',
+      attachments: [],
+      scopeMode: 'auto',
+      scope: { deviceIds: [], groups: [], allOnline: false },
+      runtimeProfileId: 'loom-native',
+    },
+    session: {
+      schema: 'loom.agent.session.v1',
+      sessionId: 'session-paused',
+      title: 'safe pause',
+      status: 'active',
+      runtimeProfileId: 'loom-native',
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    },
+    bootstrap: null,
+    running: true,
+    paused: true,
+    onChange: () => undefined,
+    onSubmit: () => undefined,
+    onStop: () => undefined,
+    onResume: () => undefined,
+    onSelectModel: async () => undefined,
+    onSetDefaultModel: async () => undefined,
+    onManageModels: () => undefined,
+  }));
+
+  assert.match(markup, /\u4efb\u52a1\u5df2\u5b89\u5168\u6682\u505c/);
+  assert.match(markup, /aria-label="\u7ee7\u7eed\u4efb\u52a1"/);
+  assert.match(markup, /aria-label="\u4e2d\u65ad\u4efb\u52a1"/);
+});
+
+test('accepted Agent resume is reflected as queued before realtime catches up', () => {
+  const afterResumeAccepted = (
+    agentWorkbench as typeof agentWorkbench & {
+      afterAgentResumeAccepted?: (run: {
+        status: string;
+        error?: unknown;
+      }) => { status: string; error?: unknown };
+    }
+  ).afterAgentResumeAccepted;
+
+  assert.equal(typeof afterResumeAccepted, 'function');
+  if (!afterResumeAccepted) return;
+  const resumed = afterResumeAccepted({
+    status: 'paused',
+    error: { code: 'agent_restart_recovery', recoverable: true },
+  });
+
+  assert.equal(resumed.status, 'queued');
+  assert.equal(resumed.error, undefined);
+});
+
+test('Agent submission retries reuse one clientMessageId and same-tick duplicates allocate nothing', () => {
+  type SubmissionCoordinator = {
+    begin: (sessionId: string, fingerprint: string) => string | null;
+    rebindSession: (fromSessionId: string, toSessionId: string) => void;
+    settle: (sessionId: string, succeeded: boolean) => void;
+  };
+  const createCoordinator = (
+    agentWorkbench as typeof agentWorkbench & {
+      createAgentSubmissionCoordinator?: (createId: () => string) => SubmissionCoordinator;
+    }
+  ).createAgentSubmissionCoordinator;
+
+  assert.equal(typeof createCoordinator, 'function');
+  if (!createCoordinator) return;
+
+  let allocatedIds = 0;
+  const coordinator = createCoordinator(() => `client-message-${++allocatedIds}`);
+  const firstAttempt = coordinator.begin('local-session', 'same-draft');
+  const duplicateAttempt = coordinator.begin('local-session', 'same-draft');
+
+  assert.equal(firstAttempt, 'client-message-1');
+  assert.equal(duplicateAttempt, null);
+  assert.equal(allocatedIds, 1);
+
+  coordinator.rebindSession('local-session', 'remote-session');
+  coordinator.settle('remote-session', false);
+  assert.equal(coordinator.begin('remote-session', 'same-draft'), 'client-message-1');
+  assert.equal(allocatedIds, 1);
+
+  coordinator.settle('remote-session', true);
+  assert.equal(coordinator.begin('remote-session', 'same-draft'), 'client-message-2');
+  assert.equal(allocatedIds, 2);
+});
+
+test('Agent sequence gaps resume at the committed cursor and apply the missing event before later events', () => {
+  type RealtimeCoordinator = {
+    preserveCursor: (sessionId: string, cursor: number) => void;
+    cursorFor: (sessionId: string, storeCursor: number) => number;
+    accept: (
+      sessionId: string,
+      event: Record<string, unknown>,
+      snapshot: { messages: Array<Record<string, unknown>>; runs: Record<string, Record<string, unknown>> },
+    ) => boolean;
+  };
+  const realtimeApi = agentWorkbench as typeof agentWorkbench & {
+    createAgentRealtimeCoordinator?: () => RealtimeCoordinator;
+    agentSequenceGapRecoveryCursor?: (gap: { committedSeq: number; receivedSeq: number }) => number;
+  };
+
+  assert.equal(typeof realtimeApi.createAgentRealtimeCoordinator, 'function');
+  assert.equal(typeof realtimeApi.agentSequenceGapRecoveryCursor, 'function');
+  if (!realtimeApi.createAgentRealtimeCoordinator || !realtimeApi.agentSequenceGapRecoveryCursor) return;
+
+  const coordinator = realtimeApi.createAgentRealtimeCoordinator();
+  coordinator.preserveCursor('session-gap', 4);
+  assert.equal(
+    realtimeApi.agentSequenceGapRecoveryCursor({ committedSeq: 4, receivedSeq: 6 }),
+    4,
+  );
+
+  const applied: number[] = [];
+  for (const seq of [5, 6]) {
+    const event = {
+      schema: 'loom.realtime.event.v1',
+      eventId: `event-${seq}`,
+      seq,
+      timestamp: `2026-07-23T00:00:0${seq}.000Z`,
+      topic: 'agent',
+      entityId: 'run-gap',
+      type: seq === 5 ? 'run.started' : 'run.completed',
+      data: { runId: 'run-gap', sessionId: 'session-gap' },
+    };
+    if (coordinator.accept('session-gap', event, { messages: [], runs: {} })) applied.push(seq);
+  }
+
+  assert.deepEqual(applied, [5, 6]);
+  assert.equal(coordinator.cursorFor('session-gap', 0), 6);
+});
+
+test('Agent terminal snapshots reject replayed deltas and run starts while retaining a nonzero replay cursor', () => {
+  type RealtimeCoordinator = {
+    preserveCursor: (sessionId: string, cursor: number) => void;
+    cursorFor: (sessionId: string, storeCursor: number) => number;
+    accept: (
+      sessionId: string,
+      event: Record<string, unknown>,
+      snapshot: { messages: Array<Record<string, unknown>>; runs: Record<string, Record<string, unknown>> },
+    ) => boolean;
+  };
+  const createCoordinator = (
+    agentWorkbench as typeof agentWorkbench & {
+      createAgentRealtimeCoordinator?: () => RealtimeCoordinator;
+    }
+  ).createAgentRealtimeCoordinator;
+
+  assert.equal(typeof createCoordinator, 'function');
+  if (!createCoordinator) return;
+
+  const coordinator = createCoordinator();
+  coordinator.preserveCursor('session-terminal', 80);
+  const snapshot = {
+    messages: [{ messageId: 'message-terminal', status: 'completed' }],
+    runs: { 'run-terminal': { runId: 'run-terminal', status: 'completed' } },
+  };
+  const oldDelta = {
+    eventId: 'old-delta',
+    seq: 81,
+    entityId: 'run-terminal',
+    type: 'message.delta',
+    data: { messageId: 'message-terminal', runId: 'run-terminal' },
+  };
+  const oldRunStarted = {
+    eventId: 'old-run-started',
+    seq: 82,
+    entityId: 'run-terminal',
+    type: 'run.started',
+    data: { runId: 'run-terminal' },
+  };
+
+  assert.equal(coordinator.accept('session-terminal', oldDelta, snapshot), false);
+  assert.equal(coordinator.accept('session-terminal', oldRunStarted, snapshot), false);
+  assert.equal(coordinator.cursorFor('session-terminal', 0), 82);
+});
+
+test('archiving an Agent session cancels its active run before archive and then invokes store cleanup', async () => {
+  type ArchiveDependencies = {
+    runs: Record<string, Record<string, unknown>>;
+    cancelRun: (runId: string) => Promise<{ run: Record<string, unknown> }>;
+    archiveRemote: (sessionId: string) => Promise<{ session: Record<string, unknown> }>;
+    upsertRun: (run: Record<string, unknown>) => void;
+    removeSession: (sessionId: string) => void;
+  };
+  const archive = (
+    agentWorkbench as typeof agentWorkbench & {
+      archiveAgentSession?: (
+        session: Record<string, unknown>,
+        dependencies: ArchiveDependencies,
+      ) => Promise<void>;
+    }
+  ).archiveAgentSession;
+
+  assert.equal(typeof archive, 'function');
+  if (!archive) return;
+
+  const operations: string[] = [];
+  await archive({
+    sessionId: 'session-active',
+    status: 'active',
+    activeRunId: 'run-active',
+  }, {
+    runs: {
+      'run-active': {
+        runId: 'run-active',
+        sessionId: 'session-active',
+        status: 'running',
+      },
+    },
+    cancelRun: async (runId) => {
+      operations.push(`cancel:${runId}`);
+      return {
+        run: {
+          runId,
+          sessionId: 'session-active',
+          status: 'cancelled',
+        },
+      };
+    },
+    archiveRemote: async (sessionId) => {
+      operations.push(`archive:${sessionId}`);
+      return { session: { sessionId, status: 'archived' } };
+    },
+    upsertRun: (run) => operations.push(`upsert:${String(run.status)}`),
+    removeSession: (sessionId) => operations.push(`remove:${sessionId}`),
+  });
+
+  assert.deepEqual(operations, [
+    'cancel:run-active',
+    'upsert:cancelled',
+    'archive:session-active',
+    'remove:session-active',
+  ]);
+});
+
+test('archiving refuses to remove an Agent session when active-run cancellation is not terminal', async () => {
+  const archive = (
+    agentWorkbench as typeof agentWorkbench & {
+      archiveAgentSession?: (
+        session: Record<string, unknown>,
+        dependencies: {
+          runs: Record<string, Record<string, unknown>>;
+          cancelRun: (runId: string) => Promise<{ run: Record<string, unknown> }>;
+          archiveRemote: (sessionId: string) => Promise<{ session: Record<string, unknown> }>;
+          upsertRun: (run: Record<string, unknown>) => void;
+          removeSession: (sessionId: string) => void;
+        },
+      ) => Promise<void>;
+    }
+  ).archiveAgentSession;
+
+  assert.equal(typeof archive, 'function');
+  if (!archive) return;
+
+  let archived = false;
+  let removed = false;
+  await assert.rejects(() => archive({
+    sessionId: 'session-still-active',
+    status: 'active',
+    activeRunId: 'run-still-active',
+  }, {
+    runs: {
+      'run-still-active': {
+        runId: 'run-still-active',
+        sessionId: 'session-still-active',
+        status: 'running',
+      },
+    },
+    cancelRun: async () => ({
+      run: {
+        runId: 'run-still-active',
+        sessionId: 'session-still-active',
+        status: 'running',
+      },
+    }),
+    archiveRemote: async (sessionId) => {
+      archived = true;
+      return { session: { sessionId, status: 'archived' } };
+    },
+    upsertRun: () => undefined,
+    removeSession: () => {
+      removed = true;
+    },
+  }), /active run cancellation did not reach a terminal state/);
+
+  assert.equal(archived, false);
+  assert.equal(removed, false);
 });

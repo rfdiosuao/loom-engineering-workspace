@@ -19,6 +19,41 @@ from api.routes_diagnostics import register_diagnostics_routes
 
 
 class DiagnosticsRouteTests(unittest.TestCase):
+    def test_run_preserves_prerequisite_scope(self) -> None:
+        app = FastAPI()
+        calls: list[str] = []
+        ctx = _test_context(calls)
+        register_diagnostics_routes(app, ctx)
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/diagnostics/run",
+            json={"scope": "prerequisites"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["scope"], "prerequisites")
+        self.assertEqual(calls, ["prerequisites"])
+
+    def test_run_rejects_unknown_scope_instead_of_ignoring_it(self) -> None:
+        app = FastAPI()
+        calls: list[str] = []
+        ctx = _test_context(calls)
+        register_diagnostics_routes(app, ctx)
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/diagnostics/run",
+            json={"scope": "not-a-real-scope"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "unsupported_diagnostics_scope",
+        )
+        self.assertEqual(calls, [])
+
     def test_prerequisites_route_supports_get_and_post(self) -> None:
         app = FastAPI()
         calls: list[str] = []
@@ -121,6 +156,10 @@ def _test_context(calls: list[str]) -> SimpleNamespace:
         auth_error=lambda _request: None,
         body=body,
         fastapi_json=fastapi_json,
+        build_diagnostics_payload=lambda: (
+            calls.append("environment")
+            or {"scope": "environment", "checks": [], "summary": {"status": "ok"}}
+        ),
         build_prerequisite_diagnostics_payload=lambda: ProcessService().diagnose_prerequisites(),
         finalize_prerequisite_diagnostics=lambda diagnostics: diagnostics,
         get_process_svc=lambda: ProcessService(),

@@ -179,6 +179,128 @@ test('terminal realtime events clear the matching session active run', () => {
   }
 });
 
+test('upserting a terminal run reconciles its active tool projections immediately', () => {
+  for (const [runStatus, expectedToolStatus] of [
+    ['completed', 'completed'],
+    ['failed', 'failed'],
+    ['cancelled', 'failed'],
+  ] as const) {
+    const store = useAgentStore.getState();
+    store.reset();
+    store.setSessions([{ ...session('session_1'), activeRunId: 'run_1' }, session('session_2')]);
+    store.setMessages('session_1', [
+      {
+        schema: 'loom.agent.message.v1',
+        messageId: 'tool-run:run_1',
+        sessionId: 'session_1',
+        role: 'tool',
+        status: 'streaming',
+        blocks: [
+          { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_running', status: 'running' } },
+          { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_awaiting', status: 'awaiting' } },
+          { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_done', status: 'completed' } },
+        ],
+        createdAt: '2026-07-16T10:00:00+08:00',
+      },
+      {
+        schema: 'loom.agent.message.v1',
+        messageId: 'tool-run:run_2',
+        sessionId: 'session_1',
+        role: 'tool',
+        status: 'streaming',
+        blocks: [
+          { type: 'tool', data: { runId: 'run_2', toolCallId: 'other_run', status: 'running' } },
+        ],
+        createdAt: '2026-07-16T10:00:01+08:00',
+      },
+    ]);
+
+    store.upsertRun({
+      schema: 'loom.agent.run.v1',
+      runId: 'run_1',
+      sessionId: 'session_1',
+      status: runStatus,
+      campaignIds: [],
+    });
+
+    const state = useAgentStore.getState();
+    const blocks = state.messagesBySession.session_1[0].blocks;
+    assert.equal(blocks.find((block) => block.data.toolCallId === 'tool_running')?.data.status, expectedToolStatus);
+    assert.equal(blocks.find((block) => block.data.toolCallId === 'tool_awaiting')?.data.status, expectedToolStatus);
+    assert.equal(blocks.find((block) => block.data.toolCallId === 'tool_done')?.data.status, 'completed');
+    assert.equal(state.messagesBySession.session_1[1].blocks[0].data.status, 'running');
+    assert.equal(state.messagesBySession.session_1[0].status, expectedToolStatus === 'completed' ? 'completed' : 'failed');
+    assert.equal(state.sessions[0].activeRunId, undefined);
+  }
+});
+
+test('purgeSessionState atomically removes one archived session and all local projections', () => {
+  const store = useAgentStore.getState();
+  store.setSessions([session('session_1'), session('session_2')]);
+  store.setCurrentSession('session_1');
+  store.setMessages('session_1', [{
+    schema: 'loom.agent.message.v1',
+    messageId: 'tool-run:run_1',
+    sessionId: 'session_1',
+    role: 'tool',
+    status: 'streaming',
+    blocks: [{ type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', status: 'running' } }],
+    createdAt: '2026-07-16T10:00:00+08:00',
+  }]);
+  store.setMessages('session_2', []);
+  store.upsertRun({
+    schema: 'loom.agent.run.v1',
+    runId: 'run_1',
+    sessionId: 'session_1',
+    status: 'running',
+    campaignIds: [],
+  });
+  store.upsertRun({
+    schema: 'loom.agent.run.v1',
+    runId: 'run_2',
+    sessionId: 'session_2',
+    status: 'running',
+    campaignIds: [],
+  });
+  store.mergeRealtimeEvent('session_1', {
+    schema: 'loom.realtime.event.v1',
+    eventId: 'event_session_1',
+    seq: 4,
+    timestamp: '2026-07-16T10:00:01+08:00',
+    topic: 'agent.run',
+    entityId: 'run_1',
+    type: 'run.started',
+    data: { sessionId: 'session_1', runId: 'run_1' },
+  });
+  store.updateDraft('session_1', { text: 'remove me' });
+  store.updateDraft('session_2', { text: 'keep me' });
+
+  const purgeSessionState = (store as unknown as {
+    purgeSessionState?: (sessionId: string) => void;
+  }).purgeSessionState;
+  assert.equal(typeof purgeSessionState, 'function');
+  if (!purgeSessionState) return;
+
+  let notifications = 0;
+  const unsubscribe = useAgentStore.subscribe(() => {
+    notifications += 1;
+  });
+  purgeSessionState('session_1');
+  unsubscribe();
+
+  const state = useAgentStore.getState();
+  assert.equal(notifications, 1);
+  assert.deepEqual(state.sessions.map((item) => item.sessionId), ['session_2']);
+  assert.equal(state.currentSessionId, 'session_2');
+  assert.equal(state.messagesBySession.session_1, undefined);
+  assert.equal(state.activeRuns.run_1, undefined);
+  assert.equal(state.streamCursors.session_1, undefined);
+  assert.equal(state.drafts.session_1, undefined);
+  assert.deepEqual(state.messagesBySession.session_2, []);
+  assert.equal(state.activeRuns.run_2.sessionId, 'session_2');
+  assert.equal(state.drafts.session_2.text, 'keep me');
+});
+
 test('send runtime selection follows the current session instead of a stale draft profile', () => {
   const runtimeFor = (agentStoreModule as unknown as {
     agentRuntimeProfileFor?: (

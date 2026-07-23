@@ -191,6 +191,10 @@ main > div {
   animation: page-enter 140ms ease-out both;
 }
 
+main > div[data-phone-matrix-access-granted] {
+  animation-name: fade-in;
+}
+
 .status-pulse {
   animation: status-pulse 2s ease-in-out infinite;
 }

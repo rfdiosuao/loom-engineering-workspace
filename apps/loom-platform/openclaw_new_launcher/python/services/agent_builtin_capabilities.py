@@ -10,6 +10,9 @@ import time
 from typing import Any, Callable
 
 from core.agent_capabilities import (
+    MEDIA_ASSET_LIST_INPUT_SCHEMA,
+    MEDIA_ASSET_LIST_OUTPUT_SCHEMA,
+    MEDIA_ASSET_TRANSFER_INPUT_SCHEMA,
     MEDIA_IMAGE_INPUT_SCHEMA,
     MEDIA_JOB_OUTPUT_SCHEMA,
     MEDIA_VIDEO_INPUT_SCHEMA,
@@ -19,6 +22,68 @@ from core.agent_capabilities import (
 
 
 Json = dict[str, Any]
+
+
+def _post_submission_error(
+    code: str,
+    message: str,
+    *,
+    execution_may_continue: bool = False,
+) -> CapabilityExecutionError:
+    return CapabilityExecutionError(
+        code,
+        message,
+        recoverable=False,
+        outcome_indeterminate=True,
+        execution_may_continue=execution_may_continue,
+    )
+
+
+def _submit_background_job(
+    job_manager: Any,
+    kind: str,
+    label: str,
+    target: Any,
+    *,
+    error_code: str,
+    error_message: str,
+) -> Any:
+    try:
+        return job_manager.submit_progress(kind, label, target)
+    except Exception as exc:
+        raise _post_submission_error(
+            error_code,
+            error_message,
+            execution_may_continue=True,
+        ) from exc
+
+
+def _read_background_job(
+    get_job: Any,
+    job_id: str,
+    *,
+    error_code: str,
+    error_message: str,
+) -> Any:
+    try:
+        return get_job(job_id)
+    except Exception as exc:
+        raise _post_submission_error(
+            error_code,
+            error_message,
+            execution_may_continue=True,
+        ) from exc
+
+
+def _request_background_job_cancel(job_manager: Any, job_id: str) -> bool:
+    cancel = getattr(job_manager, "cancel", None)
+    if not callable(cancel):
+        return False
+    try:
+        cancel(job_id)
+    except Exception:
+        return False
+    return True
 
 
 def _media_attachments(kind: str, result: Json) -> list[Json]:
@@ -44,6 +109,46 @@ def _media_attachments(kind: str, result: Json) -> list[Json]:
     return attachments
 
 
+def _media_capability_result(job_id: str, kind: str, result: Json) -> Json:
+    attachments = _media_attachments(kind, result)
+    phone_transfer = (
+        result.get("phoneTransfer")
+        if isinstance(result.get("phoneTransfer"), dict)
+        else None
+    )
+    result_status = str(result.get("status") or "").strip()
+    transfer_status = str((phone_transfer or {}).get("status") or "").strip()
+    if result_status not in {"partial_failure", "outcome_uncertain"}:
+        if transfer_status == "outcome_uncertain":
+            result_status = "outcome_uncertain"
+        elif transfer_status == "failed":
+            result_status = "partial_failure"
+        else:
+            result_status = "succeeded"
+    outcome_indeterminate = (
+        result_status == "outcome_uncertain"
+        or result.get("outcomeIndeterminate") is True
+        or (phone_transfer or {}).get("outcomeIndeterminate") is True
+    )
+    success = result_status == "succeeded"
+    response: Json = {
+        "jobId": job_id,
+        "kind": kind,
+        "status": result_status,
+        "success": success,
+        "result": result,
+        "attachments": attachments,
+        "phoneTransfer": phone_transfer,
+    }
+    if not success:
+        response.update({
+            "outcomeIndeterminate": outcome_indeterminate,
+            "retryable": False,
+            "regenerationAllowed": False,
+        })
+    return response
+
+
 class AgentBuiltinCapabilityProvider:
     def __init__(
         self,
@@ -57,10 +162,51 @@ class AgentBuiltinCapabilityProvider:
         self.matrix_factory = matrix_factory
 
     def operations(self) -> dict[str, Json]:
-        connected = callable(self.context_factory) and callable(
+        context_connected = callable(self.context_factory)
+        connected = context_connected and callable(
             getattr(self.job_manager, "submit_progress", None)
         )
         return {
+            "loom.matrix.status": {
+                "executor": self._matrix_status,
+                "permission": "read",
+                "risk": "read",
+            },
+            "loom.matrix.cancel": {
+                "executor": self._matrix_cancel,
+                "permission": "control",
+                "risk": "control_safe",
+            },
+            "loom.matrix.retry": {
+                "executor": self._matrix_retry,
+                "permission": "control",
+                "risk": "control_safe",
+                "timeoutSec": 180,
+            },
+            "loom.media.assets.list": {
+                "executor": self._list_media_assets if context_connected else None,
+                "displayName": "查看本地素材",
+                "description": "查询麓鸣本地素材库中已经生成的图片和视频，避免重复生成。",
+                "domain": "media",
+                "targetScope": "none",
+                "permission": "read",
+                "risk": "read",
+                "timeoutSec": 15,
+                "inputSchema": MEDIA_ASSET_LIST_INPUT_SCHEMA,
+                "outputSchema": MEDIA_ASSET_LIST_OUTPUT_SCHEMA,
+            },
+            "loom.media.asset.transfer": {
+                "executor": self._submit_media_asset_transfer if connected else None,
+                "displayName": "传输素材到手机",
+                "description": "把本地素材库中已有的图片或视频传输到明确选择的手机相册。",
+                "domain": "media",
+                "targetScope": "matrix-write",
+                "permission": "control",
+                "risk": "control_safe",
+                "timeoutSec": 690,
+                "inputSchema": MEDIA_ASSET_TRANSFER_INPUT_SCHEMA,
+                "outputSchema": MEDIA_JOB_OUTPUT_SCHEMA,
+            },
             "loom.media.image.generate": {
                 "executor": (
                     lambda payload, cancellation_token=None: self._submit_media(
@@ -111,6 +257,403 @@ class AgentBuiltinCapabilityProvider:
             },
         }
 
+    def _require_matrix_access(self) -> None:
+        if not callable(self.context_factory):
+            return
+        try:
+            context = self.context_factory()
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "手机矩阵授权校验服务尚未就绪",
+            ) from exc
+        protected_error = getattr(context, "protected_error", None)
+        if not callable(protected_error):
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "手机矩阵授权校验服务尚未就绪",
+            )
+        if protected_error("/api/matrix/status"):
+            raise CapabilityExecutionError(
+                "LICENSE_FEATURE_REQUIRED",
+                "请先在手机连接页激活手机矩阵授权",
+                recoverable=False,
+            )
+
+    def _matrix_status(self, payload: Json) -> Json:
+        self._require_matrix_access()
+        campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
+        return self.matrix_factory().status(campaign_id or None)
+
+    def _matrix_cancel(self, payload: Json) -> Json:
+        self._require_matrix_access()
+        campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
+        if not campaign_id:
+            raise ValueError("campaignId is required")
+        matrix = self.matrix_factory()
+        before = matrix.status(campaign_id)
+        if self._matrix_campaign_status(before, campaign_id) is None:
+            raise CapabilityExecutionError(
+                "matrix_campaign_not_found",
+                f"Matrix campaign not found: {campaign_id}",
+                recoverable=False,
+            )
+        result = matrix.cancel(campaign_id)
+        if not isinstance(result, dict):
+            raise CapabilityExecutionError(
+                "matrix_cancel_result_invalid",
+                "Matrix cancellation returned an invalid receipt.",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        status = matrix.status(campaign_id)
+        campaign_status = self._matrix_campaign_status(status, campaign_id)
+        if campaign_status is None:
+            raise CapabilityExecutionError(
+                "matrix_cancel_status_unknown",
+                "Cancellation was requested, but authoritative campaign status is unavailable.",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        if result.get("cancelled") is not True:
+            execution_may_continue = campaign_status not in {
+                "succeeded",
+                "completed",
+                "failed",
+                "needs_human",
+                "cancelled",
+            }
+            raise CapabilityExecutionError(
+                "matrix_cancel_not_applied",
+                f"Matrix cancellation was not applied; campaign status is {campaign_status}.",
+                recoverable=False,
+                outcome_indeterminate=execution_may_continue,
+                execution_may_continue=execution_may_continue,
+            )
+        local_cancellation_requested = None
+        if self.job_manager is not None:
+            try:
+                self.job_manager.cancel_matching(
+                    lambda job: str((job.get("progress") or {}).get("campaignId") or "") == campaign_id
+                )
+                local_cancellation_requested = True
+            except Exception:
+                local_cancellation_requested = False
+        return {
+            **result,
+            "campaignStatus": campaign_status,
+            "authoritativeStatus": status,
+            "localCancellationRequested": local_cancellation_requested,
+        }
+
+    def _matrix_retry(self, payload: Json) -> Json:
+        self._require_matrix_access()
+        campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
+        if not campaign_id:
+            raise ValueError("campaignId is required")
+        matrix = self.matrix_factory()
+        body = dict(payload)
+        # Capability execution only occurs after the Agent policy gate approves the call.
+        body["confirmed"] = True
+        try:
+            retry = matrix.retry_failed(campaign_id, body)
+        except Exception as exc:
+            code = str(getattr(exc, "code", "") or "")
+            if code == "matrix_campaign_not_found":
+                raise CapabilityExecutionError(
+                    code,
+                    str(exc),
+                    recoverable=False,
+                ) from exc
+            raise
+        if retry.get("retried") is not True:
+            reason = str(
+                retry.get("reason")
+                or "No retryable failed Matrix device tasks are available."
+            ).strip()
+            outcome_indeterminate = (
+                retry.get("outcomeIndeterminate") is True
+                or retry.get("executionMayContinue") is True
+            )
+            raise CapabilityExecutionError(
+                str(retry.get("code") or "matrix_retry_not_started"),
+                f"Matrix retry was not created: {reason}",
+                recoverable=bool(retry.get("retryable", True)) and not outcome_indeterminate,
+                outcome_indeterminate=outcome_indeterminate,
+                execution_may_continue=retry.get("executionMayContinue") is True,
+            )
+        task = retry.get("task") if isinstance(retry.get("task"), dict) else None
+        if not task:
+            raise CapabilityExecutionError(
+                "matrix_retry_result_invalid",
+                "Matrix retry may have been created, but no trackable task was returned.",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        dispatch_body = (
+            retry.get("dispatchBody")
+            if isinstance(retry.get("dispatchBody"), dict)
+            else body
+        )
+        job = self._start_matrix_job(
+            "matrix.retry",
+            "Agent Matrix retry",
+            matrix,
+            task,
+            dispatch_body,
+        )
+        return {
+            **self._matrix_attachment(task, job),
+            "retryOf": campaign_id,
+            "failureReasons": retry.get("failureReasons", []),
+        }
+
+    def _start_matrix_job(
+        self,
+        kind: str,
+        title: str,
+        matrix: Any,
+        task: Json,
+        body: Json,
+    ) -> Json | None:
+        if self.job_manager is None or not callable(self.context_factory):
+            return None
+        from api.routes_matrix import _run_matrix_campaign
+
+        def run(job_id: str) -> Json:
+            return _run_matrix_campaign(self.context_factory(), matrix, task, body, job_id)
+
+        try:
+            job = self.job_manager.submit_progress(
+                kind,
+                title,
+                run,
+                initial_progress={
+                    "message": "Matrix task queued by central agent",
+                    "phase": f"{kind}.queued",
+                    "commandId": kind,
+                    "campaignId": task.get("campaignId"),
+                },
+            )
+        except Exception as exc:
+            raise _post_submission_error(
+                "matrix_job_submission_unknown",
+                "Matrix retry may have been submitted, but its receipt was lost.",
+                execution_may_continue=True,
+            ) from exc
+        job_id = str(job.get("id") or "").strip() if isinstance(job, dict) else ""
+        if not job_id:
+            raise _post_submission_error(
+                "matrix_job_submission_unknown",
+                "Matrix retry was submitted without a trackable job ID.",
+                execution_may_continue=True,
+            )
+        return job
+
+    @staticmethod
+    def _matrix_attachment(task: Json, job: Json | None) -> Json:
+        rows = [
+            item
+            for mission in task.get("missions", [])
+            if isinstance(mission, dict)
+            for item in mission.get("deviceTasks", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "campaignId": str(task.get("campaignId") or ""),
+            "jobId": str(job.get("id") or "") if isinstance(job, dict) else "",
+            "status": str(task.get("status") or "queued"),
+            "counts": {
+                "total": len(rows),
+                "completed": sum(
+                    item.get("status") in {"completed", "succeeded"} for item in rows
+                ),
+                "failed": sum(item.get("status") in {"failed", "needs_human"} for item in rows),
+                "running": sum(item.get("status") in {"running", "queued", "retrying"} for item in rows),
+            },
+            "deviceTasks": rows,
+        }
+
+    @staticmethod
+    def _matrix_campaign_status(status: Json, campaign_id: str) -> str | None:
+        campaigns = status.get("campaigns") if isinstance(status, dict) else None
+        for campaign in campaigns if isinstance(campaigns, list) else []:
+            if (
+                isinstance(campaign, dict)
+                and str(campaign.get("campaignId") or "") == campaign_id
+            ):
+                return str(campaign.get("status") or "")
+        return None
+
+    def _list_media_assets(self, payload: Json) -> Json:
+        if not callable(self.context_factory):
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "本地素材库尚未就绪",
+            )
+        try:
+            context = self.context_factory()
+            from api.routes_media import _media_library
+
+            return _media_library(context).list_assets(
+                payload.get("kind"),
+                str(payload.get("cursor") or ""),
+                int(payload.get("limit") or 20),
+            )
+        except (TypeError, ValueError) as exc:
+            raise CapabilityExecutionError(
+                "media_asset_query_invalid",
+                str(exc) or "素材查询参数无效",
+                recoverable=False,
+            ) from exc
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "media_library_unavailable",
+                "本地素材库暂时不可用",
+            ) from exc
+
+    def _submit_media_asset_transfer(
+        self,
+        payload: Json,
+        *,
+        cancellation_token: Any | None = None,
+    ) -> Json:
+        if not callable(self.context_factory) or not callable(
+            getattr(self.job_manager, "submit_progress", None)
+        ):
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "素材传输服务尚未就绪",
+            )
+        try:
+            context = self.context_factory()
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "素材传输服务尚未就绪",
+            ) from exc
+
+        from api.routes_media import (
+            _configured_phone_snapshot,
+            _media_library,
+            _transfer_generated_media_to_phones,
+        )
+        from services.media_library import MediaLibraryError
+
+        try:
+            asset = _media_library(context).resolve(str(payload.get("assetId") or ""))
+        except MediaLibraryError as exc:
+            raise CapabilityExecutionError(
+                "media_asset_not_found",
+                "素材不存在或已被删除",
+                recoverable=False,
+            ) from exc
+
+        targets = payload.get("targets") if isinstance(payload.get("targets"), dict) else {}
+        requested_device_ids = [
+            str(value).strip()
+            for value in targets.get("deviceIds", [])
+            if str(value).strip()
+        ] if isinstance(targets.get("deviceIds"), list) else []
+        requested_groups = [
+            str(value).strip()
+            for value in targets.get("groups", [])
+            if str(value).strip()
+        ] if isinstance(targets.get("groups"), list) else []
+        if requested_groups or targets.get("allOnline") is True:
+            for device_id in self._resolve_media_target_device_ids(
+                requested_groups,
+                all_online=targets.get("allOnline") is True,
+            ):
+                if device_id not in requested_device_ids:
+                    requested_device_ids.append(device_id)
+        if not requested_device_ids:
+            raise CapabilityExecutionError(
+                "phone_target_scope_required",
+                "请先明确选择要接收素材的手机或设备组",
+                recoverable=False,
+            )
+
+        phone_snapshot = _configured_phone_snapshot(context, requested_device_ids)
+        missing_ids = phone_snapshot.get("missingDeviceIds")
+        if isinstance(missing_ids, list) and missing_ids:
+            raise CapabilityExecutionError(
+                "phone_target_not_found",
+                f"手机配置不存在：{', '.join(str(item) for item in missing_ids)}",
+                recoverable=False,
+            )
+        devices = phone_snapshot.get("devices") if isinstance(phone_snapshot.get("devices"), list) else []
+        if not devices:
+            raise CapabilityExecutionError(
+                "phone_target_unavailable",
+                "未找到可用的手机配置",
+                recoverable=False,
+            )
+
+        files = [{"path": asset.path, "filename": asset.filename, "mime": asset.mime}]
+
+        def target(job_id: str) -> Json:
+            progress = getattr(self.job_manager, "progress", None)
+            if callable(progress):
+                progress(
+                    job_id,
+                    f"正在传送到 {len(devices)} 台手机相册",
+                    "neutral",
+                    phase="phone-transfer",
+                )
+            summary = _transfer_generated_media_to_phones(
+                context,
+                asset.kind,
+                files,
+                phone_snapshot=phone_snapshot,
+            )
+            return {**summary, "success": summary.get("status") == "succeeded"}
+
+        job = _submit_background_job(
+            self.job_manager,
+            "media.transfer",
+            "传输素材到手机",
+            target,
+            error_code="media_transfer_submission_unknown",
+            error_message="素材传输任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+        )
+        job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
+        if not job_id:
+            raise _post_submission_error(
+                "capability_execution_unknown",
+                "素材传输任务已经提交，但未返回可追踪的任务编号",
+                execution_may_continue=True,
+            )
+        terminal = self._wait_for_media_job(
+            job_id,
+            kind="transfer",
+            cancellation_token=cancellation_token,
+        )
+        result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
+        if terminal.get("status") == "cancelled":
+            raise _post_submission_error("capability_cancelled", "素材传输任务已取消")
+        if terminal.get("status") != "succeeded" or result.get("success") is False:
+            failure = terminal.get("failure") if isinstance(terminal.get("failure"), dict) else {}
+            raise _post_submission_error(
+                str(result.get("reason") or failure.get("code") or "media_transfer_failed"),
+                str(terminal.get("error") or result.get("message") or "素材传输失败"),
+            )
+        return {
+            "jobId": job_id,
+            "kind": "media-transfer",
+            "status": "succeeded",
+            "asset": {
+                "id": asset.asset_id,
+                "kind": asset.kind,
+                "filename": asset.filename,
+                "path": asset.path,
+            },
+            "result": result,
+        }
+
     def _submit_media(
         self,
         kind: str,
@@ -154,21 +697,33 @@ class AgentBuiltinCapabilityProvider:
             _async_media_job_result,
             _configured_phone_snapshot,
             _image_generate_payload,
+            _local_only_phone_snapshot,
             _video_generate_payload,
         )
 
-        requested_device_ids = [
+        requested_device_ids = list(dict.fromkeys([
             str(value).strip()
             for value in payload.get("deviceIds", [])
             if str(value).strip()
-        ] if isinstance(payload.get("deviceIds"), list) else []
-        requested_groups = [
+        ])) if isinstance(payload.get("deviceIds"), list) else []
+        requested_groups = list(dict.fromkeys([
             str(value).strip()
             for value in payload.get("groups", [])
             if str(value).strip()
-        ] if isinstance(payload.get("groups"), list) else []
+        ])) if isinstance(payload.get("groups"), list) else []
         all_online = payload.get("allOnline") is True
         target_selector_present = bool(requested_device_ids or requested_groups or all_online)
+        selector_count = sum((
+            bool(requested_device_ids),
+            bool(requested_groups),
+            all_online,
+        ))
+        if selector_count > 1:
+            raise CapabilityExecutionError(
+                "phone_target_scope_required",
+                "每次生成只能选择手机、分组或全部在线手机中的一种目标",
+                recoverable=False,
+            )
         if requested_groups or all_online:
             requested_device_ids = self._resolve_media_target_device_ids(
                 requested_groups,
@@ -182,10 +737,25 @@ class AgentBuiltinCapabilityProvider:
             },
             "source": str(payload.get("source") or "agent"),
         }
-        phone_snapshot = _configured_phone_snapshot(
-            context,
-            requested_device_ids if target_selector_present else None,
+        phone_snapshot = (
+            _configured_phone_snapshot(context, requested_device_ids)
+            if target_selector_present
+            else _local_only_phone_snapshot()
         )
+        if target_selector_present:
+            missing_ids = phone_snapshot.get("missingDeviceIds")
+            if isinstance(missing_ids, list) and missing_ids:
+                raise CapabilityExecutionError(
+                    "phone_target_not_found",
+                    f"手机配置不存在：{', '.join(str(item) for item in missing_ids)}",
+                    recoverable=False,
+                )
+            if not phone_snapshot.get("devices"):
+                raise CapabilityExecutionError(
+                    "phone_target_unavailable",
+                    "未找到可用的手机配置",
+                    recoverable=False,
+                )
 
         def ensure_job_active(job_id: str) -> None:
             is_cancelled = getattr(self.job_manager, "is_cancelled", None)
@@ -221,7 +791,8 @@ class AgentBuiltinCapabilityProvider:
                     ),
                 )
             ensure_job_active(job_id)
-            update_progress(job_id, "正在传送到已配置手机相册", phase="phone-transfer")
+            if phone_snapshot.get("devices"):
+                update_progress(job_id, "正在传送到指定手机相册", phase="phone-transfer")
             return _async_media_job_result(
                 context,
                 kind,
@@ -230,12 +801,20 @@ class AgentBuiltinCapabilityProvider:
             )
 
         label = "图片生成" if kind == "image" else "视频生成"
-        job = self.job_manager.submit_progress(kind, label, target)
+        job = _submit_background_job(
+            self.job_manager,
+            kind,
+            label,
+            target,
+            error_code="media_job_submission_unknown",
+            error_message="媒体任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+        )
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
-            raise CapabilityExecutionError(
-                "capability_failed",
-                "媒体任务创建失败",
+            raise _post_submission_error(
+                "capability_execution_unknown",
+                "媒体任务已经提交，但未返回可追踪的任务编号",
+                execution_may_continue=True,
             )
         terminal = self._wait_for_media_job(
             job_id,
@@ -244,8 +823,15 @@ class AgentBuiltinCapabilityProvider:
         )
         result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
         if terminal.get("status") == "cancelled":
-            raise CapabilityExecutionError("capability_cancelled", "媒体生成任务已取消")
+            raise _post_submission_error("capability_cancelled", "媒体生成任务已取消")
         if terminal.get("status") != "succeeded" or result.get("success") is False:
+            transfer = result.get("phoneTransfer") if isinstance(result.get("phoneTransfer"), dict) else {}
+            transfer_status = str(transfer.get("status") or "")
+            if _media_attachments(kind, result) and (
+                str(result.get("status") or "") in {"partial_failure", "outcome_uncertain"}
+                or transfer_status in {"failed", "outcome_uncertain"}
+            ):
+                return _media_capability_result(job_id, kind, result)
             failure = terminal.get("failure") if isinstance(terminal.get("failure"), dict) else {}
             code = str(result.get("errorCode") or failure.get("code") or "media_job_failed")
             message = str(
@@ -254,19 +840,8 @@ class AgentBuiltinCapabilityProvider:
                 or result.get("message")
                 or "媒体生成任务失败"
             )
-            raise CapabilityExecutionError(
-                code,
-                message,
-                recoverable=bool(failure.get("retryable", True)),
-            )
-        return {
-            "jobId": job_id,
-            "kind": kind,
-            "status": "succeeded",
-            "result": result,
-            "attachments": _media_attachments(kind, result),
-            "phoneTransfer": result.get("phoneTransfer") if isinstance(result.get("phoneTransfer"), dict) else None,
-        }
+            raise _post_submission_error(code, message)
+        return _media_capability_result(job_id, kind, result)
 
     def _resolve_media_target_device_ids(
         self,
@@ -277,10 +852,15 @@ class AgentBuiltinCapabilityProvider:
         try:
             matrix = self.matrix_factory()
             status = matrix.status()
-        except Exception:
-            return []
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "phone_target_unavailable",
+                "无法读取手机目标状态，请稍后重试",
+                recoverable=False,
+            ) from exc
         devices = status.get("devices") if isinstance(status, dict) else []
         requested_groups = set(groups)
+        available_groups: set[str] = set()
         resolved: list[str] = []
         for item in devices if isinstance(devices, list) else []:
             if not isinstance(item, dict):
@@ -294,9 +874,23 @@ class AgentBuiltinCapabilityProvider:
                 for value in [item.get("group"), *raw_groups]
                 if str(value or "").strip()
             }
+            available_groups.update(item_groups)
             selected = item.get("online") is True if all_online else bool(item_groups & requested_groups)
             if selected and device_id not in resolved:
                 resolved.append(device_id)
+        unknown_groups = [group for group in groups if group not in available_groups]
+        if unknown_groups:
+            raise CapabilityExecutionError(
+                "phone_target_not_found",
+                f"手机分组不存在：{', '.join(unknown_groups)}",
+                recoverable=False,
+            )
+        if not resolved:
+            raise CapabilityExecutionError(
+                "phone_target_unavailable",
+                "未找到符合目标条件的可用手机",
+                recoverable=False,
+            )
         return resolved
 
     def _wait_for_media_job(
@@ -308,16 +902,28 @@ class AgentBuiltinCapabilityProvider:
     ) -> Json:
         get_job = getattr(self.job_manager, "get", None)
         if not callable(get_job):
-            raise CapabilityExecutionError("capability_unavailable", "媒体任务状态服务尚未就绪")
-        wait_seconds = 570 if kind == "image" else 1770
+            raise _post_submission_error(
+                "media_job_status_unavailable",
+                "媒体任务已经提交，但状态服务尚未就绪",
+                execution_may_continue=True,
+            )
+        wait_seconds = 570 if kind in {"image", "transfer"} else 1770
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             if cancellation_token is not None and bool(getattr(cancellation_token, "cancelled", False)):
-                cancel = getattr(self.job_manager, "cancel", None)
-                if callable(cancel):
-                    cancel(job_id)
-                raise CapabilityExecutionError("capability_cancelled", "媒体生成任务已取消")
-            job = get_job(job_id)
+                _request_background_job_cancel(self.job_manager, job_id)
+                raise _post_submission_error(
+                    "capability_cancelled",
+                    "媒体生成任务已请求取消，但任务可能仍在执行",
+                    execution_may_continue=True,
+                )
+            error_code = "media_transfer_status_unknown" if kind == "transfer" else "media_job_status_unknown"
+            job = _read_background_job(
+                get_job,
+                job_id,
+                error_code=error_code,
+                error_message="后台任务已经提交，但读取任务状态时连接中断，任务可能仍在执行",
+            )
             if isinstance(job, dict) and str(job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
                 return job
             token_wait = getattr(cancellation_token, "wait", None)
@@ -325,10 +931,22 @@ class AgentBuiltinCapabilityProvider:
                 token_wait(0.1)
             else:
                 time.sleep(0.1)
-        cancel = getattr(self.job_manager, "cancel", None)
-        if callable(cancel):
-            cancel(job_id)
-        raise CapabilityExecutionError("media_job_timeout", "媒体生成任务执行超时")
+        _request_background_job_cancel(self.job_manager, job_id)
+        if kind == "transfer":
+            raise CapabilityExecutionError(
+                "media_transfer_timeout",
+                "素材传输任务执行超时，取消请求已发出，但任务可能仍在执行",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        raise CapabilityExecutionError(
+            "media_job_timeout",
+            "媒体生成任务执行超时，取消请求已发出，但任务可能仍在执行",
+            recoverable=False,
+            outcome_indeterminate=True,
+            execution_may_continue=True,
+        )
 
     def _submit_phone_publish(self, payload: Json, *, cancellation_token: Any | None = None) -> Json:
         if not callable(self.context_factory) or not callable(
@@ -386,10 +1004,21 @@ class AgentBuiltinCapabilityProvider:
             return run_phone_publish(context, normalized)
 
         label = "手机发布草稿" if normalized["draftOnly"] else "手机自动发布"
-        job = self.job_manager.submit_progress("publish", label, target)
+        job = _submit_background_job(
+            self.job_manager,
+            "publish",
+            label,
+            target,
+            error_code="publish_job_submission_unknown",
+            error_message="手机发布任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+        )
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
-            raise CapabilityExecutionError("capability_failed", "手机发布任务创建失败")
+            raise _post_submission_error(
+                "capability_execution_unknown",
+                "手机发布任务已经提交，但未返回可追踪的任务编号",
+                execution_may_continue=True,
+            )
         terminal = self._wait_for_publish_job(job_id, cancellation_token=cancellation_token)
         result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
         if terminal.get("status") != "succeeded" or result.get("success") is False:
@@ -401,11 +1030,7 @@ class AgentBuiltinCapabilityProvider:
                 or result.get("message")
                 or "手机发布任务失败"
             )
-            raise CapabilityExecutionError(
-                code,
-                message,
-                recoverable=bool(failure.get("retryable", True)),
-            )
+            raise _post_submission_error(code, message)
         return {
             "jobId": job_id,
             "kind": "publish",
@@ -416,22 +1041,37 @@ class AgentBuiltinCapabilityProvider:
     def _wait_for_publish_job(self, job_id: str, *, cancellation_token: Any | None = None) -> Json:
         get_job = getattr(self.job_manager, "get", None)
         if not callable(get_job):
-            raise CapabilityExecutionError("capability_unavailable", "手机发布任务状态服务尚未就绪")
+            raise _post_submission_error(
+                "publish_job_status_unavailable",
+                "手机发布任务已经提交，但状态服务尚未就绪",
+                execution_may_continue=True,
+            )
         deadline = time.monotonic() + 675
         while time.monotonic() < deadline:
             if cancellation_token is not None and bool(getattr(cancellation_token, "cancelled", False)):
-                cancel = getattr(self.job_manager, "cancel", None)
-                if callable(cancel):
-                    cancel(job_id)
-                raise CapabilityExecutionError("capability_cancelled", "手机发布任务已取消")
-            job = get_job(job_id)
+                _request_background_job_cancel(self.job_manager, job_id)
+                raise _post_submission_error(
+                    "capability_cancelled",
+                    "手机发布任务已请求取消，但任务可能仍在执行",
+                    execution_may_continue=True,
+                )
+            job = _read_background_job(
+                get_job,
+                job_id,
+                error_code="publish_job_status_unknown",
+                error_message="手机发布任务已经提交，但读取任务状态时连接中断，任务可能仍在执行",
+            )
             if isinstance(job, dict) and str(job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
                 return job
             time.sleep(0.1)
-        cancel = getattr(self.job_manager, "cancel", None)
-        if callable(cancel):
-            cancel(job_id)
-        raise CapabilityExecutionError("publish_job_timeout", "手机发布任务执行超时")
+        _request_background_job_cancel(self.job_manager, job_id)
+        raise CapabilityExecutionError(
+            "publish_job_timeout",
+            "手机发布任务执行超时，取消请求已发出，但任务可能仍在执行",
+            recoverable=False,
+            outcome_indeterminate=True,
+            execution_may_continue=True,
+        )
 
 
 def run_phone_publish(context: Any, payload: Json) -> Json:

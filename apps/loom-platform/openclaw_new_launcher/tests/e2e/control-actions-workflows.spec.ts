@@ -245,6 +245,12 @@ test('creative video controls switch tab and submit only a mocked video intent',
   await expect(appMain(page).getByRole('button', { name: '生成图片' })).toBeVisible();
 });
 
+test('creative full-plan control opens the nine-step storyboard workbench', async ({ audit, page }) => {
+  await navigateTo(audit, 'creative');
+  await page.locator('[data-creative-tab-storyboard]').click();
+  await expect(appMain(page).locator('[data-storyboard-workbench]')).toBeVisible();
+});
+
 test('creative results without a local path render status instead of a dead copy button', async ({ audit, page }) => {
   const imageJob = completedJob('image-no-path-audit', {
     images: ['iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII='],
@@ -522,7 +528,7 @@ test('acquisition controls refresh, bind, confirm Feishu writes, copy payloads, 
   await expect(promptDetails.getByRole('textbox', { name: 'AI 接入提示词预览' })).toHaveAttribute('readonly', '');
 });
 
-test('phone baseline controls own form, mode, profile, quick-task, clipboard, and refresh state', async ({ audit, page }) => {
+test('phone baseline controls own form, mode, profile, quick-task, and clipboard state', async ({ audit, page }) => {
   await navigateTo(audit, 'phone');
 
   await appMain(page).getByRole('button', { name: '下载手机端 App' }).click();
@@ -569,12 +575,6 @@ test('phone baseline controls own form, mode, profile, quick-task, clipboard, an
     await expect(prompt).toHaveValue(value);
   }
 
-  const beforeMatrixRefresh = await markCalls(audit);
-  await appMain(page).getByRole('button', { name: '刷新状态' }).click();
-  await expectProxyIntent(audit, beforeMatrixRefresh, { method: 'GET', path: '/api/matrix/status', body: null });
-  const beforeJobsRefresh = await markCalls(audit);
-  await appMain(page).getByRole('button', { name: '刷新', exact: true }).click();
-  await expectProxyIntent(audit, beforeJobsRefresh, { method: 'GET', path: '/api/jobs/list?limit=40', body: null });
 });
 
 test('phone save-and-detect path records config, matrix registration, and status without touching a device', async ({ audit, page }) => {
@@ -612,7 +612,7 @@ test('phone save-and-detect path records config, matrix registration, and status
   await expectToast(page, '手机连接配置已保存');
 });
 
-test('configured phone controls mock all device, read, task, screenshot, model, history, and delete intents', async ({ audit, page }) => {
+test('configured phone controls mock device, read, task, model, and delete intents', async ({ audit, page }) => {
   const alternatePhone = {
     id: 'phone-audit-2',
     name: 'Audit Phone Two',
@@ -630,17 +630,13 @@ test('configured phone controls mock all device, read, task, screenshot, model, 
 
   const jobs = {
     status: completedJob('phone-status-audit', { stdout: JSON.stringify({ ok: true, success: true }) }),
-    screenshot: completedJob('phone-screenshot-audit', { stdout: JSON.stringify({ path: 'C:\\LOOM\\playwright-audit\\frame.png' }) }),
     sync: completedJob('phone-sync-audit', { wire: { models: { phone: 'audit-text-model' } }, syncResults: [] }),
-    history: completedJob('phone-history-audit', { rows: [] }),
     read: completedJob('phone-read-audit', { message: 'isolated read intent accepted' }),
     task: completedJob('phone-task-audit', { message: 'isolated full-control intent accepted' }),
   };
   for (const [path, job] of [
     ['/api/phone/status', jobs.status],
-    ['/api/phone/screenshot', jobs.screenshot],
     ['/api/phone/sync-model', jobs.sync],
-    ['/api/phone/history', jobs.history],
     ['/api/phone/read', jobs.read],
     ['/api/phone/task', jobs.task],
   ] as const) {
@@ -668,9 +664,7 @@ test('configured phone controls mock all device, read, task, screenshot, model, 
 
   const simpleActions = [
     ['检测连接', '/api/phone/status', jobs.status.id, { deviceId: 'phone-audit-1' }],
-    ['截图', '/api/phone/screenshot', jobs.screenshot.id],
     ['同步模型到手机', '/api/phone/sync-model', jobs.sync.id],
-    ['读取历史', '/api/phone/history', jobs.history.id],
   ] as const;
   for (const [name, path, jobId, body = null] of simpleActions) {
     const before = await markCalls(audit);
@@ -685,7 +679,7 @@ test('configured phone controls mock all device, read, task, screenshot, model, 
   await expectProxyIntent(audit, beforeRead, {
     method: 'POST',
     path: '/api/phone/read',
-    body: { prompt: 'read only isolated intent', profile: 'fast' },
+    body: { deviceId: 'phone-audit-1', prompt: 'read only isolated intent', profile: 'fast' },
   });
 
   await appMain(page).getByRole('button', { name: /^完整控制\s+full/ }).click();
@@ -698,6 +692,7 @@ test('configured phone controls mock all device, read, task, screenshot, model, 
     method: 'POST',
     path: '/api/phone/task',
     body: {
+      deviceId: 'phone-audit-1',
       prompt: 'full-control isolated intent',
       mode: 'full',
       profile: 'deep',
@@ -757,9 +752,8 @@ function runningMatrixStatus(campaignId = 'campaign-audit-1', deviceTaskId = 'ta
 async function registerMatrixDeviceRoutes(audit: AuditHarness) {
   await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/timeline?limit=80', { value: { events: [] } });
   await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/lease', { value: { lease: null } });
-  await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/screen', { value: MATRIX_SCREEN });
-  await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-1/screen?*', {
-    value: { ...MATRIX_SCREEN, notModified: true, image: undefined },
+  await audit.registerRoute('POST', '/api/matrix/screens', {
+    value: { schema: 'loom.matrix.screens.v1', screens: [MATRIX_SCREEN], errors: [] },
   });
   await audit.registerRoute('POST', '/api/matrix/devices/phone-audit-1/lease', {
     value: {
@@ -1061,14 +1055,17 @@ test('matrix focus changes ignore stale timeline and lease responses', async ({ 
     value: { events: [{ eventId: 'fresh-two', type: 'FRESH_PHONE_TWO', timestamp: '2026-07-15T00:00:01.000Z' }] },
   });
   await audit.registerRoute('GET', '/api/matrix/devices/phone-audit-2/lease', { value: { lease: null } });
-  for (const deviceId of ['phone-audit-1', 'phone-audit-2']) {
-    await audit.registerRoute('GET', `/api/matrix/devices/${deviceId}/screen`, {
-      value: { ...MATRIX_SCREEN, deviceId, screenHash: `${deviceId}-screen` },
-    });
-    await audit.registerRoute('GET', `/api/matrix/devices/${deviceId}/screen?*`, {
-      value: { ...MATRIX_SCREEN, deviceId, screenHash: `${deviceId}-screen`, notModified: true, image: undefined },
-    });
-  }
+  await audit.registerRoute('POST', '/api/matrix/screens', {
+    value: {
+      schema: 'loom.matrix.screens.v1',
+      screens: ['phone-audit-1', 'phone-audit-2'].map((deviceId) => ({
+        ...MATRIX_SCREEN,
+        deviceId,
+        screenHash: `${deviceId}-screen`,
+      })),
+      errors: [],
+    },
+  });
   await navigateTo(audit, 'workbench');
 
   const main = appMain(page);

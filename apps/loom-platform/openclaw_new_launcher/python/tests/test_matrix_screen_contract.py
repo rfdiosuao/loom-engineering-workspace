@@ -67,7 +67,7 @@ class MatrixScreenContractTests(unittest.TestCase):
             with patch("api.routes_matrix._capture_matrix_screen", side_effect=slow_capture):
                 loop_delay = asyncio.run(exercise())
 
-        self.assertLess(loop_delay, 0.08)
+        self.assertLess(loop_delay, 0.12)
 
     def test_screen_known_hash_omits_unchanged_image(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

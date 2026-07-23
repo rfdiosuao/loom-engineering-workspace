@@ -88,7 +88,7 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
   }
 
   return (
-    <div data-phone-matrix-access-granted className="flex h-full min-h-0 flex-col overflow-hidden">
+    <div data-phone-matrix-access-granted className="absolute inset-0 flex min-h-0 flex-col overflow-hidden">
       {licenseGate.status === 'offline_grace' ? (
         <div
           data-license-offline-banner
@@ -104,7 +104,7 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
           </button>
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
     </div>
   );
 };

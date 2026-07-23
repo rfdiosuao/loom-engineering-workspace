@@ -169,10 +169,117 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
 
                 self.assertTrue(capabilities["loom.media.image.generate"]["available"])
                 self.assertTrue(capabilities["loom.media.video.generate"]["available"])
+                self.assertTrue(capabilities["loom.media.assets.list"]["available"])
+                self.assertTrue(capabilities["loom.media.asset.transfer"]["available"])
+                self.assertEqual(capabilities["loom.media.asset.transfer"]["targetScope"], "matrix-write")
                 self.assertTrue(capabilities["loom.phone.publish"]["available"])
                 self.assertEqual(capabilities["loom.phone.publish"]["risk"], "outbound")
             finally:
                 service.shutdown()
+
+    def test_agent_can_list_existing_media_without_generating_again(self) -> None:
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+        from services.media_library import MediaLibrary
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            image_dir = os.path.join(paths.data_dir, "generated-images")
+            os.makedirs(image_dir, exist_ok=True)
+            image_path = os.path.join(image_dir, "existing-poster.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"existing-image")
+            recorded = MediaLibrary(paths.data_dir).record(image_path, {"prompt": "招聘海报"})
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs)
+            service = AgentService(
+                paths,
+                runtime=UnavailableRuntime(),
+                context_factory=lambda: context,
+                job_manager=jobs,
+            )
+            try:
+                result = service.capabilities.execute(
+                    "loom.media.assets.list",
+                    {"kind": "image", "limit": 10},
+                )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(result["items"][0]["id"], recorded["id"])
+        self.assertEqual(result["items"][0]["filename"], "existing-poster.png")
+        self.assertEqual(jobs.submissions, [])
+
+    def test_agent_can_transfer_existing_media_to_selected_phones(self) -> None:
+        import json
+
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+        from services.media_library import MediaLibrary
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            os.makedirs(paths.launcher_dir, exist_ok=True)
+            with open(os.path.join(paths.launcher_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "selectedDeviceId": "phone-1",
+                    "devices": [
+                        {"id": "phone-1", "name": "Phone One"},
+                        {"id": "phone-2", "name": "Phone Two"},
+                    ],
+                }, handle)
+            image_dir = os.path.join(paths.data_dir, "generated-images")
+            os.makedirs(image_dir, exist_ok=True)
+            image_path = os.path.join(image_dir, "existing-poster.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"existing-image")
+            asset = MediaLibrary(paths.data_dir).record(image_path, {"prompt": "招聘海报"})
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs)
+
+            def read_json(path, default):
+                if not os.path.isfile(path):
+                    return default
+                with open(path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+
+            context.read_json = read_json
+            observed: dict = {}
+
+            def transfer(_ctx, kind, files, *, phone_snapshot=None):
+                observed.update({"kind": kind, "files": files, "snapshot": phone_snapshot})
+                return {
+                    "status": "succeeded",
+                    "message": "transferred",
+                    "deviceCount": len(phone_snapshot.get("devices", [])),
+                    "succeededDeviceCount": len(phone_snapshot.get("devices", [])),
+                    "failedDeviceCount": 0,
+                }
+
+            service = AgentService(
+                paths,
+                runtime=UnavailableRuntime(),
+                context_factory=lambda: context,
+                job_manager=jobs,
+            )
+            try:
+                with patch("api.routes_media._transfer_generated_media_to_phones", side_effect=transfer):
+                    result = service.capabilities.execute(
+                        "loom.media.asset.transfer",
+                        {
+                            "assetId": asset["id"],
+                            "targets": {"deviceIds": ["phone-2"]},
+                        },
+                    )
+            finally:
+                service.shutdown()
+            transferred_same_file = os.path.samefile(observed["files"][0]["path"], image_path)
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["kind"], "media-transfer")
+        self.assertEqual(observed["kind"], "image")
+        self.assertTrue(transferred_same_file)
+        self.assertEqual([item["id"] for item in observed["snapshot"]["devices"]], ["phone-2"])
 
     def test_disconnected_agent_service_hides_media_from_model_catalog(self) -> None:
         from core.paths import AppPaths
@@ -302,9 +409,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
                 {key: video[key] for key in ("jobId", "kind", "status")},
                 {"jobId": "job-video-3", "kind": "video", "status": "succeeded"},
             )
-            self.assertEqual(image["result"]["phoneTransfer"]["reason"], "no_configured_phones")
-            self.assertEqual(edited["result"]["phoneTransfer"]["reason"], "no_configured_phones")
-            self.assertEqual(video["result"]["phoneTransfer"]["reason"], "no_configured_phones")
+            self.assertEqual(image["result"]["phoneTransfer"]["reason"], "local_only")
+            self.assertEqual(edited["result"]["phoneTransfer"]["reason"], "local_only")
+            self.assertEqual(video["result"]["phoneTransfer"]["reason"], "local_only")
             self.assertEqual(len(image["attachments"]), 2)
             self.assertEqual(image["attachments"][0]["kind"], "image")
             self.assertEqual(image["attachments"][0]["mime"], "image/png")
@@ -312,8 +419,8 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             self.assertEqual(len(video["attachments"]), 1)
             self.assertEqual(video["attachments"][0]["kind"], "video")
             self.assertEqual(video["attachments"][0]["mime"], "video/mp4")
-            self.assertEqual(image["phoneTransfer"]["reason"], "no_configured_phones")
-            self.assertEqual(video["phoneTransfer"]["reason"], "no_configured_phones")
+            self.assertEqual(image["phoneTransfer"]["reason"], "local_only")
+            self.assertEqual(video["phoneTransfer"]["reason"], "local_only")
             self.assertEqual(image_client.calls[0]["count"], 2)
             self.assertIsNone(image_client.calls[0]["editImagePath"])
             self.assertEqual(image_client.calls[1]["editImagePath"], reference_path)
@@ -341,7 +448,7 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
         self.assertGreaterEqual(operations["loom.media.image.generate"]["timeoutSec"], 300)
         self.assertGreaterEqual(operations["loom.media.video.generate"]["timeoutSec"], 900)
 
-    def test_media_generation_passes_all_configured_phones_to_transfer_pipeline(self) -> None:
+    def test_media_generation_without_explicit_target_stays_local(self) -> None:
         import json
 
         from core.paths import AppPaths
@@ -373,9 +480,11 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             def transfer(_ctx, _kind, _files, *, phone_snapshot=None):
                 observed["snapshot"] = phone_snapshot
                 return {
-                    "status": "succeeded",
-                    "message": "transferred",
-                    "deviceCount": len(phone_snapshot.get("devices", [])),
+                    "status": "skipped",
+                    "reason": phone_snapshot.get("reason"),
+                    "message": "saved locally",
+                    "attempted": False,
+                    "deviceCount": 0,
                 }
 
             service = AgentService(
@@ -386,14 +495,17 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             )
             try:
                 with patch("api.routes_media._transfer_generated_media_to_phones", side_effect=transfer):
-                    service.capabilities.execute("loom.media.image.generate", {"prompt": "poster"})
+                    result = service.capabilities.execute(
+                        "loom.media.image.generate",
+                        {"prompt": "poster"},
+                    )
             finally:
                 service.shutdown()
 
-        self.assertEqual(
-            [item["id"] for item in observed["snapshot"]["devices"]],
-            ["phone-1", "phone-2"],
-        )
+        self.assertEqual(observed["snapshot"]["devices"], [])
+        self.assertEqual(observed["snapshot"]["reason"], "local_only")
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["phoneTransfer"]["reason"], "local_only")
 
     def test_media_capability_transfers_only_to_requested_phone_ids(self) -> None:
         import json
@@ -447,6 +559,83 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             [item["id"] for item in observed["snapshot"]["devices"]],
             ["phone-1"],
         )
+
+    def test_media_generation_rejects_unknown_phone_before_generation(self) -> None:
+        import json
+
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            os.makedirs(paths.launcher_dir, exist_ok=True)
+            with open(os.path.join(paths.launcher_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "devices": [{"id": "phone-1", "name": "Phone One"}],
+                }, handle)
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+
+            def read_json(path, default):
+                if not os.path.isfile(path):
+                    return default
+                with open(path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+
+            context.read_json = read_json
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: None,
+            )
+
+            with patch("api.routes_media._image_generate_payload") as generate:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    provider._submit_media(
+                        "image",
+                        {"prompt": "poster", "deviceIds": ["phone-404"]},
+                    )
+
+        self.assertEqual(raised.exception.code, "phone_target_not_found")
+        self.assertEqual(jobs.submissions, [])
+        generate.assert_not_called()
+
+    def test_media_generation_rejects_unknown_group_before_generation(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class Matrix:
+            def status(self):
+                return {
+                    "devices": [
+                        {
+                            "deviceId": "phone-1",
+                            "online": True,
+                            "group": "招聘一组",
+                        },
+                    ],
+                }
+
+        with tempfile.TemporaryDirectory() as root:
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=Matrix,
+            )
+
+            with patch("api.routes_media._image_generate_payload") as generate:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    provider._submit_media(
+                        "image",
+                        {"prompt": "poster", "groups": ["不存在的分组"]},
+                    )
+
+        self.assertEqual(raised.exception.code, "phone_target_not_found")
+        self.assertEqual(jobs.submissions, [])
+        generate.assert_not_called()
 
     def test_media_transfer_resolves_selected_group_to_its_devices(self) -> None:
         import json
@@ -510,6 +699,110 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             ["phone-1"],
         )
 
+    def test_media_group_resolution_does_not_expand_group_inputs_quadratically(self) -> None:
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        with tempfile.TemporaryDirectory() as root:
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+            observed_groups: list[list[str]] = []
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: None,
+            )
+
+            def resolve(groups, *, all_online):
+                observed_groups.append(list(groups))
+                self.assertFalse(all_online)
+                return ["phone-1"]
+
+            provider._resolve_media_target_device_ids = resolve
+            with patch(
+                "api.routes_media._image_generate_payload",
+                return_value={"files": [], "count": 0},
+            ), patch(
+                "api.routes_media._configured_phone_snapshot",
+                return_value={
+                    "devices": [{"id": "phone-1"}],
+                    "reason": "",
+                    "missingDeviceIds": [],
+                },
+            ), patch(
+                "api.routes_media._async_media_job_result",
+                return_value={
+                    "success": True,
+                    "files": [],
+                    "phoneTransfer": {"reason": "no_configured_phones"},
+                },
+            ):
+                provider._submit_media(
+                    "image",
+                    {"prompt": "group poster", "groups": ["招聘一组", "招聘二组"]},
+                )
+
+        self.assertEqual(observed_groups, [["招聘一组", "招聘二组"]])
+
+    def test_media_transfer_failure_preserves_attachment_and_blocks_regeneration(self) -> None:
+        import json
+
+        from core.paths import AppPaths
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        with tempfile.TemporaryDirectory() as root:
+            generated_path = os.path.join(root, "generated.png")
+            with open(generated_path, "wb") as handle:
+                handle.write(b"generated")
+            paths = AppPaths(root)
+            os.makedirs(paths.launcher_dir, exist_ok=True)
+            with open(os.path.join(paths.launcher_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                json.dump({"devices": [{"id": "phone-1", "name": "Phone One"}]}, handle)
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+
+            def read_json(path, default):
+                if not os.path.isfile(path):
+                    return default
+                with open(path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+
+            context.read_json = read_json
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: None,
+            )
+            with patch(
+                "api.routes_media._image_generate_payload",
+                return_value={"files": [{"path": generated_path}], "count": 1},
+            ), patch(
+                "api.routes_media._async_media_job_result",
+                return_value={
+                    "success": False,
+                    "status": "partial_failure",
+                    "errorCode": "media_transfer_failed",
+                    "message": "图片已生成，但一台手机传输失败",
+                    "files": [{"path": generated_path, "filename": "generated.png", "mime": "image/png"}],
+                    "phoneTransfer": {
+                        "status": "failed",
+                        "reason": "phone_upload_partial_failure",
+                        "succeededDeviceCount": 1,
+                        "failedDeviceCount": 1,
+                    },
+                },
+            ):
+                result = provider._submit_media(
+                    "image",
+                    {"prompt": "generate once", "deviceIds": ["phone-1"]},
+                )
+
+        self.assertEqual(result["status"], "partial_failure")
+        self.assertFalse(result["success"])
+        self.assertFalse(result["retryable"])
+        self.assertFalse(result["regenerationAllowed"])
+        self.assertEqual(result["attachments"][0]["path"], generated_path)
+        self.assertEqual(result["phoneTransfer"]["reason"], "phone_upload_partial_failure")
+
     def test_media_capability_cancellation_cancels_background_job(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
         from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
@@ -533,6 +826,144 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "capability_cancelled")
         self.assertEqual(jobs.cancelled, ["job-video-pending"])
+
+    def test_background_job_timeouts_are_indeterminate_and_never_auto_retry(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        cases = (
+            ("image", "media_job_timeout", "_wait_for_media_job"),
+            ("transfer", "media_transfer_timeout", "_wait_for_media_job"),
+            ("publish", "publish_job_timeout", "_wait_for_publish_job"),
+        )
+        for kind, expected_code, method_name in cases:
+            with self.subTest(kind=kind):
+                jobs = PendingJobManager()
+                provider = AgentBuiltinCapabilityProvider(
+                    context_factory=lambda: object(),
+                    job_manager=jobs,
+                    matrix_factory=lambda: object(),
+                )
+                with patch(
+                    "services.agent_builtin_capabilities.time.monotonic",
+                    side_effect=[0.0, 10_000.0],
+                ):
+                    with self.assertRaises(CapabilityExecutionError) as raised:
+                        if method_name == "_wait_for_media_job":
+                            provider._wait_for_media_job("job-timeout", kind=kind)
+                        else:
+                            provider._wait_for_publish_job("job-timeout")
+
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertFalse(raised.exception.recoverable)
+                self.assertTrue(raised.exception.outcome_indeterminate)
+                self.assertTrue(raised.exception.execution_may_continue)
+                self.assertEqual(jobs.cancelled, ["job-timeout"])
+
+    def test_background_job_status_disconnects_preserve_may_continue_semantics(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class DisconnectedStatusJobs:
+            def get(self, _job_id):
+                raise ConnectionResetError("status channel closed")
+
+        provider = AgentBuiltinCapabilityProvider(
+            context_factory=lambda: object(),
+            job_manager=DisconnectedStatusJobs(),
+            matrix_factory=lambda: object(),
+        )
+        cases = (
+            ("image", "media_job_status_unknown", "_wait_for_media_job"),
+            ("transfer", "media_transfer_status_unknown", "_wait_for_media_job"),
+            ("publish", "publish_job_status_unknown", "_wait_for_publish_job"),
+        )
+        for kind, expected_code, method_name in cases:
+            with self.subTest(kind=kind):
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    if method_name == "_wait_for_media_job":
+                        provider._wait_for_media_job("job-disconnected", kind=kind)
+                    else:
+                        provider._wait_for_publish_job("job-disconnected")
+
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertFalse(raised.exception.recoverable)
+                self.assertTrue(raised.exception.outcome_indeterminate)
+                self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_background_job_submit_disconnects_are_not_treated_as_safe_to_retry(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class AcceptedThenDisconnectedJobs:
+            def __init__(self) -> None:
+                self.accepted: list[tuple[str, str]] = []
+
+            def submit_progress(self, kind, label, _target, initial_progress=None):
+                self.accepted.append((kind, label))
+                raise ConnectionResetError("submission response lost")
+
+        with tempfile.TemporaryDirectory() as root:
+            media_path = os.path.join(root, "publish.png")
+            with open(media_path, "wb") as handle:
+                handle.write(b"image")
+            jobs = AcceptedThenDisconnectedJobs()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: object(),
+            )
+
+            with self.assertRaises(CapabilityExecutionError) as media_error:
+                provider._submit_media("image", {"prompt": "generate once"})
+            with self.assertRaises(CapabilityExecutionError) as publish_error:
+                provider._submit_phone_publish({
+                    "platform": "douyin",
+                    "title": "LOOM QA",
+                    "body": "publish once",
+                    "mediaPaths": [media_path],
+                    "deviceId": "phone-1",
+                })
+
+        self.assertEqual(media_error.exception.code, "media_job_submission_unknown")
+        self.assertTrue(media_error.exception.execution_may_continue)
+        self.assertFalse(media_error.exception.recoverable)
+        self.assertEqual(publish_error.exception.code, "publish_job_submission_unknown")
+        self.assertTrue(publish_error.exception.execution_may_continue)
+        self.assertFalse(publish_error.exception.recoverable)
+        self.assertEqual(
+            [kind for kind, _label in jobs.accepted],
+            ["image", "publish"],
+        )
+
+    def test_cancel_receipt_disconnect_keeps_the_original_indeterminate_error(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class CancelReceiptDisconnectedJobs(PendingJobManager):
+            def cancel(self, _job_id):
+                raise ConnectionResetError("cancel response lost")
+
+        jobs = CancelReceiptDisconnectedJobs()
+        provider = AgentBuiltinCapabilityProvider(
+            context_factory=lambda: object(),
+            job_manager=jobs,
+            matrix_factory=lambda: object(),
+        )
+        token = SimpleNamespace(cancelled=True)
+
+        with self.assertRaises(CapabilityExecutionError) as raised:
+            provider._wait_for_media_job(
+                "job-cancel-disconnected",
+                kind="image",
+                cancellation_token=token,
+            )
+
+        self.assertEqual(raised.exception.code, "capability_cancelled")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
 
     def test_cancelled_media_job_does_not_transfer_after_generation_returns(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
@@ -706,7 +1137,10 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
         from services.agent_service import AgentService
 
         with tempfile.TemporaryDirectory() as root:
-            jobs = RecordingJobManager()
+            jobs = SimpleNamespace(
+                submit_progress=lambda *_args, **_kwargs: {"id": "job-never"},
+                cancel_matching=lambda _predicate: [],
+            )
             context = self._context(
                 root,
                 jobs,
@@ -719,16 +1153,404 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
                 runtime=UnavailableRuntime(),
                 context_factory=lambda: context,
                 job_manager=jobs,
-                matrix_factory=lambda: SimpleNamespace(status=lambda: {"devices": []}),
+                matrix_factory=lambda: SimpleNamespace(
+                    status=lambda: {"devices": []},
+                    dispatch=lambda _payload: {"campaignId": "campaign-never"},
+                    cancel=lambda campaign_id: {"campaignId": campaign_id, "cancelled": True},
+                    retry_failed=lambda campaign_id, _payload: {
+                        "campaignId": campaign_id,
+                        "retried": True,
+                    },
+                ),
             )
             try:
-                with self.assertRaises(CapabilityExecutionError) as raised:
-                    service.capabilities.execute("loom.matrix.status", {})
+                cases = {
+                    "loom.matrix.status": {},
+                    "loom.matrix.dispatch": {
+                        "prompt": "inspect",
+                        "targets": {"deviceIds": ["phone-1"]},
+                    },
+                    "loom.matrix.screenshot": {"deviceId": "phone-1"},
+                    "loom.matrix.cancel": {"campaignId": "campaign-1"},
+                    "loom.matrix.retry": {"campaignId": "campaign-1"},
+                }
+                for capability_name, payload in cases.items():
+                    with self.subTest(capability=capability_name):
+                        with self.assertRaises(CapabilityExecutionError) as raised:
+                            service.capabilities.execute(capability_name, payload)
+                        self.assertEqual(raised.exception.code, "LICENSE_FEATURE_REQUIRED")
             finally:
                 service.shutdown()
 
             self.assertEqual(raised.exception.code, "LICENSE_FEATURE_REQUIRED")
             self.assertIn("手机连接页", str(raised.exception))
+
+    def test_matrix_job_submit_disconnect_is_indeterminate_and_may_continue(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        class SubmitDisconnectJobManager:
+            def submit_progress(self, *_args, **_kwargs):
+                raise ConnectionResetError("submit response lost")
+
+        matrix = SimpleNamespace(
+            dispatch=lambda _payload: {
+                "campaignId": "campaign-submitted",
+                "status": "queued",
+                "missions": [],
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            jobs = SubmitDisconnectJobManager()
+            context = self._context(root, jobs)
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.dispatch",
+                        {
+                            "prompt": "inspect",
+                            "targets": {"deviceIds": ["phone-1"]},
+                        },
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_job_submission_unknown")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_matrix_job_submit_without_job_id_is_not_reported_as_completed(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        jobs = SimpleNamespace(
+            submit_progress=lambda *_args, **_kwargs: {"status": "queued"},
+        )
+        matrix = SimpleNamespace(
+            dispatch=lambda _payload: {
+                "campaignId": "campaign-missing-job-id",
+                "status": "queued",
+                "missions": [],
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            context = self._context(root, jobs)
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.dispatch",
+                        {
+                            "prompt": "inspect",
+                            "targets": {"deviceIds": ["phone-1"]},
+                        },
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_job_submission_unknown")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_matrix_retry_without_failed_tasks_is_not_reported_as_completed(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.agent_policy import AgentPolicyEngine
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        matrix = SimpleNamespace(
+            retry_failed=lambda campaign_id, _payload: {
+                "retried": False,
+                "campaignId": campaign_id,
+                "reason": "没有失败设备任务",
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.retry",
+                        {"campaignId": "campaign-no-failures"},
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_retry_not_started")
+        self.assertTrue(raised.exception.recoverable)
+        self.assertFalse(raised.exception.outcome_indeterminate)
+        self.assertFalse(raised.exception.execution_may_continue)
+
+    def test_matrix_cancel_false_result_is_not_reported_as_completed(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        matrix = SimpleNamespace(
+            status=lambda campaign_id=None: {
+                "campaigns": [{
+                    "campaignId": campaign_id or "campaign-running",
+                    "status": "running",
+                }],
+            },
+            cancel=lambda _campaign_id: {
+                "cancelled": False,
+                "campaignId": "campaign-running",
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.cancel",
+                        {"campaignId": "campaign-running"},
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_cancel_not_applied")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_matrix_cancel_false_result_does_not_cancel_local_jobs(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        local_cancel_calls: list[object] = []
+        jobs = SimpleNamespace(
+            cancel_matching=lambda predicate: local_cancel_calls.append(predicate),
+        )
+        matrix = SimpleNamespace(
+            status=lambda campaign_id=None: {
+                "campaigns": [{
+                    "campaignId": campaign_id or "campaign-running",
+                    "status": "running",
+                }],
+            },
+            cancel=lambda campaign_id: {
+                "cancelled": False,
+                "campaignId": campaign_id,
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                job_manager=jobs,
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError):
+                    service.capabilities.execute(
+                        "loom.matrix.cancel",
+                        {"campaignId": "campaign-running"},
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(local_cancel_calls, [])
+
+    def test_matrix_attachment_counts_succeeded_device_tasks_as_completed(self) -> None:
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        attachment = AgentBuiltinCapabilityProvider._matrix_attachment(
+            {
+                "campaignId": "campaign-counts",
+                "status": "completed",
+                "missions": [{
+                    "deviceTasks": [
+                        {"deviceId": "phone-1", "status": "succeeded"},
+                        {"deviceId": "phone-2", "status": "completed"},
+                        {"deviceId": "phone-3", "status": "needs_human"},
+                    ],
+                }],
+            },
+            {"id": "job-counts"},
+        )
+
+        self.assertEqual(attachment["counts"], {
+            "total": 3,
+            "completed": 2,
+            "failed": 1,
+            "running": 0,
+        })
+
+    def test_matrix_cancel_without_authoritative_status_is_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        class Matrix:
+            def __init__(self) -> None:
+                self.status_calls = 0
+
+            def status(self, campaign_id=None):
+                self.status_calls += 1
+                if self.status_calls == 1:
+                    return {
+                        "campaigns": [{
+                            "campaignId": campaign_id,
+                            "status": "running",
+                        }],
+                    }
+                return {"campaigns": []}
+
+            def cancel(self, campaign_id):
+                return {"cancelled": True, "campaignId": campaign_id}
+
+        matrix = Matrix()
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.cancel",
+                        {"campaignId": "campaign-status-lost"},
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_cancel_status_unknown")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_matrix_status_queries_requested_campaign_beyond_default_window(self) -> None:
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        requested: list[str | None] = []
+
+        def status(campaign_id=None):
+            requested.append(campaign_id)
+            return {
+                "campaigns": (
+                    [{"campaignId": campaign_id, "status": "failed"}]
+                    if campaign_id
+                    else []
+                ),
+            }
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                matrix_factory=lambda: SimpleNamespace(status=status),
+            )
+            try:
+                result = service.capabilities.execute(
+                    "loom.matrix.status",
+                    {"campaignId": "campaign-old"},
+                )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(requested, ["campaign-old"])
+        self.assertEqual(result["campaigns"][0]["campaignId"], "campaign-old")
+
+    def test_matrix_retry_indeterminate_result_is_not_immediately_retryable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.agent_policy import AgentPolicyEngine
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        matrix = SimpleNamespace(
+            retry_failed=lambda campaign_id, _payload: {
+                "retried": False,
+                "campaignId": campaign_id,
+                "code": "matrix_retry_blocked_indeterminate",
+                "reason": "Check the actual device task status before retrying.",
+                "retryable": False,
+                "outcomeIndeterminate": True,
+                "executionMayContinue": True,
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.retry",
+                        {"campaignId": "campaign-indeterminate"},
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_retry_blocked_indeterminate")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_matrix_retry_missing_new_task_is_indeterminate_not_completed(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.agent_policy import AgentPolicyEngine
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        matrix = SimpleNamespace(
+            retry_failed=lambda campaign_id, _payload: {
+                "retried": True,
+                "retryOf": campaign_id,
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.retry",
+                        {"campaignId": "campaign-missing-task"},
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_retry_result_invalid")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
 
     def test_phone_publish_terminal_job_failure_fails_the_agent_capability(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
@@ -769,6 +1591,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.code, "phone_publish_semantic_failure")
             self.assertIn("未登录", str(raised.exception))
+            self.assertFalse(raised.exception.recoverable)
+            self.assertTrue(raised.exception.outcome_indeterminate)
+            self.assertFalse(raised.exception.execution_may_continue)
 
     def test_phone_publish_requires_existing_media_before_job_submit(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError

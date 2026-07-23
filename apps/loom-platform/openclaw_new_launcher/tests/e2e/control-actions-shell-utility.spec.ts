@@ -157,6 +157,19 @@ test('settings opens the global update center and installs only after download v
       installer_path: 'C:\\LOOM\\playwright-audit\\update.exe',
     },
   });
+  await audit.registerRoute('GET', '/api/update/status', {
+    value: {
+      phase: 'ready',
+      downloaded: 12_345_678,
+      total: 12_345_678,
+      percent: 100,
+      version: '2.3.1-audit',
+      message: '下载与安全校验已完成',
+      errorCode: '',
+      retryable: false,
+      remediation: [],
+    },
+  });
   await audit.registerCommand('prepare_update_install', { value: null });
 
   await navigateTo(audit, 'settings');
@@ -164,8 +177,9 @@ test('settings opens the global update center and installs only after download v
   const beforeCheck = await markCalls(audit);
   await appMain(page).getByRole('button', { name: '检查更新' }).click();
   await expectProxyIntent(audit, beforeCheck, { method: 'GET', path: '/api/update/check', body: null });
-  const updateCenter = page.getByRole('dialog', { name: '发现新版本' });
+  const updateCenter = page.locator('[data-update-phase]');
   await expect(updateCenter).toBeVisible();
+  await expect(updateCenter).toHaveAccessibleName('发现新版本');
   await expect(updateCenter).toContainText('Audit update center release notes');
 
   const install = updateCenter.getByRole('button', { name: '立即更新' });
@@ -173,6 +187,7 @@ test('settings opens the global update center and installs only after download v
   const beforeInstall = await markCalls(audit);
   await install.click();
   await expectProxyIntent(audit, beforeInstall, { method: 'POST', path: '/api/update/do', body: null });
+  await expect(updateCenter).toHaveAttribute('data-update-phase', 'ready');
   await expect(updateCenter.getByText('下载与安全校验已完成')).toBeVisible();
 
   const beforeRestart = await markCalls(audit);

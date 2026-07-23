@@ -91,7 +91,7 @@ OUTREACH_MARKERS = (
 
 _MATRIX_STATE_LOCK = threading.RLock()
 _MATRIX_LOCK_DEPTH = threading.local()
-_DEVICE_TASK_TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+_DEVICE_TASK_TERMINAL_STATES = frozenset({"succeeded", "failed", "needs_human", "cancelled"})
 _DEVICE_TASK_CANCELLABLE_STATES = frozenset({"queued", "preflight", "running", "retrying", "paused"})
 _DEVICE_RUNTIME_FIELDS = frozenset(
     {
@@ -373,9 +373,20 @@ class MatrixControlPlane:
             self._write_json(self.devices_path, {"schema": "loom.matrix.devices.v1", "devices": next_devices})
         return {"removed": removed, "deviceId": safe_id}
 
-    def status(self) -> Json:
+    def status(self, campaign_id: str | None = None) -> Json:
         devices = [_public_device(item) for item in self._load_devices()]
         tasks = self._load_tasks().get("campaigns", [])
+        selected_campaign_id = str(campaign_id or "").strip()
+        campaigns = (
+            [
+                item
+                for item in tasks
+                if isinstance(item, dict)
+                and str(item.get("campaignId") or "") == selected_campaign_id
+            ]
+            if selected_campaign_id
+            else tasks[-20:]
+        )
         return {
             "schema": "loom.matrix.v1",
             "updatedAt": _now_iso(),
@@ -386,7 +397,7 @@ class MatrixControlPlane:
                 "busy": sum(1 for item in devices if item.get("busy")),
                 "failed": sum(1 for item in devices if int(item.get("failureCount") or 0) > 0),
             },
-            "campaigns": _redact_json(tasks[-20:]),
+            "campaigns": _redact_json(campaigns),
         }
 
     @_matrix_state_guard
@@ -697,14 +708,64 @@ class MatrixControlPlane:
         tasks = self._load_tasks()
         campaign = next((item for item in tasks.get("campaigns", []) if item.get("campaignId") == campaign_id), None)
         if not isinstance(campaign, dict):
-            return {"retried": False, "campaignId": campaign_id, "reason": "campaign not found"}
+            raise MatrixTargetError("matrix_campaign_not_found", f"Matrix campaign not found: {campaign_id}")
         failed = []
+        indeterminate = []
         for mission in campaign.get("missions", []):
             for device_task in mission.get("deviceTasks", []):
-                if isinstance(device_task, dict) and device_task.get("status") == "failed":
+                if not isinstance(device_task, dict):
+                    continue
+                if (
+                    device_task.get("outcomeIndeterminate") is True
+                    or device_task.get("executionMayContinue") is True
+                    or device_task.get("status") == "needs_human"
+                ):
+                    indeterminate.append(device_task)
+                elif device_task.get("status") == "failed":
                     failed.append(device_task)
+        if indeterminate:
+            return {
+                "retried": False,
+                "campaignId": campaign_id,
+                "code": "matrix_retry_blocked_indeterminate",
+                "reason": (
+                    "Execution outcome is indeterminate and may still continue. "
+                    "Check the actual device and task status before retrying."
+                ),
+                "retryable": False,
+                "outcomeIndeterminate": True,
+                "executionMayContinue": any(
+                    item.get("executionMayContinue") is True for item in indeterminate
+                ),
+                "deviceTaskIds": [
+                    str(item.get("deviceTaskId") or "")
+                    for item in indeterminate
+                    if str(item.get("deviceTaskId") or "")
+                ],
+            }
         if not failed:
-            return {"retried": False, "campaignId": campaign_id, "reason": "没有失败设备任务"}
+            return {
+                "retried": False,
+                "campaignId": campaign_id,
+                "code": "matrix_retry_not_available",
+                "reason": (
+                    "No failed device tasks are available to retry. "
+                    "Refresh the campaign status and inspect its device tasks."
+                ),
+                "retryable": True,
+            }
+        failure_reasons = [
+            {
+                "deviceTaskId": str(item.get("deviceTaskId") or ""),
+                "deviceId": str(item.get("deviceId") or ""),
+                "code": str(item.get("failureCode") or ""),
+                "reason": str(
+                    item.get("failureReason")
+                    or "Review the device task logs before retrying."
+                ),
+            }
+            for item in failed
+        ]
         if campaign.get("requestSchema") == MATRIX_DISPATCH_SCHEMA:
             retry_payload: Json = {
                 "schema": MATRIX_DISPATCH_SCHEMA,
@@ -742,6 +803,7 @@ class MatrixControlPlane:
                 "retryOf": campaign_id,
                 "task": task,
                 "dispatchBody": _redact_json(retry_payload),
+                "failureReasons": _redact_json(failure_reasons),
             }
         retry_body = campaign.get("retryBody") if isinstance(campaign.get("retryBody"), dict) else {}
         prompt = _clip(body.get("prompt") or retry_body.get("promptPreview") or campaign.get("title") or "重试手机任务", 2000)
@@ -770,7 +832,13 @@ class MatrixControlPlane:
             "",
             f"已生成重试任务 {task.get('campaignId')}",
         )
-        return {"retried": True, "retryOf": campaign_id, "task": task, "dispatchBody": _redact_json(retry_payload)}
+        return {
+            "retried": True,
+            "retryOf": campaign_id,
+            "task": task,
+            "dispatchBody": _redact_json(retry_payload),
+            "failureReasons": _redact_json(failure_reasons),
+        }
 
     def record_lead(self, raw: Json) -> Json:
         lead = {
@@ -1951,14 +2019,24 @@ class MatrixControlPlane:
     @_matrix_state_guard
     def cancel(self, campaign_id: str) -> Json:
         tasks = self._load_tasks()
-        already_terminal = any(
-            isinstance(campaign, dict)
-            and str(campaign.get("campaignId") or "") == campaign_id
-            and str(campaign.get("status") or "") in _DEVICE_TASK_TERMINAL_STATES
-            for campaign in tasks.get("campaigns", [])
+        campaign = next(
+            (
+                item
+                for item in tasks.get("campaigns", [])
+                if isinstance(item, dict)
+                and str(item.get("campaignId") or "") == campaign_id
+            ),
+            None,
         )
+        if not isinstance(campaign, dict):
+            raise MatrixTargetError("matrix_campaign_not_found", f"Matrix campaign not found: {campaign_id}")
+        already_terminal = str(campaign.get("status") or "") in _DEVICE_TASK_TERMINAL_STATES
         result = self._cancel_campaigns(tasks, {campaign_id}, message="任务已取消")
-        result.update({"alreadyTerminal": already_terminal, "campaignId": campaign_id})
+        result.update({
+            "alreadyTerminal": already_terminal,
+            "campaignId": campaign_id,
+            "status": str(campaign.get("status") or ""),
+        })
         return result
 
     @_matrix_state_guard
@@ -2093,6 +2171,9 @@ class MatrixControlPlane:
         duration_ms: int,
         failure_reason: str = "",
         failure_code: str = "",
+        task_id: str = "",
+        outcome_indeterminate: bool = False,
+        execution_may_continue: bool = False,
     ) -> Json:
         tasks = self._load_tasks()
         found: Json | None = None
@@ -2118,10 +2199,23 @@ class MatrixControlPlane:
                 "status": task_status,
                 "deviceTaskId": device_task_id,
             }
-        found["status"] = "succeeded" if ok else "failed"
+        found["status"] = (
+            "succeeded"
+            if ok
+            else "needs_human"
+            if outcome_indeterminate or execution_may_continue
+            else "failed"
+        )
         found["durationMs"] = int(duration_ms)
         found["failureCode"] = "" if ok else _clip(failure_code, 100)
         found["failureReason"] = _clip(failure_reason, 200)
+        if not ok:
+            if task_id:
+                found["taskId"] = _clip(task_id, 160)
+            if outcome_indeterminate:
+                found["outcomeIndeterminate"] = True
+            if execution_may_continue:
+                found["executionMayContinue"] = True
         found["updatedAt"] = _now_iso()
         for step in found.get("steps", []):
             if step.get("status") == "running":
@@ -2163,6 +2257,12 @@ class MatrixControlPlane:
             "failureReason": _clip(failure_reason, 200),
             "promptHash": found.get("promptHash"),
         }
+        if not ok and task_id:
+            record["taskId"] = _clip(task_id, 160)
+        if not ok and outcome_indeterminate:
+            record["outcomeIndeterminate"] = True
+        if not ok and execution_may_continue:
+            record["executionMayContinue"] = True
         self._append_jsonl(self.experience_path, record)
         return {"ok": True, "record": _redact_json(record)}
 
@@ -2370,8 +2470,12 @@ class MatrixControlPlane:
                     mission["status"] = "paused"
                 elif statuses.issubset({"succeeded"}):
                     mission["status"] = "succeeded"
-                elif statuses and statuses.issubset({"failed", "succeeded", "cancelled"}):
-                    mission["status"] = "failed" if "failed" in statuses else "cancelled"
+                elif statuses and statuses.issubset({"failed", "needs_human", "succeeded", "cancelled"}):
+                    mission["status"] = (
+                        "failed"
+                        if statuses & {"failed", "needs_human"}
+                        else "cancelled"
+                    )
                 else:
                     mission["status"] = "running"
                 mission["updatedAt"] = now

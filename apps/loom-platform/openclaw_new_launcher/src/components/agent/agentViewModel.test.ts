@@ -1,6 +1,7 @@
 import 'tsx/esm';
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -13,7 +14,11 @@ import {
   sanitizeDisplayValue,
 } from './agentViewModel.ts';
 import * as agentViewModel from './agentViewModel.ts';
-import { MessageBlockView, ToolExecutionGroup } from './messageBlocks.tsx';
+import {
+  MessageBlockView,
+  ToolExecutionGroup,
+  toolExecutionGroupSummary,
+} from './messageBlocks.tsx';
 
 const SESSION_ID = 'session_1';
 
@@ -218,6 +223,371 @@ test('missing critical target is localized without leaking the policy code', () 
   assert.equal(summary.title, '请明确操作对象');
   assert.match(summary.message, /设备|目标/);
   assert.doesNotMatch(JSON.stringify(summary), /critical_target_required|explicit target|critical actions/i);
+});
+
+test('matrix scope failures explain which target must be selected', () => {
+  const target = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'matrix_target_scope_required',
+      message: 'Matrix dispatch requires an explicit target selected for this run.',
+      recoverable: true,
+    },
+  });
+  const campaign = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'matrix_campaign_scope_required',
+      message: 'Matrix cancel and retry require a campaign bound to this run.',
+      recoverable: true,
+    },
+  });
+  const mismatch = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'matrix_campaign_scope_violation',
+      message: "Matrix campaign is outside this run's requested campaign scope.",
+      recoverable: true,
+    },
+  });
+
+  assert.equal(target.title, '请选择矩阵目标');
+  assert.match(target.message, /手机|设备组|全部在线/);
+  assert.equal(campaign.title, '请选择对应矩阵任务');
+  assert.match(campaign.message, /原会话|任务/);
+  assert.equal(mismatch.title, '矩阵任务不匹配');
+  assert.match(mismatch.message, /当前会话|对应任务/);
+  assert.doesNotMatch(
+    JSON.stringify([target, campaign, mismatch]),
+    /matrix_(target|campaign)_scope|explicit target|campaign bound|requested campaign scope/i,
+  );
+});
+
+test('missing media and disconnected capabilities have actionable Chinese guidance', () => {
+  const unavailable = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'capability_unavailable',
+      message: 'Capability is not connected: loom.media.generate_image',
+      recoverable: true,
+    },
+  });
+  const missing = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'publish_media_missing',
+      message: 'No generated media was attached to the publish request.',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(unavailable.title, '能力尚未就绪');
+  assert.match(unavailable.message, /安装|配置|运行状态/);
+  assert.equal(missing.title, '找不到可用素材');
+  assert.match(missing.message, /生成|素材库/);
+  assert.doesNotMatch(
+    JSON.stringify([unavailable, missing]),
+    /capability_unavailable|not connected|publish_media_missing|attached/i,
+  );
+});
+
+test('indeterminate execution timeouts never expose an immediate retry action', () => {
+  for (const code of [
+    'phone_task_timeout',
+    'media_job_timeout',
+    'media_transfer_timeout',
+    'publish_job_timeout',
+    'capability_timeout_indeterminate',
+  ]) {
+    const summary = agentViewModel.userFacingAgentError({
+      error: {
+        code,
+        message: `${code}: operation exceeded its execution window`,
+        recoverable: false,
+      },
+    });
+
+    assert.equal(summary.title, '执行状态待确认');
+    assert.match(summary.message, /可能仍在执行/);
+    assert.match(summary.message, /避免重复执行/);
+    assert.equal(summary.recoverable, false);
+    assert.doesNotMatch(JSON.stringify(summary), /timeout|execution window/i);
+  }
+});
+
+test('pre-execution capability timeout remains safely retryable', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'capability_timeout',
+      message: 'Capability timed out before starting.',
+      recoverable: true,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '能力等待超时',
+    message: '这项能力没有在时间限制内开始执行，本轮没有产生新的操作。请稍后重试；若持续出现，请检查系统负载。',
+    recoverable: true,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /capability_timeout|timed out/i);
+});
+
+test('tool loop guards explain why autonomous execution stopped', () => {
+  for (const code of ['agent_repeated_tool_call', 'agent_tool_loop_limit']) {
+    const summary = agentViewModel.userFacingAgentError({
+      error: {
+        code,
+        message: 'Agent exceeded the maximum number of tool rounds.',
+        recoverable: true,
+      },
+    });
+
+    assert.equal(summary.title, '已停止重复调用');
+    assert.match(summary.message, /没有新证据|调整任务/);
+    assert.doesNotMatch(JSON.stringify(summary), /agent_|tool rounds|maximum/i);
+  }
+});
+
+test('restart recovery never encourages replaying an uncertain side effect', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_restart_inflight_unknown',
+      message: 'A tool was in flight when the app stopped; it will not be repeated automatically.',
+      recoverable: true,
+      outcomeIndeterminate: true,
+    },
+  });
+
+  assert.equal(summary.title, '执行状态待确认');
+  assert.match(summary.message, /重启|关闭/);
+  assert.match(summary.message, /避免重复执行/);
+  assert.equal(summary.recoverable, false);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_restart|in flight|repeated automatically/i);
+});
+
+test('service worker crash during a tool never encourages replaying the side effect', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_service_inflight_unknown',
+      message: 'simulated service worker crash',
+      recoverable: true,
+      outcomeIndeterminate: true,
+      executionMayContinue: true,
+    },
+  });
+
+  assert.equal(summary.title, '执行状态待确认');
+  assert.match(summary.message, /服务异常/);
+  assert.match(summary.message, /避免重复执行/);
+  assert.equal(summary.recoverable, false);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_service|worker crash|simulated/i);
+});
+
+test('post-execution persistence failure warns against duplicate side effects', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_tool_result_persistence_failed',
+      message: 'internal persistence error',
+      recoverable: true,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '执行结果未能保存',
+    message: '工具已经执行，但麓鸣未能可靠保存结果。请先检查手机、矩阵任务、素材库或发布记录，确认实际状态后再决定是否重试。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /agent_tool|persistence|internal/i);
+});
+
+test('completed tool event failure says the operation finished and forbids replay', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_tool_completion_event_failed',
+      message: 'Tool completed but its realtime event could not be persisted.',
+      recoverable: false,
+      outcomeIndeterminate: false,
+      executionMayContinue: false,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '操作已完成，界面同步失败',
+    message: '工具结果已经执行并保存，但完成状态没有及时显示。请刷新会话查看结果，不要直接重跑，以免重复操作。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /agent_tool|realtime|persisted/i);
+});
+
+test('approval state failures are localized without exposing policy protocol text', () => {
+  const rejected = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'approval_rejected',
+      message: 'Approval did not authorize the pending tool call.',
+      recoverable: true,
+    },
+  });
+  const conflict = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'approval_conflict',
+      message: 'Approval was resolved by another request.',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(rejected.title, '操作未获授权');
+  assert.match(rejected.message, /未执行|重新发起/);
+  assert.equal(conflict.title, '审批状态已变化');
+  assert.match(conflict.message, /刷新|最新状态/);
+  assert.doesNotMatch(
+    JSON.stringify([rejected, conflict]),
+    /approval_|pending tool|resolved by another/i,
+  );
+});
+
+test('missing or unavailable phone targets ask for a fresh device selection', () => {
+  for (const code of ['phone_target_not_found', 'phone_target_unavailable']) {
+    const summary = agentViewModel.userFacingAgentError({
+      error: {
+        code,
+        message: `${code}: configured phone is no longer available`,
+        recoverable: true,
+      },
+    });
+
+    assert.equal(summary.title, '目标手机不可用');
+    assert.match(summary.message, /刷新|在线手机/);
+    assert.doesNotMatch(JSON.stringify(summary), /phone_target|configured phone/i);
+  }
+});
+
+test('invalid tool output warns against blindly retrying a completed side effect', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'capability_invalid_output',
+      message: 'output.receiptId is required',
+      recoverable: false,
+      outcomeIndeterminate: true,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '执行结果待确认',
+    message: '操作已经发起，但返回结果格式异常，麓鸣无法确认最终状态。请先查看目标设备或任务记录，确认后再决定是否重试，避免重复执行。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /capability_invalid_output|output\.receiptId|required/i);
+});
+
+test('unknown control execution outcome warns against replaying the side effect', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'capability_execution_unknown',
+      message: 'connection reset after request was sent',
+      recoverable: false,
+      outcomeIndeterminate: true,
+      executionMayContinue: false,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '执行状态待确认',
+    message: '操作已经发出，但连接在返回结果前中断，麓鸣无法确认是否已生效。请先查看手机、矩阵任务、素材库或发布记录，避免直接重复执行。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /capability_execution_unknown|connection reset/i);
+});
+
+test('new indeterminate side-effect errors default to inspection instead of retry', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'media_transfer_failed',
+      message: 'one device failed after another device received the asset',
+      recoverable: true,
+      outcomeIndeterminate: true,
+      executionMayContinue: false,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '部分结果待确认',
+    message: '任务可能已经在部分设备或平台生效。请先检查目标手机、素材库、矩阵任务或发布记录，再决定是否重新执行。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /media_transfer_failed|one device failed/i);
+});
+
+test('oversized runtime output explains that no new tool was executed', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_runtime_output_too_large',
+      message: 'Agent runtime output exceeded 2 MB.',
+      recoverable: false,
+    },
+  });
+
+  assert.equal(summary.title, '智能体输出过多');
+  assert.match(summary.message, /尚未继续执行新的工具/);
+  assert.equal(summary.recoverable, true);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_runtime|exceeded|2 MB/i);
+});
+
+test('invalid model protocol is localized as a safe pre-tool failure', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'AGENT_MODEL_PROTOCOL_INVALID',
+      message: 'Managed gateway tool arguments were malformed JSON.',
+      recoverable: false,
+    },
+  });
+
+  assert.equal(summary.title, '模型响应格式异常');
+  assert.match(summary.message, /未继续执行新的工具/);
+  assert.equal(summary.recoverable, true);
+  assert.doesNotMatch(JSON.stringify(summary), /protocol|malformed|gateway/i);
+});
+
+test('conflicting reused tool call IDs warn about partial execution and forbid direct retry', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_tool_call_id_collision',
+      message: 'Runtime reused a completed toolCallId with different content.',
+      recoverable: false,
+      outcomeIndeterminate: true,
+      executionMayContinue: false,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '模型调用标识冲突',
+    message: '本轮已有工具完成，但模型又用相同标识请求了不同操作。麓鸣已停止后续执行，请先检查已有结果，避免直接重跑造成重复操作。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /toolCallId|runtime|collision/i);
+});
+
+test('runtime event persistence failure reports child termination and diagnostics', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_runtime_event_failed',
+      message: 'Agent runtime progress could not be persisted.',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(summary.title, '运行记录写入失败');
+  assert.match(summary.message, /停止智能体子进程/);
+  assert.match(summary.message, /环境诊断/);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_runtime|persisted/i);
+});
+
+test('runtime timeout is localized without exposing the adapter protocol', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_runtime_timeout',
+      message: 'Agent runtime exceeded its time limit.',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(summary.title, '模型响应超时');
+  assert.match(summary.message, /停止等待/);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_runtime|time limit/i);
 });
 
 test('phone publish login failures show the actionable manual handoff', () => {
@@ -660,6 +1030,38 @@ test('terminal tool status never regresses to a later nonterminal update', () =>
   assert.equal(state.messages[0].status, 'completed');
 });
 
+test('terminal messages ignore later replayed deltas', () => {
+  for (const status of ['completed', 'failed'] as const) {
+    const initial = createAgentEventState([message(`message_${status}`, 'Final text', status)]);
+    const state = mergeAgentEvent(initial, event(1, 'message.delta', {
+      sessionId: SESSION_ID,
+      messageId: `message_${status}`,
+      runId: 'run_1',
+      delta: ' stale delta',
+    }), SESSION_ID);
+
+    assert.equal(state.messages[0].status, status);
+    assert.equal(state.messages[0].blocks[0].data.text, 'Final text');
+    assert.equal(state.lastSeq, 1);
+  }
+});
+
+test('terminal runs ignore later replayed run starts', () => {
+  for (const terminalType of ['run.completed', 'run.failed', 'run.cancelled'] as const) {
+    const terminalStatus = terminalType.slice('run.'.length);
+    const state = [
+      event(1, terminalType, { sessionId: SESSION_ID, runId: 'run_1' }),
+      event(2, 'run.started', { sessionId: SESSION_ID, runId: 'run_1' }),
+    ].reduce(
+      (current, item) => mergeAgentEvent(current, item, SESSION_ID),
+      createAgentEventState(),
+    );
+
+    assert.equal(state.runs.run_1.status, terminalStatus);
+    assert.equal(state.lastSeq, 2);
+  }
+});
+
 test('the same tool call ID remains distinct across runs', () => {
   const state = [
     event(1, 'tool.started', {
@@ -703,6 +1105,37 @@ test('terminal run events reconcile only their nonterminal tool rows', () => {
     assert.equal(tools.find((block) => block.data.runId === 'run_1')?.data.status, expectedStatus);
     assert.equal(tools.find((block) => block.data.runId === 'run_2')?.data.status, 'running');
   }
+});
+
+test('terminal runs keep tool summaries terminal even when a stale active block remains', () => {
+  const summaryFor = (status: 'completed' | 'failed' | 'cancelled') => (
+    toolExecutionGroupSummary([{
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_1',
+        capability: 'loom.phone.control',
+        status: 'awaiting',
+      },
+    }], {
+      schema: 'loom.agent.run.v1',
+      runId: 'run_1',
+      sessionId: SESSION_ID,
+      status,
+      campaignIds: [],
+    })
+  );
+
+  assert.equal(summaryFor('completed').state, 'completed');
+  assert.equal(summaryFor('failed').state, 'failed');
+  assert.equal(summaryFor('cancelled').state, 'failed');
+});
+
+test('archive confirmation explains that an active run is cancelled before archiving', () => {
+  const source = readFileSync(new URL('./ConversationSidebar.tsx', import.meta.url), 'utf8');
+
+  assert.match(source, /先取消活动运行，再归档对话/);
+  assert.doesNotMatch(source, /运行中的后台任务不会被取消/);
 });
 
 test('approval cards remain independent from their related tool lifecycle', () => {
