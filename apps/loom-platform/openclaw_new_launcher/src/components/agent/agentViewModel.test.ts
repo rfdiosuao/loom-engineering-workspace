@@ -220,6 +220,166 @@ test('missing critical target is localized without leaking the policy code', () 
   assert.doesNotMatch(JSON.stringify(summary), /critical_target_required|explicit target|critical actions/i);
 });
 
+test('matrix scope failures explain which target must be selected', () => {
+  const target = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'matrix_target_scope_required',
+      message: 'Matrix dispatch requires an explicit target selected for this run.',
+      recoverable: true,
+    },
+  });
+  const campaign = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'matrix_campaign_scope_required',
+      message: 'Matrix cancel and retry require a campaign bound to this run.',
+      recoverable: true,
+    },
+  });
+  const mismatch = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'matrix_campaign_scope_violation',
+      message: "Matrix campaign is outside this run's requested campaign scope.",
+      recoverable: true,
+    },
+  });
+
+  assert.equal(target.title, '请选择矩阵目标');
+  assert.match(target.message, /手机|设备组|全部在线/);
+  assert.equal(campaign.title, '请选择对应矩阵任务');
+  assert.match(campaign.message, /原会话|任务/);
+  assert.equal(mismatch.title, '矩阵任务不匹配');
+  assert.match(mismatch.message, /当前会话|对应任务/);
+  assert.doesNotMatch(
+    JSON.stringify([target, campaign, mismatch]),
+    /matrix_(target|campaign)_scope|explicit target|campaign bound|requested campaign scope/i,
+  );
+});
+
+test('missing media and disconnected capabilities have actionable Chinese guidance', () => {
+  const unavailable = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'capability_unavailable',
+      message: 'Capability is not connected: loom.media.generate_image',
+      recoverable: true,
+    },
+  });
+  const missing = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'publish_media_missing',
+      message: 'No generated media was attached to the publish request.',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(unavailable.title, '能力尚未就绪');
+  assert.match(unavailable.message, /安装|配置|运行状态/);
+  assert.equal(missing.title, '找不到可用素材');
+  assert.match(missing.message, /生成|素材库/);
+  assert.doesNotMatch(
+    JSON.stringify([unavailable, missing]),
+    /capability_unavailable|not connected|publish_media_missing|attached/i,
+  );
+});
+
+test('execution timeouts warn that a side effect may still be running', () => {
+  for (const code of [
+    'phone_task_timeout',
+    'media_job_timeout',
+    'media_transfer_timeout',
+    'publish_job_timeout',
+    'capability_timeout',
+    'capability_timeout_indeterminate',
+  ]) {
+    const summary = agentViewModel.userFacingAgentError({
+      error: {
+        code,
+        message: `${code}: operation exceeded its execution window`,
+        recoverable: true,
+      },
+    });
+
+    assert.equal(summary.title, '任务执行超时');
+    assert.match(summary.message, /可能仍在执行/);
+    assert.match(summary.message, /避免重复执行/);
+    assert.doesNotMatch(JSON.stringify(summary), /timeout|execution window/i);
+  }
+});
+
+test('tool loop guards explain why autonomous execution stopped', () => {
+  for (const code of ['agent_repeated_tool_call', 'agent_tool_loop_limit']) {
+    const summary = agentViewModel.userFacingAgentError({
+      error: {
+        code,
+        message: 'Agent exceeded the maximum number of tool rounds.',
+        recoverable: true,
+      },
+    });
+
+    assert.equal(summary.title, '已停止重复调用');
+    assert.match(summary.message, /没有新证据|调整任务/);
+    assert.doesNotMatch(JSON.stringify(summary), /agent_|tool rounds|maximum/i);
+  }
+});
+
+test('restart recovery never encourages replaying an uncertain side effect', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_restart_inflight_unknown',
+      message: 'A tool was in flight when the app stopped; it will not be repeated automatically.',
+      recoverable: true,
+      outcomeIndeterminate: true,
+    },
+  });
+
+  assert.equal(summary.title, '执行状态待确认');
+  assert.match(summary.message, /重启|关闭/);
+  assert.match(summary.message, /避免重复执行/);
+  assert.equal(summary.recoverable, false);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_restart|in flight|repeated automatically/i);
+});
+
+test('approval state failures are localized without exposing policy protocol text', () => {
+  const rejected = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'approval_rejected',
+      message: 'Approval did not authorize the pending tool call.',
+      recoverable: true,
+    },
+  });
+  const conflict = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'approval_conflict',
+      message: 'Approval was resolved by another request.',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(rejected.title, '操作未获授权');
+  assert.match(rejected.message, /未执行|重新发起/);
+  assert.equal(conflict.title, '审批状态已变化');
+  assert.match(conflict.message, /刷新|最新状态/);
+  assert.doesNotMatch(
+    JSON.stringify([rejected, conflict]),
+    /approval_|pending tool|resolved by another/i,
+  );
+});
+
+test('missing or unavailable phone targets ask for a fresh device selection', () => {
+  for (const code of ['phone_target_not_found', 'phone_target_unavailable']) {
+    const summary = agentViewModel.userFacingAgentError({
+      error: {
+        code,
+        message: `${code}: configured phone is no longer available`,
+        recoverable: true,
+      },
+    });
+
+    assert.equal(summary.title, '目标手机不可用');
+    assert.match(summary.message, /刷新|在线手机/);
+    assert.doesNotMatch(JSON.stringify(summary), /phone_target|configured phone/i);
+  }
+});
+
 test('invalid tool output warns against blindly retrying a completed side effect', () => {
   const summary = agentViewModel.userFacingAgentError({
     error: {

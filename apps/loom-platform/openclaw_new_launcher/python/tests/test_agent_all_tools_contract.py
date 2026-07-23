@@ -571,6 +571,133 @@ class AgentAllToolsContractTests(unittest.TestCase):
             self.assertEqual(len(calls), len(connected))
             self.assertEqual(approval_count, expected_approvals)
 
+    def test_every_connected_production_tool_failure_closes_without_reexecution(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        class _ConnectedJobManager:
+            def submit_progress(self, *_args, **_kwargs):
+                return {"id": "unused-failure-contract-job"}
+
+        calls: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory() as root:
+            discovery_service = AgentService(
+                AppPaths(root),
+                runtime=object(),
+                context_factory=lambda: object(),
+                job_manager=_ConnectedJobManager(),
+            )
+            try:
+                production_capabilities = discovery_service.capabilities.list_capabilities(
+                    available_only=True,
+                )
+            finally:
+                discovery_service.shutdown()
+
+            operations: dict[str, dict[str, Any]] = {}
+            for capability in production_capabilities:
+                name = str(capability["name"])
+
+                def fail(
+                    payload,
+                    *,
+                    cancellation_token=None,
+                    capability_name=name,
+                ):
+                    calls.append({
+                        "name": capability_name,
+                        "payload": dict(payload),
+                        "cancelled": bool(cancellation_token and cancellation_token.cancelled),
+                    })
+                    raise CapabilityExecutionError(
+                        "injected_tool_failure",
+                        f"Injected failure for {capability_name}",
+                        recoverable=False,
+                    )
+
+                operations[name] = {
+                    **capability,
+                    "executor": fail,
+                }
+
+            registry = CapabilityRegistry(
+                internal_operations=operations,
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            connected = registry.list_capabilities(available_only=True)
+            repository = AgentSessionRepository(root)
+            event_bus = AgentEventBus(repository)
+
+            for index, capability in enumerate(connected):
+                name = str(capability["name"])
+                session_id = f"failure-tool-session-{index}"
+                run_id = f"failure-tool-run-{index}"
+                repository.create_session(capability["displayName"], session_id=session_id)
+                payload = _minimal_value(capability["inputSchema"])
+                target_scope = capability["targetScope"]
+                request: dict[str, Any] = {
+                    "prompt": capability["displayName"],
+                    "capabilityHints": [name],
+                }
+
+                if target_scope in {
+                    "single-device-read",
+                    "single-device-write",
+                    "optional-device-write",
+                }:
+                    for key in ("deviceId", "device", "target", "targets", "deviceIds", "groups", "allOnline"):
+                        payload.pop(key, None)
+                    request["targets"] = {"deviceIds": ["phone-1"]}
+                elif target_scope == "matrix-write":
+                    for key in ("deviceId", "group", "target", "targets", "deviceIds", "groups", "allOnline"):
+                        payload.pop(key, None)
+                    request["targets"] = {"allOnline": True}
+                elif target_scope == "campaign-write":
+                    for key in ("campaignId", "id"):
+                        payload.pop(key, None)
+                    request["campaignIds"] = ["campaign-1"]
+
+                before_calls = len(calls)
+                orchestrator = AgentOrchestrator(
+                    repository,
+                    event_bus,
+                    _SingleToolRuntime(name, payload),
+                    registry,
+                    AgentPolicyEngine(approval_mode="strong"),
+                )
+                orchestrator.queue_run(session_id, run_id=run_id)
+                result = orchestrator.execute_run(session_id, run_id, request)
+                if result["status"] == "waiting_approval":
+                    approvals = repository.list_approvals(session_id, run_id=run_id)
+                    self.assertEqual(len(approvals), 1, name)
+                    result = orchestrator.resolve_approval(
+                        session_id,
+                        approvals[0]["approvalId"],
+                        decision="approved",
+                        decided_by="failure-contract-test",
+                        request=request,
+                    )["run"]
+
+                self.assertEqual(result["status"], "failed", name)
+                self.assertEqual(result["error"]["code"], "injected_tool_failure", name)
+                self.assertEqual(len(calls), before_calls + 1, name)
+                checkpoint = json.loads(result["checkpoint"])
+                self.assertEqual(len(checkpoint["toolResults"]), 1, name)
+                self.assertEqual(
+                    checkpoint["toolResults"][0]["error"]["code"],
+                    "injected_tool_failure",
+                    name,
+                )
+
+            self.assertEqual(len(calls), len(connected))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 
 from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
 from core.agent_events import AgentEventBus
+from core.agent_language import has_positive_term
 from core.agent_orchestrator import AgentOrchestrator
 from core.agent_policy import AgentPolicyEngine
 from core.agent_runtime import redact_sensitive
@@ -42,9 +43,19 @@ _SCOPE_CONTINUATION_TERMS = (
     "\u521a\u624d",
     "\u4e0a\u9762",
     "\u4e4b\u524d",
-    "\u624b\u673a",
-    "\u56fe\u7247",
-    "\u89c6\u9891",
+)
+_SCOPE_INDEPENDENT_MEDIA_TERMS = (
+    "生成图片",
+    "生成一张图片",
+    "生成海报",
+    "制作图片",
+    "画一张",
+    "画图",
+    "生图",
+    "生成视频",
+    "制作视频",
+    "做视频",
+    "生视频",
 )
 NATIVE_RUNTIME_NAME = "麓鸣原生智能体"
 
@@ -79,7 +90,15 @@ def _history_message_text(item: Any) -> str:
 
 def _is_scope_continuation(text: str) -> bool:
     folded = str(text or "").casefold()
-    return any(term.casefold() in folded for term in _SCOPE_CONTINUATION_TERMS)
+    continuation = has_positive_term(
+        folded,
+        tuple(term.casefold() for term in _SCOPE_CONTINUATION_TERMS),
+    )
+    independent_media = has_positive_term(
+        folded,
+        tuple(term.casefold() for term in _SCOPE_INDEPENDENT_MEDIA_TERMS),
+    )
+    return continuation and not independent_media
 
 
 class AgentService:

@@ -760,7 +760,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             events = AgentEventBus(repository).replay("session-1")
             approvals = repository.list_approvals("session-1", run_id="run-invalid-outbound")
 
-            self.assertEqual(waiting["status"], "waiting_approval")
+            self.assertEqual(waiting["status"], "waiting_approval", waiting)
             self.assertEqual(calls, [])
             self.assertEqual(len(runtime.requests), 2)
             self.assertEqual(
@@ -2395,6 +2395,134 @@ class AgentOrchestratorTests(unittest.TestCase):
             capability_names = {item["name"] for item in request["capabilities"]}
             self.assertNotIn("loom.media.image.generate", capability_names)
             self.assertNotIn("loom.media.video.generate", capability_names)
+
+    def test_generated_media_flows_into_approved_publish_without_target_or_path_loss(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        generation_calls: list[dict] = []
+        publish_calls: list[dict] = []
+
+        with tempfile.TemporaryDirectory() as root:
+            media_path = os.path.join(root, "generated-poster.png")
+            with open(media_path, "wb") as handle:
+                handle.write(b"poster")
+
+            class ChainedRuntime:
+                def __init__(self):
+                    self.requests: list[dict] = []
+
+                def status(self, _profile_id=None):
+                    return {"available": True, "runtime": "chained-test"}
+
+                def start(self, request, _emit, cancel, *, timeout_sec=None):
+                    if cancel.is_set():
+                        raise AssertionError("runtime started after cancellation")
+                    self.requests.append(dict(request))
+                    if len(self.requests) == 1:
+                        return {
+                            "toolCalls": [{
+                                "toolCallId": "generate-chain-1",
+                                "name": "loom.media.image.generate",
+                                "input": {"prompt": "生成招聘海报"},
+                            }],
+                        }
+                    if len(self.requests) == 2:
+                        generated = request["toolResults"][-1]["result"]
+                        observed_path = generated["attachments"][0]["path"]
+                        return {
+                            "toolCalls": [{
+                                "toolCallId": "publish-chain-1",
+                                "name": "loom.phone.publish",
+                                "input": {
+                                    "platform": "xiaohongshu",
+                                    "title": "招聘进行中",
+                                    "body": "查看岗位详情",
+                                    "mediaPaths": [observed_path],
+                                    "draftOnly": True,
+                                },
+                            }],
+                        }
+                    return {"final": {"text": "图片已生成并保存到目标手机草稿"}}
+
+            runtime = ChainedRuntime()
+
+            def generate(payload):
+                generation_calls.append(dict(payload))
+                return {
+                    "jobId": "job-image-chain",
+                    "kind": "image",
+                    "status": "succeeded",
+                    "result": {"success": True},
+                    "attachments": [{
+                        "name": "generated-poster.png",
+                        "path": media_path,
+                        "mime": "image/png",
+                        "kind": "image",
+                    }],
+                }
+
+            def publish(payload):
+                publish_calls.append(dict(payload))
+                return {
+                    "jobId": "job-publish-chain",
+                    "kind": "publish",
+                    "status": "succeeded",
+                    "result": {"success": True, "draftOnly": True},
+                }
+
+            repository = AgentSessionRepository(root)
+            repository.create_session("Chained media publish", session_id="session-chain")
+            event_bus = AgentEventBus(repository)
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.media.image.generate": {"executor": generate},
+                    "loom.phone.publish": {
+                        "executor": publish,
+                        "permission": "control",
+                        "risk": "outbound",
+                        "targetScope": "single-device-write",
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                event_bus,
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="strong"),
+            )
+            orchestrator.queue_run("session-chain", run_id="run-chain")
+            request = {
+                "prompt": "生成一张招聘海报并发布到 phone-1 的小红书草稿",
+                "targets": {"deviceIds": ["phone-1"]},
+            }
+
+            waiting = orchestrator.execute_run("session-chain", "run-chain", request)
+            self.assertEqual(waiting["status"], "waiting_approval")
+            self.assertEqual(len(generation_calls), 1)
+            self.assertEqual(publish_calls, [])
+
+            approval = repository.list_approvals("session-chain", run_id="run-chain")[0]
+            completed = orchestrator.resolve_approval(
+                "session-chain",
+                approval["approvalId"],
+                decision="approved",
+                decided_by="test",
+                request=request,
+            )["run"]
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(len(publish_calls), 1)
+        self.assertEqual(publish_calls[0]["deviceId"], "phone-1")
+        self.assertEqual(publish_calls[0]["mediaPaths"], [media_path])
+        self.assertEqual(runtime.requests[1]["toolResults"][-1]["result"]["attachments"][0]["path"], media_path)
 
     def test_matrix_tools_cannot_invent_a_device_scope_for_an_unscoped_run(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator

@@ -788,6 +788,90 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(runtime.requests[1]["targets"], {"deviceIds": ["phone-progress"]})
         self.assertEqual(runtime.requests[2]["targets"], {})
 
+    def test_new_media_or_phone_query_does_not_inherit_an_unrelated_previous_phone_scope(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([
+            {"final": {"text": "published"}},
+            {"final": {"text": "generated"}},
+            {"final": {"text": "listed"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=_registry(),
+                matrix_factory=ProgressMatrix,
+            )
+            try:
+                session = service.create_session({"title": "No accidental scope inheritance"})
+                first = service.send_message(session["sessionId"], {
+                    "clientMessageId": "no-scope-leak-1",
+                    "text": "发布到小红书",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, first["run"]["runId"], "completed")
+                second = service.send_message(session["sessionId"], {
+                    "clientMessageId": "no-scope-leak-2",
+                    "text": "生成一张图片",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, second["run"]["runId"], "completed")
+                third = service.send_message(session["sessionId"], {
+                    "clientMessageId": "no-scope-leak-3",
+                    "text": "现在有哪些手机",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, third["run"]["runId"], "completed")
+            finally:
+                service.shutdown()
+
+        self.assertEqual(runtime.requests[0]["targets"], {"deviceIds": ["phone-progress"]})
+        self.assertEqual(runtime.requests[1]["targets"], {})
+        self.assertEqual(runtime.requests[2]["targets"], {})
+
+    def test_negated_or_independent_continuation_does_not_reuse_previous_phone_scope(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([
+            {"final": {"text": "published"}},
+            {"final": {"text": "generated"}},
+            {"final": {"text": "explained"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=_registry(),
+                matrix_factory=ProgressMatrix,
+            )
+            try:
+                session = service.create_session({"title": "Scope continuation boundaries"})
+                first = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-boundary-1",
+                    "text": "发布到小红书",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, first["run"]["runId"], "completed")
+                second = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-boundary-2",
+                    "text": "继续生成一张图片",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, second["run"]["runId"], "completed")
+                third = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-boundary-3",
+                    "text": "不要继续刚才的手机任务，只说明风险",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, third["run"]["runId"], "completed")
+            finally:
+                service.shutdown()
+
+        self.assertEqual(runtime.requests[0]["targets"], {"deviceIds": ["phone-progress"]})
+        self.assertEqual(runtime.requests[1]["targets"], {})
+        self.assertEqual(runtime.requests[2]["targets"], {})
+
     def test_explicit_capability_id_is_added_to_runtime_hints(self) -> None:
         from services.agent_service import AgentService
 

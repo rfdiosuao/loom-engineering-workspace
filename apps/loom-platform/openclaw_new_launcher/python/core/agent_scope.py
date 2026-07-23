@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from core.agent_language import has_positive_term, is_negated_occurrence
+
 
 _ALL_ONLINE_PHRASES = (
     "全部在线设备",
@@ -34,6 +36,13 @@ _PHONE_ACTION_TERMS = (
     "登录",
     "发布",
     "发送",
+    "传到",
+    "传入",
+    "传给",
+    "传输",
+    "上传",
+    "导入",
+    "保存到",
     "查看",
     "检查",
     "检测",
@@ -122,7 +131,8 @@ def resolve_request_scope(text: str, explicit_scope: Mapping[str, Any] | None, m
     selected_device_ids = set([*direct_device_ids, *alias_device_ids])
     device_ids = [device_id for device_id in devices if device_id in selected_device_ids]
     matched_groups = [group for group in groups if _contains_label(content, group)]
-    all_online = any(phrase.casefold() in content.casefold() for phrase in _ALL_ONLINE_PHRASES)
+    folded = content.casefold()
+    all_online = has_positive_term(folded, tuple(phrase.casefold() for phrase in _ALL_ONLINE_PHRASES))
     selector_count = sum(bool(value) for value in (device_ids, matched_groups, all_online))
     if selector_count > 1:
         return _ambiguous(mode, "请求同时包含不同类型的设备范围")
@@ -260,11 +270,12 @@ def _resolve_device_aliases(text: str, aliases: Mapping[str, Sequence[str]]) -> 
 
 
 def _contains_identifier(text: str, identifier: str) -> bool:
-    return re.search(
+    matches = re.finditer(
         rf"(?<![A-Za-z0-9_-]){re.escape(identifier)}(?![A-Za-z0-9_-])",
         text,
         re.IGNORECASE,
-    ) is not None
+    )
+    return any(not is_negated_occurrence(text, match.start()) for match in matches)
 
 
 def _contains_label(text: str, label: str) -> bool:
@@ -277,13 +288,20 @@ def _label_spans(text: str, label: str) -> list[tuple[int, int]]:
     pattern = re.escape(label)
     if not re.search(r"[\u3400-\u9fff]", label):
         pattern = rf"(?<![A-Za-z0-9_-]){pattern}(?![A-Za-z0-9_-])"
-    return [match.span() for match in re.finditer(pattern, text, re.IGNORECASE)]
+    return [
+        match.span()
+        for match in re.finditer(pattern, text, re.IGNORECASE)
+        if not is_negated_occurrence(text, match.start())
+    ]
 
 
 def _requires_phone_target(text: str) -> bool:
     folded = text.casefold()
-    has_action = any(term.casefold() in folded for term in _PHONE_ACTION_TERMS)
-    has_context = any(term.casefold() in folded for term in (*_PHONE_CONTEXT_TERMS, *_MOBILE_PLATFORM_TERMS))
+    has_action = has_positive_term(folded, tuple(term.casefold() for term in _PHONE_ACTION_TERMS))
+    has_context = has_positive_term(
+        folded,
+        tuple(term.casefold() for term in (*_PHONE_CONTEXT_TERMS, *_MOBILE_PLATFORM_TERMS)),
+    )
     return has_action and (has_context or _DEVICE_LIKE_PATTERN.search(text) is not None)
 
 

@@ -92,6 +92,41 @@ class AgentScopeTests(unittest.TestCase):
                 self.assertEqual(result.status, "resolved")
                 self.assertEqual(result.device_ids, ["phone-1"])
 
+    def test_media_transfer_language_resolves_one_phone_and_clarifies_multiple(self) -> None:
+        one_phone = {"devices": [{"deviceId": "phone-1", "online": True}]}
+
+        for prompt in ("把图片传到手机相册", "上传视频到手机", "传输素材到设备"):
+            with self.subTest(prompt=prompt):
+                resolved = resolve_request_scope(prompt, {"mode": "auto"}, one_phone)
+                ambiguous = resolve_request_scope(prompt, {"mode": "auto"}, MATRIX_STATUS)
+
+                self.assertEqual(resolved.status, "resolved")
+                self.assertEqual(resolved.device_ids, ["phone-1"])
+                self.assertEqual(ambiguous.status, "ambiguous")
+                self.assertEqual(ambiguous.targets(), {})
+
+    def test_negated_phone_actions_do_not_request_or_inherit_a_device_scope(self) -> None:
+        for prompt in (
+            "不要操作手机，只告诉我方案",
+            "先别打开抖音，给我分析流程",
+            "无需检查全部在线设备，先说明步骤",
+        ):
+            with self.subTest(prompt=prompt):
+                result = resolve_request_scope(prompt, {"mode": "auto"}, MATRIX_STATUS)
+
+                self.assertEqual(result.status, "not_required")
+                self.assertEqual(result.targets(), {})
+
+    def test_negated_device_is_excluded_when_the_user_replaces_the_target(self) -> None:
+        result = resolve_request_scope(
+            "不要控制 P01，改为控制 P02",
+            {"mode": "auto"},
+            MATRIX_STATUS,
+        )
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.device_ids, ["P02"])
+
     def test_resolves_unique_device_display_name_to_its_stable_id(self) -> None:
         matrix_status = {
             "devices": [

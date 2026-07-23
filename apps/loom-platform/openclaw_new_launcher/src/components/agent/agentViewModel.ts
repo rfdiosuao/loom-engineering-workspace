@@ -307,6 +307,94 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       recoverable: true,
     };
   }
+  if (code === 'matrix_target_scope_required') {
+    return {
+      title: '请选择矩阵目标',
+      message: '请在输入框下方选择手机、设备组或全部在线设备后重试。',
+      recoverable: true,
+    };
+  }
+  if (code === 'matrix_campaign_scope_required') {
+    return {
+      title: '请选择对应矩阵任务',
+      message: '取消或重试需要关联一个已下发的矩阵任务，请返回原会话或打开对应任务后再操作。',
+      recoverable: true,
+    };
+  }
+  if (code === 'matrix_campaign_scope_violation') {
+    return {
+      title: '矩阵任务不匹配',
+      message: '当前会话没有关联到要操作的矩阵任务，请打开对应任务后再取消或重试。',
+      recoverable: true,
+    };
+  }
+  if (code === 'capability_unavailable') {
+    return {
+      title: '能力尚未就绪',
+      message: '这项能力尚未连接，请检查对应组件是否已安装、配置是否完整以及运行状态是否正常。',
+      recoverable: true,
+    };
+  }
+  if (code === 'media_asset_not_found' || code === 'publish_media_missing') {
+    return {
+      title: '找不到可用素材',
+      message: '请先生成图片或视频，或从本地素材库选择仍然存在的文件后再发布。',
+      recoverable: true,
+    };
+  }
+  if (
+    code === 'phone_task_timeout'
+    || code === 'media_job_timeout'
+    || code === 'media_transfer_timeout'
+    || code === 'publish_job_timeout'
+    || code === 'capability_timeout'
+    || code === 'capability_timeout_indeterminate'
+  ) {
+    return {
+      title: '任务执行超时',
+      message: '手机端或生成服务可能仍在执行。请先查看任务状态和目标设备结果，确认未完成后再重试，避免重复执行。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_repeated_tool_call' || code === 'agent_tool_loop_limit') {
+    return {
+      title: '已停止重复调用',
+      message: '智能体连续调用工具但没有获得新证据，麓鸣已停止本轮执行。请查看运行详情、补充目标或调整任务后重试。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_restart_inflight_unknown') {
+    return {
+      title: '执行状态待确认',
+      message: '应用关闭或重启时有工具正在执行，麓鸣不会自动重放。请先查看目标设备和任务记录，确认实际结果后再决定是否重试，避免重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'approval_rejected' || code === 'approval_expired') {
+    return {
+      title: '操作未获授权',
+      message: '这项操作没有执行。需要继续时，请确认目标和内容后重新发起。',
+      recoverable: true,
+    };
+  }
+  if (
+    code === 'approval_conflict'
+    || code === 'approval_already_resolved'
+    || code === 'approval_scope_mismatch'
+  ) {
+    return {
+      title: '审批状态已变化',
+      message: '这项审批已在其他操作中处理或不再匹配当前任务，请刷新会话查看最新状态。',
+      recoverable: true,
+    };
+  }
+  if (code === 'phone_target_not_found' || code === 'phone_target_unavailable') {
+    return {
+      title: '目标手机不可用',
+      message: '原目标已不存在或当前不可用，请刷新设备状态并重新选择一台在线手机。',
+      recoverable: true,
+    };
+  }
   if (code === 'agent_runtime_output_too_large' || code === 'agent_model_output_too_large') {
     return {
       title: '智能体输出过多',
