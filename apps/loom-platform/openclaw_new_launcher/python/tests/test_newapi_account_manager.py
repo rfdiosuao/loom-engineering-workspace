@@ -1181,7 +1181,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
             dumped += repr(desktop_config)
             self.assertNotIn("test-token-not-real", dumped)
 
-    def test_select_models_writes_text_and_image_but_not_video_provider_config(self) -> None:
+    def test_select_models_writes_text_phone_and_image_but_not_video_provider_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = NewApiAccountManager(AppPaths(temp_dir))
             session = {
@@ -1191,12 +1191,20 @@ class NewApiAccountManagerTests(unittest.TestCase):
                 "gatewayDefaultModel": "qwen3.7-plus",
                 "gatewayImageModel": "gpt-image-1",
                 "gatewayVideoModel": "agnes-video-v1",
-                "gatewayModels": ["qwen3.7-plus", "gpt-4o", "gpt-image-1", "seedream-image-v1", "agnes-video-v1"],
+                "gatewayModels": [
+                    "qwen3.7-plus",
+                    "gpt-4o",
+                    "agnes-2.0-flash",
+                    "gpt-image-1",
+                    "seedream-image-v1",
+                    "agnes-video-v1",
+                ],
                 "memberToken": "test-token-not-real",
                 "gatewayImageAccessToken": "test-token-not-real",
                 "gateway": {
                     "classifiedModels": {
                         "text": ["qwen3.7-plus", "gpt-4o"],
+                        "phone": ["qwen3.7-plus", "agnes-2.0-flash"],
                         "image": ["gpt-image-1", "seedream-image-v1"],
                         "video": ["agnes-video-v1"],
                     }
@@ -1204,6 +1212,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
                 "newApi": {
                     "modelClasses": {
                         "text": ["qwen3.7-plus", "gpt-4o"],
+                        "phone": ["qwen3.7-plus", "agnes-2.0-flash"],
                         "image": ["gpt-image-1", "seedream-image-v1"],
                         "video": ["agnes-video-v1"],
                     }
@@ -1218,11 +1227,13 @@ class NewApiAccountManagerTests(unittest.TestCase):
 
             next_public = manager.select_models(
                 text_model="gpt-4o",
+                phone_model="qwen3.7-plus",
                 image_model="seedream-image-v1",
                 video_model="agnes-video-v1",
             )
 
             self.assertEqual(next_public["selectedModels"]["text"], "gpt-4o")
+            self.assertEqual(next_public["selectedModels"]["phone"], "qwen3.7-plus")
             self.assertEqual(next_public["selectedModels"]["image"], "seedream-image-v1")
             self.assertEqual(next_public["selectedModels"]["videoDraft"], "agnes-video-v1")
             self.assertFalse(os.path.exists(os.path.join(temp_dir, "video_config.json")))
@@ -1235,6 +1246,8 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertNotIn("gatewayVideoModel", provider)
             self.assertNotIn("videoModel", provider)
             self.assertTrue(os.path.exists(AppPaths(temp_dir).wire_current))
+            phone_config = read_json(os.path.join(AppPaths(temp_dir).launcher_dir, "phone-agent.json"), {})
+            self.assertEqual(phone_config["llm"]["model"], "qwen3.7-plus")
 
             models_json = read_json(os.path.join(temp_dir, "data", ".openclaw", "agents", "main", "agent", "models.json"), {})
             model_providers = models_json["providers"]

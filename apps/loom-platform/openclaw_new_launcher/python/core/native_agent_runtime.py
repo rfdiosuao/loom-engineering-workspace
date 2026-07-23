@@ -42,16 +42,25 @@ class LoomNativeRuntimeAdapter:
         round_suffix = f"_round_{round_value}" if isinstance(round_value, int) and round_value > 0 else ""
         message_id = f"message_{run_id}{round_suffix}"
 
+        def safe_emit(event: Json) -> None:
+            try:
+                emit(event)
+            except Exception as error:
+                raise RuntimeExecutionError(
+                    "agent_runtime_event_failed",
+                    "Agent runtime progress could not be persisted.",
+                ) from error
+
         def relay(event: Json) -> None:
             if event.get("type") == "model.text.delta":
                 data = event.get("data") if isinstance(event.get("data"), Mapping) else {}
                 delta = data.get("delta", data.get("text", ""))
-                emit({
+                safe_emit({
                     "type": "message.delta",
                     "data": {"messageId": message_id, "role": "assistant", "delta": str(delta or "")},
                 })
                 return
-            emit(redact_sensitive(event))
+            safe_emit(redact_sensitive(event))
 
         try:
             response = self.client.complete(request, relay, cancel, timeout_sec=timeout_sec)

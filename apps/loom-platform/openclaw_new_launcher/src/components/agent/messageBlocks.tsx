@@ -106,6 +106,7 @@ function ToolBlock({ data }: { data: Record<string, unknown> }) {
   const status = text(data.status, 'running');
   const statusLabels: Record<string, string> = {
     queued: '等待中',
+    awaiting: '等待中',
     running: '进行中',
     completed: '已完成',
     failed: '未完成',
@@ -129,7 +130,7 @@ function ToolBlock({ data }: { data: Record<string, unknown> }) {
           {status === 'failed' ? <AlertCircle className="h-3.5 w-3.5" /> : null}
           {status === 'completed' ? <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> : null}
           {status === 'running' ? <LoaderCircle className="agent-tool-spinner h-3.5 w-3.5" /> : null}
-          {status === 'queued' ? <Circle className="h-2.5 w-2.5" /> : null}
+          {status === 'queued' || status === 'awaiting' ? <Circle className="h-2.5 w-2.5" /> : null}
         </span>
         <span className="min-w-0 flex-1 text-xs font-semibold leading-5 text-text">
           {capabilityActionLabel(capability, status)}
@@ -183,9 +184,20 @@ export function compactToolExecutionBlocks(blocks: AgentMessageBlock[]): AgentMe
 
 export function toolExecutionGroupSummary(
   blocks: AgentMessageBlock[],
-  _run?: AgentRun,
+  run?: AgentRun,
 ): ToolExecutionGroupSummary {
-  const statuses = blocks.map((block) => text(block.data.status, 'running'));
+  const terminalRunToolStatus = run?.status === 'completed'
+    ? 'completed'
+    : run?.status === 'failed' || run?.status === 'cancelled'
+      ? 'failed'
+      : null;
+  const statuses = blocks.map((block) => {
+    const status = text(block.data.status, 'running');
+    return terminalRunToolStatus
+      && (status === 'queued' || status === 'awaiting' || status === 'running')
+      ? terminalRunToolStatus
+      : status;
+  });
   const completedCount = statuses.filter((status) => status === 'completed').length;
   const failedCount = statuses.filter((status) => status === 'failed').length;
   if (failedCount > 0) {
@@ -198,8 +210,10 @@ export function toolExecutionGroupSummary(
       expanded: true,
     };
   }
-  if (statuses.some((status) => status === 'queued' || status === 'running')) {
-    const activeCount = statuses.filter((status) => status === 'queued' || status === 'running').length;
+  if (statuses.some((status) => status === 'queued' || status === 'awaiting' || status === 'running')) {
+    const activeCount = statuses.filter(
+      (status) => status === 'queued' || status === 'awaiting' || status === 'running',
+    ).length;
     return {
       state: 'running',
       count: blocks.length,

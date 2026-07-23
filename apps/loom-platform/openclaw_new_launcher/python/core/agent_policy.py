@@ -63,6 +63,12 @@ class AgentPolicyEngine:
         name = str(_capability_value(capability, "name", "") or "").lower()
         action_content = _action_content(capability, tool_input or {})
         searchable = f"{name} {action_content}"
+        if _is_real_acquisition_run(name, tool_input or {}):
+            return "critical"
+        if _is_committed_external_publish(name, tool_input or {}):
+            return "critical"
+        if _is_media_generation_capability(name) and _media_transfer_targets(tool_input or {}):
+            return "outbound"
         if any(marker in searchable for marker in _CRITICAL_MARKERS):
             return "critical"
         if any(marker in searchable for marker in _OUTBOUND_MARKERS):
@@ -74,15 +80,18 @@ class AgentPolicyEngine:
     def evaluate(self, capability: Any, tool_input: Mapping[str, Any] | None = None) -> PolicyDecision:
         classification = self.classify(capability, tool_input)
         capability_name = str(_capability_value(capability, "name", "") or "").lower()
-        approval_for_dispatch = _matrix_dispatch_requires_approval(capability_name, tool_input or {})
-        targets = _targets(tool_input or {})
+        approval_for_matrix_operation = _matrix_operation_requires_approval(
+            capability_name,
+            tool_input or {},
+        )
+        targets = _targets(tool_input or {}, capability_name)
         allowed = self._targets_allowed(targets)
         if not allowed:
             return PolicyDecision(classification, False, False, "Target is outside the authorized device scope.")
         requires_approval = (
             classification == "critical"
             if self.approval_mode == "weak"
-            else classification in {"outbound", "critical"} or approval_for_dispatch
+            else classification in {"outbound", "critical"} or approval_for_matrix_operation
         )
         reasons = {
             "read": "Read-only capability may execute automatically.",
@@ -92,13 +101,13 @@ class AgentPolicyEngine:
                 if self.approval_mode == "weak"
                 else "External communication requires approval."
             ),
-            "critical": "Critical account, payment, deletion, or security action requires approval.",
+            "critical": "Critical account, payment, deletion, security, or committed external action requires approval.",
         }
         reason = (
-            "Free-form or full-control Matrix dispatch requires user approval."
-            if approval_for_dispatch and self.approval_mode == "strong"
+            "Matrix dispatch or retry requires user approval."
+            if approval_for_matrix_operation and self.approval_mode == "strong"
             else "Explicit user request may execute automatically within the authorized target scope."
-            if approval_for_dispatch
+            if approval_for_matrix_operation
             else reasons[classification]
         )
         return PolicyDecision(classification, requires_approval, True, reason)
@@ -117,7 +126,8 @@ class AgentPolicyEngine:
             raise PolicyViolationError("target_not_authorized", decision.reason)
         if not decision.requires_approval:
             raise PolicyViolationError("approval_not_required", "This capability does not require approval.")
-        targets = _targets(tool_input)
+        capability_name = str(_capability_value(capability, "name", "") or "")
+        targets = _targets(tool_input, capability_name)
         target_scope = str(
             _capability_value(
                 capability,
@@ -129,7 +139,6 @@ class AgentPolicyEngine:
         if decision.classification == "critical" and target_scope != "none" and not targets:
             raise PolicyViolationError("critical_target_required", "Critical actions require an explicit target.")
         now = _aware_utc(self._clock())
-        capability_name = str(_capability_value(capability, "name", "") or "")
         capability_display_name = str(
             _capability_value(capability, "display_name", "")
             or _capability_value(capability, "displayName", "")
@@ -186,7 +195,7 @@ class AgentPolicyEngine:
             approval.get("toolCallId") == tool_call_id
             and approval.get("capability") == capability_name
             and approval.get("inputHash") == _input_hash(tool_input)
-            and approval.get("targetsHash") == _input_hash(_targets(tool_input))
+            and approval.get("targetsHash") == _input_hash(_targets(tool_input, capability_name))
         )
 
     def consume_approval(
@@ -203,6 +212,8 @@ class AgentPolicyEngine:
     def _targets_allowed(self, targets: Mapping[str, Any]) -> bool:
         if self.authorized_device_ids is None:
             return True
+        if "groups" in targets or "allOnline" in targets:
+            return False
         raw_devices = targets.get("deviceIds", [])
         if not isinstance(raw_devices, list):
             return False
@@ -286,11 +297,15 @@ def _action_content(capability: Any, tool_input: Mapping[str, Any]) -> str:
     return json.dumps(values, ensure_ascii=False, sort_keys=True, default=str).lower()
 
 
-def _targets(tool_input: Mapping[str, Any]) -> Json:
+def _targets(tool_input: Mapping[str, Any], capability_name: str = "") -> Json:
     for key in ("targets", "target"):
         value = tool_input.get(key)
         if isinstance(value, Mapping) and value:
             return redact_sensitive(dict(value))
+    if _is_media_generation_capability(capability_name):
+        media_targets = _media_transfer_targets(tool_input)
+        if media_targets:
+            return redact_sensitive(media_targets)
     if tool_input.get("deviceId"):
         return {"deviceIds": [str(tool_input["deviceId"])]}
     if tool_input.get("accountId"):
@@ -298,12 +313,44 @@ def _targets(tool_input: Mapping[str, Any]) -> Json:
     return {}
 
 
+def _is_media_generation_capability(capability_name: str) -> bool:
+    return str(capability_name or "").strip().lower() in {
+        "loom.media.image.generate",
+        "loom.media.video.generate",
+    }
+
+
+def _media_transfer_targets(tool_input: Mapping[str, Any]) -> Json:
+    device_ids = _target_string_list(tool_input.get("deviceIds"))
+    groups = _target_string_list(tool_input.get("groups"))
+    if device_ids:
+        return {"deviceIds": device_ids}
+    if groups:
+        return {"groups": groups}
+    if tool_input.get("allOnline") is True:
+        return {"allOnline": True}
+    return {}
+
+
+def _target_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for raw in value:
+        item = str(raw or "").strip()[:80]
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
 def _input_hash(tool_input: Mapping[str, Any]) -> str:
     canonical = json.dumps(dict(tool_input), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
-def _matrix_dispatch_requires_approval(capability_name: str, tool_input: Mapping[str, Any]) -> bool:
+def _matrix_operation_requires_approval(capability_name: str, tool_input: Mapping[str, Any]) -> bool:
+    if capability_name == "loom.matrix.retry":
+        return True
     if capability_name != "loom.matrix.dispatch":
         return False
     if str(tool_input.get("mode") or "").strip().lower() == "full":
@@ -318,6 +365,17 @@ def _matrix_dispatch_requires_approval(capability_name: str, tool_input: Mapping
         and bool(str(assignment.get("prompt") or "").strip())
         for assignment in assignments
     )
+
+
+def _is_real_acquisition_run(capability_name: str, tool_input: Mapping[str, Any]) -> bool:
+    if not capability_name.endswith("loom_acquisition_agent_run"):
+        return False
+    value = tool_input.get("realRun")
+    return value is True or str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_committed_external_publish(capability_name: str, tool_input: Mapping[str, Any]) -> bool:
+    return capability_name == "loom.phone.publish" and tool_input.get("draftOnly") is False
 
 
 def _summarize(value: Any, *, depth: int = 0) -> Any:

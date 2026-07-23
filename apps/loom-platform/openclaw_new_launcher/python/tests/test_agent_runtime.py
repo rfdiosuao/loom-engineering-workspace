@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import unittest
@@ -220,6 +221,91 @@ class LoomCliRuntimeAdapterTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "agent_runtime_invalid_output")
         self.assertTrue(caught.exception.recoverable)
         self.assertNotIn("super-secret-token", str(caught.exception))
+
+    def test_generic_runtime_rejects_output_larger_than_two_megabytes(self) -> None:
+        from core.agent_runtime import LoomCliRuntimeAdapter, RuntimeExecutionError
+
+        adapter = LoomCliRuntimeAdapter(
+            profile_resolver=lambda _profile_id: {
+                "profileId": "default",
+                "runtime": "test",
+                "command": [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.write('x' * 2100000); sys.stdout.flush()",
+                ],
+            }
+        )
+
+        with self.assertRaises(RuntimeExecutionError) as caught:
+            adapter.start({}, lambda _event: None, threading.Event(), timeout_sec=2)
+
+        self.assertEqual(caught.exception.code, "agent_runtime_output_too_large")
+        self.assertFalse(caught.exception.recoverable)
+
+    def test_runtime_event_failure_terminates_the_child_process(self) -> None:
+        from core.agent_runtime import LoomCliRuntimeAdapter, RuntimeExecutionError
+
+        processes = []
+
+        def process_factory(*args, **kwargs):
+            process = subprocess.Popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        adapter = LoomCliRuntimeAdapter(
+            profile_resolver=lambda _profile_id: {
+                "profileId": "default",
+                "runtime": "test",
+                "command": [
+                    sys.executable,
+                    "-c",
+                    "import json,time; print(json.dumps({'type':'message.delta','data':{'delta':'hello'}}), flush=True); time.sleep(5)",
+                ],
+            },
+            process_factory=process_factory,
+        )
+
+        def reject_event(_event):
+            raise OSError("event ledger unavailable")
+
+        with self.assertRaises(RuntimeExecutionError) as caught:
+            adapter.start({}, reject_event, threading.Event(), timeout_sec=2)
+
+        self.assertEqual(caught.exception.code, "agent_runtime_event_failed")
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
+        self.assertNotIn("event ledger unavailable", str(caught.exception))
+
+    def test_redact_sensitive_hides_login_code_without_hiding_error_codes(self) -> None:
+        from core.agent_runtime import redact_sensitive
+
+        safe = redact_sensitive({
+            "name": "loom.mcp.loom.loom_account_login_code",
+            "input": {
+                "email": "user@example.com",
+                "code": "246810",
+            },
+            "error": {
+                "code": "invalid_verification_code",
+                "message": "The verification code is invalid.",
+            },
+        })
+
+        self.assertEqual(safe["input"]["code"], "[REDACTED]")
+        self.assertEqual(safe["error"]["code"], "invalid_verification_code")
+
+    def test_redact_sensitive_preserves_noncredential_code_fields(self) -> None:
+        from core.agent_runtime import redact_sensitive
+
+        safe = redact_sensitive({
+            "language": "python",
+            "code": "print('hello')",
+            "error": {"code": "capability_failed"},
+        })
+
+        self.assertEqual(safe["code"], "print('hello')")
+        self.assertEqual(safe["error"]["code"], "capability_failed")
 
 
 if __name__ == "__main__":

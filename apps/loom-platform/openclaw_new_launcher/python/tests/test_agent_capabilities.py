@@ -136,6 +136,7 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(matrix_dispatch["targetScope"], "matrix-write")
 
         expected_scopes = {
+            "loom.capabilities.list": "none",
             "loom.matrix.status": "none",
             "loom.matrix.dispatch": "matrix-write",
             "loom.matrix.screenshot": "single-device-read",
@@ -344,6 +345,33 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertNotIn("loom.mcp.loom.loom_status", connected_names)
         self.assertIn("loom.cli.status", connected_names)
 
+    def test_native_capability_catalog_deduplicates_the_legacy_mcp_catalog(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        calls: list[str] = []
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.capabilities.list": {
+                    "executor": lambda _payload: calls.append("internal") or {"count": 1},
+                },
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "loom",
+                "name": "loom_cli_commands",
+                "permission": "read",
+                "risk": "read",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: calls.append("mcp") or {"count": 2},
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        names = {item["name"] for item in registry.list_capabilities(available_only=True)}
+        self.assertIn("loom.capabilities.list", names)
+        self.assertNotIn("loom.mcp.loom.loom_cli_commands", names)
+        self.assertEqual(registry.execute("loom.mcp.loom.loom_cli_commands", {}), {"count": 1})
+        self.assertEqual(calls, ["internal"])
+
     def test_semantic_aliases_execute_the_preferred_connected_implementation(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
 
@@ -408,7 +436,7 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertIn("prompt", dispatch["required"])
         self.assertIn("targets", dispatch["properties"])
         self.assertEqual(
-            dispatch["anyOf"],
+            dispatch["oneOf"],
             [{"required": ["deviceId"]}, {"required": ["group"]}, {"required": ["targets"]}],
         )
         self.assertIn("deviceId", capabilities["loom.matrix.screenshot"]["inputSchema"]["required"])
@@ -524,6 +552,54 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertTrue(registry.execute("loom.mcp.loom.loom_job_get", {"id": "job-2"})["ok"])
         self.assertEqual(calls, [("loom_job_get", {"id": "job-1"}), ("loom_job_get", {"id": "job-2"})])
 
+    def test_unavailable_internal_alias_does_not_change_the_model_selected_executor(self) -> None:
+        from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
+
+        calls: list[tuple[str, dict]] = []
+        registry = CapabilityRegistry(
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "loom",
+                "name": "loom_matrix_dispatch",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["prompt", "targets"],
+                    "properties": {
+                        "prompt": {"type": "string", "minLength": 1},
+                        "targets": {"type": "object"},
+                    },
+                    "additionalProperties": False,
+                },
+                "permission": "control",
+                "risk": "control_safe",
+            }],
+            mcp_executor=lambda _server, tool, data: calls.append((tool, data)) or {"ok": True},
+            cli_catalog_provider=lambda: {
+                "domains": [{"domain": "matrix", "commands": [{"name": "matrix dispatch"}]}],
+            },
+            cli_executor=lambda _command, _payload: self.fail(
+                "execution must use the same structured implementation exposed to the model"
+            ),
+        )
+
+        catalog = registry.list_capabilities(available_only=True)
+        self.assertEqual(len(catalog), 1)
+        exposed_name = catalog[0]["name"]
+        self.assertEqual(catalog[0]["source"], "mcp")
+        with self.assertRaises(CapabilityInputError):
+            registry.validate_input(exposed_name, {"prompt": "读取屏幕"})
+
+        result = registry.execute(
+            exposed_name,
+            {"prompt": "读取屏幕", "targets": {"deviceIds": ["phone-1"]}},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [(
+            "loom_matrix_dispatch",
+            {"prompt": "读取屏幕", "targets": {"deviceIds": ["phone-1"]}},
+        )])
+
     def test_execute_validates_input_schema_and_dispatches_by_source(self) -> None:
         from core.agent_capabilities import CapabilityInputError
 
@@ -540,6 +616,125 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(skill["skill"], "screen-reader")
         self.assertEqual(mcp["tool"], "search_logs")
         self.assertEqual(cli["command"], "phone status")
+
+    def test_mcp_discovery_preserves_original_ids_and_avoids_sanitized_collisions(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        calls = []
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [
+                {
+                    "server": "local server",
+                    "name": "read/a",
+                    "description": "slash tool",
+                    "inputSchema": {"type": "object", "additionalProperties": False},
+                    "permission": "read",
+                    "risk": "read",
+                },
+                {
+                    "server": "local server",
+                    "name": "read a",
+                    "description": "space tool",
+                    "inputSchema": {"type": "object", "additionalProperties": False},
+                    "permission": "read",
+                    "risk": "read",
+                },
+            ],
+            mcp_executor=lambda server, tool, payload: calls.append((server, tool, payload)) or {
+                "server": server,
+                "tool": tool,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        tools = {
+            item["description"]: item["name"]
+            for item in registry.list_capabilities(available_only=True)
+        }
+        self.assertNotEqual(tools["slash tool"], tools["space tool"])
+        self.assertEqual(
+            registry.execute(tools["slash tool"], {}),
+            {"server": "local server", "tool": "read/a"},
+        )
+        self.assertEqual(
+            registry.execute(tools["space tool"], {}),
+            {"server": "local server", "tool": "read a"},
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("local server", "read/a", {}),
+                ("local server", "read a", {}),
+            ],
+        )
+
+    def test_skill_discovery_preserves_original_id_after_safe_model_naming(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        calls = []
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [{
+                "id": "screen reader/zh",
+                "description": "screen reader",
+                "permission": "read",
+                "risk": "read",
+            }],
+            skill_executor=lambda skill_id, payload: calls.append((skill_id, payload)) or {
+                "skillId": skill_id,
+            },
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        capability = next(
+            item
+            for item in registry.list_capabilities(available_only=True)
+            if item["description"] == "screen reader"
+        )
+        result = registry.execute(capability["name"], {})
+
+        self.assertEqual(result, {"skillId": "screen reader/zh"})
+        self.assertEqual(calls, [("screen reader/zh", {})])
+
+    def test_discovery_is_reused_across_list_resolve_validate_and_read_execution(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        calls = {"skills": 0, "mcp": 0, "cli": 0}
+
+        def skills():
+            calls["skills"] += 1
+            return []
+
+        def mcp():
+            calls["mcp"] += 1
+            return [{
+                "server": "local",
+                "name": "ping",
+                "inputSchema": {"type": "object", "additionalProperties": False},
+                "permission": "read",
+                "risk": "read",
+            }]
+
+        def cli():
+            calls["cli"] += 1
+            return {"domains": []}
+
+        registry = CapabilityRegistry(
+            skill_provider=skills,
+            mcp_provider=mcp,
+            mcp_executor=lambda _server, _tool, _payload: {"ok": True},
+            cli_catalog_provider=cli,
+        )
+
+        registry.list_capabilities(available_only=True)
+        registry.get("loom.mcp.local.ping")
+        registry.validate_input("loom.mcp.local.ping", {})
+        registry.execute("loom.mcp.local.ping", {})
+
+        self.assertEqual(calls, {"skills": 1, "mcp": 1, "cli": 1})
 
     def test_validate_input_enforces_json_schema_value_constraints(self) -> None:
         from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
@@ -584,6 +779,138 @@ class CapabilityRegistryTests(unittest.TestCase):
         )
         self.assertEqual(valid["title"], "title")
 
+    def test_validate_input_enforces_any_of_and_rejects_unknown_properties(self) -> None:
+        from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.schedule": {
+                    "executor": lambda payload: {"ok": True, "payload": payload},
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1},
+                            "at": {"type": "string", "minLength": 1},
+                            "every": {"type": "string", "minLength": 1},
+                        },
+                        "anyOf": [
+                            {"required": ["at"]},
+                            {"required": ["every"]},
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "loom.test.matrix": {
+                    "executor": lambda payload: {"ok": True, "payload": payload},
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["targets"],
+                        "properties": {
+                            "targets": {
+                                "type": "object",
+                                "properties": {
+                                    "deviceIds": {"type": "array", "minItems": 1},
+                                    "allOnline": {"type": "boolean"},
+                                },
+                                "anyOf": [
+                                    {"required": ["deviceIds"]},
+                                    {"required": ["allOnline"]},
+                                ],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        invalid_cases = [
+            ("loom.test.schedule", {"name": "nightly"}),
+            ("loom.test.schedule", {"name": "nightly", "at": "21:00", "timezone": "Asia/Shanghai"}),
+            ("loom.test.matrix", {"targets": {}}),
+            ("loom.test.matrix", {"targets": {"allOnline": True, "unknown": True}}),
+        ]
+        for capability, payload in invalid_cases:
+            with self.subTest(capability=capability, payload=payload), self.assertRaises(CapabilityInputError):
+                registry.validate_input(capability, payload)
+
+        _, scheduled = registry.validate_input(
+            "loom.test.schedule",
+            {"name": "nightly", "every": "1h"},
+        )
+        _, matrix = registry.validate_input(
+            "loom.test.matrix",
+            {"targets": {"deviceIds": ["phone-1"]}},
+        )
+        self.assertEqual(scheduled["every"], "1h")
+        self.assertEqual(matrix["targets"]["deviceIds"], ["phone-1"])
+
+    def test_validate_input_enforces_exactly_one_one_of_branch(self) -> None:
+        from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.target": {
+                    "executor": lambda payload: {"ok": True, "payload": payload},
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "deviceId": {"type": "string"},
+                            "group": {"type": "string"},
+                        },
+                        "oneOf": [
+                            {"required": ["deviceId"]},
+                            {"required": ["group"]},
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        for payload in ({}, {"deviceId": "phone-1", "group": "sales"}):
+            with self.subTest(payload=payload), self.assertRaises(CapabilityInputError):
+                registry.validate_input("loom.test.target", payload)
+
+        _, valid = registry.validate_input("loom.test.target", {"deviceId": "phone-1"})
+        self.assertEqual(valid, {"deviceId": "phone-1"})
+
+    def test_default_matrix_dispatch_requires_one_unambiguous_target(self) -> None:
+        from core.agent_capabilities import CapabilityInputError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.matrix.dispatch": {"executor": lambda _payload: {"ok": True}},
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        invalid_payloads = (
+            {"prompt": "检查状态"},
+            {"prompt": "检查状态", "deviceId": "phone-1", "group": "sales"},
+            {"prompt": "检查状态", "targets": {"deviceIds": ["phone-1"], "groups": ["sales"]}},
+            {"prompt": "检查状态", "targets": {"allOnline": False}},
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), self.assertRaises(CapabilityInputError):
+                registry.validate_input("loom.matrix.dispatch", payload)
+
+        _, valid = registry.validate_input(
+            "loom.matrix.dispatch",
+            {"prompt": "检查状态", "targets": {"allOnline": True}},
+        )
+        self.assertEqual(valid["targets"], {"allOnline": True})
+
     def test_execute_redacts_secrets_from_results(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
 
@@ -601,6 +928,94 @@ class CapabilityRegistryTests(unittest.TestCase):
 
         self.assertEqual(result["token"], "[REDACTED]")
         self.assertNotIn("abc.def", json.dumps(result))
+
+    def test_execute_treats_invalid_output_as_indeterminate_nonrecoverable_failure(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        executions = []
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.side-effect": {
+                    "executor": lambda payload: executions.append(dict(payload)) or {"ok": True},
+                    "permission": "control",
+                    "risk": "control_safe",
+                    "outputSchema": {
+                        "type": "object",
+                        "required": ["receiptId"],
+                        "properties": {"receiptId": {"type": "string"}},
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.test.side-effect", {})
+
+        self.assertEqual(executions, [{}])
+        self.assertEqual(caught.exception.code, "capability_invalid_output")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+        self.assertIn("output.receiptId is required", str(caught.exception))
+
+    def test_execute_treats_unknown_control_exception_as_indeterminate_nonrecoverable_failure(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        executions = []
+
+        def send_then_disconnect(payload):
+            executions.append(dict(payload))
+            raise ConnectionResetError("connection reset after request was sent")
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.side-effect": {
+                    "executor": send_then_disconnect,
+                    "permission": "control",
+                    "risk": "outbound",
+                }
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.test.side-effect", {"target": "phone-1"})
+
+        self.assertEqual(executions, [{"target": "phone-1"}])
+        self.assertEqual(caught.exception.code, "capability_execution_unknown")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
+    def test_execute_keeps_unknown_read_exception_recoverable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.read": {
+                    "executor": lambda _payload: (_ for _ in ()).throw(ConnectionError("temporary read failure")),
+                    "permission": "read",
+                    "risk": "read",
+                }
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.test.read", {})
+
+        self.assertEqual(caught.exception.code, "capability_failed")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
 
     def test_execute_returns_promptly_when_timed_out_work_keeps_running(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
@@ -755,6 +1170,243 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "permission_denied")
         self.assertEqual(str(caught.exception), "Admin permission is required.")
 
+    def test_execute_unwraps_structured_mcp_success_payload(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "local",
+                "name": "status",
+                "permission": "read",
+                "risk": "read",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "ok": True,
+                        "data": {
+                            "status": "online",
+                            "deviceCount": 2,
+                        },
+                    }),
+                }],
+                "isError": False,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        result = registry.execute("loom.mcp.local.status", {})
+
+        self.assertEqual(result, {
+            "ok": True,
+            "data": {
+                "status": "online",
+                "deviceCount": 2,
+            },
+        })
+
+    def test_builtin_mcp_read_rejects_malformed_success_payload(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "loom",
+                "name": "loom_status",
+                "permission": "read",
+                "risk": "read",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{"type": "text", "text": "not-json"}],
+                "isError": False,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.mcp.loom.loom_status", {})
+
+        self.assertEqual(caught.exception.code, "capability_invalid_output")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
+
+    def test_builtin_mcp_control_malformed_success_receipt_is_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "loom",
+                "name": "loom_phone_quick_task",
+                "permission": "control",
+                "risk": "control_safe",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{"type": "text", "text": "accepted"}],
+                "isError": False,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute(
+                "loom.mcp.loom.loom_phone_quick_task",
+                {"prompt": "Open settings"},
+            )
+
+        self.assertEqual(caught.exception.code, "capability_execution_unknown")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+
+    def test_mcp_control_error_without_no_effect_proof_is_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "local",
+                "name": "publish",
+                "permission": "control",
+                "risk": "outbound",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "ok": False,
+                        "error": {
+                            "code": "bridge_http_error",
+                            "message": "Connection closed before a receipt was returned.",
+                        },
+                    }),
+                }],
+                "isError": True,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.mcp.local.publish", {"body": "hello"})
+
+        self.assertEqual(caught.exception.code, "capability_execution_unknown")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
+    def test_mcp_control_missing_or_invalid_post_execution_receipts_are_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        for error_code in ("missing_publish_receipt", "invalid_completion_payload"):
+            with self.subTest(error_code=error_code):
+                registry = CapabilityRegistry(
+                    internal_operations={},
+                    skill_provider=lambda: [],
+                    mcp_provider=lambda: [{
+                        "server": "local",
+                        "name": "publish",
+                        "permission": "control",
+                        "risk": "outbound",
+                    }],
+                    mcp_executor=lambda _server, _tool, _payload, code=error_code: {
+                        "content": [{
+                            "type": "text",
+                            "text": json.dumps({
+                                "ok": False,
+                                "error": {
+                                    "code": code,
+                                    "message": "The operation may have completed before its receipt was lost.",
+                                },
+                            }),
+                        }],
+                        "isError": True,
+                    },
+                    cli_catalog_provider=lambda: {"domains": []},
+                )
+
+                with self.assertRaises(CapabilityExecutionError) as caught:
+                    registry.execute("loom.mcp.local.publish", {"body": "hello"})
+
+                self.assertEqual(caught.exception.code, "capability_execution_unknown")
+                self.assertFalse(caught.exception.recoverable)
+                self.assertTrue(caught.exception.outcome_indeterminate)
+
+    def test_mcp_control_explicit_missing_input_remains_recoverable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "local",
+                "name": "dispatch",
+                "permission": "control",
+                "risk": "control_safe",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "ok": False,
+                        "error": {
+                            "code": "missing_prompt",
+                            "message": "A prompt is required before dispatch.",
+                        },
+                    }),
+                }],
+                "isError": True,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.mcp.local.dispatch", {})
+
+        self.assertEqual(caught.exception.code, "missing_prompt")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
+
+    def test_mcp_control_preflight_denial_remains_recoverable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "local",
+                "name": "publish",
+                "permission": "control",
+                "risk": "outbound",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "ok": False,
+                        "error": {
+                            "code": "permission_denied",
+                            "message": "Control permission is required.",
+                        },
+                    }),
+                }],
+                "isError": True,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.mcp.local.publish", {"body": "hello"})
+
+        self.assertEqual(caught.exception.code, "permission_denied")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
     def test_registry_forwards_declared_permission_to_mcp_executor(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
 
@@ -845,6 +1497,90 @@ class CapabilityRegistryTests(unittest.TestCase):
             ["matrix", "dispatch", "--target", "phone-1", "--prompt", "inspect", "--json"],
             source="agent",
         )
+
+    def test_default_cli_control_error_without_no_effect_proof_is_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, _default_cli_executor
+
+        dispatch = mock.Mock(return_value=(
+            4,
+            {
+                "ok": False,
+                "error": {
+                    "code": "bridge_http_error",
+                    "message": "Connection closed before a receipt was returned.",
+                },
+            },
+        ))
+        fake_loom_cli = types.SimpleNamespace(dispatch=dispatch)
+
+        with mock.patch.dict(sys.modules, {"loom_cli": fake_loom_cli}):
+            with self.assertRaises(CapabilityExecutionError) as caught:
+                _default_cli_executor(
+                    "matrix dispatch",
+                    {"args": ["--target", "phone-1", "--prompt", "inspect"]},
+                    permission="control",
+                )
+
+        self.assertEqual(caught.exception.code, "capability_execution_unknown")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
+    def test_default_cli_control_post_execution_shape_errors_are_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, _default_cli_executor
+
+        for error_code in ("missing_publish_receipt", "invalid_completion_payload"):
+            with self.subTest(error_code=error_code):
+                dispatch = mock.Mock(return_value=(
+                    4,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": error_code,
+                            "message": "The operation may have completed before its receipt was lost.",
+                        },
+                    },
+                ))
+                fake_loom_cli = types.SimpleNamespace(dispatch=dispatch)
+
+                with mock.patch.dict(sys.modules, {"loom_cli": fake_loom_cli}):
+                    with self.assertRaises(CapabilityExecutionError) as caught:
+                        _default_cli_executor(
+                            "matrix dispatch",
+                            {"args": ["--target", "phone-1", "--prompt", "inspect"]},
+                            permission="control",
+                        )
+
+                self.assertEqual(caught.exception.code, "capability_execution_unknown")
+                self.assertFalse(caught.exception.recoverable)
+                self.assertTrue(caught.exception.outcome_indeterminate)
+
+    def test_default_cli_control_preflight_denial_remains_recoverable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, _default_cli_executor
+
+        dispatch = mock.Mock(return_value=(
+            3,
+            {
+                "ok": False,
+                "error": {
+                    "code": "permission_denied",
+                    "message": "Control permission is required.",
+                },
+            },
+        ))
+        fake_loom_cli = types.SimpleNamespace(dispatch=dispatch)
+
+        with mock.patch.dict(sys.modules, {"loom_cli": fake_loom_cli}):
+            with self.assertRaises(CapabilityExecutionError) as caught:
+                _default_cli_executor(
+                    "matrix dispatch",
+                    {"args": ["--target", "phone-1", "--prompt", "inspect"]},
+                    permission="control",
+                )
+
+        self.assertEqual(caught.exception.code, "permission_denied")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
 
     def test_default_cli_executor_maps_phone_quick_task_structured_payload_to_flags(self) -> None:
         from core.agent_capabilities import _default_cli_executor

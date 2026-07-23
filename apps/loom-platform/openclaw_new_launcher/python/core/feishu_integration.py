@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from functools import wraps
 from typing import Any, Callable, Dict
 
@@ -201,8 +202,9 @@ class FeishuAcquisitionIntegration:
         return {"ok": ok, "result": _redact_json(payload), "error": "" if ok else _redact(completed.get("stderr") or "")}
 
     def test_write(self) -> Json:
+        test_id = f"test_{int(time.time())}_{uuid.uuid4().hex[:12]}"
         lead = {
-            "leadId": f"test_{int(time.time())}",
+            "leadId": test_id,
             "platform": "dry-run",
             "sourceTask": "飞书测试写入",
             "title": "测试客户",
@@ -213,7 +215,7 @@ class FeishuAcquisitionIntegration:
             "draft": "这是一条测试草稿，不会触达真实客户。",
             "status": "test",
             "owner": "麓鸣",
-            "logId": "test-write",
+            "logId": test_id,
         }
         return self.sync_lead(lead)
 

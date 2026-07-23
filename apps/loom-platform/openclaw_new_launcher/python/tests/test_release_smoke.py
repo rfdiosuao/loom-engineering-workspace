@@ -55,6 +55,87 @@ class ReleaseSmokeTests(unittest.TestCase):
         self.assertEqual(phone["observedDevices"], 1)
         self.assertIn("至少 2 台", phone["error"])
 
+    def test_phone_requirement_follows_async_job_to_terminal_result(self) -> None:
+        from core.release_smoke import run_release_smoke
+
+        job_reads = 0
+
+        def runner(command, _timeout):
+            nonlocal job_reads
+            if "phone" in command:
+                data = {
+                    "result": {
+                        "jobId": "job_phone_status",
+                        "job": {"id": "job_phone_status", "status": "queued"},
+                    }
+                }
+            elif "jobs" in command:
+                job_reads += 1
+                job = (
+                    {"id": "job_phone_status", "status": "running"}
+                    if job_reads == 1
+                    else {
+                        "id": "job_phone_status",
+                        "status": "succeeded",
+                        "result": {
+                            "count": 1,
+                            "results": [{"ok": True, "status": {"online": True}}],
+                        },
+                    }
+                )
+                data = {"result": job}
+            else:
+                data = {}
+            return 0, json.dumps({"ok": True, "data": data}), ""
+
+        report = run_release_smoke(
+            "loom_cli.py",
+            require_phone_count=1,
+            timeout_sec=5,
+            command_runner=runner,
+        )
+
+        self.assertTrue(report["passed"])
+        phone = next(item for item in report["checks"] if item["name"] == "phone_status")
+        self.assertEqual(phone["observedDevices"], 1)
+        self.assertEqual(phone["jobStatus"], "succeeded")
+        self.assertEqual(phone["pollCount"], 2)
+
+    def test_phone_requirement_reports_terminal_job_failure(self) -> None:
+        from core.release_smoke import run_release_smoke
+
+        def runner(command, _timeout):
+            if "phone" in command:
+                data = {
+                    "result": {
+                        "jobId": "job_phone_status",
+                        "job": {"id": "job_phone_status", "status": "queued"},
+                    }
+                }
+            elif "jobs" in command:
+                data = {
+                    "result": {
+                        "id": "job_phone_status",
+                        "status": "failed",
+                        "error": "手机无障碍服务未开启",
+                    }
+                }
+            else:
+                data = {}
+            return 0, json.dumps({"ok": True, "data": data}), ""
+
+        report = run_release_smoke(
+            "loom_cli.py",
+            require_phone_count=1,
+            timeout_sec=5,
+            command_runner=runner,
+        )
+
+        self.assertFalse(report["passed"])
+        phone = next(item for item in report["checks"] if item["name"] == "phone_status")
+        self.assertEqual(phone["jobStatus"], "failed")
+        self.assertIn("无障碍服务", phone["error"])
+
     def test_report_redacts_provider_credentials(self) -> None:
         from core.release_smoke import run_release_smoke
 

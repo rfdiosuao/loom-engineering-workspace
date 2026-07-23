@@ -210,6 +210,36 @@ class ConfirmationMatrix(ProgressMatrix):
         return super().dispatch(body)
 
 
+class ConfirmationRetryMatrix(ConfirmationMatrix):
+    def __init__(self, *, require_confirmation: bool = False) -> None:
+        super().__init__(require_confirmation=require_confirmation)
+        self.retries: list[dict] = []
+
+    def retry_failed(self, campaign_id, body):
+        self.retries.append({"campaignId": campaign_id, **dict(body)})
+        if self.require_confirmation and body.get("confirmed") is not True:
+            raise ValueError("server confirmation required")
+        return {
+            "retried": True,
+            "retryOf": campaign_id,
+            "task": {
+                "campaignId": "campaign-retry-progress",
+                "status": "queued",
+                "missions": [],
+            },
+            "dispatchBody": dict(body),
+        }
+
+
+class MultiPhoneMatrix(ConfirmationMatrix):
+    def __init__(self) -> None:
+        super().__init__()
+        self.devices = [
+            {"deviceId": "phone-1", "online": True, "group": "本机手机", "groups": ["本机手机"]},
+            {"deviceId": "phone-2", "online": True, "group": "本机手机", "groups": ["本机手机"]},
+        ]
+
+
 class CancellableMatrix(ProgressMatrix):
     def __init__(self, *, completes_cancel: bool = True) -> None:
         super().__init__()
@@ -358,6 +388,40 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(trace["approvals"], [])
         self.assertIn("哪台手机", detail["messages"][-1]["blocks"][0]["data"]["text"])
 
+    def test_device_id_reply_resolves_the_next_run_after_multi_phone_clarification(self) -> None:
+        from services.agent_service import AgentService
+
+        matrix = MultiPhoneMatrix()
+        runtime = ScriptedRuntime([{"final": {"text": "phone-2 已锁定"}}])
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=_registry(),
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                session = service.create_session({"title": "Scope clarification"})
+                ambiguous = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-question",
+                    "text": "在手机上打开小红书",
+                    "scopeMode": "auto",
+                })
+                first = _wait_for_status(service, ambiguous["run"]["runId"], "completed")
+                selected = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-answer",
+                    "text": "phone-2",
+                    "scopeMode": "auto",
+                })
+                second = _wait_for_status(service, selected["run"]["runId"], "completed")
+            finally:
+                service.shutdown()
+
+        self.assertEqual(first["request"]["requestScope"]["status"], "ambiguous")
+        self.assertEqual(second["request"]["requestScope"]["status"], "resolved")
+        self.assertEqual(second["request"]["targets"], {"deviceIds": ["phone-2"]})
+        self.assertEqual(runtime.requests[0]["requestScope"]["targets"], {"deviceIds": ["phone-2"]})
+
     def test_invalid_manual_scope_is_rejected_before_run_creation(self) -> None:
         from services.agent_service import AgentService
 
@@ -405,9 +469,36 @@ class AgentServiceTests(unittest.TestCase):
             {"modelId": "glm-5", "name": "glm-5", "available": True},
             {"modelId": "qwen3.7-plus", "name": "qwen3.7-plus", "available": True},
         ])
-        self.assertEqual(bootstrap["policy"]["mode"], "weak")
-        self.assertEqual(bootstrap["policy"]["approvalRequired"], ["critical"])
+        self.assertEqual(bootstrap["policy"]["mode"], "strong")
+        self.assertEqual(bootstrap["policy"]["approvalRequired"], ["outbound", "critical"])
         self.assertTrue(bootstrap["permissions"]["outbound"])
+
+    def test_native_capability_catalog_returns_the_live_connected_registry(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime())
+            try:
+                expected = service.capabilities.list_capabilities(available_only=True)
+                catalog = service.capabilities.execute("loom.capabilities.list", {})
+            finally:
+                service.shutdown()
+
+        self.assertEqual(catalog["schema"], "loom.agent.capability-catalog.v1")
+        self.assertEqual(catalog["count"], len(expected))
+        self.assertEqual(
+            sorted(
+                display_name
+                for domain in catalog["domains"]
+                for display_name in domain["capabilities"]
+            ),
+            sorted(item["displayName"] for item in expected),
+        )
+        self.assertEqual(sum(domain["count"] for domain in catalog["domains"]), catalog["count"])
+        self.assertLess(
+            len(json.dumps(catalog, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
+            10_000,
+        )
 
     def test_session_model_is_snapshotted_into_run_and_survives_later_switch(self) -> None:
         from services.agent_service import AgentService
@@ -575,6 +666,76 @@ class AgentServiceTests(unittest.TestCase):
                 runtime.release.set()
                 service.shutdown()
 
+    def test_session_active_run_check_is_atomic_across_service_instances(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            first_runtime = BlockingRuntime()
+            second_runtime = BlockingRuntime()
+            first_service = AgentService(AppPaths(root), runtime=first_runtime, capabilities=_registry())
+            second_service = AgentService(AppPaths(root), runtime=second_runtime, capabilities=_registry())
+            release_first_check = threading.Event()
+            first_check_completed = threading.Event()
+            second_submission_completed = threading.Event()
+            outcomes: dict[str, object] = {}
+            threads: list[threading.Thread] = []
+            try:
+                session = first_service.create_session({"title": "Cross-service single run"})
+                original_list_runs = first_service.repository.list_runs
+
+                def pause_after_first_check(session_id: str) -> list[dict]:
+                    runs = original_list_runs(session_id)
+                    first_check_completed.set()
+                    if not release_first_check.wait(5.0):
+                        raise RuntimeError("timed out waiting to continue first submission")
+                    return runs
+
+                first_service.repository.list_runs = pause_after_first_check  # type: ignore[method-assign]
+
+                def submit(label: str, service: AgentService) -> None:
+                    try:
+                        outcomes[label] = service.send_message(
+                            session["sessionId"],
+                            {
+                                "clientMessageId": f"cross-service-{label}",
+                                "text": label,
+                            },
+                        )
+                    except Exception as exc:
+                        outcomes[label] = exc
+                    finally:
+                        if label == "second":
+                            second_submission_completed.set()
+
+                first_thread = threading.Thread(target=submit, args=("first", first_service))
+                second_thread = threading.Thread(target=submit, args=("second", second_service))
+                threads = [first_thread, second_thread]
+                first_thread.start()
+                self.assertTrue(first_check_completed.wait(2.0))
+                second_thread.start()
+
+                crossed_check_create_window = second_submission_completed.wait(2.0)
+                release_first_check.set()
+                for thread in threads:
+                    thread.join(5.0)
+
+                self.assertFalse(crossed_check_create_window)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+                successes = [value for value in outcomes.values() if isinstance(value, dict)]
+                failures = [value for value in outcomes.values() if isinstance(value, Exception)]
+                self.assertEqual(len(successes), 1)
+                self.assertEqual(len(failures), 1)
+                self.assertRegex(str(failures[0]), "already active")
+                self.assertEqual(len(original_list_runs(session["sessionId"])), 1)
+            finally:
+                release_first_check.set()
+                first_runtime.release.set()
+                second_runtime.release.set()
+                for thread in threads:
+                    thread.join(1.0)
+                first_service.shutdown()
+                second_service.shutdown()
+
     def test_quick_pause_then_resume_chains_continuation_after_worker_wind_down(self) -> None:
         from services.agent_service import AgentService
 
@@ -716,6 +877,90 @@ class AgentServiceTests(unittest.TestCase):
                 service.shutdown()
 
         self.assertEqual(runtime.requests[1]["targets"], {"deviceIds": ["phone-progress"]})
+        self.assertEqual(runtime.requests[2]["targets"], {})
+
+    def test_new_media_or_phone_query_does_not_inherit_an_unrelated_previous_phone_scope(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([
+            {"final": {"text": "published"}},
+            {"final": {"text": "generated"}},
+            {"final": {"text": "listed"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=_registry(),
+                matrix_factory=ProgressMatrix,
+            )
+            try:
+                session = service.create_session({"title": "No accidental scope inheritance"})
+                first = service.send_message(session["sessionId"], {
+                    "clientMessageId": "no-scope-leak-1",
+                    "text": "发布到小红书",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, first["run"]["runId"], "completed")
+                second = service.send_message(session["sessionId"], {
+                    "clientMessageId": "no-scope-leak-2",
+                    "text": "生成一张图片",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, second["run"]["runId"], "completed")
+                third = service.send_message(session["sessionId"], {
+                    "clientMessageId": "no-scope-leak-3",
+                    "text": "现在有哪些手机",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, third["run"]["runId"], "completed")
+            finally:
+                service.shutdown()
+
+        self.assertEqual(runtime.requests[0]["targets"], {"deviceIds": ["phone-progress"]})
+        self.assertEqual(runtime.requests[1]["targets"], {})
+        self.assertEqual(runtime.requests[2]["targets"], {})
+
+    def test_negated_or_independent_continuation_does_not_reuse_previous_phone_scope(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([
+            {"final": {"text": "published"}},
+            {"final": {"text": "generated"}},
+            {"final": {"text": "explained"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=_registry(),
+                matrix_factory=ProgressMatrix,
+            )
+            try:
+                session = service.create_session({"title": "Scope continuation boundaries"})
+                first = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-boundary-1",
+                    "text": "发布到小红书",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, first["run"]["runId"], "completed")
+                second = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-boundary-2",
+                    "text": "继续生成一张图片",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, second["run"]["runId"], "completed")
+                third = service.send_message(session["sessionId"], {
+                    "clientMessageId": "scope-boundary-3",
+                    "text": "不要继续刚才的手机任务，只说明风险",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, third["run"]["runId"], "completed")
+            finally:
+                service.shutdown()
+
+        self.assertEqual(runtime.requests[0]["targets"], {"deviceIds": ["phone-progress"]})
+        self.assertEqual(runtime.requests[1]["targets"], {})
         self.assertEqual(runtime.requests[2]["targets"], {})
 
     def test_explicit_capability_id_is_added_to_runtime_hints(self) -> None:
@@ -877,7 +1122,7 @@ class AgentServiceTests(unittest.TestCase):
                 release.set()
                 service.shutdown()
 
-    def test_restart_recovery_pauses_uncertain_run_and_starts_safe_queued_run(self) -> None:
+    def test_restart_recovery_terminalizes_uncertain_run_and_starts_safe_queued_run(self) -> None:
         from services.agent_service import AgentService
 
         with tempfile.TemporaryDirectory() as root:
@@ -912,12 +1157,197 @@ class AgentServiceTests(unittest.TestCase):
             service = AgentService(paths, runtime=runtime, capabilities=_registry())
             try:
                 uncertain = service.get_run("run-uncertain")
-                self.assertEqual(uncertain["status"], "paused")
+                self.assertEqual(uncertain["status"], "failed")
                 self.assertEqual(uncertain["error"]["code"], "agent_restart_inflight_unknown")
-                self.assertTrue(uncertain["error"]["recoverable"])
+                self.assertFalse(uncertain["error"]["recoverable"])
+                self.assertTrue(uncertain["error"]["outcomeIndeterminate"])
+                self.assertTrue(uncertain["error"]["executionMayContinue"])
                 self.assertEqual(_wait_for_status(service, "run-queued", "completed")["status"], "completed")
                 self.assertEqual(len(runtime.requests), 1)
                 self.assertEqual(runtime.requests[0]["runtimeProfileId"], "loom-native")
+            finally:
+                service.shutdown()
+
+    def test_restart_recovery_allows_safe_pre_tool_run_to_resume(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            repository = AgentSessionRepository(paths)
+            repository.create_session("Safe paused run", session_id="session-safe-paused")
+            repository.create_run({
+                "schema": "loom.agent.run.v1",
+                "runId": "run-safe-paused",
+                "sessionId": "session-safe-paused",
+                "status": "running",
+                "campaignIds": [],
+                "checkpoint": json.dumps({
+                    "version": 1,
+                    "completedToolCallIds": [],
+                    "toolResults": [],
+                    "inFlightToolCall": None,
+                }),
+                "request": {"prompt": "continue after restart", "runtimeProfileId": "loom-native"},
+            })
+
+            runtime = ScriptedRuntime([{"final": {"text": "resumed safely"}}])
+            service = AgentService(paths, runtime=runtime, capabilities=_registry())
+            try:
+                recovered = service.get_run("run-safe-paused")
+                self.assertEqual(recovered["status"], "paused")
+                self.assertEqual(recovered["error"]["code"], "agent_restart_recovery")
+                self.assertTrue(recovered["error"]["recoverable"])
+
+                service.resume_run("run-safe-paused")
+                completed = _wait_for_status(service, "run-safe-paused", "completed")
+
+                self.assertEqual(completed["status"], "completed")
+                self.assertNotIn("error", completed)
+                self.assertEqual(len(runtime.requests), 1)
+                self.assertEqual(runtime.requests[0]["prompt"], "continue after restart")
+            finally:
+                service.shutdown()
+
+    def test_worker_crash_with_inflight_tool_is_indeterminate_and_not_retryable(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                capabilities=_registry(),
+            )
+            try:
+                session = service.create_session({"title": "Worker crash"})
+
+                def crash_with_inflight_tool(session_id, run_id, request=None):
+                    run = service.repository.get_run(run_id, session_id=session_id)
+                    checkpoint = json.loads(str(run.get("checkpoint") or "{}"))
+                    checkpoint["inFlightToolCall"] = {
+                        "toolCallId": "tool-crashed",
+                        "name": "loom.phone.task",
+                        "input": {"deviceId": "phone-1", "task": "发布内容"},
+                    }
+                    service.repository.update_run(
+                        run_id,
+                        {
+                            "status": "running",
+                            "checkpoint": json.dumps(checkpoint, ensure_ascii=False),
+                        },
+                        session_id=session_id,
+                    )
+                    raise RuntimeError("simulated service worker crash")
+
+                service.orchestrator.execute_run = crash_with_inflight_tool
+                sent = service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "worker-crash-client", "text": "执行手机任务"},
+                )
+                failed = _wait_for_status(service, sent["run"]["runId"], "failed")
+
+                self.assertEqual(failed["error"]["code"], "agent_service_inflight_unknown")
+                self.assertFalse(failed["error"]["recoverable"])
+                self.assertTrue(failed["error"]["outcomeIndeterminate"])
+                self.assertTrue(failed["error"]["executionMayContinue"])
+                checkpoint = json.loads(failed["checkpoint"])
+                self.assertIsNone(checkpoint["inFlightToolCall"])
+                self.assertEqual(checkpoint["completedToolCallIds"], ["tool-crashed"])
+                self.assertEqual(checkpoint["toolResults"][-1]["status"], "failed")
+            finally:
+                service.shutdown()
+
+    def test_worker_crash_discards_queued_continuation_after_terminal_failure(self) -> None:
+        from services.agent_service import AgentService
+
+        started = threading.Event()
+        release = threading.Event()
+        continuation_released = threading.Event()
+        invocations: list[dict] = []
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                capabilities=_registry(),
+            )
+            try:
+                session = service.create_session({"title": "Queued crash continuation"})
+
+                def crash_with_inflight_tool(session_id, run_id, request=None):
+                    invocations.append(dict(request or {}))
+                    run = service.repository.get_run(run_id, session_id=session_id)
+                    checkpoint = json.loads(str(run.get("checkpoint") or "{}"))
+                    checkpoint["inFlightToolCall"] = {
+                        "toolCallId": "tool-before-queued-crash",
+                        "name": "loom.phone.publish",
+                        "input": {"target": {"deviceIds": ["phone-1"]}, "text": "publish once"},
+                    }
+                    service.repository.update_run(
+                        run_id,
+                        {
+                            "status": "running",
+                            "checkpoint": json.dumps(checkpoint, ensure_ascii=False),
+                        },
+                        session_id=session_id,
+                    )
+                    started.set()
+                    release.wait(3)
+                    raise RuntimeError("simulated crash after queuing a continuation")
+
+                service.orchestrator.execute_run = crash_with_inflight_tool
+                sent = service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "queued-crash-client", "text": "publish once"},
+                )
+                self.assertTrue(started.wait(1))
+                queued = service._submit_run(
+                    session["sessionId"],
+                    sent["run"]["runId"],
+                    {"prompt": "queued approval continuation"},
+                    emit_runtime_requested=False,
+                    on_complete=continuation_released.set,
+                    queue_if_busy=True,
+                )
+                self.assertTrue(queued)
+
+                release.set()
+                failed = _wait_for_status(service, sent["run"]["runId"], "failed")
+
+                self.assertEqual(failed["error"]["code"], "agent_service_inflight_unknown")
+                self.assertTrue(continuation_released.wait(1))
+                time.sleep(0.05)
+                self.assertEqual(len(invocations), 1)
+                self.assertNotIn(sent["run"]["runId"], service._pending_continuations)
+            finally:
+                release.set()
+                service.shutdown()
+
+    def test_worker_crash_before_tool_execution_remains_retryable(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                capabilities=_registry(),
+            )
+            try:
+                session = service.create_session({"title": "Pre-tool worker crash"})
+
+                def crash_before_tool(session_id, run_id, request=None):
+                    raise RuntimeError("simulated pre-tool service crash")
+
+                service.orchestrator.execute_run = crash_before_tool
+                sent = service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "pre-tool-crash-client", "text": "分析任务"},
+                )
+                failed = _wait_for_status(service, sent["run"]["runId"], "failed")
+
+                self.assertEqual(failed["error"]["code"], "agent_service_failed")
+                self.assertTrue(failed["error"]["recoverable"])
+                self.assertNotIn("outcomeIndeterminate", failed["error"])
+                checkpoint = json.loads(failed["checkpoint"])
+                self.assertIsNone(checkpoint["inFlightToolCall"])
             finally:
                 service.shutdown()
 
@@ -1180,7 +1610,12 @@ class AgentServiceTests(unittest.TestCase):
         ])
         with tempfile.TemporaryDirectory() as root:
             matrix = ConfirmationMatrix(require_confirmation=True)
-            service = AgentService(AppPaths(root), runtime=runtime, matrix_factory=lambda: matrix)
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
             try:
                 session = service.create_session({"title": "Weak dispatch"})
                 sent = service.send_message(session["sessionId"], {
@@ -1288,6 +1723,115 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertEqual([event["type"] for event in events].count("runtime.requested"), 1)
             finally:
                 service.shutdown()
+
+    def test_approved_matrix_retry_receives_one_server_confirmation(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "dispatch-before-retry",
+                    "name": "loom.matrix.dispatch",
+                    "input": {
+                        "prompt": "prepare the selected device",
+                        "target": {"deviceIds": ["phone-progress"]},
+                    },
+                }]
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "retry-confirmed",
+                    "name": "loom.matrix.retry",
+                    "input": {"campaignId": "campaign-progress"},
+                }]
+            },
+            {"final": {"text": "approved retry complete"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            matrix = ConfirmationRetryMatrix(require_confirmation=True)
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="strong"),
+            )
+            try:
+                session = service.create_session({"title": "Confirmed retry"})
+                sent = service.send_message(session["sessionId"], {
+                    "clientMessageId": "confirmed-retry-client",
+                    "text": "dispatch and then retry the selected device",
+                    "targets": {"deviceIds": ["phone-progress"]},
+                })
+                first_waiting = _wait_for_status(service, sent["run"]["runId"], "waiting_approval")
+                self.assertEqual(matrix.retries, [])
+                first_approval = service.get_trace(first_waiting["runId"])["approvals"][0]
+
+                first_outcome = service.resolve_approval(
+                    first_approval["approvalId"],
+                    {"decision": "approved"},
+                )
+                self.assertEqual(first_outcome["run"]["status"], "waiting_approval")
+                self.assertEqual(len(matrix.dispatches), 1)
+                self.assertEqual(matrix.retries, [])
+                approvals = service.get_trace(first_waiting["runId"])["approvals"]
+                self.assertEqual(len(approvals), 2)
+
+                outcome = service.resolve_approval(
+                    approvals[-1]["approvalId"],
+                    {"decision": "approved"},
+                )
+                self.assertEqual(outcome["run"]["status"], "completed")
+                self.assertEqual(len(matrix.retries), 1)
+                self.assertIs(matrix.retries[0].get("confirmed"), True)
+            finally:
+                service.shutdown()
+
+    def test_weak_policy_auto_confirms_matrix_retry_without_approval(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "dispatch-before-weak-retry",
+                    "name": "loom.matrix.dispatch",
+                    "input": {
+                        "prompt": "prepare the selected device",
+                        "target": {"deviceIds": ["phone-progress"]},
+                    },
+                }]
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "retry-weak",
+                    "name": "loom.matrix.retry",
+                    "input": {"campaignId": "campaign-progress"},
+                }]
+            },
+            {"final": {"text": "retry complete"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            matrix = ConfirmationRetryMatrix(require_confirmation=True)
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            try:
+                session = service.create_session({"title": "Weak retry"})
+                sent = service.send_message(session["sessionId"], {
+                    "clientMessageId": "weak-retry-client",
+                    "text": "dispatch and then retry the selected device",
+                    "targets": {"deviceIds": ["phone-progress"]},
+                })
+                completed = _wait_for_status(service, sent["run"]["runId"], "completed")
+                trace = service.get_trace(completed["runId"])
+            finally:
+                service.shutdown()
+
+        self.assertEqual(trace["approvals"], [])
+        self.assertEqual(len(matrix.retries), 1)
+        self.assertIs(matrix.retries[0].get("confirmed"), True)
 
     def test_cancel_run_cascades_to_linked_matrix_campaigns_and_jobs(self) -> None:
         from services.agent_service import AgentService

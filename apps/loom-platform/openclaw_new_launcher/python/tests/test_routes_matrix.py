@@ -250,6 +250,91 @@ class MatrixRouteContractTests(unittest.TestCase):
         self.assertEqual(plan["evidence_body"]["assignmentId"], "assignment_route_b")
         self.assertEqual(job["result"]["results"][0]["assignmentId"], "assignment_route_b")
 
+    def test_canonical_dispatch_does_not_retry_structured_remote_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            attempts: list[dict] = []
+
+            def submit_phone(_ctx, **plan):
+                attempts.append(plan)
+                return {
+                    "success": False,
+                    "errorCode": "timeout",
+                    "error": "remote task may still be running",
+                    "taskId": "remote-task-42",
+                    "stdout": "",
+                    "stderr": "",
+                }
+
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            with patch("api.routes_matrix._submit_phone_job", side_effect=submit_phone):
+                submitted = client.post(
+                    "/api/matrix/dispatch",
+                    json={
+                        "schema": "loom.matrix.dispatch.v2",
+                        "campaignId": "campaign_uncertain",
+                        "concurrency": 1,
+                        "mode": "safe",
+                        "profile": "standard",
+                        "deviceAssignments": [
+                            {
+                                "assignmentId": "assignment_uncertain",
+                                "deviceId": "phone-a",
+                                "prompt": "read the current screen",
+                                "templateId": "screen_read_v1",
+                                "input": {},
+                                "timeoutSec": 180,
+                                "retryBudget": 3,
+                            }
+                        ],
+                    },
+                )
+                job = _wait_for_job(client, submitted.json()["jobId"])
+
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(len(attempts), 1)
+            result = job["result"]["results"][0]
+            self.assertEqual(result["attempts"], 1)
+            self.assertEqual(result["taskId"], "remote-task-42")
+            self.assertTrue(result["outcomeIndeterminate"])
+            status = client.get(
+                "/api/matrix/status",
+                params={"campaignId": "campaign_uncertain"},
+            ).json()
+            stored_task = status["campaigns"][0]["missions"][0]["deviceTasks"][0]
+            self.assertEqual(stored_task.get("taskId"), "remote-task-42")
+            self.assertTrue(stored_task.get("outcomeIndeterminate"))
+
+    def test_matrix_status_can_query_campaign_older_than_default_window(self) -> None:
+        from core.phone_matrix import MatrixControlPlane
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            campaign_ids = [
+                matrix.dispatch(
+                    {
+                        "prompt": f"read screen {index}",
+                        "mode": "observe",
+                        "target": {"deviceIds": ["phone-a"]},
+                    }
+                )["campaignId"]
+                for index in range(25)
+            ]
+
+            default_status = client.get("/api/matrix/status").json()
+            selected_status = client.get(
+                "/api/matrix/status",
+                params={"campaignId": campaign_ids[0]},
+            ).json()
+
+            self.assertNotIn(campaign_ids[0], [item["campaignId"] for item in default_status["campaigns"]])
+            self.assertEqual(
+                [item["campaignId"] for item in selected_status["campaigns"]],
+                [campaign_ids[0]],
+            )
+
     def test_matrix_observe_reuses_phone_control_fast_read_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _write_script(temp_dir, "openclaw-phone-vision.mjs")
@@ -689,6 +774,44 @@ class MatrixRouteContractTests(unittest.TestCase):
         self.assertEqual(states[first["campaignId"]], "cancelled")
         self.assertEqual(states[second["campaignId"]], "cancelled")
 
+    def test_matrix_cancel_missing_campaign_returns_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+
+            response = client.post(
+                "/api/matrix/cancel",
+                json={"campaignId": "campaign-missing"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "matrix_campaign_not_found")
+
+    def test_matrix_cancel_false_result_is_not_reported_as_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            from core.phone_matrix import MatrixControlPlane
+
+            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            task = matrix.dispatch(
+                {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
+            )
+            matrix.record_result(
+                task["missions"][0]["deviceTasks"][0]["deviceTaskId"],
+                ok=True,
+                duration_ms=10,
+            )
+
+            response = client.post(
+                "/api/matrix/cancel",
+                json={"campaignId": task["campaignId"]},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "matrix_cancel_not_applied")
+        self.assertFalse(response.json()["cancelled"])
+        self.assertEqual(response.json()["campaignStatus"], "succeeded")
+
     def test_matrix_cancel_all_never_starts_a_device_waiting_for_concurrency(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             first_started = threading.Event()
@@ -1124,6 +1247,45 @@ class MatrixRouteContractTests(unittest.TestCase):
         self.assertTrue(retry_payload["retry"]["retried"])
         self.assertEqual(retry_payload["retry"]["retryOf"], campaign_id)
         self.assertTrue(retry_payload["retry"]["task"]["campaignId"].startswith("campaign_"))
+
+    def test_matrix_retry_missing_campaign_returns_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+
+            response = client.post(
+                "/api/matrix/retry",
+                json={"campaignId": "campaign-missing"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "matrix_campaign_not_found")
+
+    def test_matrix_retry_without_failed_tasks_returns_actionable_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            from core.phone_matrix import MatrixControlPlane
+
+            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            task = matrix.dispatch(
+                {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
+            )
+            matrix.record_result(
+                task["missions"][0]["deviceTasks"][0]["deviceTaskId"],
+                ok=True,
+                duration_ms=10,
+            )
+
+            response = client.post(
+                "/api/matrix/retry",
+                json={"campaignId": task["campaignId"]},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertEqual(payload["code"], "matrix_retry_not_available")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["error"], payload["retry"]["reason"])
 
 
 def _write_script(base_path: str, name: str, *, return_code: int = 0, body: str = "") -> None:

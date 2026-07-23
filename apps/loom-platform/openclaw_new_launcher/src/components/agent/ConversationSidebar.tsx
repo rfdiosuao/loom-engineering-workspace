@@ -57,7 +57,7 @@ export function ConversationSidebar({
   const archive = async (session: AgentSession) => {
     const confirmed = await showConfirm({
       title: '归档对话',
-      message: `归档“${session.title}”？运行中的后台任务不会被取消。`,
+      message: `归档“${session.title}”？系统将先取消活动运行，再归档对话。`,
       confirmText: '归档',
     });
     if (confirmed) await onArchive(session);

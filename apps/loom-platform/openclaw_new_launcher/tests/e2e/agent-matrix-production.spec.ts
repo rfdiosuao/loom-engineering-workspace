@@ -873,7 +873,10 @@ test('Agent identity and controls stay framed at the shipped desktop viewports',
       await Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => undefined)));
     });
     await expect(header.locator('[data-loom-agent-mark]').first()).toBeVisible();
-    await expect(header.locator('img[src="/loom-motion/agent-core-v1.png"]')).toBeVisible();
+    const agentMarkImage = header.locator('[data-loom-agent-mark] img').first();
+    await expect(agentMarkImage).toBeVisible();
+    await expect(agentMarkImage).toHaveAttribute('src', /luming-logo/);
+    await expect(agentMarkImage).not.toHaveAttribute('src', /agent-core-v1/);
     await expect(header.locator('[data-agent-executing="true"]')).toHaveCount(1);
     await expect(main.getByText('AGT', { exact: true })).toHaveCount(0);
 

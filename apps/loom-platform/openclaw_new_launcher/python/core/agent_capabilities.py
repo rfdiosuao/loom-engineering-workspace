@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -49,7 +51,7 @@ MEDIA_IMAGE_INPUT_SCHEMA: Json = {
             "minItems": 1,
             "items": {"type": "string", "minLength": 1},
         },
-        "allOnline": {"type": "boolean"},
+        "allOnline": {"type": "boolean", "enum": [True]},
     },
 }
 
@@ -139,13 +141,44 @@ MATRIX_TARGET_SCHEMA: Json = {
             "minItems": 1,
             "items": {"type": "string", "minLength": 1},
         },
-        "allOnline": {"type": "boolean"},
+        "allOnline": {"type": "boolean", "enum": [True]},
     },
-    "anyOf": [
+    "oneOf": [
         {"required": ["deviceIds"]},
         {"required": ["groups"]},
         {"required": ["allOnline"]},
     ],
+    "additionalProperties": False,
+}
+
+MEDIA_ASSET_LIST_INPUT_SCHEMA: Json = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": ["image", "video"]},
+        "cursor": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+    "additionalProperties": False,
+}
+
+MEDIA_ASSET_LIST_OUTPUT_SCHEMA: Json = {
+    "type": "object",
+    "required": ["items", "nextCursor", "hasMore"],
+    "properties": {
+        "items": {"type": "array", "items": {"type": "object"}},
+        "nextCursor": {"type": "string"},
+        "hasMore": {"type": "boolean"},
+    },
+}
+
+MEDIA_ASSET_TRANSFER_INPUT_SCHEMA: Json = {
+    "type": "object",
+    "required": ["assetId", "targets"],
+    "properties": {
+        "assetId": {"type": "string", "minLength": 1},
+        "targets": MATRIX_TARGET_SCHEMA,
+    },
+    "additionalProperties": False,
 }
 
 MATRIX_DISPATCH_INPUT_SCHEMA: Json = {
@@ -158,7 +191,7 @@ MATRIX_DISPATCH_INPUT_SCHEMA: Json = {
         "targets": MATRIX_TARGET_SCHEMA,
         "mode": {"type": "string", "enum": ["observe", "safe", "full", "deep"]},
     },
-    "anyOf": [
+    "oneOf": [
         {"required": ["deviceId"]},
         {"required": ["group"]},
         {"required": ["targets"]},
@@ -300,6 +333,7 @@ DEFAULT_CLI_ALLOWLIST = frozenset(
 )
 
 SEMANTIC_CAPABILITY_GROUPS = (
+    ("loom.capabilities.list", "loom.mcp.loom.loom_cli_commands"),
     ("loom.logs.tail", "loom.cli.logs.tail", "loom.mcp.loom.loom_logs_tail"),
     ("loom.matrix.status", "loom.cli.matrix.status", "loom.mcp.loom.loom_matrix_status"),
     ("loom.matrix.dispatch", "loom.cli.matrix.dispatch", "loom.mcp.loom.loom_matrix_dispatch"),
@@ -446,8 +480,107 @@ UNSAFE_CLI_GLOBAL_OPTIONS = frozenset(
     }
 )
 
+PRE_EXECUTION_ERROR_CODES = frozenset(
+    {
+        "approval_already_resolved",
+        "approval_conflict",
+        "approval_expired",
+        "approval_rejected",
+        "approval_scope_mismatch",
+        "bridge_not_configured",
+        "capability_invalid_input",
+        "capability_not_found",
+        "capability_unavailable",
+        "critical_target_required",
+        "invalid_action_body_json",
+        "invalid_actual_model",
+        "invalid_codex_toml",
+        "invalid_control",
+        "invalid_dispatch",
+        "invalid_input",
+        "invalid_json",
+        "invalid_lease",
+        "invalid_media_file",
+        "invalid_media_kind",
+        "invalid_model",
+        "invalid_option",
+        "invalid_permission",
+        "invalid_phone_mode",
+        "invalid_phone_profile",
+        "invalid_phone_token",
+        "invalid_phone_url",
+        "invalid_provider_url",
+        "invalid_runtime",
+        "invalid_schedule_command",
+        "invalid_target",
+        "invalid_task_transition",
+        "invalid_user_model",
+        "matrix_campaign_scope_required",
+        "matrix_campaign_scope_violation",
+        "matrix_target_scope_required",
+        "media_asset_not_found",
+        "missing_action",
+        "missing_action_body_json",
+        "missing_adb",
+        "missing_agent_result_json",
+        "missing_api_token",
+        "missing_campaign",
+        "missing_check_id",
+        "missing_component",
+        "missing_config_path",
+        "missing_config_write_fields",
+        "missing_email",
+        "missing_email_code",
+        "missing_feishu_table",
+        "missing_helper_script",
+        "missing_ids",
+        "missing_job_id",
+        "missing_lead_summary",
+        "missing_license_code",
+        "missing_local_phone_model_config",
+        "missing_login_identity",
+        "missing_merchant_id",
+        "missing_model",
+        "missing_option_value",
+        "missing_packages",
+        "missing_password",
+        "missing_phone_llm_config",
+        "missing_phone_token",
+        "missing_phone_url",
+        "missing_prompt",
+        "missing_register_fields",
+        "missing_schedule_command",
+        "missing_schedule_time",
+        "missing_target",
+        "missing_task_id",
+        "missing_template_id",
+        "missing_ticket",
+        "missing_wire_custom_fields",
+        "permission_denied",
+        "phone_single_target_required",
+        "phone_target_not_found",
+        "phone_target_scope_required",
+        "phone_target_unavailable",
+        "publish_media_missing",
+        "safety_confirmation_required",
+        "unknown_command",
+        "unknown_tool",
+        "unsupported_command",
+    }
+)
+
 
 DEFAULT_INTERNAL_SPECS: dict[str, Json] = {
+    "loom.capabilities.list": {
+        "displayName": "查看能力目录",
+        "description": "查看麓鸣智能体当前真实连接且可执行的完整能力目录。",
+        "domain": "agent",
+        "targetScope": "none",
+        "permission": "read",
+        "risk": "read",
+        "timeoutSec": 15,
+        "inputSchema": {"type": "object", "additionalProperties": False},
+    },
     "loom.matrix.status": {
         "displayName": "查看矩阵状态",
         "description": "查看手机矩阵任务与设备执行状态。",
@@ -543,6 +676,7 @@ class CapabilityRegistry:
         cli_catalog_provider: Callable[[], Any] | None = None,
         cli_executor: Callable[[str, Json], Any] | None = None,
         cli_allowlist: Sequence[str] = tuple(DEFAULT_CLI_ALLOWLIST),
+        discovery_cache_ttl_sec: float = 5.0,
     ):
         self.internal_operations = dict(internal_operations or {})
         self.skill_provider = skill_provider or _default_skill_provider
@@ -553,6 +687,10 @@ class CapabilityRegistry:
         self.cli_catalog_provider = cli_catalog_provider or _default_cli_catalog_provider
         self.cli_executor = cli_executor or _default_cli_executor
         self.cli_allowlist = {str(item).strip() for item in cli_allowlist if str(item).strip()}
+        self.discovery_cache_ttl_sec = max(0.0, float(discovery_cache_ttl_sec or 0.0))
+        self._discovery_lock = threading.RLock()
+        self._discovery_cache: dict[str, Capability] | None = None
+        self._discovery_cache_expires_at = 0.0
 
     def list_capabilities(self, *, available_only: bool = False) -> list[Json]:
         capabilities = list(self._capabilities(available_only=available_only).values())
@@ -574,6 +712,8 @@ class CapabilityRegistry:
         capability, data = self.validate_input(name, payload)
         if capability.executor is None:
             raise CapabilityExecutionError("capability_unavailable", f"Capability is not connected: {name}")
+        if capability.permission != "read":
+            self.invalidate_cache()
         token = CapabilityCancellationToken()
         state = _ExecutionState()
         supports_cancellation = _accepts_cancellation_token(capability.executor)
@@ -622,10 +762,30 @@ class CapabilityRegistry:
                 raise state.error
             if not isinstance(state.error, Exception):
                 raise state.error
-            raise CapabilityExecutionError("capability_failed", f"Capability failed: {name}: {state.error}") from state.error
+            detail = str(redact_sensitive(str(state.error)))[:500]
+            if capability.permission == "read" and capability.risk == "read":
+                raise CapabilityExecutionError(
+                    "capability_failed",
+                    f"Capability failed: {name}: {detail}",
+                ) from state.error
+            raise CapabilityExecutionError(
+                "capability_execution_unknown",
+                f"Capability execution outcome is unknown: {name}: {detail}",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=False,
+            ) from state.error
         result = state.result
         safe_result = redact_sensitive(result)
-        _validate_schema(safe_result, capability.output_schema, path="output")
+        try:
+            _validate_schema(safe_result, capability.output_schema, path="output")
+        except CapabilityInputError as exc:
+            raise CapabilityExecutionError(
+                "capability_invalid_output",
+                str(exc),
+                recoverable=False,
+                outcome_indeterminate=True,
+            ) from exc
         return safe_result
 
     def validate_input(
@@ -639,14 +799,30 @@ class CapabilityRegistry:
         return capability, data
 
     def _all_capabilities(self) -> dict[str, Capability]:
-        capabilities = self._internal_capabilities()
-        for capability in self._skill_capabilities():
-            capabilities[capability.name] = capability
-        for capability in self._mcp_capabilities():
-            capabilities[capability.name] = capability
-        for capability in self._cli_capabilities():
-            capabilities[capability.name] = capability
-        return dict(sorted(capabilities.items()))
+        now = time.monotonic()
+        with self._discovery_lock:
+            if (
+                self._discovery_cache is not None
+                and now < self._discovery_cache_expires_at
+            ):
+                return dict(self._discovery_cache)
+            capabilities = self._internal_capabilities()
+            for capability in self._skill_capabilities():
+                capabilities[capability.name] = capability
+            for capability in self._mcp_capabilities():
+                capabilities[capability.name] = capability
+            for capability in self._cli_capabilities():
+                capabilities[capability.name] = capability
+            discovered = dict(sorted(capabilities.items()))
+            if self.discovery_cache_ttl_sec > 0:
+                self._discovery_cache = discovered
+                self._discovery_cache_expires_at = now + self.discovery_cache_ttl_sec
+            return dict(discovered)
+
+    def invalidate_cache(self) -> None:
+        with self._discovery_lock:
+            self._discovery_cache = None
+            self._discovery_cache_expires_at = 0.0
 
     def _capabilities(self, *, available_only: bool = False) -> dict[str, Capability]:
         capabilities = list(self._all_capabilities().values())
@@ -688,14 +864,20 @@ class CapabilityRegistry:
         for item in items if isinstance(items, Sequence) and not isinstance(items, (str, bytes)) else []:
             if not isinstance(item, Mapping) or not item.get("installed", True) or not item.get("enabled", True):
                 continue
-            skill_id = _safe_name(item.get("id") or item.get("name"))
-            if not skill_id:
+            raw_skill_id = str(item.get("id") or item.get("name") or "").strip()
+            if not raw_skill_id or not _safe_name(raw_skill_id):
                 continue
             executor = item.get("executor") if callable(item.get("executor")) else None
             if executor is None and self.skill_executor is not None:
                 skill_executor = self.skill_executor
 
-                def executor(payload, *, cancellation_token, skill_id=skill_id, skill_executor=skill_executor):
+                def executor(
+                    payload,
+                    *,
+                    cancellation_token,
+                    skill_id=raw_skill_id,
+                    skill_executor=skill_executor,
+                ):
                     return _invoke_with_optional_cancellation(
                         skill_executor,
                         skill_id,
@@ -705,7 +887,7 @@ class CapabilityRegistry:
             permission, risk = _external_policy_metadata(item)
             capabilities.append(
                 _capability_from_spec(
-                    f"loom.skill.{skill_id}",
+                    _external_capability_id("skill", raw_skill_id),
                     "skill",
                     {
                         **item,
@@ -725,16 +907,16 @@ class CapabilityRegistry:
         for item in items if isinstance(items, Sequence) and not isinstance(items, (str, bytes)) else []:
             if not isinstance(item, Mapping):
                 continue
-            server = _safe_name(item.get("server") or "default")
-            tool = _safe_name(item.get("name"))
-            if not server or not tool:
+            raw_server = str(item.get("server") or "default").strip()
+            raw_tool = str(item.get("name") or "").strip()
+            if not raw_server or not raw_tool or not _safe_name(raw_server) or not _safe_name(raw_tool):
                 continue
             permission, risk = _external_policy_metadata(item)
             executor = item.get("executor") if callable(item.get("executor")) else None
             if (
                 executor is None
                 and self.mcp_executor is not None
-                and (not self._uses_default_mcp_executor or server == "loom")
+                and (not self._uses_default_mcp_executor or raw_server == "loom")
             ):
                 mcp_executor = self.mcp_executor
 
@@ -742,10 +924,11 @@ class CapabilityRegistry:
                     payload,
                     *,
                     cancellation_token,
-                    server=server,
-                    tool=tool,
+                    server=raw_server,
+                    tool=raw_tool,
                     mcp_executor=mcp_executor,
                     permission=permission,
+                    risk=risk,
                 ):
                     result = _invoke_with_optional_cancellation(
                         mcp_executor,
@@ -756,12 +939,31 @@ class CapabilityRegistry:
                         permission=permission,
                     )
                     if isinstance(result, Mapping) and result.get("isError") is True:
-                        raise _mcp_execution_error(server, tool, result)
-                    return result
-            localized = _external_capability_metadata("mcp", tool, server=server)
+                        raise _mcp_execution_error(
+                            server,
+                            tool,
+                            result,
+                            permission=permission,
+                            risk=risk,
+                        )
+                    payload = _mcp_success_payload(result)
+                    if (
+                        server == "loom"
+                        and isinstance(result, Mapping)
+                        and "isError" in result
+                        and payload is result
+                    ):
+                        raise _mcp_malformed_success_error(
+                            server,
+                            tool,
+                            permission=permission,
+                            risk=risk,
+                        )
+                    return payload
+            localized = _external_capability_metadata("mcp", raw_tool, server=raw_server)
             capabilities.append(
                 _capability_from_spec(
-                    f"loom.mcp.{server}.{tool}",
+                    _external_capability_id("mcp", raw_server, raw_tool),
                     "mcp",
                     {
                         **item,
@@ -834,11 +1036,15 @@ def _preferred_capability(
     *,
     prefer_available: bool,
 ) -> Capability:
+    eligible = list(candidates)
+    if prefer_available:
+        available = [capability for capability in eligible if capability.executor is not None]
+        if available:
+            eligible = available
     return min(
-        candidates,
+        eligible,
         key=lambda capability: (
-            0 if not prefer_available or capability.executor is not None else 1,
-            0 if _preserves_structured_contract(capability, candidates) else 1,
+            0 if _preserves_structured_contract(capability, eligible) else 1,
             CAPABILITY_SOURCE_PRIORITY.get(capability.source, 99),
             capability.name,
         ),
@@ -1011,6 +1217,16 @@ def _safe_name(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip(".-")[:160]
 
 
+def _external_capability_id(source: str, *raw_parts: str) -> str:
+    safe_parts = [_safe_name(part) for part in raw_parts]
+    base = ".".join(["loom", _safe_name(source), *safe_parts])
+    if all(raw == safe for raw, safe in zip(raw_parts, safe_parts)):
+        return base
+    digest_input = json.dumps(list(raw_parts), ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:12]
+    return f"{base}.{digest}"
+
+
 def _safe_provider_call(provider: Callable[[], Any]) -> Any:
     try:
         return provider()
@@ -1058,15 +1274,72 @@ def _validate_schema(value: Any, schema: Mapping[str, Any], *, path: str) -> Non
             raise CapabilityInputError(f"{path} must be at least {minimum}")
         if isinstance(maximum, (int, float)) and value > maximum:
             raise CapabilityInputError(f"{path} must be at most {maximum}")
-    if expected == "object" and isinstance(value, Mapping):
-        for key in schema.get("required", []):
+    required = schema.get("required")
+    properties = schema.get("properties")
+    has_required_fields = isinstance(required, Sequence) and not isinstance(required, (str, bytes))
+    has_object_constraints = (
+        expected == "object"
+        or isinstance(properties, Mapping)
+        or has_required_fields
+        or schema.get("additionalProperties") is False
+    )
+    if has_object_constraints:
+        if not isinstance(value, Mapping):
+            raise CapabilityInputError(f"{path} must be object")
+        for key in required if has_required_fields else []:
             if key not in value:
                 raise CapabilityInputError(f"{path}.{key} is required")
-        properties = schema.get("properties", {})
         if isinstance(properties, Mapping):
             for key, child_schema in properties.items():
                 if key in value and isinstance(child_schema, Mapping):
                     _validate_schema(value[key], child_schema, path=f"{path}.{key}")
+            if schema.get("additionalProperties") is False:
+                unexpected = [str(key) for key in value if key not in properties]
+                if unexpected:
+                    raise CapabilityInputError(f"{path}.{sorted(unexpected)[0]} is not allowed")
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, Sequence) and not isinstance(any_of, (str, bytes)) and any_of:
+        for option in any_of:
+            if not isinstance(option, Mapping):
+                continue
+            try:
+                _validate_schema(value, option, path=path)
+            except CapabilityInputError:
+                continue
+            break
+        else:
+            required_options = [
+                "/".join(str(key) for key in option.get("required", []))
+                for option in any_of
+                if isinstance(option, Mapping)
+                and isinstance(option.get("required"), Sequence)
+                and not isinstance(option.get("required"), (str, bytes))
+            ]
+            detail = f": {' or '.join(required_options)}" if required_options else ""
+            raise CapabilityInputError(f"{path} must satisfy one allowed parameter combination{detail}")
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, Sequence) and not isinstance(one_of, (str, bytes)) and one_of:
+        matches = 0
+        for option in one_of:
+            if not isinstance(option, Mapping):
+                continue
+            try:
+                _validate_schema(value, option, path=path)
+            except CapabilityInputError:
+                continue
+            matches += 1
+        if matches != 1:
+            required_options = [
+                "/".join(str(key) for key in option.get("required", []))
+                for option in one_of
+                if isinstance(option, Mapping)
+                and isinstance(option.get("required"), Sequence)
+                and not isinstance(option.get("required"), (str, bytes))
+            ]
+            detail = f": {' or '.join(required_options)}" if required_options else ""
+            raise CapabilityInputError(
+                f"{path} must satisfy exactly one allowed parameter combination{detail}"
+            )
 
 
 def _default_skill_provider() -> Any:
@@ -1093,9 +1366,17 @@ def _default_mcp_executor(server: str, tool: str, payload: Json, *, permission: 
     return loom_mcp.call_tool(tool, payload, permission=permission, trusted_internal=True)
 
 
-def _mcp_execution_error(server: str, tool: str, result: Mapping[str, Any]) -> CapabilityExecutionError:
+def _mcp_execution_error(
+    server: str,
+    tool: str,
+    result: Mapping[str, Any],
+    *,
+    permission: str = "read",
+    risk: str = "read",
+) -> CapabilityExecutionError:
     code = "mcp_tool_failed"
     message = f"MCP tool failed: {server}/{tool}"
+    error_payload: Mapping[str, Any] = {}
     content = result.get("content")
     if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
         for item in content:
@@ -1111,10 +1392,88 @@ def _mcp_execution_error(server: str, tool: str, result: Mapping[str, Any]) -> C
                 break
             error = payload.get("error") if isinstance(payload, Mapping) else None
             if isinstance(error, Mapping):
+                error_payload = error
                 code = str(error.get("code") or code)
                 message = str(error.get("message") or message)
             break
-    return CapabilityExecutionError(code, message)
+    outcome_indeterminate = error_payload.get("outcomeIndeterminate") is True
+    execution_may_continue = error_payload.get("executionMayContinue") is True
+    recoverable_value = error_payload.get("recoverable")
+    if not isinstance(recoverable_value, bool):
+        recoverable_value = error_payload.get("retryable")
+    recoverable = recoverable_value if isinstance(recoverable_value, bool) else True
+    if outcome_indeterminate or execution_may_continue:
+        return CapabilityExecutionError(
+            code,
+            message,
+            recoverable=False,
+            outcome_indeterminate=outcome_indeterminate or execution_may_continue,
+            execution_may_continue=execution_may_continue,
+        )
+    side_effecting = permission != "read" or risk != "read"
+    if side_effecting and not _error_is_definitely_pre_execution(code):
+        return CapabilityExecutionError(
+            "capability_execution_unknown",
+            f"MCP control outcome is unknown after {code}: {message}",
+            recoverable=False,
+            outcome_indeterminate=True,
+            execution_may_continue=False,
+        )
+    return CapabilityExecutionError(code, message, recoverable=recoverable)
+
+
+def _mcp_success_payload(result: Any) -> Any:
+    if not isinstance(result, Mapping) or result.get("isError") is True:
+        return result
+
+    structured = result.get("structuredContent")
+    if isinstance(structured, Mapping):
+        return dict(structured)
+
+    content = result.get("content")
+    if not isinstance(content, Sequence) or isinstance(content, (str, bytes)):
+        return result
+    for item in content:
+        if not isinstance(item, Mapping) or item.get("type") != "text":
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, Mapping):
+            return dict(payload)
+    return result
+
+
+def _mcp_malformed_success_error(
+    server: str,
+    tool: str,
+    *,
+    permission: str = "read",
+    risk: str = "read",
+) -> CapabilityExecutionError:
+    message = f"MCP tool returned a success response without a structured result: {server}/{tool}"
+    if permission != "read" or risk != "read":
+        return CapabilityExecutionError(
+            "capability_execution_unknown",
+            f"MCP control outcome is unknown because its success receipt was malformed: {server}/{tool}",
+            recoverable=False,
+            outcome_indeterminate=True,
+            execution_may_continue=False,
+        )
+    return CapabilityExecutionError(
+        "capability_invalid_output",
+        message,
+        recoverable=True,
+    )
+
+
+def _error_is_definitely_pre_execution(code: str) -> bool:
+    normalized = str(code or "").strip().lower()
+    return normalized in PRE_EXECUTION_ERROR_CODES
 
 
 def _default_cli_catalog_provider() -> Any:
@@ -1148,5 +1507,15 @@ def _default_cli_executor(command: str, payload: Json, *, permission: str | None
     code, result = loom_cli.dispatch([*command.split(), *extra, "--json", *permission_args], source="agent")
     if code != 0:
         error = result.get("error", {}) if isinstance(result, Mapping) else {}
-        raise CapabilityExecutionError(str(error.get("code") or "cli_failed"), str(error.get("message") or "CLI command failed"))
+        error_code = str(error.get("code") or "cli_failed")
+        message = str(error.get("message") or "CLI command failed")
+        if permission != "read" and not _error_is_definitely_pre_execution(error_code):
+            raise CapabilityExecutionError(
+                "capability_execution_unknown",
+                f"CLI control outcome is unknown after {error_code}: {message}",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=False,
+            )
+        raise CapabilityExecutionError(error_code, message)
     return result.get("data", result) if isinstance(result, Mapping) else result

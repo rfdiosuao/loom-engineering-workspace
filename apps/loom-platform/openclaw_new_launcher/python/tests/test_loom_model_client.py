@@ -476,6 +476,47 @@ class LoomModelClientTests(unittest.TestCase):
 
         self.assertEqual(payload["tool_choice"], "auto")
 
+    def test_capability_router_can_force_the_catalog_tool(self):
+        payload = build_chat_payload(transport_profile(), {
+            "runId": "run_catalog",
+            "round": 1,
+            "prompt": "列出当前已经连接的全部能力",
+            "capabilityRouting": {
+                "mode": "forced",
+                "forcedCapability": "loom.capabilities.list",
+            },
+            "capabilities": [{
+                "name": "loom.capabilities.list",
+                "description": "查看当前真实连接的能力目录。",
+                "inputSchema": {"type": "object", "additionalProperties": False},
+            }],
+        })
+
+        self.assertEqual(payload["tool_choice"], {
+            "type": "function",
+            "function": {"name": "loom_capabilities_list"},
+        })
+
+    def test_capability_router_disables_more_tools_after_catalog_result(self):
+        payload = build_chat_payload(transport_profile(), {
+            "runId": "run_catalog",
+            "round": 2,
+            "prompt": "列出当前已经连接的全部能力",
+            "capabilityRouting": {"mode": "response_only", "toolChoice": "none"},
+            "toolResults": [{
+                "toolCallId": "catalog-1",
+                "capability": "loom.capabilities.list",
+                "status": "completed",
+                "result": {"count": 12},
+            }],
+            "capabilities": [{
+                "name": "loom.capabilities.list",
+                "inputSchema": {"type": "object", "additionalProperties": False},
+            }],
+        })
+
+        self.assertEqual(payload["tool_choice"], "none")
+
     def test_invalid_tool_input_forces_one_model_repair_call_for_the_same_capability(self):
         payload = build_chat_payload(transport_profile(), {
             "runId": "run_repair_publish",
@@ -578,6 +619,50 @@ class LoomModelClientTests(unittest.TestCase):
             message["role"] == "user" and str(message.get("content") or "").startswith("Tool results from LOOM:")
             for message in payload["messages"]
         ))
+
+    def test_large_tool_history_remains_valid_json_after_bounding(self):
+        payload = build_chat_payload(transport_profile(), {
+            "runId": "run_large_tool_history",
+            "round": 2,
+            "prompt": "Continue from the completed tool call.",
+            "toolResults": [{
+                "toolCallId": "call_large_result",
+                "capability": "loom.matrix.status",
+                "status": "completed",
+                "input": {
+                    "detail": "summary",
+                    "context": "input-" * 4000,
+                },
+                "result": {
+                    "online": 1,
+                    "rows": [
+                        {"deviceId": f"phone-{index}", "details": "result-" * 800}
+                        for index in range(40)
+                    ],
+                },
+            }],
+            "capabilities": [{
+                "name": "loom.matrix.status",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "detail": {"type": "string"},
+                        "context": {"type": "string"},
+                    },
+                },
+            }],
+        })
+
+        assistant = next(message for message in payload["messages"] if message["role"] == "assistant")
+        tool = next(message for message in payload["messages"] if message["role"] == "tool")
+        arguments = assistant["tool_calls"][0]["function"]["arguments"]
+
+        self.assertLessEqual(len(arguments), 12000)
+        self.assertLessEqual(len(tool["content"]), 12000)
+        self.assertIsInstance(json.loads(arguments), dict)
+        decoded_result = json.loads(tool["content"])
+        self.assertEqual(decoded_result["status"], "completed")
+        self.assertIn("result", decoded_result)
 
     def test_session_artifacts_are_exposed_as_reusable_runtime_context(self):
         payload = build_chat_payload(transport_profile(), {
@@ -1018,6 +1103,22 @@ class LoomModelClientTests(unittest.TestCase):
             'authHeader=[REDACTED], authCredentials=[REDACTED], '
             'cookieJar=[REDACTED], maxTokens=100, prompt_tokens=10, safe=assignment-keep',
         )
+
+    def test_redact_sensitive_hides_login_code_without_hiding_program_code(self):
+        login_input = redact_sensitive({
+            "email": "user@example.com",
+            "purpose": "login",
+            "code": "246810",
+        })
+        program = redact_sensitive({
+            "language": "python",
+            "code": "print('hello')",
+            "error": {"code": "capability_failed"},
+        })
+
+        self.assertEqual(login_input["code"], "[REDACTED]")
+        self.assertEqual(program["code"], "print('hello')")
+        self.assertEqual(program["error"]["code"], "capability_failed")
 
     def test_redact_sensitive_recognizes_all_compound_credential_markers(self):
         safe = redact_sensitive({

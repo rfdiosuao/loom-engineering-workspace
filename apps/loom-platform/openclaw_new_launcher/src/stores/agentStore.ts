@@ -1,7 +1,12 @@
 import { create } from 'zustand';
 import type { AgentApproval, AgentMessage, AgentRun, AgentScope, AgentSession } from '../types/agent';
 import type { LoomRealtimeEvent } from '../types/realtime';
-import { mergeAgentEvent, normalizeAgentMessages } from '../components/agent/agentViewModel';
+import {
+  isTerminalAgentRunStatus,
+  mergeAgentEvent,
+  normalizeAgentMessages,
+  reconcileAgentMessagesForTerminalRun,
+} from '../components/agent/agentViewModel';
 
 export interface AgentAttachmentMetadata {
   name: string;
@@ -49,6 +54,7 @@ interface AgentState {
   upsertSession: (session: AgentSession) => void;
   replaceSession: (optimisticId: string, session: AgentSession) => void;
   removeSession: (sessionId: string) => void;
+  purgeSessionState: (sessionId: string) => void;
   setCurrentSession: (sessionId: string | null) => void;
   setMessages: (sessionId: string, messages: AgentMessage[]) => void;
   upsertMessage: (message: AgentMessage) => void;
@@ -142,6 +148,28 @@ export const useAgentStore = create<AgentState>((set) => ({
         : state.currentSessionId,
     };
   }),
+  purgeSessionState: (sessionId) => set((state) => {
+    const sessions = state.sessions.filter((session) => session.sessionId !== sessionId);
+    const messagesBySession = { ...state.messagesBySession };
+    const streamCursors = { ...state.streamCursors };
+    const drafts = { ...state.drafts };
+    delete messagesBySession[sessionId];
+    delete streamCursors[sessionId];
+    delete drafts[sessionId];
+    return {
+      sessions,
+      currentSessionId: state.currentSessionId === sessionId
+        ? sessions.find((session) => session.status === 'active')?.sessionId || null
+        : state.currentSessionId,
+      messagesBySession,
+      activeRuns: Object.fromEntries(
+        Object.entries(state.activeRuns).filter(([, run]) => run.sessionId !== sessionId),
+      ),
+      streamCursors,
+      drafts,
+      selectedTraceNodeId: state.currentSessionId === sessionId ? null : state.selectedTraceNodeId,
+    };
+  }),
   setCurrentSession: (currentSessionId) => set({ currentSessionId, selectedTraceNodeId: null }),
   setMessages: (sessionId, messages) => set((state) => ({
     messagesBySession: { ...state.messagesBySession, [sessionId]: normalizeAgentMessages([...messages]) },
@@ -168,10 +196,21 @@ export const useAgentStore = create<AgentState>((set) => ({
     };
   }),
   upsertRun: (run) => set((state) => {
-    const activeRuns = { ...state.activeRuns, [run.runId]: run };
+    const existing = state.activeRuns[run.runId];
+    const nextRun = existing
+      && isTerminalAgentRunStatus(existing.status)
+      && !isTerminalAgentRunStatus(run.status)
+      ? existing
+      : run;
+    const activeRuns = { ...state.activeRuns, [run.runId]: nextRun };
+    const currentMessages = state.messagesBySession[nextRun.sessionId] || [];
+    const reconciledMessages = reconcileAgentMessagesForTerminalRun(currentMessages, nextRun);
     return {
       activeRuns,
       sessions: clearTerminalActiveRuns(state.sessions, activeRuns),
+      messagesBySession: reconciledMessages === currentMessages
+        ? state.messagesBySession
+        : { ...state.messagesBySession, [nextRun.sessionId]: reconciledMessages },
     };
   }),
   applyResolvedApproval: (approval) => set((state) => ({

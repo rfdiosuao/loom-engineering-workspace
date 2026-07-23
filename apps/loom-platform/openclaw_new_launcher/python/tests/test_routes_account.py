@@ -220,6 +220,64 @@ class AccountRouteResponseTests(unittest.TestCase):
         self.assertNotIn("123456", repr(payload))
         self.assertNotIn("sk-route-secret", repr(payload))
 
+    def test_email_code_send_route_rejects_sent_false(self) -> None:
+        app = FastAPI()
+        manager = SimpleNamespace(
+            send_email_code=lambda *_args, **_kwargs: {
+                "sent": False,
+                "message": "upstream mail delivery failed",
+            },
+        )
+        register_account_routes(app, _ctx(manager))
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/account/email-code/send",
+            json={"email": "user@example.invalid", "purpose": "login"},
+        )
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.json()
+        self.assertFalse(payload["sent"])
+        self.assertEqual(payload["error"]["code"], "email_code_not_sent")
+
+    def test_select_models_route_preserves_phone_model(self) -> None:
+        app = FastAPI()
+        calls = []
+
+        def select_models(**models):
+            calls.append(models)
+            return {"selectedModels": {"phone": models["phone_model"]}}
+
+        manager = SimpleNamespace(select_models=select_models)
+        register_account_routes(app, _ctx(manager))
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/account/models/select",
+            json={
+                "textModel": "qwen-test",
+                "phoneModel": "agnes-2.0-flash",
+                "imageModel": "image-test",
+                "videoModel": "video-test",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            calls,
+            [{
+                "text_model": "qwen-test",
+                "phone_model": "agnes-2.0-flash",
+                "image_model": "image-test",
+                "video_model": "video-test",
+            }],
+        )
+        self.assertEqual(
+            response.json()["account"]["selectedModels"]["phone"],
+            "agnes-2.0-flash",
+        )
+
     def test_email_code_login_route_returns_public_account_and_redacted_sync_results(self) -> None:
         app = FastAPI()
         calls = []

@@ -328,9 +328,14 @@ class UpdateCheckAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_check_route_does_not_block_the_event_loop(self) -> None:
         app = FastAPI()
         release = threading.Event()
+        worker_started = threading.Event()
+        heartbeat = asyncio.Event()
+        loop = asyncio.get_running_loop()
 
         class BlockingUpdater(_FailedUpdater):
             def latest_release(self):
+                worker_started.set()
+                loop.call_soon_threadsafe(heartbeat.set)
                 release.wait(timeout=1)
                 return super().latest_release()
 
@@ -342,9 +347,8 @@ class UpdateCheckAsyncTests(unittest.IsolatedAsyncioTestCase):
             fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
         )
         register_update_routes(app, ctx)
-        timer = threading.Timer(0.3, release.set)
+        timer = threading.Timer(1, release.set)
         timer.start()
-        started_at = time.monotonic()
         try:
             endpoint = next(
                 route.endpoint
@@ -352,8 +356,9 @@ class UpdateCheckAsyncTests(unittest.IsolatedAsyncioTestCase):
                 if getattr(route, "path", "") == "/api/update/check"
             )
             request = asyncio.create_task(endpoint(SimpleNamespace()))
-            await asyncio.sleep(0.05)
-            self.assertLess(time.monotonic() - started_at, 0.2)
+            await asyncio.wait_for(heartbeat.wait(), timeout=1.5)
+            self.assertTrue(worker_started.is_set())
+            self.assertFalse(release.is_set(), "update check blocked the event loop until the worker finished")
             release.set()
             response = await request
         finally:

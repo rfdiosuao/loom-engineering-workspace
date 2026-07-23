@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 
 from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
 from core.agent_events import AgentEventBus
+from core.agent_language import has_positive_term
 from core.agent_orchestrator import AgentOrchestrator
 from core.agent_policy import AgentPolicyEngine
 from core.agent_runtime import redact_sensitive
@@ -32,6 +33,10 @@ RunContinuation = tuple[str, Json, bool, bool, Callable[[], None] | None]
 TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled"}
 TERMINAL_MATRIX_STATUSES = {"succeeded", "completed", "failed", "cancelled"}
 NATIVE_RUNTIME_PROFILE_ID = "loom-native"
+MATRIX_CONFIRMATION_CAPABILITIES = frozenset({
+    "loom.matrix.dispatch",
+    "loom.matrix.retry",
+})
 _SCOPE_CONTINUATION_TERMS = (
     "\u7ee7\u7eed",
     "\u91cd\u8bd5",
@@ -42,9 +47,19 @@ _SCOPE_CONTINUATION_TERMS = (
     "\u521a\u624d",
     "\u4e0a\u9762",
     "\u4e4b\u524d",
-    "\u624b\u673a",
-    "\u56fe\u7247",
-    "\u89c6\u9891",
+)
+_SCOPE_INDEPENDENT_MEDIA_TERMS = (
+    "生成图片",
+    "生成一张图片",
+    "生成海报",
+    "制作图片",
+    "画一张",
+    "画图",
+    "生图",
+    "生成视频",
+    "制作视频",
+    "做视频",
+    "生视频",
 )
 NATIVE_RUNTIME_NAME = "麓鸣原生智能体"
 
@@ -79,7 +94,15 @@ def _history_message_text(item: Any) -> str:
 
 def _is_scope_continuation(text: str) -> bool:
     folded = str(text or "").casefold()
-    return any(term.casefold() in folded for term in _SCOPE_CONTINUATION_TERMS)
+    continuation = has_positive_term(
+        folded,
+        tuple(term.casefold() for term in _SCOPE_CONTINUATION_TERMS),
+    )
+    independent_media = has_positive_term(
+        folded,
+        tuple(term.casefold() for term in _SCOPE_INDEPENDENT_MEDIA_TERMS),
+    )
+    return continuation and not independent_media
 
 
 class AgentService:
@@ -129,7 +152,7 @@ class AgentService:
             skill_provider=self._skill_service.list_skills,
             skill_executor=self._load_skill_instructions,
         )
-        self.policy = policy or AgentPolicyEngine(approval_mode="weak")
+        self.policy = policy if policy is not None else AgentPolicyEngine(approval_mode="strong")
         self.orchestrator = AgentOrchestrator(
             self.repository,
             self.event_bus,
@@ -336,7 +359,8 @@ class AgentService:
         if model_id:
             run["modelId"] = model_id
             run["modelSource"] = model_source
-        with self._lock:
+        # Span the active-run check and commit across services sharing this repository.
+        with self._lock, self.repository._lock:
             existing = self.repository.find_message_run(session_id, client_message_id)
             if existing is not None:
                 return {"message": existing["message"], "run": existing["run"]}
@@ -532,7 +556,7 @@ class AgentService:
         decision = str(body.get("decision") or "").strip().lower()
         decision = {"approve": "approved", "reject": "rejected"}.get(decision, decision)
         confirmation_token: tuple[str, str] | None = None
-        if decision == "approved" and approval.get("capability") == "loom.matrix.dispatch":
+        if decision == "approved" and approval.get("capability") in MATRIX_CONFIRMATION_CAPABILITIES:
             input_hash = str(approval.get("inputHash") or "")
             if input_hash:
                 confirmation_token = (input_hash, approval_id)
@@ -561,7 +585,7 @@ class AgentService:
         decision = str(body.get("decision") or "").strip().lower()
         decision = {"approve": "approved", "reject": "rejected"}.get(decision, decision)
         confirmation_token: tuple[str, str] | None = None
-        if decision == "approved" and approval.get("capability") == "loom.matrix.dispatch":
+        if decision == "approved" and approval.get("capability") in MATRIX_CONFIRMATION_CAPABILITIES:
             input_hash = str(approval.get("inputHash") or "")
             if input_hash:
                 confirmation_token = (input_hash, approval_id)
@@ -671,17 +695,11 @@ class AgentService:
                 except Exception as error:
                     safe_error = str(redact_sensitive(str(error)))[:500]
                     try:
-                        run = self.repository.get_run(run_id, session_id=session_id)
-                        if run.get("status") not in TERMINAL_RUN_STATUSES:
-                            self.repository.update_run(
-                                run_id,
-                                {
-                                    "status": "failed",
-                                    "completedAt": _utc_now(),
-                                    "error": {"code": "agent_service_failed", "message": safe_error, "recoverable": True},
-                                },
-                                session_id=session_id,
-                            )
+                        self.orchestrator.record_unexpected_service_failure(
+                            session_id,
+                            run_id,
+                            safe_error,
+                        )
                     except Exception:
                         pass
                 continuation: RunContinuation | None = None
@@ -698,6 +716,23 @@ class AgentService:
                         pass
                 if continuation is not None:
                     next_session_id, next_request, next_resume, next_emit, next_on_complete = continuation
+                    try:
+                        latest_run = self.repository.get_run(run_id, session_id=next_session_id)
+                        continuation_is_still_valid = (
+                            str(latest_run.get("status") or "") not in TERMINAL_RUN_STATUSES
+                        )
+                    except Exception:
+                        continuation_is_still_valid = False
+                    if not continuation_is_still_valid:
+                        if next_on_complete is not None:
+                            try:
+                                next_on_complete()
+                            except Exception:
+                                pass
+                        with self._lock:
+                            if next_resume:
+                                self._resume_requests.discard(run_id)
+                        return
                     try:
                         self._submit_run(
                             next_session_id,
@@ -986,12 +1021,40 @@ class AgentService:
 
     def _internal_operations(self) -> Json:
         return {
+            "loom.capabilities.list": {
+                "executor": self._connected_capability_catalog,
+                "permission": "read",
+                "risk": "read",
+            },
             "loom.matrix.status": {"executor": self._matrix_status, "permission": "read", "risk": "read"},
             "loom.matrix.dispatch": {"executor": self._matrix_dispatch, "permission": "control", "risk": "control_safe", "timeoutSec": 180},
             "loom.matrix.screenshot": {"executor": self._matrix_screenshot, "permission": "read", "risk": "read", "timeoutSec": 60},
             "loom.matrix.cancel": {"executor": self._matrix_cancel, "permission": "control", "risk": "control_safe"},
             "loom.matrix.retry": {"executor": self._matrix_retry, "permission": "control", "risk": "control_safe", "timeoutSec": 180},
             "loom.logs.tail": {"executor": self._logs_tail, "permission": "read", "risk": "read"},
+        }
+
+    def _connected_capability_catalog(self, _payload: Json) -> Json:
+        capabilities = self.capabilities.list_capabilities(available_only=True)
+        domains: dict[str, list[str]] = {}
+        for item in capabilities:
+            if not isinstance(item, Mapping):
+                continue
+            domain = str(item.get("domain") or "general")
+            display_name = str(item.get("displayName") or "").strip()
+            if display_name:
+                domains.setdefault(domain, []).append(display_name)
+        return {
+            "schema": "loom.agent.capability-catalog.v1",
+            "count": len(capabilities),
+            "domains": [
+                {
+                    "domain": domain,
+                    "count": len(display_names),
+                    "capabilities": display_names,
+                }
+                for domain, display_names in sorted(domains.items())
+            ],
         }
 
     def _require_matrix_access(self) -> None:
@@ -1033,19 +1096,7 @@ class AgentService:
 
     def _matrix_dispatch(self, payload: Json) -> Json:
         self._require_matrix_access()
-        body = dict(payload)
-        input_hash = _tool_input_hash(body)
-        body.pop("confirmed", None)
-        if self.policy.approval_mode == "weak":
-            body["confirmed"] = True
-        else:
-            with self._lock:
-                confirmation_tokens = self._matrix_confirmation_tokens.get(input_hash, [])
-                if confirmation_tokens:
-                    confirmation_tokens.pop(0)
-                    body["confirmed"] = True
-                    if not confirmation_tokens:
-                        self._matrix_confirmation_tokens.pop(input_hash, None)
+        body = self._matrix_confirmed_payload(payload)
         if "targets" in body and "target" not in body:
             body["target"] = body.pop("targets")
         matrix = self._matrix_factory()
@@ -1054,6 +1105,7 @@ class AgentService:
         return self._matrix_attachment(task, job)
 
     def _matrix_cancel(self, payload: Json) -> Json:
+        self._require_matrix_access()
         campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
         if not campaign_id:
             raise ValueError("campaignId is required")
@@ -1069,17 +1121,43 @@ class AgentService:
         if not campaign_id:
             raise ValueError("campaignId is required")
         matrix = self._matrix_factory()
-        body = dict(payload)
-        body.pop("confirmed", None)
-        if self.policy.approval_mode == "weak":
-            body["confirmed"] = True
+        body = self._matrix_confirmed_payload(payload)
         retry = matrix.retry_failed(campaign_id, body)
+        if retry.get("retried") is not True:
+            reason = str(retry.get("reason") or "当前矩阵任务没有可重试的失败项").strip()
+            raise CapabilityExecutionError(
+                "matrix_retry_not_started",
+                f"未创建矩阵重试任务：{reason}",
+                recoverable=True,
+            )
         task = retry.get("task") if isinstance(retry.get("task"), dict) else None
         if not task:
-            return retry
+            raise CapabilityExecutionError(
+                "matrix_retry_result_invalid",
+                "矩阵重试可能已经创建，但未返回可追踪的新任务",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
         body = retry.get("dispatchBody") if isinstance(retry.get("dispatchBody"), dict) else body
         job = self._start_matrix_job("matrix.retry", "Agent Matrix retry", matrix, task, body)
         return self._matrix_attachment(task, job)
+
+    def _matrix_confirmed_payload(self, payload: Mapping[str, Any]) -> Json:
+        body = dict(payload)
+        input_hash = _tool_input_hash(body)
+        body.pop("confirmed", None)
+        if self.policy.approval_mode == "weak":
+            body["confirmed"] = True
+            return body
+        with self._lock:
+            confirmation_tokens = self._matrix_confirmation_tokens.get(input_hash, [])
+            if confirmation_tokens:
+                confirmation_tokens.pop(0)
+                body["confirmed"] = True
+                if not confirmation_tokens:
+                    self._matrix_confirmation_tokens.pop(input_hash, None)
+        return body
 
     def _start_matrix_job(self, kind: str, title: str, matrix: MatrixControlPlane, task: Json, body: Json) -> Json | None:
         if self.job_manager is None or self.context_factory is None:
@@ -1089,17 +1167,36 @@ class AgentService:
         def run(job_id: str) -> Json:
             return _run_matrix_campaign(self.context_factory(), matrix, task, body, job_id)
 
-        return self.job_manager.submit_progress(
-            kind,
-            title,
-            run,
-            initial_progress={
-                "message": "Matrix task queued by central agent",
-                "phase": f"{kind}.queued",
-                "commandId": kind,
-                "campaignId": task.get("campaignId"),
-            },
-        )
+        try:
+            job = self.job_manager.submit_progress(
+                kind,
+                title,
+                run,
+                initial_progress={
+                    "message": "Matrix task queued by central agent",
+                    "phase": f"{kind}.queued",
+                    "commandId": kind,
+                    "campaignId": task.get("campaignId"),
+                },
+            )
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "matrix_job_submission_unknown",
+                "矩阵任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            ) from exc
+        job_id = str(job.get("id") or "").strip() if isinstance(job, Mapping) else ""
+        if not job_id:
+            raise CapabilityExecutionError(
+                "matrix_job_submission_unknown",
+                "矩阵任务已经提交，但未返回可追踪的任务编号，任务可能仍在执行",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        return job
 
     def _matrix_attachment(self, task: Json, job: Json | None) -> Json:
         rows = [

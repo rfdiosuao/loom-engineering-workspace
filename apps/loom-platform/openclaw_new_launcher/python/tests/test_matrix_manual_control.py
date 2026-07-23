@@ -477,7 +477,7 @@ class MatrixManualControlTests(unittest.TestCase):
 
     def test_releasing_human_takeover_resumes_only_the_task_bound_to_that_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            _app, client = _client(temp_dir)
+            app, client = _client(temp_dir)
             matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             first = matrix.dispatch({"prompt": "first", "target": {"deviceIds": ["phone-a"]}})
@@ -508,6 +508,12 @@ class MatrixManualControlTests(unittest.TestCase):
                 )
                 deadline = time.time() + 1
                 while time.time() < deadline and matrix.task_status(first_task_id) != "succeeded":
+                    time.sleep(0.01)
+                job_id = str(released.json().get("jobId") or "")
+                while time.time() < deadline:
+                    job = app.state.job_mgr.get(job_id)
+                    if job and job.get("status") in {"succeeded", "failed", "cancelled"}:
+                        break
                     time.sleep(0.01)
             first_status = matrix.task_status(first_task_id)
             second_status = matrix.task_status(second_task_id)
@@ -540,6 +546,7 @@ def _client(base_path: str) -> tuple[FastAPI, TestClient]:
         get_job_mgr=lambda: job_mgr,
         paths=SimpleNamespace(base_path=base_path, launcher_dir=base_path, node_exe=sys.executable),
     )
+    app.state.job_mgr = job_mgr
     register_matrix_routes(app, ctx)
     return app, TestClient(app)
 

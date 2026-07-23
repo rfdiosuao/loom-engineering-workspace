@@ -436,11 +436,11 @@ def _command_catalog(paths: AppPaths | None = None) -> Json:
                 {"name": "phone status", "permission": "read", "endpoint": "POST /api/phone/status"},
                 {"name": "phone screenshot", "permission": "read", "endpoint": "POST /api/phone/screenshot", "targetScope": "single-device-read"},
                 {"name": "phone read", "permission": "read", "endpoint": "POST /api/phone/read", "targetScope": "single-device-read"},
-                {"name": "phone events-start", "permission": "read", "endpoint": "POST /api/phone/events/start"},
+                {"name": "phone events-start", "permission": "control", "endpoint": "POST /api/phone/events/start"},
                 {"name": "phone events-status", "permission": "read", "endpoint": "GET /api/phone/events/status"},
-                {"name": "phone events-stop", "permission": "read", "endpoint": "POST /api/phone/events/stop"},
+                {"name": "phone events-stop", "permission": "control", "endpoint": "POST /api/phone/events/stop"},
                 {"name": "phone quick-task", "permission": "control", "endpoint": "POST /api/phone/task", "targetScope": "single-device-write"},
-                {"name": "phone template-task", "permission": "read/control", "endpoint": "POST /api/phone/task"},
+                {"name": "phone template-task", "permission": "read/control", "endpoint": "POST /api/phone/task", "targetScope": "single-device-write"},
                 {"name": "phone adb-doctor", "permission": "admin", "endpoint": "POST /api/phone/adb-doctor"},
             ],
         },
@@ -455,7 +455,7 @@ def _command_catalog(paths: AppPaths | None = None) -> Json:
                 {"name": "matrix retry", "permission": "control", "endpoint": "POST /api/matrix/retry", "targetScope": "campaign-write"},
                 {"name": "matrix leads", "permission": "read", "endpoint": "GET /api/matrix/leads"},
                 {"name": "matrix record-lead", "permission": "control", "endpoint": "POST /api/matrix/leads"},
-                {"name": "template run", "permission": "read/control", "endpoint": "POST /api/matrix/template/run"},
+                {"name": "template run", "permission": "read/control", "endpoint": "POST /api/matrix/template/run", "targetScope": "single-device-write"},
                 {"name": "experience report", "permission": "read", "endpoint": "GET /api/matrix/experience"},
             ],
         },
@@ -463,7 +463,7 @@ def _command_catalog(paths: AppPaths | None = None) -> Json:
             "domain": "acquisition",
             "summary": "Customer acquisition workbench phone-Agent dry-run and result ingestion.",
             "commands": [
-                {"name": "acquisition agent-run", "permission": "control", "endpoint": "POST /api/matrix/acquisition/agent/run"},
+                {"name": "acquisition agent-run", "permission": "control", "endpoint": "POST /api/matrix/acquisition/agent/run", "targetScope": "single-device-write"},
                 {"name": "acquisition agent-result", "permission": "control", "endpoint": "POST /api/matrix/acquisition/agent/result"},
             ],
         },
@@ -792,6 +792,7 @@ def _account(args: list[str], ctx: CliContext) -> Json:
         return _bridge_call(ctx, "POST", "/api/account/email-code/send", _compact_body({
             "email": email,
             "baseUrl": _option(args, "--base-url"),
+            "purpose": "login",
         }))
     if action == "login-code":
         _require_permission(ctx, "control")
@@ -851,6 +852,7 @@ def _account(args: list[str], ctx: CliContext) -> Json:
         _require_permission(ctx, "control")
         return _bridge_call(ctx, "POST", "/api/account/models/select", _compact_body({
             "textModel": _option(args, "--text") or _option(args, "--text-model"),
+            "phoneModel": _option(args, "--phone") or _option(args, "--phone-model"),
             "imageModel": _option(args, "--image") or _option(args, "--image-model"),
             "videoModel": _option(args, "--video") or _option(args, "--video-model"),
         }))
@@ -886,7 +888,12 @@ def _wire(args: list[str], ctx: CliContext) -> Json:
         }))
     if action == "verify":
         _require_permission(ctx, "read")
-        return _bridge_call(ctx, "POST", "/api/wire/verify", {})
+        return _bridge_call(ctx, "POST", "/api/wire/verify", _compact_body({
+            "provider": _option(args, "--provider"),
+            "baseUrl": _option(args, "--base-url") or _option(args, "--url"),
+            "apiKey": _option(args, "--api-key") or _option(args, "--token"),
+            "textModel": _option(args, "--text-model") or _option(args, "--model"),
+        }))
     if action == "rollback":
         _require_permission(ctx, "control")
         return _bridge_call(ctx, "POST", "/api/wire/rollback", {})
@@ -1024,6 +1031,10 @@ def _jobs(args: list[str], ctx: CliContext) -> Json:
 def _settings(args: list[str], ctx: CliContext) -> Json:
     action = args[0] if args else "theme"
     if action == "theme":
+        theme_id = _option(args, "--set")
+        if theme_id:
+            _require_permission(ctx, "control")
+            return _bridge_call(ctx, "POST", "/api/theme/current", {"theme": theme_id})
         _require_permission(ctx, "read")
         return _bridge_call(ctx, "GET", "/api/theme/current", {})
     if action == "theme-list":
@@ -1061,7 +1072,9 @@ def _diagnostics(args: list[str], ctx: CliContext) -> Json:
     action = args[0] if args else "run"
     if action == "run":
         _require_permission(ctx, "read")
-        return _bridge_call(ctx, "POST", "/api/diagnostics/run", {})
+        return _bridge_call(ctx, "POST", "/api/diagnostics/run", _compact_body({
+            "scope": _option(args, "--scope"),
+        }))
     if action == "repair":
         _require_permission(ctx, "admin")
         check_id = _option(args, "--check") or _option(args, "--id") or _positional(args, 1)
@@ -1131,7 +1144,7 @@ def _phone(args: list[str], ctx: CliContext) -> Json:
             body["knownHash"] = known_hash
         return _bridge_call(ctx, "POST", "/api/phone/read", body)
     if action in {"events-start", "event-start", "stream-start"}:
-        _require_permission(ctx, "read")
+        _require_permission(ctx, "control")
         return _bridge_call(ctx, "POST", "/api/phone/events/start", _compact_body({
             "deviceId": _option(args, "--device-id"),
             "maxSec": _option(args, "--max-sec"),
@@ -1145,7 +1158,7 @@ def _phone(args: list[str], ctx: CliContext) -> Json:
             endpoint = f"{endpoint}?deviceId={urllib.parse.quote(device_id, safe='')}"
         return _bridge_call(ctx, "GET", endpoint, {})
     if action in {"events-stop", "event-stop", "stream-stop"}:
-        _require_permission(ctx, "read")
+        _require_permission(ctx, "control")
         return _bridge_call(ctx, "POST", "/api/phone/events/stop", _compact_body({
             "deviceId": _option(args, "--device-id"),
         }))
@@ -1569,6 +1582,13 @@ def _bridge_call(ctx: CliContext, method: str, endpoint: str, body: Json) -> Jso
             text = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         text = exc.read().decode("utf-8", errors="replace")
+        try:
+            error_payload = json.loads(text)
+        except json.JSONDecodeError:
+            error_payload = None
+        failure = _bridge_business_failure(error_payload)
+        if failure is not None:
+            raise CliError(failure[0], failure[1], 4)
         raise CliError("bridge_http_error", _extract_bridge_error(text) or f"Bridge 返回 {exc.code}。", 4)
     except urllib.error.URLError as exc:
         raise CliError("bridge_unavailable", f"Bridge 暂不可用：{_public_error(exc)}", 4)
@@ -1579,7 +1599,71 @@ def _bridge_call(ctx: CliContext, method: str, endpoint: str, body: Json) -> Jso
         result = json.loads(text)
     except json.JSONDecodeError:
         result = {"raw": _redact(text[:4000])}
+    failure = _bridge_business_failure(result)
+    if failure is not None:
+        raise CliError(failure[0], failure[1], 4)
     return {"method": method, "endpoint": endpoint, "result": _redact_json(result)}
+
+
+def _bridge_business_failure(payload: Any) -> tuple[str, str] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    error = payload.get("error")
+    meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
+    status = str(payload.get("status") or "").strip().lower()
+    failed = (
+        payload.get("ok") is False
+        or payload.get("success") is False
+        or payload.get("sent") is False
+        or status in {"failed", "error"}
+        or error not in (None, "", False, {})
+        or meta.get("ok") is False
+    )
+    if not failed:
+        return None
+
+    code = _bridge_business_error_code(payload, error, meta)
+    message = _bridge_business_error_message(payload, error, meta)
+    return code, message
+
+
+def _bridge_business_error_code(payload: Json, error: Any, meta: Json) -> str:
+    error_payload = error if isinstance(error, dict) else {}
+    meta_error = meta.get("error") if isinstance(meta.get("error"), dict) else {}
+    for value in (
+        error_payload.get("code"),
+        payload.get("code"),
+        meta_error.get("code"),
+    ):
+        if isinstance(value, str):
+            code = value.strip()
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", code):
+                return code
+    if payload.get("sent") is False:
+        return "bridge_not_sent"
+    if str(payload.get("status") or "").strip().lower() in {"failed", "error"}:
+        return "bridge_status_failed"
+    if payload.get("success") is False:
+        return "bridge_success_false"
+    if payload.get("ok") is False or meta.get("ok") is False:
+        return "bridge_ok_false"
+    return "bridge_business_error"
+
+
+def _bridge_business_error_message(payload: Json, error: Any, meta: Json) -> str:
+    candidates: list[Any] = []
+    if isinstance(error, dict):
+        candidates.extend(error.get(key) for key in ("message", "detail", "reason"))
+    else:
+        candidates.append(error)
+    candidates.extend(payload.get(key) for key in ("message", "detail", "reason"))
+    meta_error = meta.get("error") if isinstance(meta.get("error"), dict) else {}
+    candidates.extend(meta_error.get(key) for key in ("message", "detail", "reason"))
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return _redact(value.strip())
+    return "Bridge 返回了业务失败结果。"
 
 
 def _phone_task_body(prompt: str, mode: str, args: list[str] | None = None) -> Json:

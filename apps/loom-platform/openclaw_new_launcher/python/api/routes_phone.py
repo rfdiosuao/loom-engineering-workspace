@@ -2681,14 +2681,61 @@ def _phone_payload_failure(stdout: str) -> dict:
         or data.get("details")
         or failed_result.get("details")
     )
+    details_dict = details if isinstance(details, dict) else {}
     if isinstance(details, dict):
         failure["details"] = details
-        if details.get("executionMayContinue") is True:
-            failure["executionMayContinue"] = True
+    task_id = _clip(
+        payload.get("taskId")
+        or data.get("taskId")
+        or failed_result.get("taskId")
+        or details_dict.get("taskId"),
+        160,
+    )
+    if task_id:
+        failure["taskId"] = task_id
+    execution_may_continue = any(
+        source.get("executionMayContinue") is True
+        for source in (payload, data, failed_result, details_dict)
+    )
+    outcome_indeterminate = any(
+        source.get("outcomeIndeterminate") is True
+        for source in (payload, data, failed_result, details_dict)
+    )
+    structured_timeout = error_code.lower() == "timeout" and bool(task_id)
+    if execution_may_continue:
+        failure["executionMayContinue"] = True
+    if outcome_indeterminate or execution_may_continue or structured_timeout:
+        failure["outcomeIndeterminate"] = True
     remediation = failed_result.get("remediation") or payload.get("remediation") or data.get("remediation")
     if isinstance(remediation, list):
         failure["remediation"] = [_clip(item, 300) for item in remediation if _clip(item, 300)][:5]
     return failure
+
+
+def _apply_phone_payload_failure(result: dict, payload_failure: dict) -> dict:
+    result["errorCode"] = str(
+        payload_failure.get("errorCode")
+        or result.get("errorCode")
+        or "phone_payload_failed"
+    )
+    for key in (
+        "details",
+        "remediation",
+        "taskId",
+        "outcomeIndeterminate",
+        "executionMayContinue",
+    ):
+        value = payload_failure.get(key)
+        if value not in (None, "", False):
+            result[key] = value
+    return result
+
+
+def _phone_execution_is_uncertain(result: dict) -> bool:
+    return bool(
+        result.get("outcomeIndeterminate") is True
+        or result.get("executionMayContinue") is True
+    )
 
 
 def _phone_stdout_payload(stdout: str) -> dict:
@@ -3389,7 +3436,12 @@ def _submit_phone_job(
                 _record_phone_task_evidence(ctx, kind, evidence_body, result, started_at)
 
         def run_agent_fallback(previous_result: dict) -> dict:
-            if not fallback_script_path or not fallback_args or not fallback_execution:
+            if (
+                _phone_execution_is_uncertain(previous_result)
+                or not fallback_script_path
+                or not fallback_args
+                or not fallback_execution
+            ):
                 return previous_result
             fallback_info = {
                 "from": _phone_metrics_mode(kind, execution),
@@ -3439,6 +3491,20 @@ def _submit_phone_job(
             fallback_returncode = int(fallback_completed.get("returncode") if fallback_completed.get("returncode") is not None else 1)
             stdout = _sanitize_cli_output(ctx, fallback_completed.get("stdout") or "", kind=kind)
             stderr = _sanitize_cli_output(ctx, fallback_completed.get("stderr") or "", kind=kind)
+            payload_failure = _phone_payload_failure(stdout)
+            if payload_failure:
+                result = _phone_failure_result(
+                    kind,
+                    code=fallback_returncode if fallback_returncode != 0 else "fallback_payload_failed",
+                    reason=str(payload_failure.get("reason") or "phone fallback payload failed"),
+                    stdout=stdout,
+                    stderr=stderr,
+                    execution=fallback_execution,
+                    started_at=fallback_started_at,
+                )
+                _apply_phone_payload_failure(result, payload_failure)
+                result["fallback"] = fallback_info
+                return result
             if fallback_returncode != 0:
                 result = _phone_failure_result(
                     kind,
@@ -3449,22 +3515,6 @@ def _submit_phone_job(
                     execution=fallback_execution,
                     started_at=fallback_started_at,
                 )
-                result["fallback"] = fallback_info
-                return result
-            payload_failure = _phone_payload_failure(stdout)
-            if payload_failure:
-                result = _phone_failure_result(
-                    kind,
-                    code="fallback_payload_failed",
-                    reason=str(payload_failure.get("reason") or "phone fallback payload failed"),
-                    stdout=stdout,
-                    stderr=stderr,
-                    execution=fallback_execution,
-                    started_at=fallback_started_at,
-                )
-                result["errorCode"] = str(payload_failure.get("errorCode") or result.get("errorCode") or "phone_payload_failed")
-                if payload_failure.get("remediation"):
-                    result["remediation"] = payload_failure["remediation"]
                 result["fallback"] = fallback_info
                 return result
             result_payload = {
@@ -3517,6 +3567,7 @@ def _submit_phone_job(
         )
         stdout = _sanitize_cli_output(ctx, completed.get("stdout") or "", kind=kind)
         stderr = _sanitize_cli_output(ctx, completed.get("stderr") or "", kind=kind)
+        payload_failure = _phone_payload_failure(stdout)
         if completed.get("cancelled"):
             return {
                 "success": False,
@@ -3547,10 +3598,27 @@ def _submit_phone_job(
                 execution=execution,
                 started_at=started_at,
             )
-            result = run_agent_fallback(result)
+            if payload_failure and _phone_execution_is_uncertain(payload_failure):
+                result = _apply_phone_payload_failure(result, payload_failure)
+            else:
+                result = run_agent_fallback(result)
             record_evidence(result)
             return result
         returncode = int(completed.get("returncode") if completed.get("returncode") is not None else 1)
+        if payload_failure:
+            result = _phone_failure_result(
+                kind,
+                code=returncode if returncode != 0 else "payload_failed",
+                reason=str(payload_failure.get("reason") or "phone payload failed"),
+                stdout=stdout,
+                stderr=stderr,
+                execution=execution,
+                started_at=started_at,
+            )
+            _apply_phone_payload_failure(result, payload_failure)
+            result = run_agent_fallback(result)
+            record_evidence(result)
+            return result
         if returncode != 0:
             result = _phone_failure_result(
                 kind,
@@ -3561,25 +3629,6 @@ def _submit_phone_job(
                 execution=execution,
                 started_at=started_at,
             )
-            result = run_agent_fallback(result)
-            record_evidence(result)
-            return result
-        payload_failure = _phone_payload_failure(stdout)
-        if payload_failure:
-            result = _phone_failure_result(
-                kind,
-                code="payload_failed",
-                reason=str(payload_failure.get("reason") or "phone payload failed"),
-                stdout=stdout,
-                stderr=stderr,
-                execution=execution,
-                started_at=started_at,
-            )
-            result["errorCode"] = str(payload_failure.get("errorCode") or result.get("errorCode") or "phone_payload_failed")
-            if isinstance(payload_failure.get("details"), dict):
-                result["details"] = payload_failure["details"]
-            if payload_failure.get("executionMayContinue") is True:
-                result["executionMayContinue"] = True
             result = run_agent_fallback(result)
             record_evidence(result)
             return result
@@ -4089,8 +4138,9 @@ def register_phone_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         body = await ctx.body(request)
-        device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
-        screenshot_body = _phone_screenshot_cache_body(ctx, body)
+        requested_device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
+        device_id = _phone_matrix_runtime_device_id(ctx, requested_device_id)
+        screenshot_body = _phone_screenshot_cache_body(ctx, {**body, "deviceId": device_id})
         cached_result = _phone_cached_screenshot_result(ctx, screenshot_body)
         if cached_result:
             execution = _phone_execution_contract(
@@ -4158,7 +4208,7 @@ def register_phone_routes(app, ctx) -> None:
             timeout_sec=_PHONE_OBSERVE_TIMEOUT_SEC,
             execution_layer="direct",
             step_timeout_sec=_PHONE_OBSERVE_STEP_TIMEOUT_SEC,
-            evidence_body={**screenshot_body, "deviceId": device_id} if device_id else screenshot_body,
+            evidence_body=screenshot_body,
             device_id=device_id,
             exact_timeout=True,
         )
@@ -4168,7 +4218,9 @@ def register_phone_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         body = await ctx.body(request)
-        device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
+        requested_device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
+        device_id = _phone_matrix_runtime_device_id(ctx, requested_device_id)
+        request_body = {**body, "deviceId": device_id}
         try:
             prompt = _safe_prompt(body.get("prompt") or "只读取当前手机屏幕，不要点击、输入或滑动。")
             fast_path = _clip(body.get("fastPath") or body.get("fast_path") or "observe_fast", 40) or "observe_fast"
@@ -4176,7 +4228,7 @@ def register_phone_routes(app, ctx) -> None:
                 body.get("knownHash")
                 or body.get("known_hash")
                 or body.get("screenHash")
-                or _phone_cached_screen_hash(ctx, body, fast_path),
+                or _phone_cached_screen_hash(ctx, request_body, fast_path),
                 80,
             )
         except ValueError as exc:
@@ -4210,7 +4262,8 @@ def register_phone_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         body = await ctx.body(request)
-        device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
+        requested_device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
+        device_id = _phone_matrix_runtime_device_id(ctx, requested_device_id)
         try:
             plan = _build_phone_task_plan(ctx, body, device_id=device_id)
         except ValueError as exc:

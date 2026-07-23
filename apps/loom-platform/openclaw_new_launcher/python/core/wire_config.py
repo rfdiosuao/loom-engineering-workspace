@@ -291,6 +291,55 @@ class WireService:
             "targets": targets,
         }
 
+    def verify_candidate(
+        self,
+        *,
+        provider: str,
+        base_url: str,
+        api_key: str,
+        text_model: str,
+    ) -> dict[str, Any]:
+        provider = _pick_text(provider, "自定义 Provider")
+        base = _validate_provider_url(base_url)
+        api_key = _pick_text(api_key)
+        text_model = _pick_text(text_model)
+        if not api_key:
+            raise WireConfigError("请输入第三方 API Key")
+        if not text_model:
+            raise WireConfigError("请输入默认文本模型")
+        if _looks_like_non_text_model(text_model):
+            raise WireConfigError("默认文本模型不能使用手机/图像/视频模型")
+
+        candidates = [base]
+        if not base.endswith("/v1"):
+            candidates.append(f"{base}/v1")
+        errors: list[str] = []
+        for candidate in candidates:
+            try:
+                payload = _provider_json_request(
+                    f"{candidate}/models",
+                    api_key,
+                    method="GET",
+                )
+                model_ids = _extract_remote_model_ids(payload)
+                if not model_ids:
+                    raise WireConfigError("provider_models_empty")
+                if text_model not in model_ids:
+                    raise WireConfigError("selected_model_not_listed")
+                return {
+                    "ok": True,
+                    "provider": provider,
+                    "baseUrl": candidate,
+                    "model": text_model,
+                    "modelsVerified": True,
+                    "availableModelCount": len(model_ids),
+                    "verifiedAt": _iso_now(),
+                }
+            except WireConfigError as exc:
+                errors.append(f"{candidate}/models: {exc}")
+        safe = _redact_secret_text("; ".join(errors[-2:]))
+        raise WireConfigError(f"provider_models_probe_failed: {safe}")
+
     def rollback(self) -> dict[str, Any]:
         previous = _read_json_if_exists(self.paths.wire_last_good)
         if not isinstance(previous, dict):

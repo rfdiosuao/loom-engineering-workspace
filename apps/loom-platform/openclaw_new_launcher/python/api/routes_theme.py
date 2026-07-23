@@ -10,8 +10,23 @@ def register_theme_routes(app, ctx) -> None:
     async def theme_current(request: Request):
         if error := ctx.auth_error(request):
             return error
+        manager = ctx.get_theme_mgr()
+        if request.method == "POST":
+            body = await ctx.body(request)
+            theme_id = str(body.get("theme") or body.get("themeId") or "").strip()
+            if theme_id:
+                theme = manager.get_by_merchant(theme_id)
+                if theme is None:
+                    return ctx.fastapi_json({
+                        "error": {
+                            "code": "theme_not_found",
+                            "message": f"未找到主题 {theme_id}",
+                        },
+                    }, 404)
+                manager.save_theme(theme)
+                return ctx.fastapi_json({"theme": theme, "themeId": theme_id})
         license_data = ctx.get_license_mgr().current_license()
-        theme = ctx.get_theme_mgr().get_current(license_data)
+        theme = manager.get_current(license_data)
         return ctx.fastapi_json({"theme": theme})
 
     @app.post("/api/theme/by_merchant")

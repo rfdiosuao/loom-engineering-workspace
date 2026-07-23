@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
 from types import SimpleNamespace
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
@@ -219,6 +220,69 @@ def test_agent_stream_requires_single_use_ticket_and_replays_after_sequence() ->
         params={"sessionId": "session_1", "once": 1},
         headers={"Authorization": f"Bearer {ticket}"},
     ).status_code == 401
+
+
+def test_agent_stream_emits_sanitized_terminal_error_when_event_ledger_read_fails() -> None:
+    class FailingEventLedgerService(FakeAgentService):
+        def events_after(self, *, session_id, after_seq):
+            self.calls.append(("events_after", (session_id, after_seq)))
+            raise OSError("D:/private/events.jsonl unavailable; token=ledger-secret")
+
+    service = FailingEventLedgerService()
+    app = FastAPI()
+    ctx = _ctx(service)
+    register_realtime_routes(app, ctx)
+    register_agent_routes(app, ctx)
+    client = TestClient(app)
+    ticket = client.post(
+        "/api/realtime/tickets",
+        json={"topic": "agent", "resource": "session_1"},
+    ).json()["ticket"]
+    stream_endpoint = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/agent/events/stream"
+        and "GET" in getattr(route, "methods", set())
+    )
+
+    async def scenario() -> str:
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/agent/events/stream",
+            "raw_path": b"/api/agent/events/stream",
+            "query_string": b"sessionId=session_1&afterSeq=0",
+            "headers": [(b"authorization", f"Bearer {ticket}".encode("ascii"))],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }, receive)
+        response = await stream_endpoint(request)
+        frame = await asyncio.wait_for(anext(response.body_iterator), timeout=1)
+        try:
+            await asyncio.wait_for(anext(response.body_iterator), timeout=1)
+        except StopAsyncIteration:
+            return frame
+        raise AssertionError("agent stream continued after its terminal error frame")
+
+    frame = asyncio.run(scenario())
+    payload = json.loads(frame.split("data: ", 1)[1])
+
+    assert frame.startswith("event: agent_stream_error\n")
+    assert payload == {
+        "type": "agent_stream_error",
+        "code": "AGENT_STREAM_LEDGER_UNAVAILABLE",
+        "phase": "event_replay",
+        "retryable": True,
+    }
+    assert "events.jsonl" not in frame
+    assert "ledger-secret" not in frame
+    assert service.calls == [("events_after", ("session_1", 0))]
 
 
 def test_agent_stream_rejects_query_tickets_and_does_not_spend_a_ticket_on_the_wrong_session() -> None:

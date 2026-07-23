@@ -115,9 +115,9 @@ function detectOwner() {
     const value = output("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], { cwd: repoDir });
     if (value) return value;
   } catch {
-    // Fall through to the project default used for current lumi releases.
+    // Fall through to the canonical public LOOM release repository.
   }
-  return "rfdiosuao/lumi";
+  return "rfdiosuao/loom-engineering-workspace";
 }
 
 function portableManifestPath(stageDir) {

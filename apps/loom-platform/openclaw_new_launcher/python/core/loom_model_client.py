@@ -48,6 +48,7 @@ TOOL_CALL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 CAPABILITY_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,127}\Z")
 MODEL_TOOL_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_-]+")
 MODEL_TOOL_NAME_MAX_LENGTH = 64
+MAX_TOOL_HISTORY_JSON_CHARS = 12000
 SENSITIVE_HEADER_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(?P<prefix>(?:authorization|proxy[-_ ]?authorization|cookie|set[-_ ]?cookie)[ \t]*:[ \t]*)[^\r\n]*",
     re.IGNORECASE | re.MULTILINE,
@@ -182,20 +183,117 @@ def _text_assignment_value_end(text: str, start: int) -> tuple[int, str | None]:
 
 
 def redact_sensitive(value: Any) -> Any:
+    return _redact_sensitive(value, sensitive_code_context=False)
+
+
+def _redact_sensitive(value: Any, *, sensitive_code_context: bool) -> Any:
     if isinstance(value, Mapping):
         safe: dict[str, Any] = {}
+        auth_code_context = sensitive_code_context or _looks_like_auth_code_input(value)
+        capability = str(value.get("name") or value.get("capability") or "")
+        capability_uses_code = _capability_uses_sensitive_code(capability)
         for key, item in value.items():
             name = str(key)
             normalized = re.sub(r"[^a-z0-9]", "", name.lower())
             if _is_sensitive_key(normalized):
                 safe[name] = "[REDACTED]"
+            elif normalized == "code" and auth_code_context:
+                safe[name] = "[REDACTED]"
             else:
-                safe[name] = redact_sensitive(item)
+                child_code_context = capability_uses_code and normalized in {"input", "arguments", "payload"}
+                safe[name] = _redact_sensitive(item, sensitive_code_context=child_code_context)
         return safe
     if isinstance(value, (list, tuple)):
-        return [redact_sensitive(item) for item in value]
+        return [_redact_sensitive(item, sensitive_code_context=False) for item in value]
     if isinstance(value, str):
         return redact_text(value)
+    return value
+
+
+def _bounded_json(value: Any, *, max_chars: int = MAX_TOOL_HISTORY_JSON_CHARS) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    if len(serialized) <= max_chars:
+        return serialized
+
+    for max_items, max_string in ((12, 1000), (8, 600), (5, 320), (3, 160)):
+        compact = _compact_json_value(
+            value,
+            depth=0,
+            max_depth=6,
+            max_items=max_items,
+            max_string=max_string,
+        )
+        serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"), default=str)
+        if len(serialized) <= max_chars:
+            return serialized
+
+    # This path is only for adversarial key/value shapes that remain oversized
+    # after structural compaction. Keep the protocol JSON-valid at all costs.
+    low = 0
+    high = min(len(serialized), max_chars)
+    best = json.dumps(
+        {"_loomTruncated": True, "preview": ""},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = json.dumps(
+            {"_loomTruncated": True, "preview": serialized[:midpoint]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(candidate) <= max_chars:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best
+
+
+def _compact_json_value(
+    value: Any,
+    *,
+    depth: int,
+    max_depth: int,
+    max_items: int,
+    max_string: int,
+) -> Any:
+    if depth >= max_depth:
+        return {"_loomTruncated": True, "reason": "max_depth"}
+    if isinstance(value, Mapping):
+        items = list(value.items())
+        compact: dict[str, Any] = {}
+        for key, item in items[:max_items]:
+            safe_key = str(key)
+            if len(safe_key) > 160:
+                safe_key = f"{safe_key[:144]}...[truncated]"
+            compact[safe_key] = _compact_json_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string=max_string,
+            )
+        if len(items) > max_items:
+            compact["_loomOmittedFields"] = len(items) - max_items
+        return compact
+    if isinstance(value, (list, tuple)):
+        compact_items = [
+            _compact_json_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string=max_string,
+            )
+            for item in value[:max_items]
+        ]
+        if len(value) > max_items:
+            compact_items.append({"_loomOmittedItems": len(value) - max_items})
+        return compact_items
+    if isinstance(value, str) and len(value) > max_string:
+        return f"{value[:max_string]}...[truncated {len(value) - max_string} chars]"
     return value
 
 
@@ -225,6 +323,21 @@ def _is_sensitive_key(normalized: str) -> bool:
     )):
         return True
     return False
+
+
+def _looks_like_auth_code_input(value: Mapping[str, Any]) -> bool:
+    normalized_keys = {
+        re.sub(r"[^a-z0-9]", "", str(key).lower())
+        for key in value
+    }
+    return "code" in normalized_keys and bool(
+        normalized_keys.intersection({"email", "phone", "mobile", "purpose", "verificationtype"})
+    )
+
+
+def _capability_uses_sensitive_code(capability: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", capability.lower())
+    return any(marker in normalized for marker in ("accountlogincode", "licenseactivate"))
 
 
 def _sanitized_gateway_error(error: ModelGatewayError) -> ModelGatewayError:
@@ -617,14 +730,14 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
                     "type": "function",
                     "function": {
                         "name": alias,
-                        "arguments": json.dumps(safe_input, ensure_ascii=False, separators=(",", ":"), default=str)[:12000],
+                        "arguments": _bounded_json(safe_input),
                     },
                 }],
             })
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
-                "content": json.dumps(safe_result, ensure_ascii=False, separators=(",", ":"), default=str)[:12000],
+                "content": _bounded_json(safe_result),
             })
         if fallback_results:
             summary = json.dumps(
@@ -670,6 +783,10 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
     round_value = request.get("round")
     tool_choice: Any = "auto"
     tool_results = request.get("toolResults")
+    routing = request.get("capabilityRouting")
+    routing = routing if isinstance(routing, Mapping) else {}
+    routing_forced_capability = str(routing.get("forcedCapability") or "").strip()
+    routing_tool_choice = str(routing.get("toolChoice") or "").strip().lower()
     repair_capability = ""
     if isinstance(tool_results, list) and tool_results:
         latest_result = tool_results[-1]
@@ -680,7 +797,7 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
                 and str(latest_error.get("code") or "") == "capability_invalid_input"
             ):
                 repair_capability = str(latest_result.get("capability") or "").strip()
-    forced_capability = repair_capability or (
+    forced_capability = repair_capability or routing_forced_capability or (
         explicit_hints[0]
         if len(explicit_hints) == 1 and not (isinstance(tool_results, list) and tool_results)
         else ""
@@ -689,6 +806,8 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
         forced_alias = canonical_to_alias.get(forced_capability)
         if forced_alias:
             tool_choice = {"type": "function", "function": {"name": forced_alias}}
+    elif routing_tool_choice == "none":
+        tool_choice = "none"
 
     return {
         "model": profile.model,

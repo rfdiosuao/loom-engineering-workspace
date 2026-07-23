@@ -36,6 +36,12 @@ Json = Dict[str, Any]
 DEFAULT_PERMISSION = os.environ.get("LOOM_MCP_PERMISSION", "read").strip().lower() or "read"
 
 
+class McpInputError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 def _launcher_package_version() -> str:
     for root in [Path(__file__).resolve().parent, *Path(__file__).resolve().parents]:
         package_json = root / "package.json"
@@ -167,9 +173,24 @@ def tool_definitions() -> list[Json]:
         ),
         _tool("loom_agent_model_rollback", "Rollback one Agent model config.", "control", {"component": _string_schema("Agent component ID")}),
         _tool("loom_account_current", "Read current relay account snapshot.", "read", {}),
-        _tool("loom_account_send_code", "Send relay account email verification code.", "control", {"email": _string_schema("Email address"), "baseUrl": _string_schema("Relay base URL", required=False)}),
-        _tool("loom_account_login_code", "Login relay account with email code.", "control", {"email": _string_schema("Email address"), "code": _string_schema("Verification code"), "baseUrl": _string_schema("Relay base URL", required=False)}),
-        _tool("loom_account_login_password", "Login relay account with username/email and password.", "control", {"username": _string_schema("Username or email"), "password": _string_schema("Password"), "baseUrl": _string_schema("Relay base URL", required=False)}),
+        _tool(
+            "loom_account_send_code",
+            "Send relay account email verification code.",
+            "control",
+            {
+                "email": _string_schema("Email address"),
+                "baseUrl": _string_schema("Relay base URL", required=False),
+                "purpose": {
+                    "type": "string",
+                    "enum": ["login"],
+                    "description": "Verification purpose; Agent access only supports login.",
+                    "required": False,
+                },
+            },
+            risk="outbound",
+        ),
+        _tool("loom_account_login_code", "Login relay account with email code.", "control", {"email": _string_schema("Email address"), "code": _string_schema("Verification code"), "baseUrl": _string_schema("Relay base URL", required=False)}, risk="critical"),
+        _tool("loom_account_login_password", "Login relay account with username/email and password.", "control", {"username": _string_schema("Username or email"), "password": _string_schema("Password"), "baseUrl": _string_schema("Relay base URL", required=False)}, risk="critical"),
         _tool("loom_account_sync", "Sync relay account balance and models.", "control", {}),
         _tool("loom_account_subscription", "Read relay account subscription snapshot.", "read", {}),
         _tool(
@@ -215,8 +236,8 @@ def tool_definitions() -> list[Json]:
         _tool("loom_media_config", "Read image/video generation config.", "read", {}),
         _tool("loom_media_save_image_config", "Save image generation provider config.", "control", {"baseUrl": _string_schema("Image API base URL"), "apiKey": _string_schema("Image API key"), "model": _string_schema("Image model"), "provider": _string_schema("Provider label", required=False)}),
         _tool("loom_media_save_video_config", "Save video generation provider config.", "control", {"baseUrl": _string_schema("Video API base URL"), "apiKey": _string_schema("Video API key"), "model": _string_schema("Video model"), "provider": _string_schema("Provider label", required=False)}),
-        _tool("loom_media_test_image", "Test image generation provider config.", "read", {}),
-        _tool("loom_media_test_video", "Test video generation provider config.", "read", {}),
+        _tool("loom_media_test_image", "Test image generation provider config.", "control", {}),
+        _tool("loom_media_test_video", "Test video generation provider config.", "control", {}),
         _tool("loom_media_generate_image", "Submit an image generation job.", "control", {"prompt": _string_schema("Image prompt"), "editImage": _string_schema("Optional image path for edit mode", required=False), "sync": {"type": "boolean", "required": False}}),
         _tool("loom_media_generate_video", "Submit a video generation job.", "control", {"prompt": _string_schema("Video prompt"), "image": _string_schema("Optional reference image path", required=False), "sync": {"type": "boolean", "required": False}}),
         _tool(
@@ -258,7 +279,10 @@ def tool_definitions() -> list[Json]:
             "loom_phone_template_task",
             "Run a built-in phone template task.",
             "control",
-            {"template": {"type": "string", "enum": ["read-screen", "screen-summary", "back", "home"], "required": False}},
+            {
+                "template": {"type": "string", "enum": ["read-screen", "screen-summary", "back", "home"], "required": False},
+                "deviceId": _string_schema("Bound device ID", required=False),
+            },
             target_scope="single-device-write",
         ),
         _tool("loom_phone_adb_doctor", "Repair common ADB or phone connection issues.", "admin", {
@@ -267,7 +291,7 @@ def tool_definitions() -> list[Json]:
             "launch": {"type": "boolean", "required": False},
             "restartServer": {"type": "boolean", "required": False},
         }),
-        _tool("loom_phone_events_start", "Start phone event synchronization.", "read", {
+        _tool("loom_phone_events_start", "Start phone event synchronization.", "control", {
             "deviceId": _string_schema("Bound device ID", required=False),
             "maxSec": {"type": "integer", "minimum": 1, "required": False},
             "maxEvents": {"type": "integer", "minimum": 1, "required": False},
@@ -275,7 +299,7 @@ def tool_definitions() -> list[Json]:
         _tool("loom_phone_events_status", "Read phone event synchronization status.", "read", {
             "deviceId": _string_schema("Bound device ID", required=False),
         }),
-        _tool("loom_phone_events_stop", "Stop phone event synchronization.", "read", {
+        _tool("loom_phone_events_stop", "Stop phone event synchronization.", "control", {
             "deviceId": _string_schema("Bound device ID", required=False),
         }),
         _tool("loom_acquisition_agent_run", "Prepare or start a compliant acquisition Agent task.", "control", {
@@ -295,7 +319,7 @@ def tool_definitions() -> list[Json]:
             "deviceId": _string_schema("Bound device ID", required=False),
             "topic": _string_schema("Acquisition topic", required=False),
             "action": _string_schema("Acquisition action", required=False),
-        }),
+        }, risk="outbound"),
         _tool("loom_feishu_doctor", "Inspect the Feishu integration environment.", "read", {}),
         _tool("loom_feishu_status", "Read Feishu integration status.", "read", {}),
         _tool("loom_feishu_install", "Install the Feishu integration.", "admin", {
@@ -308,9 +332,9 @@ def tool_definitions() -> list[Json]:
         }),
         _tool("loom_feishu_create_table", "Create a Feishu lead table.", "control", {
             "confirmed": {"type": "boolean", "required": False},
-        }),
-        _tool("loom_feishu_test_write", "Test writing a lead row to Feishu.", "control", {}),
-        _tool("loom_feishu_retry_sync", "Retry pending Feishu synchronization.", "control", {}),
+        }, risk="critical"),
+        _tool("loom_feishu_test_write", "Test writing a lead row to Feishu.", "control", {}, risk="outbound"),
+        _tool("loom_feishu_retry_sync", "Retry pending Feishu synchronization.", "control", {}, risk="outbound"),
         _tool("loom_feishu_reconcile", "Reconcile local and Feishu synchronization state.", "control", {}),
         _tool("loom_schedule_list", "Read scheduled tasks.", "read", {}),
         _tool(
@@ -319,7 +343,15 @@ def tool_definitions() -> list[Json]:
             "automation",
             {
                 "name": _string_schema("Task name"),
-                "command": _string_schema("Allowed LOOM CLI command"),
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "Allowed LOOM CLI command. Supported roots: status, models, logs; "
+                        "supported commands: agents list, phone screenshot, phone read, "
+                        "phone read-screen, phone quick-task, phone template-task."
+                    ),
+                    "examples": ["status", "phone screenshot"],
+                },
                 "at": _string_schema("ISO time", required=False),
                 "every": _string_schema("Repeat interval", required=False),
             },
@@ -342,20 +374,21 @@ def tool_definitions() -> list[Json]:
                     "properties": {
                         "deviceIds": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                         "groups": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "allOnline": {"type": "boolean"},
+                        "allOnline": {"type": "boolean", "enum": [True]},
                     },
-                    "anyOf": [
+                    "oneOf": [
                         {"required": ["deviceIds"]},
                         {"required": ["groups"]},
                         {"required": ["allOnline"]},
                     ],
+                    "additionalProperties": False,
                     "required": False,
                 },
                 "mode": {"type": "string", "enum": ["observe", "safe", "full", "deep"], "required": False},
                 "confirmed": {"type": "boolean", "required": False},
             },
             target_scope="matrix-write",
-            any_of=[
+            one_of=[
                 {"required": ["deviceId"]},
                 {"required": ["group"]},
                 {"required": ["targets"]},
@@ -393,7 +426,12 @@ def tool_definitions() -> list[Json]:
         _tool("loom_settings_update_check", "Check launcher update status.", "read", {}),
         _tool("loom_settings_update_install", "Install launcher update.", "admin", {}),
         _tool("loom_diagnostics_run", "Run launcher diagnostics.", "read", {"scope": _string_schema("Diagnostic scope", required=False)}),
-        _tool("loom_diagnostics_repair", "Run a diagnostic repair action.", "admin", {"action": _string_schema("Repair action")}),
+        _tool(
+            "loom_diagnostics_repair",
+            "Run a diagnostic repair action.",
+            "admin",
+            {"action": {"type": "string", "enum": ["prerequisites"], "description": "Repair action"}},
+        ),
         _tool("loom_diagnostics_export", "Export diagnostic bundle.", "read", {}),
         _tool("loom_license_current", "Read current license state.", "read", {}),
         _tool("loom_license_activate", "Activate a license code.", "control", {"code": _string_schema("License code")}),
@@ -430,6 +468,13 @@ def call_tool(
         return {
             "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}],
             "isError": not ok,
+        }
+    except McpInputError as exc:
+        error = exc.code
+        payload = {"ok": False, "command": name, "error": {"code": exc.code, "message": str(exc)}}
+        return {
+            "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}],
+            "isError": True,
         }
     except Exception as exc:  # pragma: no cover - defensive stdio boundary
         error = str(exc)[:300]
@@ -528,6 +573,7 @@ def _tool_to_cli_args(name: str, args: Json) -> list[str]:
     if name == "loom_account_send_code":
         argv = ["account", "send-code", "--email", _required(args, "email")]
         _append_optional(argv, args, "baseUrl", "--base-url")
+        argv.extend(["--purpose", str(args.get("purpose") or "login")])
         return argv
     if name == "loom_account_login_code":
         argv = ["account", "login-code", "--email", _required(args, "email"), "--code", _required(args, "code")]
@@ -642,7 +688,9 @@ def _tool_to_cli_args(name: str, args: Json) -> list[str]:
         _append_optional(argv, args, "deviceId", "--device-id")
         return argv
     if name == "loom_phone_template_task":
-        return ["phone", "template-task", "--template", str(args.get("template") or "read-screen")]
+        argv = ["phone", "template-task", "--template", str(args.get("template") or "read-screen")]
+        _append_optional(argv, args, "deviceId", "--device-id")
+        return argv
     if name == "loom_phone_adb_doctor":
         argv = ["phone", "adb-doctor"]
         _append_optional(argv, args, "serial", "--serial")
@@ -748,19 +796,8 @@ def _tool_to_cli_args(name: str, args: Json) -> list[str]:
         return ["matrix", "status"]
     if name == "loom_matrix_dispatch":
         argv = ["matrix", "dispatch", "--prompt", _required(args, "prompt")]
-        targets = args.get("targets") if isinstance(args.get("targets"), dict) else {}
-        device_ids = targets.get("deviceIds") if isinstance(targets.get("deviceIds"), list) else []
-        groups = targets.get("groups") if isinstance(targets.get("groups"), list) else []
-        if targets.get("allOnline"):
-            argv.extend(["--target", "all"])
-        elif device_ids:
-            argv.extend(["--device", ",".join(str(item) for item in device_ids)])
-        elif groups:
-            argv.extend(["--group", ",".join(str(item) for item in groups)])
-        elif args.get("deviceId"):
-            argv.extend(["--device", str(args["deviceId"])])
-        elif args.get("group"):
-            argv.extend(["--group", str(args["group"])])
+        target_flag, target_value = _matrix_dispatch_target(args)
+        argv.extend([target_flag, target_value])
         if args.get("mode"):
             argv.extend(["--mode", str(args["mode"])])
         if args.get("confirmed"):
@@ -884,6 +921,8 @@ def _tool(
     *,
     target_scope: str = "none",
     any_of: Any = None,
+    one_of: Any = None,
+    risk: str | None = None,
 ) -> Json:
     required = []
     schema_properties = {}
@@ -894,12 +933,15 @@ def _tool(
             required.append(key)
         schema_properties[key] = schema
     schema_properties["dryRun"] = {"type": "boolean", "description": "只返回计划，不执行动作。"}
-    risk = {
+    derived_risk = {
         "read": "read",
         "control": "control_safe",
         "automation": "critical",
         "admin": "critical",
     }.get(permission, "critical")
+    resolved_risk = str(risk or derived_risk).strip().lower()
+    if resolved_risk not in {"read", "control_safe", "outbound", "critical"}:
+        raise ValueError(f"Unsupported tool risk: {risk}")
     input_schema = {
         "type": "object",
         "properties": schema_properties,
@@ -908,11 +950,13 @@ def _tool(
     }
     if any_of:
         input_schema["anyOf"] = list(any_of)
+    if one_of:
+        input_schema["oneOf"] = list(one_of)
     return {
         "name": name,
         "description": f"{description} 权限：{permission}。",
         "permission": permission,
-        "risk": risk,
+        "risk": resolved_risk,
         "targetScope": target_scope,
         "inputSchema": input_schema,
     }
@@ -934,6 +978,52 @@ def _required(args: Json, key: str) -> str:
     if not value:
         raise ValueError(f"Missing required argument: {key}")
     return value
+
+
+def _matrix_dispatch_target(args: Json) -> tuple[str, str]:
+    targets_value = args.get("targets")
+    if targets_value is not None and not isinstance(targets_value, dict):
+        raise McpInputError("invalid_target", "targets must be an object.")
+    targets = targets_value if isinstance(targets_value, dict) else {}
+
+    selectors: list[tuple[str, str]] = []
+    device_id = str(args.get("deviceId") or "").strip()
+    group = str(args.get("group") or "").strip()
+    if device_id:
+        selectors.append(("--device", device_id))
+    if group:
+        selectors.append(("--group", group))
+
+    if "deviceIds" in targets:
+        device_ids = targets.get("deviceIds")
+        if not isinstance(device_ids, list) or not device_ids:
+            raise McpInputError("invalid_target", "targets.deviceIds must contain at least one device ID.")
+        normalized = [str(item).strip() for item in device_ids]
+        if any(not item for item in normalized):
+            raise McpInputError("invalid_target", "targets.deviceIds cannot contain empty device IDs.")
+        selectors.append(("--device", ",".join(normalized)))
+
+    if "groups" in targets:
+        groups = targets.get("groups")
+        if not isinstance(groups, list) or not groups:
+            raise McpInputError("invalid_target", "targets.groups must contain at least one group.")
+        normalized = [str(item).strip() for item in groups]
+        if any(not item for item in normalized):
+            raise McpInputError("invalid_target", "targets.groups cannot contain empty groups.")
+        selectors.append(("--group", ",".join(normalized)))
+
+    if "allOnline" in targets:
+        all_online = targets.get("allOnline")
+        if not isinstance(all_online, bool) or not all_online:
+            raise McpInputError("invalid_target", "targets.allOnline must be true when selected.")
+        selectors.append(("--target", "all"))
+
+    if len(selectors) != 1:
+        raise McpInputError(
+            "invalid_target",
+            "Select exactly one Matrix target: deviceId, group, targets.deviceIds, targets.groups, or targets.allOnline.",
+        )
+    return selectors[0]
 
 
 def _rpc_result(request_id: Any, result: Json) -> Json:

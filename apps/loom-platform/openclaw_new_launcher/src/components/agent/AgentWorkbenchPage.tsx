@@ -3,12 +3,19 @@ import { accountApi, agentApi, matrixApi, parseErrorText } from '../../services/
 import { openRealtimeStream } from '../../services/realtimeStream';
 import type {
   AgentBootstrapResponse,
+  AgentMessage,
   AgentRun,
   AgentSession,
 } from '../../types/agent';
+import type { RealtimeSequenceGap } from '../../types/realtime';
 import type { FeatureNavigationContext } from '../../stores/appStore';
 import { useAppStore } from '../../stores/appStore';
-import { agentDraftFor, agentMessagesFor, useAgentStore } from '../../stores/agentStore';
+import {
+  agentDraftFor,
+  agentMessagesFor,
+  type AgentDraft,
+  useAgentStore,
+} from '../../stores/agentStore';
 import { showToast } from '../common';
 import { AgentComposer } from './AgentComposer';
 import { AgentDebugger } from './AgentDebugger';
@@ -94,12 +101,220 @@ function clientMessageId(): string {
     : `message_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
+interface PendingAgentSubmission {
+  clientMessageId: string;
+  fingerprint: string;
+}
+
+export interface AgentSubmissionCoordinator {
+  begin: (sessionId: string, fingerprint: string) => string | null;
+  rebindSession: (fromSessionId: string, toSessionId: string) => void;
+  settle: (sessionId: string, succeeded: boolean) => void;
+}
+
+export function createAgentSubmissionCoordinator(
+  createId: () => string = clientMessageId,
+): AgentSubmissionCoordinator {
+  const pendingBySession = new Map<string, PendingAgentSubmission>();
+  let activeSessionId: string | null = null;
+
+  return {
+    begin: (sessionId, fingerprint) => {
+      if (activeSessionId !== null) return null;
+      activeSessionId = sessionId;
+      const pending = pendingBySession.get(sessionId);
+      if (pending?.fingerprint === fingerprint) return pending.clientMessageId;
+      const next = { clientMessageId: createId(), fingerprint };
+      pendingBySession.set(sessionId, next);
+      return next.clientMessageId;
+    },
+    rebindSession: (fromSessionId, toSessionId) => {
+      if (fromSessionId === toSessionId) return;
+      const pending = pendingBySession.get(fromSessionId);
+      if (pending) {
+        pendingBySession.set(toSessionId, pending);
+        pendingBySession.delete(fromSessionId);
+      }
+      if (activeSessionId === fromSessionId) activeSessionId = toSessionId;
+    },
+    settle: (sessionId, succeeded) => {
+      if (succeeded) pendingBySession.delete(sessionId);
+      activeSessionId = null;
+    },
+  };
+}
+
+function agentSubmissionFingerprint(draft: AgentDraft): string {
+  return JSON.stringify({
+    text: draft.text.trim(),
+    attachments: draft.attachments,
+    scopeMode: draft.scopeMode,
+    scope: draft.scope,
+    runtimeProfileId: 'loom-native',
+  });
+}
+
+interface AgentRealtimeEventLike {
+  eventId?: unknown;
+  seq?: unknown;
+  entityId?: unknown;
+  type?: unknown;
+  data?: unknown;
+}
+
+interface AgentRealtimeSnapshotLike {
+  messages: ReadonlyArray<Pick<AgentMessage, 'messageId' | 'status'> | Record<string, unknown>>;
+  runs: Record<string, Pick<AgentRun, 'runId' | 'status'> | Record<string, unknown>>;
+}
+
+export interface AgentRealtimeCoordinator {
+  preserveCursor: (sessionId: string, cursor: number) => void;
+  cursorFor: (sessionId: string, storeCursor: number) => number;
+  accept: (
+    sessionId: string,
+    event: AgentRealtimeEventLike,
+    snapshot: AgentRealtimeSnapshotLike,
+  ) => boolean;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function terminalRunStatus(status: unknown): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+function shouldApplyAgentRealtimeEvent(
+  event: AgentRealtimeEventLike,
+  snapshot: AgentRealtimeSnapshotLike,
+): boolean {
+  const type = stringValue(event.type);
+  const data = recordValue(event.data);
+  const nestedRun = recordValue(data.run);
+  const entityId = stringValue(event.entityId);
+  const runId = stringValue(nestedRun.runId) || stringValue(data.runId) || entityId;
+  const existingRun = runId ? snapshot.runs[runId] : undefined;
+
+  if (type === 'message.delta') {
+    const messageId = stringValue(data.messageId) || (entityId ? `${entityId}:message` : '');
+    const existingMessage = messageId
+      ? snapshot.messages.find((message) => message.messageId === messageId)
+      : undefined;
+    if (existingMessage && existingMessage.status !== 'streaming') return false;
+    if (existingRun && terminalRunStatus(existingRun.status)) return false;
+  }
+
+  if (
+    existingRun
+    && terminalRunStatus(existingRun.status)
+    && (
+      type === 'run.queued'
+      || type === 'run.started'
+      || type === 'run.running'
+      || type === 'run.waiting_approval'
+      || type === 'run.paused'
+      || type === 'run.resumed'
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+export function createAgentRealtimeCoordinator(): AgentRealtimeCoordinator {
+  const cursors = new Map<string, number>();
+  const preserveCursor = (sessionId: string, cursor: number) => {
+    const normalized = Number.isSafeInteger(cursor) ? Math.max(0, cursor) : 0;
+    cursors.set(sessionId, Math.max(cursors.get(sessionId) || 0, normalized));
+  };
+
+  return {
+    preserveCursor,
+    cursorFor: (sessionId, storeCursor) => (
+      Math.max(cursors.get(sessionId) || 0, Number.isSafeInteger(storeCursor) ? storeCursor : 0)
+    ),
+    accept: (sessionId, event, snapshot) => {
+      const seq = Number(event.seq);
+      const currentCursor = cursors.get(sessionId) || 0;
+      if (!Number.isSafeInteger(seq) || seq <= currentCursor) return false;
+      preserveCursor(sessionId, seq);
+      return shouldApplyAgentRealtimeEvent(event, snapshot);
+    },
+  };
+}
+
+export function agentSequenceGapRecoveryCursor(
+  gap: Pick<RealtimeSequenceGap, 'committedSeq' | 'receivedSeq'>,
+): number {
+  return gap.committedSeq;
+}
+
+interface ArchivableAgentSession {
+  sessionId: string;
+  status?: unknown;
+  activeRunId?: string;
+}
+
+interface ArchivableAgentRun {
+  runId?: unknown;
+  sessionId?: unknown;
+  status?: unknown;
+}
+
+interface ArchiveAgentSessionDependencies {
+  runs: Record<string, ArchivableAgentRun>;
+  cancelRun: (runId: string) => Promise<{ run: ArchivableAgentRun }>;
+  archiveRemote: (sessionId: string) => Promise<{ session: ArchivableAgentSession }>;
+  upsertRun: (run: ArchivableAgentRun) => void;
+  removeSession: (sessionId: string) => void;
+}
+
+export async function archiveAgentSession(
+  session: ArchivableAgentSession,
+  dependencies: ArchiveAgentSessionDependencies,
+): Promise<void> {
+  const activeRun = (
+    session.activeRunId
+      ? dependencies.runs[session.activeRunId] || { runId: session.activeRunId, status: 'running' }
+      : Object.values(dependencies.runs).find((run) => (
+        run.sessionId === session.sessionId && !terminalRunStatus(run.status)
+      ))
+  );
+  const activeRunId = stringValue(activeRun?.runId);
+  if (activeRunId && !terminalRunStatus(activeRun?.status)) {
+    const response = await dependencies.cancelRun(activeRunId);
+    dependencies.upsertRun(response.run);
+    if (!terminalRunStatus(response.run.status)) {
+      throw new Error('active run cancellation did not reach a terminal state');
+    }
+  }
+
+  if (!session.sessionId.startsWith('local_agent_')) {
+    const response = await dependencies.archiveRemote(session.sessionId);
+    if (response.session.status !== 'archived') throw new Error('归档状态未生效');
+  }
+  dependencies.removeSession(session.sessionId);
+}
+
 function errorMessage(reason: unknown, fallback: string): string {
   return parseErrorText(reason) || fallback;
 }
 
 function isTerminalRun(run: AgentRun): boolean {
   return run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
+}
+
+export function afterAgentResumeAccepted(run: AgentRun): AgentRun {
+  if (run.status !== 'paused') return run;
+  return { ...run, status: 'queued', error: undefined };
 }
 
 export function sessionRetryDelayMs(attempt: number): number {
@@ -127,7 +342,15 @@ export function AgentWorkbenchPage() {
   const [traceRefreshToken, setTraceRefreshToken] = useState(0);
   const [debuggerRunId, setDebuggerRunId] = useState<string | null>(null);
   const pendingCreatesRef = useRef(new Map<string, Promise<string>>());
+  const submissionCoordinatorRef = useRef<AgentSubmissionCoordinator | null>(null);
+  const realtimeCoordinatorRef = useRef<AgentRealtimeCoordinator | null>(null);
   const debuggerReturnFocusRef = useRef<HTMLElement | null>(null);
+  if (!submissionCoordinatorRef.current) {
+    submissionCoordinatorRef.current = createAgentSubmissionCoordinator();
+  }
+  if (!realtimeCoordinatorRef.current) {
+    realtimeCoordinatorRef.current = createAgentRealtimeCoordinator();
+  }
 
   const currentSession = sessions.find((session) => session.sessionId === currentSessionId) || null;
   const currentRun = useMemo(
@@ -186,9 +409,15 @@ export function AgentWorkbenchPage() {
     let active = true;
     let lastConnectionError = '';
     let retryTimer: number | undefined;
+    const realtimeCoordinator = realtimeCoordinatorRef.current;
+    if (!realtimeCoordinator) return;
 
     const applySessionDetail = (detail: Awaited<ReturnType<typeof agentApi.session>>) => {
       const store = useAgentStore.getState();
+      realtimeCoordinator.preserveCursor(
+        currentSessionId,
+        store.streamCursors[currentSessionId]?.lastSeq || 0,
+      );
       store.upsertSession(detail.session);
       store.setMessages(currentSessionId, detail.messages);
       for (const run of detail.runs || []) store.upsertRun(run);
@@ -220,7 +449,10 @@ export function AgentWorkbenchPage() {
       if (active) setConversationLoading(false);
       if (!active) return;
       setStreamStatus('connecting');
-      const afterSeq = useAgentStore.getState().streamCursors[currentSessionId]?.lastSeq || 0;
+      const afterSeq = realtimeCoordinator.cursorFor(
+        currentSessionId,
+        useAgentStore.getState().streamCursors[currentSessionId]?.lastSeq || 0,
+      );
       await openRealtimeStream({
         topic: 'agent',
         afterSeq,
@@ -228,17 +460,24 @@ export function AgentWorkbenchPage() {
         query: { sessionId: currentSessionId },
         onEvent: (event) => {
           if (!active) return;
-          useAgentStore.getState().mergeRealtimeEvent(currentSessionId, event);
+          const store = useAgentStore.getState();
+          if (realtimeCoordinator.accept(currentSessionId, event, {
+            messages: store.messagesBySession[currentSessionId] || [],
+            runs: store.activeRuns,
+          })) {
+            store.mergeRealtimeEvent(currentSessionId, event);
+          }
           setStreamStatus('live');
           setTraceRefreshToken((value) => value + 1);
         },
         onSequenceGap: async (gap) => {
           if (active) setStreamStatus('reconnecting');
+          realtimeCoordinator.preserveCursor(currentSessionId, gap.committedSeq);
           try {
             const detail = await agentApi.session(currentSessionId, { limit: 200 });
             if (!active) return;
             applySessionDetail(detail);
-            return Math.max(gap.committedSeq, gap.receivedSeq - 1);
+            return agentSequenceGapRecoveryCursor(gap);
           } catch (reason) {
             if (active) showToast(errorMessage(reason, '实时状态补收失败，正在重试'), 'error');
             return;
@@ -321,12 +560,14 @@ export function AgentWorkbenchPage() {
 
   const archiveSession = async (session: AgentSession) => {
     try {
-      if (session.sessionId.startsWith('local_agent_')) useAgentStore.getState().removeSession(session.sessionId);
-      else {
-        const response = await agentApi.updateSession(session.sessionId, { status: 'archived' });
-        if (response.session.status !== 'archived') throw new Error('归档状态未生效');
-        useAgentStore.getState().removeSession(session.sessionId);
-      }
+      const store = useAgentStore.getState();
+      await archiveAgentSession(session, {
+        runs: store.activeRuns,
+        cancelRun: agentApi.cancel,
+        archiveRemote: (sessionId) => agentApi.updateSession(sessionId, { status: 'archived' }),
+        upsertRun: (run) => useAgentStore.getState().upsertRun(run as AgentRun),
+        removeSession: (sessionId) => useAgentStore.getState().purgeSessionState(sessionId),
+      });
     } catch (reason) {
       showToast(errorMessage(reason, '归档失败'), 'error');
     }
@@ -336,6 +577,15 @@ export function AgentWorkbenchPage() {
     if (!currentSessionId || sending) return;
     const initialDraft = useAgentStore.getState().drafts[currentSessionId] || draft;
     if (!initialDraft.text.trim() && initialDraft.attachments.length === 0) return;
+    const submissionCoordinator = submissionCoordinatorRef.current;
+    if (!submissionCoordinator) return;
+    const submissionId = submissionCoordinator.begin(
+      currentSessionId,
+      agentSubmissionFingerprint(initialDraft),
+    );
+    if (!submissionId) return;
+    let submissionSessionId = currentSessionId;
+    let succeeded = false;
     setSending(true);
     try {
       const nativeProfile = bootstrap?.runtimeProfiles.find((profile) => profile.runtimeProfileId === 'loom-native');
@@ -343,10 +593,12 @@ export function AgentWorkbenchPage() {
         throw new Error(nativeProfile?.error?.message || '麓鸣原生智能体尚未就绪，请先登录模型账号');
       }
       const realSessionId = await ensureRemoteSession(currentSessionId);
+      submissionCoordinator.rebindSession(submissionSessionId, realSessionId);
+      submissionSessionId = realSessionId;
       const currentState = useAgentStore.getState();
       const outgoing = currentState.drafts[realSessionId] || initialDraft;
       const response = await agentApi.sendMessage(realSessionId, {
-        clientMessageId: clientMessageId(),
+        clientMessageId: submissionId,
         text: outgoing.text.trim(),
         attachments: outgoing.attachments.map((attachment) => ({ ...attachment })),
         scopeMode: outgoing.scopeMode,
@@ -365,9 +617,11 @@ export function AgentWorkbenchPage() {
       });
       store.clearDraft(realSessionId);
       setTraceRefreshToken((value) => value + 1);
+      succeeded = true;
     } catch (reason) {
       showToast(`${errorMessage(reason, '发送失败')}，草稿已保留`, 'error');
     } finally {
+      submissionCoordinator.settle(submissionSessionId, succeeded);
       setSending(false);
     }
   };
@@ -404,6 +658,20 @@ export function AgentWorkbenchPage() {
       setTraceRefreshToken((value) => value + 1);
     } catch (reason) {
       showToast(errorMessage(reason, '停止任务失败'), 'error');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const resumeCurrentRun = async () => {
+    if (!currentRun || currentRun.status !== 'paused') return;
+    setBusyKey(currentRun.runId);
+    try {
+      const response = await agentApi.resume(currentRun.runId);
+      useAgentStore.getState().upsertRun(afterAgentResumeAccepted(response.run));
+      setTraceRefreshToken((value) => value + 1);
+    } catch (reason) {
+      showToast(errorMessage(reason, '继续任务失败'), 'error');
     } finally {
       setBusyKey(null);
     }
@@ -499,9 +767,12 @@ export function AgentWorkbenchPage() {
             disabled={!currentSession || currentSession.status === 'archived'}
             sending={sending}
             running={runActive}
+            paused={currentRun?.status === 'paused'}
+            controlBusy={Boolean(currentRun && busyKey === currentRun.runId)}
             onChange={(next) => currentSessionId && useAgentStore.getState().updateDraft(currentSessionId, next)}
             onSubmit={() => void sendMessage()}
             onStop={() => void stopCurrentRun()}
+            onResume={() => void resumeCurrentRun()}
             onSelectModel={selectSessionModel}
             onSetDefaultModel={setDefaultModel}
             onManageModels={() => openFeature('models')}

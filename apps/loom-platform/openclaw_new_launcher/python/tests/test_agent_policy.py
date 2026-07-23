@@ -95,6 +95,43 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertEqual(phone_action.classification, "critical")
         self.assertTrue(phone_action.requires_approval)
 
+    def test_media_generation_with_request_scope_targets_is_outbound_and_approval_scoped(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="strong")
+        capability = {
+            "name": "loom.media.image.generate",
+            "displayName": "生成图片",
+            "permission": "control",
+            "risk": "control_safe",
+            "targetScope": "optional-device-write",
+        }
+
+        local_only = policy.evaluate(capability, {"prompt": "生成招聘海报"})
+        self.assertEqual(local_only.classification, "control_safe")
+        self.assertFalse(local_only.requires_approval)
+
+        for label, targets in (
+            ("devices", {"deviceIds": ["phone-1"]}),
+            ("groups", {"groups": ["招聘一组"]}),
+            ("all-online", {"allOnline": True}),
+        ):
+            with self.subTest(label=label):
+                tool_input = {"prompt": "生成并传到手机", **targets}
+                decision = policy.evaluate(capability, tool_input)
+                approval = policy.create_approval(
+                    session_id="session-media",
+                    run_id=f"run-{label}",
+                    tool_call_id=f"call-{label}",
+                    capability=capability,
+                    tool_input=tool_input,
+                )
+
+                self.assertEqual(decision.classification, "outbound")
+                self.assertTrue(decision.requires_approval)
+                self.assertEqual(approval["risk"], "outbound")
+                self.assertEqual(approval["targets"], targets)
+
     def test_outbound_and_critical_require_approval(self) -> None:
         from core.agent_policy import AgentPolicyEngine
 
@@ -106,6 +143,80 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertTrue(outbound.requires_approval)
         self.assertTrue(critical.requires_approval)
         self.assertFalse(policy.evaluate({"name": "loom.matrix.status", "permission": "read", "risk": "read"}, {}).requires_approval)
+
+    def test_device_allowlist_fails_closed_for_unresolved_group_and_all_online_targets(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(
+            approval_mode="strong",
+            authorized_device_ids={"phone-1"},
+        )
+        capability = {
+            "name": "loom.matrix.dispatch",
+            "permission": "control",
+            "risk": "control_safe",
+        }
+
+        explicit = policy.evaluate(
+            capability,
+            {"targets": {"deviceIds": ["phone-1"]}},
+        )
+        unresolved_targets = (
+            {"groups": ["sales"]},
+            {"allOnline": True},
+            {"deviceIds": ["phone-1"], "groups": ["sales"]},
+        )
+
+        self.assertTrue(explicit.allowed)
+        for targets in unresolved_targets:
+            with self.subTest(targets=targets):
+                decision = policy.evaluate(capability, {"targets": targets})
+                self.assertFalse(decision.allowed)
+                self.assertFalse(decision.requires_approval)
+                self.assertIn("authorized device scope", decision.reason)
+
+    def test_real_acquisition_run_requires_approval_but_preview_does_not(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="strong")
+        capability = {
+            "name": "loom.mcp.loom.loom_acquisition_agent_run",
+            "permission": "control",
+            "risk": "control_safe",
+            "targetScope": "single-device-write",
+        }
+
+        preview = policy.evaluate(
+            capability,
+            {"realRun": False, "confirmed": True, "deviceId": "phone-1"},
+        )
+        real_run = policy.evaluate(
+            capability,
+            {"realRun": True, "confirmed": True, "deviceId": "phone-1"},
+        )
+
+        self.assertFalse(preview.requires_approval)
+        self.assertEqual(real_run.classification, "critical")
+        self.assertTrue(real_run.requires_approval)
+
+    def test_real_acquisition_run_still_requires_approval_in_weak_mode(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="weak")
+        capability = {
+            "name": "loom_acquisition_agent_run",
+            "permission": "control",
+            "risk": "control_safe",
+            "targetScope": "single-device-write",
+        }
+
+        decision = policy.evaluate(
+            capability,
+            {"realRun": True, "confirmed": True, "deviceId": "phone-1"},
+        )
+
+        self.assertEqual(decision.classification, "critical")
+        self.assertTrue(decision.requires_approval)
 
     def test_free_form_and_full_matrix_dispatch_require_approval_despite_confirmed_input(self) -> None:
         from core.agent_policy import AgentPolicyEngine
@@ -159,6 +270,24 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertTrue(canonical_prompt_with_template.requires_approval)
         self.assertFalse(bounded_template.requires_approval)
 
+    def test_matrix_retry_requires_reapproval_in_strong_mode_only(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        capability = {
+            "name": "loom.matrix.retry",
+            "permission": "control",
+            "risk": "control_safe",
+            "targetScope": "campaign-write",
+        }
+        tool_input = {"campaignId": "campaign-full-control"}
+
+        strong = AgentPolicyEngine(approval_mode="strong").evaluate(capability, tool_input)
+        weak = AgentPolicyEngine(approval_mode="weak").evaluate(capability, tool_input)
+
+        self.assertTrue(strong.requires_approval)
+        self.assertIn("retry", strong.reason.lower())
+        self.assertFalse(weak.requires_approval)
+
     def test_weak_mode_only_requires_approval_for_critical_actions(self) -> None:
         from core.agent_policy import AgentPolicyEngine
 
@@ -181,6 +310,30 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertFalse(free_form_matrix.requires_approval)
         self.assertTrue(critical.requires_approval)
         self.assertIn("explicit user request", outbound.reason.lower())
+
+    def test_weak_mode_requires_approval_for_committed_external_publish(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="weak")
+        capability = {
+            "name": "loom.phone.publish",
+            "permission": "control",
+            "risk": "outbound",
+        }
+
+        draft = policy.evaluate(
+            capability,
+            {"target": {"deviceIds": ["phone-1"]}, "draftOnly": True},
+        )
+        committed_publish = policy.evaluate(
+            capability,
+            {"target": {"deviceIds": ["phone-1"]}, "draftOnly": False},
+        )
+
+        self.assertFalse(draft.requires_approval)
+        self.assertEqual(committed_publish.classification, "critical")
+        self.assertTrue(committed_publish.requires_approval)
+        self.assertIn("approval", committed_publish.reason.lower())
 
     def test_approval_is_redacted_and_scoped_to_one_exact_tool_call(self) -> None:
         from core.agent_policy import AgentPolicyEngine

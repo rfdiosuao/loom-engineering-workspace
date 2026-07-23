@@ -20,8 +20,7 @@ from core.paths import AppPaths
 
 
 DEFAULT_RELEASE_API_URLS = (
-    "https://gitee.com/api/v5/repos/rfdiosuao/lumi/releases/latest",
-    "https://api.github.com/repos/rfdiosuao/lumi/releases/latest",
+    "https://api.github.com/repos/rfdiosuao/loom-engineering-workspace/releases/latest",
 )
 SETUP_NAME_RE = re.compile(r"^LOOM-(?P<version>\d+\.\d+\.\d+)-setup\.exe$", re.IGNORECASE)
 SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")

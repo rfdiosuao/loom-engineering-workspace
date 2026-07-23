@@ -21,6 +21,13 @@ export interface AgentEventState {
   seenEventIds: string[];
 }
 
+export function isTerminalAgentRunStatus(status: unknown): status is Extract<
+  AgentRunStatus,
+  'completed' | 'failed' | 'cancelled'
+> {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
 export function agentModelSelectionState(
   sessionModelId: string | undefined,
   defaultModelId: string | undefined,
@@ -140,7 +147,7 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
-export type ToolLifecycleStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type ToolLifecycleStatus = 'queued' | 'awaiting' | 'running' | 'completed' | 'failed';
 
 export function normalizeAgentMessages(messages: AgentMessage[]): AgentMessage[] {
   const ranked = messages.map((message, index) => {
@@ -160,11 +167,13 @@ export function capabilityActionLabel(capability: unknown, status: unknown = 'ru
   const normalized = typeof capability === 'string'
     ? capability.toLowerCase().replace(/[^a-z0-9]+/g, '.')
     : '';
-  const lifecycle: ToolLifecycleStatus = status === 'queued'
-    || status === 'completed'
-    || status === 'failed'
-    ? status
-    : 'running';
+  const lifecycle: Exclude<ToolLifecycleStatus, 'awaiting'> = status === 'queued' || status === 'awaiting'
+    ? 'queued'
+    : status === 'completed'
+      ? 'completed'
+      : status === 'failed'
+        ? 'failed'
+        : 'running';
   const copy = (queued: string, running: string, completed: string, failed: string) => ({
     queued,
     running,
@@ -307,6 +316,175 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       recoverable: true,
     };
   }
+  if (code === 'matrix_target_scope_required') {
+    return {
+      title: '请选择矩阵目标',
+      message: '请在输入框下方选择手机、设备组或全部在线设备后重试。',
+      recoverable: true,
+    };
+  }
+  if (code === 'matrix_campaign_scope_required') {
+    return {
+      title: '请选择对应矩阵任务',
+      message: '取消或重试需要关联一个已下发的矩阵任务，请返回原会话或打开对应任务后再操作。',
+      recoverable: true,
+    };
+  }
+  if (code === 'matrix_campaign_scope_violation') {
+    return {
+      title: '矩阵任务不匹配',
+      message: '当前会话没有关联到要操作的矩阵任务，请打开对应任务后再取消或重试。',
+      recoverable: true,
+    };
+  }
+  if (code === 'capability_unavailable') {
+    return {
+      title: '能力尚未就绪',
+      message: '这项能力尚未连接，请检查对应组件是否已安装、配置是否完整以及运行状态是否正常。',
+      recoverable: true,
+    };
+  }
+  if (code === 'media_asset_not_found' || code === 'publish_media_missing') {
+    return {
+      title: '找不到可用素材',
+      message: '请先生成图片或视频，或从本地素材库选择仍然存在的文件后再发布。',
+      recoverable: true,
+    };
+  }
+  if (
+    code === 'phone_task_timeout'
+    || code === 'media_job_timeout'
+    || code === 'media_transfer_timeout'
+    || code === 'publish_job_timeout'
+    || code === 'capability_timeout_indeterminate'
+  ) {
+    return {
+      title: '执行状态待确认',
+      message: '任务已超过等待时间，停止请求已经发出，但手机端或生成服务可能仍在执行。请先查看目标状态和任务记录，避免重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'capability_timeout') {
+    return {
+      title: '能力等待超时',
+      message: '这项能力没有在时间限制内开始执行，本轮没有产生新的操作。请稍后重试；若持续出现，请检查系统负载。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_repeated_tool_call' || code === 'agent_tool_loop_limit') {
+    return {
+      title: '已停止重复调用',
+      message: '智能体连续调用工具但没有获得新证据，麓鸣已停止本轮执行。请查看运行详情、补充目标或调整任务后重试。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_restart_inflight_unknown') {
+    return {
+      title: '执行状态待确认',
+      message: '应用关闭或重启时有工具正在执行，麓鸣不会自动重放。请先查看目标设备和任务记录，确认实际结果后再决定是否重试，避免重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'agent_service_inflight_unknown') {
+    return {
+      title: '执行状态待确认',
+      message: '智能体服务异常时有工具正在执行，操作可能仍在手机或平台端继续。请先查看目标状态和任务记录，避免重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'agent_tool_result_persistence_failed') {
+    return {
+      title: '执行结果未能保存',
+      message: '工具已经执行，但麓鸣未能可靠保存结果。请先检查手机、矩阵任务、素材库或发布记录，确认实际状态后再决定是否重试。',
+      recoverable: false,
+    };
+  }
+  if (code === 'agent_tool_completion_event_failed') {
+    return {
+      title: '操作已完成，界面同步失败',
+      message: '工具结果已经执行并保存，但完成状态没有及时显示。请刷新会话查看结果，不要直接重跑，以免重复操作。',
+      recoverable: false,
+    };
+  }
+  if (code === 'approval_rejected' || code === 'approval_expired') {
+    return {
+      title: '操作未获授权',
+      message: '这项操作没有执行。需要继续时，请确认目标和内容后重新发起。',
+      recoverable: true,
+    };
+  }
+  if (
+    code === 'approval_conflict'
+    || code === 'approval_already_resolved'
+    || code === 'approval_scope_mismatch'
+  ) {
+    return {
+      title: '审批状态已变化',
+      message: '这项审批已在其他操作中处理或不再匹配当前任务，请刷新会话查看最新状态。',
+      recoverable: true,
+    };
+  }
+  if (code === 'phone_target_not_found' || code === 'phone_target_unavailable') {
+    return {
+      title: '目标手机不可用',
+      message: '原目标已不存在或当前不可用，请刷新设备状态并重新选择一台在线手机。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_runtime_output_too_large' || code === 'agent_model_output_too_large') {
+    return {
+      title: '智能体输出过多',
+      message: '麓鸣已停止本轮模型进程以保护工作台，尚未继续执行新的工具。请缩短任务、减少一次处理的内容或更换模型后重试。',
+      recoverable: true,
+    };
+  }
+  if (
+    code === 'agent_runtime_invalid_output'
+    || code === 'agent_runtime_empty_output'
+    || code === 'agent_runtime_invalid_tool_calls'
+    || code === 'agent_model_protocol_invalid'
+  ) {
+    return {
+      title: '模型响应格式异常',
+      message: '模型没有返回麓鸣可执行的结构化结果，本轮未继续执行新的工具。可以重试；若持续出现，请切换模型。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_runtime_event_failed') {
+    return {
+      title: '运行记录写入失败',
+      message: '麓鸣已停止智能体子进程，没有继续执行后续工具。请重试；若持续出现，请前往环境诊断导出日志。',
+      recoverable: true,
+    };
+  }
+  if (code === 'agent_runtime_timeout' || code === 'agent_model_timeout') {
+    return {
+      title: '模型响应超时',
+      message: '本轮模型响应超过时间限制，麓鸣已停止等待，尚未继续执行新的工具。请检查网络或更换模型后重试。',
+      recoverable: true,
+    };
+  }
+  if (code === 'capability_invalid_output') {
+    return {
+      title: '执行结果待确认',
+      message: '操作已经发起，但返回结果格式异常，麓鸣无法确认最终状态。请先查看目标设备或任务记录，确认后再决定是否重试，避免重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'capability_execution_unknown') {
+    return {
+      title: '执行状态待确认',
+      message: '操作已经发出，但连接在返回结果前中断，麓鸣无法确认是否已生效。请先查看手机、矩阵任务、素材库或发布记录，避免直接重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'agent_tool_call_id_collision') {
+    return {
+      title: '模型调用标识冲突',
+      message: '本轮已有工具完成，但模型又用相同标识请求了不同操作。麓鸣已停止后续执行，请先检查已有结果，避免直接重跑造成重复操作。',
+      recoverable: false,
+    };
+  }
   if (isProtocolError(data)) {
     return {
       title: '能力暂不可用',
@@ -325,6 +503,13 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       title: '抖音需要登录',
       message: '请先在手机上手动登录抖音，完成后重试。麓鸣不会代填账号、密码或验证码。',
       recoverable: true,
+    };
+  }
+  if (error.outcomeIndeterminate === true || data.outcomeIndeterminate === true) {
+    return {
+      title: '部分结果待确认',
+      message: '任务可能已经在部分设备或平台生效。请先检查目标手机、素材库、矩阵任务或发布记录，再决定是否重新执行。',
+      recoverable: false,
     };
   }
   if (code.includes('device_offline') || message.includes('device offline')) {
@@ -426,7 +611,11 @@ function toolMessageId(runId: string): string {
 }
 
 function toolStatus(value: unknown): ToolLifecycleStatus | undefined {
-  return value === 'queued' || value === 'running' || value === 'completed' || value === 'failed'
+  return value === 'queued'
+    || value === 'awaiting'
+    || value === 'running'
+    || value === 'completed'
+    || value === 'failed'
     ? value
     : undefined;
 }
@@ -437,7 +626,8 @@ function mergeToolStatus(
 ): ToolLifecycleStatus {
   if (current === 'completed' || current === 'failed') return current;
   if (incoming === 'completed' || incoming === 'failed') return incoming;
-  if (current === 'running' && incoming === 'queued') return current;
+  if (current === 'running' && (incoming === 'queued' || incoming === 'awaiting')) return current;
+  if (current === 'awaiting' && incoming === 'queued') return current;
   return incoming;
 }
 
@@ -452,7 +642,9 @@ function messageStatusForToolBlocks(blocks: AgentMessageBlock[]): AgentMessage['
     .filter((block) => block.type === 'tool')
     .map((block) => toolStatus(block.data.status));
   if (statuses.includes('failed')) return 'failed';
-  if (statuses.some((status) => status === 'queued' || status === 'running')) return 'streaming';
+  if (statuses.some((status) => status === 'queued' || status === 'awaiting' || status === 'running')) {
+    return 'streaming';
+  }
   return 'completed';
 }
 
@@ -529,14 +721,12 @@ function removeRejectedToolBlock(
   });
 }
 
-function reconcileTerminalToolRows(
+function reconcileTerminalToolRowsForRun(
   messages: AgentMessage[],
-  event: LoomRealtimeEvent,
+  runId: string,
   status: Extract<ToolLifecycleStatus, 'completed' | 'failed'>,
+  terminalData: Record<string, unknown> = {},
 ): AgentMessage[] {
-  const suppliedRun = isRecord(event.data.run) ? event.data.run : undefined;
-  const runId = stringValue(suppliedRun?.runId) || stringValue(event.data.runId) || event.entityId;
-  const terminalData = blockData(event.data);
   let changed = false;
   const next = messages.map((message) => {
     let messageChanged = false;
@@ -561,6 +751,26 @@ function reconcileTerminalToolRows(
     return { ...message, status: messageStatusForToolBlocks(blocks), blocks };
   });
   return changed ? next : messages;
+}
+
+function reconcileTerminalToolRows(
+  messages: AgentMessage[],
+  event: LoomRealtimeEvent,
+  status: Extract<ToolLifecycleStatus, 'completed' | 'failed'>,
+): AgentMessage[] {
+  const suppliedRun = isRecord(event.data.run) ? event.data.run : undefined;
+  const runId = stringValue(suppliedRun?.runId) || stringValue(event.data.runId) || event.entityId;
+  return reconcileTerminalToolRowsForRun(messages, runId, status, blockData(event.data));
+}
+
+export function reconcileAgentMessagesForTerminalRun(
+  messages: AgentMessage[],
+  run: AgentRun,
+): AgentMessage[] {
+  if (!isTerminalAgentRunStatus(run.status)) return messages;
+  const status = run.status === 'completed' ? 'completed' : 'failed';
+  const terminalData = run.error ? { error: run.error } : {};
+  return reconcileTerminalToolRowsForRun(messages, run.runId, status, terminalData);
 }
 
 function hasFailedToolForRun(messages: AgentMessage[], runId: string): boolean {
@@ -663,6 +873,7 @@ function mergeDelta(messages: AgentMessage[], event: LoomRealtimeEvent, sessionI
       { type: 'text', data: { text: delta, runId } },
     ], event.timestamp),
     (message) => {
+      if (message.status === 'completed' || message.status === 'failed') return message;
       const textIndex = message.blocks.findIndex((block) => block.type === 'text');
       const blocks = [...message.blocks];
       if (textIndex < 0) blocks.push({ type: 'text', data: { text: delta } });
@@ -758,6 +969,9 @@ function mergeRun(
     || (stringValue(supplied?.status) as AgentRunStatus | undefined);
   if (!status && !supplied) return runs;
   const existing = runs[runId];
+  if (existing && isTerminalAgentRunStatus(existing.status) && !isTerminalAgentRunStatus(status)) {
+    return runs;
+  }
   const campaignIds = stringArray(supplied?.campaignIds ?? event.data.campaignIds);
   const errorValue = isRecord(supplied?.error) ? supplied.error : isRecord(event.data.error) ? event.data.error : undefined;
   const next: AgentRun = {
@@ -843,9 +1057,15 @@ export function mergeAgentEvent(
     || (isRecord(event.data.message) ? stringValue(event.data.message.sessionId) : undefined)
     || (isRecord(event.data.run) ? stringValue(event.data.run.sessionId) : undefined);
   if (eventSessionId && eventSessionId !== sessionId) return state;
+  const suppliedRun = isRecord(event.data.run) ? event.data.run : undefined;
+  const eventRunId = stringValue(suppliedRun?.runId) || stringValue(event.data.runId) || event.entityId;
+  const ignoreDeltaForTerminalRun = event.type === 'message.delta'
+    && isTerminalAgentRunStatus(state.runs[eventRunId]?.status);
 
   return {
-    messages: normalizeAgentMessages(mergeMessages(state.messages, event, sessionId)),
+    messages: ignoreDeltaForTerminalRun
+      ? state.messages
+      : normalizeAgentMessages(mergeMessages(state.messages, event, sessionId)),
     runs: mergeRun(state.runs, event, sessionId),
     lastSeq: event.seq,
     seenEventIds: [...state.seenEventIds, event.eventId].slice(-EVENT_ID_HISTORY_LIMIT),

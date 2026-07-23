@@ -2286,11 +2286,18 @@ class NewApiAccountManager:
             "tokenMasked": _mask_secret(session.get("memberToken")),
             "models": {
                 "text": text_models,
+                "phone": classes.get("phone") if isinstance(classes.get("phone"), list) else [],
                 "image": classes.get("image") if isinstance(classes.get("image"), list) else [],
                 "video": classes.get("video") if isinstance(classes.get("video"), list) else [],
             },
             "selectedModels": {
                 "text": selected_text_model,
+                "phone": _pick_text(
+                    (session.get("phoneAgent") or {}).get("model")
+                    if isinstance(session.get("phoneAgent"), dict)
+                    else "",
+                    DEFAULT_PHONE_MODEL,
+                ),
                 "image": _pick_text(session.get("gatewayImageModel"), gateway.get("imageModel")),
                 "videoDraft": _pick_text(
                     session.get("gatewayVideoDraftModel"),
@@ -2309,12 +2316,20 @@ class NewApiAccountManager:
             "lastSyncResults": session.get("lastSyncResults") if isinstance(session.get("lastSyncResults"), list) else [],
         }
 
-    def select_models(self, *, text_model: str = "", image_model: str = "", video_model: str = "") -> dict[str, Any]:
+    def select_models(
+        self,
+        *,
+        text_model: str = "",
+        phone_model: str = "",
+        image_model: str = "",
+        video_model: str = "",
+    ) -> dict[str, Any]:
         session = self.current()
         if not session:
             raise NewApiAccountError("尚未登录模型账号")
         classes = self._session_model_classes(session)
         text_model = text_model.strip()
+        phone_model = phone_model.strip()
         image_model = image_model.strip()
         video_model = video_model.strip()
         if text_model:
@@ -2326,6 +2341,11 @@ class NewApiAccountManager:
         if video_model:
             self._ensure_model_choice(video_model, classes.get("video", []), "视频模型")
             session["gatewayVideoDraftModel"] = video_model
+        if phone_model:
+            self._ensure_model_choice(phone_model, classes.get("phone", []), "手机模型")
+            phone_agent = session.get("phoneAgent") if isinstance(session.get("phoneAgent"), dict) else {}
+            phone_agent["model"] = phone_model
+            session["phoneAgent"] = phone_agent
         gateway = session.get("gateway") if isinstance(session.get("gateway"), dict) else {}
         if text_model:
             gateway["defaultModel"] = text_model
@@ -2358,6 +2378,7 @@ class NewApiAccountManager:
         )
         return {
             "text": text_models,
+            "phone": classes.get("phone") if isinstance(classes.get("phone"), list) else [],
             "image": classes.get("image") if isinstance(classes.get("image"), list) else [],
             "video": classes.get("video") if isinstance(classes.get("video"), list) else [],
         }
