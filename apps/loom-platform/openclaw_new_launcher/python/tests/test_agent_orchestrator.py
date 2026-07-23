@@ -2301,6 +2301,101 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(calls[0]["targets"], {"deviceIds": ["phone-1"]})
 
+    def test_existing_media_lookup_then_transfer_reuses_asset_and_binds_request_scope(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        list_calls: list[dict] = []
+        transfer_calls: list[dict] = []
+        generation_calls: list[dict] = []
+        runtime = ScriptedRuntime(
+            [
+                {
+                    "toolCalls": [{
+                        "toolCallId": "media-list-1",
+                        "name": "loom.media.assets.list",
+                        "input": {"kind": "image", "limit": 10},
+                    }],
+                },
+                {
+                    "toolCalls": [{
+                        "toolCallId": "media-transfer-1",
+                        "name": "loom.media.asset.transfer",
+                        "input": {
+                            "assetId": "asset-existing-1",
+                            "targets": {"deviceIds": ["phone-attacker"]},
+                        },
+                    }],
+                },
+                {"final": {"text": "已传到选定手机相册"}},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.media.assets.list": {
+                        "executor": lambda payload: list_calls.append(dict(payload)) or {
+                            "items": [{"assetId": "asset-existing-1", "kind": "image"}],
+                            "nextCursor": "",
+                            "hasMore": False,
+                        },
+                        "permission": "read",
+                        "risk": "read",
+                        "targetScope": "none",
+                    },
+                    "loom.media.asset.transfer": {
+                        "executor": lambda payload: transfer_calls.append(dict(payload)) or {
+                            "ok": True,
+                            "jobId": "job-transfer-1",
+                            "status": "succeeded",
+                        },
+                        "permission": "control",
+                        "risk": "control_safe",
+                        "targetScope": "matrix-write",
+                    },
+                    "loom.media.image.generate": lambda payload: generation_calls.append(dict(payload)) or {"ok": True},
+                    "loom.media.video.generate": lambda payload: generation_calls.append(dict(payload)) or {"ok": True},
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                AgentEventBus(repository),
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="weak"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-existing-media-transfer")
+
+            completed = orchestrator.execute_run(
+                "session-1",
+                "run-existing-media-transfer",
+                {
+                    "prompt": "把之前生成的图片传到 phone-1 手机相册",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(list_calls, [{"kind": "image", "limit": 10}])
+        self.assertEqual(
+            transfer_calls,
+            [{"assetId": "asset-existing-1", "targets": {"deviceIds": ["phone-1"]}}],
+        )
+        self.assertEqual(generation_calls, [])
+        for request in runtime.requests:
+            capability_names = {item["name"] for item in request["capabilities"]}
+            self.assertNotIn("loom.media.image.generate", capability_names)
+            self.assertNotIn("loom.media.video.generate", capability_names)
+
     def test_matrix_tools_cannot_invent_a_device_scope_for_an_unscoped_run(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
 
