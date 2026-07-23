@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -12,7 +13,12 @@ from datetime import datetime, timezone
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
-from core.agent_capabilities import CapabilityError, CapabilityInputError, CapabilityRegistry
+from core.agent_capabilities import (
+    CapabilityError,
+    CapabilityExecutionError,
+    CapabilityInputError,
+    CapabilityRegistry,
+)
 from core.agent_capability_router import route_capabilities
 from core.agent_policy import AgentPolicyEngine, PolicyViolationError
 from core.agent_runtime import AgentRuntimeAdapter, RuntimeExecutionError, redact_sensitive
@@ -990,22 +996,38 @@ class AgentOrchestrator:
             {"toolCallId": call_id, "capability": call["name"], "inputSummary": _summary(call["input"])},
         )
         result = self.capabilities.execute(call["name"], call["input"])
-        safe_result = redact_sensitive(result)
-        self._attach_matrix_result(session_id, run_id, call, safe_result)
-        checkpoint["completedToolCallIds"].append(call_id)
-        checkpoint["toolResults"].append(
-            {
-                "toolCallId": call_id,
-                "capability": call["name"],
-                "status": "completed",
-                "input": _summary(call["input"]),
-                "result": _summary(safe_result),
-                "fingerprint": _tool_fingerprint(capability.name, call["input"]),
-            }
-        )
-        checkpoint["inFlightToolCall"] = None
-        checkpoint.pop("pendingApproval", None)
-        self.repository.update_run(run_id, {"checkpoint": _dump_checkpoint(checkpoint)}, session_id=session_id)
+        completed_checkpoint = copy.deepcopy(checkpoint)
+        try:
+            safe_result = redact_sensitive(result)
+            self._attach_matrix_result(session_id, run_id, call, safe_result)
+            completed_checkpoint["completedToolCallIds"].append(call_id)
+            completed_checkpoint["toolResults"].append(
+                {
+                    "toolCallId": call_id,
+                    "capability": call["name"],
+                    "status": "completed",
+                    "input": _summary(call["input"]),
+                    "result": _summary(safe_result),
+                    "fingerprint": _tool_fingerprint(capability.name, call["input"]),
+                }
+            )
+            completed_checkpoint["inFlightToolCall"] = None
+            completed_checkpoint.pop("pendingApproval", None)
+            self.repository.update_run(
+                run_id,
+                {"checkpoint": _dump_checkpoint(completed_checkpoint)},
+                session_id=session_id,
+            )
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "agent_tool_result_persistence_failed",
+                "工具已经执行，但麓鸣未能可靠保存执行结果；请先检查目标状态，不要直接重复执行。",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=False,
+            ) from exc
+        checkpoint.clear()
+        checkpoint.update(completed_checkpoint)
         completed_data = {
             "toolCallId": call_id,
             "capability": call["name"],

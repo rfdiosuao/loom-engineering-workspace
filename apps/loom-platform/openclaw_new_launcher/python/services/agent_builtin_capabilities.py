@@ -513,8 +513,20 @@ class AgentBuiltinCapabilityProvider:
         if callable(cancel):
             cancel(job_id)
         if kind == "transfer":
-            raise CapabilityExecutionError("media_transfer_timeout", "素材传输任务执行超时")
-        raise CapabilityExecutionError("media_job_timeout", "媒体生成任务执行超时")
+            raise CapabilityExecutionError(
+                "media_transfer_timeout",
+                "素材传输任务执行超时，取消请求已发出，但任务可能仍在执行",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        raise CapabilityExecutionError(
+            "media_job_timeout",
+            "媒体生成任务执行超时，取消请求已发出，但任务可能仍在执行",
+            recoverable=False,
+            outcome_indeterminate=True,
+            execution_may_continue=True,
+        )
 
     def _submit_phone_publish(self, payload: Json, *, cancellation_token: Any | None = None) -> Json:
         if not callable(self.context_factory) or not callable(
@@ -617,7 +629,13 @@ class AgentBuiltinCapabilityProvider:
         cancel = getattr(self.job_manager, "cancel", None)
         if callable(cancel):
             cancel(job_id)
-        raise CapabilityExecutionError("publish_job_timeout", "手机发布任务执行超时")
+        raise CapabilityExecutionError(
+            "publish_job_timeout",
+            "手机发布任务执行超时，取消请求已发出，但任务可能仍在执行",
+            recoverable=False,
+            outcome_indeterminate=True,
+            execution_may_continue=True,
+        )
 
 
 def run_phone_publish(context: Any, payload: Json) -> Json:

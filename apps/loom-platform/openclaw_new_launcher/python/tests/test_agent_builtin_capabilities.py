@@ -641,6 +641,39 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "capability_cancelled")
         self.assertEqual(jobs.cancelled, ["job-video-pending"])
 
+    def test_background_job_timeouts_are_indeterminate_and_never_auto_retry(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        cases = (
+            ("image", "media_job_timeout", "_wait_for_media_job"),
+            ("transfer", "media_transfer_timeout", "_wait_for_media_job"),
+            ("publish", "publish_job_timeout", "_wait_for_publish_job"),
+        )
+        for kind, expected_code, method_name in cases:
+            with self.subTest(kind=kind):
+                jobs = PendingJobManager()
+                provider = AgentBuiltinCapabilityProvider(
+                    context_factory=lambda: object(),
+                    job_manager=jobs,
+                    matrix_factory=lambda: object(),
+                )
+                with patch(
+                    "services.agent_builtin_capabilities.time.monotonic",
+                    side_effect=[0.0, 10_000.0],
+                ):
+                    with self.assertRaises(CapabilityExecutionError) as raised:
+                        if method_name == "_wait_for_media_job":
+                            provider._wait_for_media_job("job-timeout", kind=kind)
+                        else:
+                            provider._wait_for_publish_job("job-timeout")
+
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertFalse(raised.exception.recoverable)
+                self.assertTrue(raised.exception.outcome_indeterminate)
+                self.assertTrue(raised.exception.execution_may_continue)
+                self.assertEqual(jobs.cancelled, ["job-timeout"])
+
     def test_cancelled_media_job_does_not_transfer_after_generation_returns(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
         from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider

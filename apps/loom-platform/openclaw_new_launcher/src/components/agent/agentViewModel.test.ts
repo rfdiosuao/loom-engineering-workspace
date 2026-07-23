@@ -281,28 +281,45 @@ test('missing media and disconnected capabilities have actionable Chinese guidan
   );
 });
 
-test('execution timeouts warn that a side effect may still be running', () => {
+test('indeterminate execution timeouts never expose an immediate retry action', () => {
   for (const code of [
     'phone_task_timeout',
     'media_job_timeout',
     'media_transfer_timeout',
     'publish_job_timeout',
-    'capability_timeout',
     'capability_timeout_indeterminate',
   ]) {
     const summary = agentViewModel.userFacingAgentError({
       error: {
         code,
         message: `${code}: operation exceeded its execution window`,
-        recoverable: true,
+        recoverable: false,
       },
     });
 
-    assert.equal(summary.title, '任务执行超时');
+    assert.equal(summary.title, '执行状态待确认');
     assert.match(summary.message, /可能仍在执行/);
     assert.match(summary.message, /避免重复执行/);
+    assert.equal(summary.recoverable, false);
     assert.doesNotMatch(JSON.stringify(summary), /timeout|execution window/i);
   }
+});
+
+test('pre-execution capability timeout remains safely retryable', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'capability_timeout',
+      message: 'Capability timed out before starting.',
+      recoverable: true,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '能力等待超时',
+    message: '这项能力没有在时间限制内开始执行，本轮没有产生新的操作。请稍后重试；若持续出现，请检查系统负载。',
+    recoverable: true,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /capability_timeout|timed out/i);
 });
 
 test('tool loop guards explain why autonomous execution stopped', () => {
@@ -336,6 +353,23 @@ test('restart recovery never encourages replaying an uncertain side effect', () 
   assert.match(summary.message, /避免重复执行/);
   assert.equal(summary.recoverable, false);
   assert.doesNotMatch(JSON.stringify(summary), /agent_restart|in flight|repeated automatically/i);
+});
+
+test('post-execution persistence failure warns against duplicate side effects', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_tool_result_persistence_failed',
+      message: 'internal persistence error',
+      recoverable: true,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '执行结果未能保存',
+    message: '工具已经执行，但麓鸣未能可靠保存结果。请先检查手机、矩阵任务、素材库或发布记录，确认实际状态后再决定是否重试。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /agent_tool|persistence|internal/i);
 });
 
 test('approval state failures are localized without exposing policy protocol text', () => {

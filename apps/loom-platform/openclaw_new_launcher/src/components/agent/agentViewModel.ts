@@ -347,12 +347,18 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
     || code === 'media_job_timeout'
     || code === 'media_transfer_timeout'
     || code === 'publish_job_timeout'
-    || code === 'capability_timeout'
     || code === 'capability_timeout_indeterminate'
   ) {
     return {
-      title: '任务执行超时',
-      message: '手机端或生成服务可能仍在执行。请先查看任务状态和目标设备结果，确认未完成后再重试，避免重复执行。',
+      title: '执行状态待确认',
+      message: '任务已超过等待时间，停止请求已经发出，但手机端或生成服务可能仍在执行。请先查看目标状态和任务记录，避免重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'capability_timeout') {
+    return {
+      title: '能力等待超时',
+      message: '这项能力没有在时间限制内开始执行，本轮没有产生新的操作。请稍后重试；若持续出现，请检查系统负载。',
       recoverable: true,
     };
   }
@@ -367,6 +373,13 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
     return {
       title: '执行状态待确认',
       message: '应用关闭或重启时有工具正在执行，麓鸣不会自动重放。请先查看目标设备和任务记录，确认实际结果后再决定是否重试，避免重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'agent_tool_result_persistence_failed') {
+    return {
+      title: '执行结果未能保存',
+      message: '工具已经执行，但麓鸣未能可靠保存结果。请先检查手机、矩阵任务、素材库或发布记录，确认实际状态后再决定是否重试。',
       recoverable: false,
     };
   }

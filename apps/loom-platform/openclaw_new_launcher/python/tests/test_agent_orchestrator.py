@@ -1324,6 +1324,63 @@ class AgentOrchestratorTests(unittest.TestCase):
             0,
         )
 
+    def test_post_execution_persistence_failure_is_indeterminate_and_never_retried(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime(
+            [
+                {
+                    "toolCalls": [{
+                        "toolCallId": "call-post-execution-failure",
+                        "name": "loom.matrix.dispatch",
+                        "input": {"prompt": "读取屏幕"},
+                    }],
+                },
+                {"final": {"text": "must not retry"}},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+
+            def fail_after_execution(*_args, **_kwargs):
+                raise OSError("simulated result persistence failure")
+
+            orchestrator._attach_matrix_result = fail_after_execution
+            orchestrator.queue_run("session-1", run_id="run-post-execution-failure")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-post-execution-failure",
+                {"prompt": "读取 phone-1 屏幕", "targets": {"deviceIds": ["phone-1"]}},
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(runtime.requests), 1)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "agent_tool_result_persistence_failed")
+        self.assertFalse(failed["error"]["recoverable"])
+        self.assertTrue(failed["error"]["outcomeIndeterminate"])
+        self.assertFalse(failed["error"]["executionMayContinue"])
+        checkpoint = json.loads(failed["checkpoint"])
+        self.assertIsNone(checkpoint["inFlightToolCall"])
+        self.assertEqual(checkpoint["completedToolCallIds"], ["call-post-execution-failure"])
+        self.assertEqual(len(checkpoint["toolResults"]), 1)
+        self.assertEqual(checkpoint["toolResults"][0]["status"], "failed")
+        self.assertEqual(
+            checkpoint["toolResults"][0]["error"]["code"],
+            "agent_tool_result_persistence_failed",
+        )
+        tool_error = next(event for event in events if event["type"] == "tool.failed")["data"]["error"]
+        self.assertTrue(tool_error["outcomeIndeterminate"])
+        self.assertFalse(tool_error["executionMayContinue"])
+
     def test_matrix_dispatch_without_tool_targets_is_bound_to_run_request(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
 
