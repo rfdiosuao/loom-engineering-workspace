@@ -1063,6 +1063,78 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertTrue(caught.exception.outcome_indeterminate)
         self.assertFalse(caught.exception.execution_may_continue)
 
+    def test_mcp_control_missing_or_invalid_post_execution_receipts_are_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        for error_code in ("missing_publish_receipt", "invalid_completion_payload"):
+            with self.subTest(error_code=error_code):
+                registry = CapabilityRegistry(
+                    internal_operations={},
+                    skill_provider=lambda: [],
+                    mcp_provider=lambda: [{
+                        "server": "local",
+                        "name": "publish",
+                        "permission": "control",
+                        "risk": "outbound",
+                    }],
+                    mcp_executor=lambda _server, _tool, _payload, code=error_code: {
+                        "content": [{
+                            "type": "text",
+                            "text": json.dumps({
+                                "ok": False,
+                                "error": {
+                                    "code": code,
+                                    "message": "The operation may have completed before its receipt was lost.",
+                                },
+                            }),
+                        }],
+                        "isError": True,
+                    },
+                    cli_catalog_provider=lambda: {"domains": []},
+                )
+
+                with self.assertRaises(CapabilityExecutionError) as caught:
+                    registry.execute("loom.mcp.local.publish", {"body": "hello"})
+
+                self.assertEqual(caught.exception.code, "capability_execution_unknown")
+                self.assertFalse(caught.exception.recoverable)
+                self.assertTrue(caught.exception.outcome_indeterminate)
+
+    def test_mcp_control_explicit_missing_input_remains_recoverable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "local",
+                "name": "dispatch",
+                "permission": "control",
+                "risk": "control_safe",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "ok": False,
+                        "error": {
+                            "code": "missing_prompt",
+                            "message": "A prompt is required before dispatch.",
+                        },
+                    }),
+                }],
+                "isError": True,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.mcp.local.dispatch", {})
+
+        self.assertEqual(caught.exception.code, "missing_prompt")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
+
     def test_mcp_control_preflight_denial_remains_recoverable(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
 
@@ -1217,6 +1289,35 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertFalse(caught.exception.recoverable)
         self.assertTrue(caught.exception.outcome_indeterminate)
         self.assertFalse(caught.exception.execution_may_continue)
+
+    def test_default_cli_control_post_execution_shape_errors_are_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, _default_cli_executor
+
+        for error_code in ("missing_publish_receipt", "invalid_completion_payload"):
+            with self.subTest(error_code=error_code):
+                dispatch = mock.Mock(return_value=(
+                    4,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": error_code,
+                            "message": "The operation may have completed before its receipt was lost.",
+                        },
+                    },
+                ))
+                fake_loom_cli = types.SimpleNamespace(dispatch=dispatch)
+
+                with mock.patch.dict(sys.modules, {"loom_cli": fake_loom_cli}):
+                    with self.assertRaises(CapabilityExecutionError) as caught:
+                        _default_cli_executor(
+                            "matrix dispatch",
+                            {"args": ["--target", "phone-1", "--prompt", "inspect"]},
+                            permission="control",
+                        )
+
+                self.assertEqual(caught.exception.code, "capability_execution_unknown")
+                self.assertFalse(caught.exception.recoverable)
+                self.assertTrue(caught.exception.outcome_indeterminate)
 
     def test_default_cli_control_preflight_denial_remains_recoverable(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError, _default_cli_executor

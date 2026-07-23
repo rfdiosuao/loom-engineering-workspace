@@ -747,6 +747,111 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
                 self.assertTrue(raised.exception.execution_may_continue)
                 self.assertEqual(jobs.cancelled, ["job-timeout"])
 
+    def test_background_job_status_disconnects_preserve_may_continue_semantics(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class DisconnectedStatusJobs:
+            def get(self, _job_id):
+                raise ConnectionResetError("status channel closed")
+
+        provider = AgentBuiltinCapabilityProvider(
+            context_factory=lambda: object(),
+            job_manager=DisconnectedStatusJobs(),
+            matrix_factory=lambda: object(),
+        )
+        cases = (
+            ("image", "media_job_status_unknown", "_wait_for_media_job"),
+            ("transfer", "media_transfer_status_unknown", "_wait_for_media_job"),
+            ("publish", "publish_job_status_unknown", "_wait_for_publish_job"),
+        )
+        for kind, expected_code, method_name in cases:
+            with self.subTest(kind=kind):
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    if method_name == "_wait_for_media_job":
+                        provider._wait_for_media_job("job-disconnected", kind=kind)
+                    else:
+                        provider._wait_for_publish_job("job-disconnected")
+
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertFalse(raised.exception.recoverable)
+                self.assertTrue(raised.exception.outcome_indeterminate)
+                self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_background_job_submit_disconnects_are_not_treated_as_safe_to_retry(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class AcceptedThenDisconnectedJobs:
+            def __init__(self) -> None:
+                self.accepted: list[tuple[str, str]] = []
+
+            def submit_progress(self, kind, label, _target, initial_progress=None):
+                self.accepted.append((kind, label))
+                raise ConnectionResetError("submission response lost")
+
+        with tempfile.TemporaryDirectory() as root:
+            media_path = os.path.join(root, "publish.png")
+            with open(media_path, "wb") as handle:
+                handle.write(b"image")
+            jobs = AcceptedThenDisconnectedJobs()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: object(),
+            )
+
+            with self.assertRaises(CapabilityExecutionError) as media_error:
+                provider._submit_media("image", {"prompt": "generate once"})
+            with self.assertRaises(CapabilityExecutionError) as publish_error:
+                provider._submit_phone_publish({
+                    "platform": "douyin",
+                    "title": "LOOM QA",
+                    "body": "publish once",
+                    "mediaPaths": [media_path],
+                    "deviceId": "phone-1",
+                })
+
+        self.assertEqual(media_error.exception.code, "media_job_submission_unknown")
+        self.assertTrue(media_error.exception.execution_may_continue)
+        self.assertFalse(media_error.exception.recoverable)
+        self.assertEqual(publish_error.exception.code, "publish_job_submission_unknown")
+        self.assertTrue(publish_error.exception.execution_may_continue)
+        self.assertFalse(publish_error.exception.recoverable)
+        self.assertEqual(
+            [kind for kind, _label in jobs.accepted],
+            ["image", "publish"],
+        )
+
+    def test_cancel_receipt_disconnect_keeps_the_original_indeterminate_error(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class CancelReceiptDisconnectedJobs(PendingJobManager):
+            def cancel(self, _job_id):
+                raise ConnectionResetError("cancel response lost")
+
+        jobs = CancelReceiptDisconnectedJobs()
+        provider = AgentBuiltinCapabilityProvider(
+            context_factory=lambda: object(),
+            job_manager=jobs,
+            matrix_factory=lambda: object(),
+        )
+        token = SimpleNamespace(cancelled=True)
+
+        with self.assertRaises(CapabilityExecutionError) as raised:
+            provider._wait_for_media_job(
+                "job-cancel-disconnected",
+                kind="image",
+                cancellation_token=token,
+            )
+
+        self.assertEqual(raised.exception.code, "capability_cancelled")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
+
     def test_cancelled_media_job_does_not_transfer_after_generation_returns(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
         from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider

@@ -374,6 +374,83 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(len(runtime.requests), 1)
 
+    def test_reused_tool_call_id_with_different_content_fails_instead_of_silent_skip(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "reused-across-rounds",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "first task"},
+                }],
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "reused-across-rounds",
+                    "name": "loom.matrix.cancel",
+                    "input": {"campaignId": "campaign-1"},
+                }],
+            },
+            {"final": {"text": "must not claim both operations completed"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-reused-call-id")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-reused-call-id",
+                {"prompt": "dispatch then cancel", "targets": {"allOnline": True}},
+            )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "agent_tool_call_id_collision")
+        self.assertFalse(failed["error"]["recoverable"])
+        self.assertTrue(failed["error"]["outcomeIndeterminate"])
+        self.assertFalse(failed["error"]["executionMayContinue"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(runtime.requests), 2)
+
+    def test_exact_tool_call_id_replay_is_safely_ignored(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        repeated_call = {
+            "toolCallId": "same-call-same-content",
+            "name": "loom.matrix.dispatch",
+            "input": {"prompt": "execute once"},
+        }
+        runtime = ScriptedRuntime([
+            {"toolCalls": [repeated_call]},
+            {"toolCalls": [repeated_call]},
+            {"final": {"text": "executed once"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-exact-call-id-replay")
+
+            completed = orchestrator.execute_run(
+                "session-1",
+                "run-exact-call-id-replay",
+                {"prompt": "dispatch once", "targets": {"allOnline": True}},
+            )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(runtime.requests), 3)
+
     def test_excessive_tool_batch_is_rejected_before_any_execution(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator, MAX_TOOL_CALLS_PER_ROUND
 
@@ -1487,6 +1564,68 @@ class AgentOrchestratorTests(unittest.TestCase):
         tool_error = next(event for event in events if event["type"] == "tool.failed")["data"]["error"]
         self.assertTrue(tool_error["outcomeIndeterminate"])
         self.assertFalse(tool_error["executionMayContinue"])
+
+    def test_completed_event_failure_never_marks_an_executed_tool_safe_to_retry(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-completion-event-failure",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "execute exactly once"},
+                }],
+            },
+            {"final": {"text": "must not retry"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            original_emit = orchestrator._emit
+            completion_failures = 0
+
+            def fail_first_completed_event(
+                session_id,
+                run_id,
+                event_type,
+                data,
+                **kwargs,
+            ):
+                nonlocal completion_failures
+                if event_type == "tool.completed" and completion_failures == 0:
+                    completion_failures += 1
+                    raise OSError("simulated completed event persistence failure")
+                return original_emit(session_id, run_id, event_type, data, **kwargs)
+
+            orchestrator._emit = fail_first_completed_event
+            orchestrator.queue_run("session-1", run_id="run-completion-event-failure")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-completion-event-failure",
+                {"prompt": "dispatch once", "targets": {"allOnline": True}},
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(runtime.requests), 1)
+        self.assertEqual(completion_failures, 1)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "agent_tool_completion_event_failed")
+        self.assertFalse(failed["error"]["recoverable"])
+        self.assertFalse(failed["error"]["outcomeIndeterminate"])
+        checkpoint = json.loads(failed["checkpoint"])
+        self.assertEqual(checkpoint["completedToolCallIds"], ["call-completion-event-failure"])
+        self.assertEqual(len(checkpoint["toolResults"]), 1)
+        self.assertEqual(checkpoint["toolResults"][0]["status"], "completed")
+        tool_error = next(event for event in events if event["type"] == "tool.failed")["data"]["error"]
+        self.assertEqual(tool_error["code"], "agent_tool_completion_event_failed")
+        self.assertFalse(tool_error["recoverable"])
 
     def test_matrix_dispatch_without_tool_targets_is_bound_to_run_request(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator

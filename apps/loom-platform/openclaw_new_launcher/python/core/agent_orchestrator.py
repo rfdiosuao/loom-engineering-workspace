@@ -238,7 +238,46 @@ class AgentOrchestrator:
             for call in normalized_tool_calls:
                 call_id = call["toolCallId"]
                 if call_id in checkpoint["completedToolCallIds"]:
-                    continue
+                    previous_call = _previous_tool_result_by_call_id(checkpoint, call_id)
+                    exact_replay = False
+                    if (
+                        previous_call is not None
+                        and str(previous_call.get("status") or "") == "completed"
+                        and str(previous_call.get("capability") or "") == call["name"]
+                    ):
+                        try:
+                            replay_capability = self.capabilities.get(call["name"])
+                            replay_call = self._bind_execution_scope(
+                                session_id,
+                                run_id,
+                                call,
+                                replay_capability,
+                                checkpoint,
+                            )
+                            replay_fingerprint = _tool_fingerprint(
+                                replay_capability.name,
+                                replay_call["input"],
+                            )
+                            exact_replay = (
+                                str(previous_call.get("fingerprint") or "")
+                                == replay_fingerprint
+                            )
+                        except CapabilityError:
+                            exact_replay = False
+                    if exact_replay:
+                        continue
+                    return self._fail_run(
+                        session_id,
+                        run_id,
+                        "agent_tool_call_id_collision",
+                        "Runtime reused a completed tool call identifier with different content.",
+                        False,
+                        checkpoint,
+                        error_flags={
+                            "outcomeIndeterminate": True,
+                            "executionMayContinue": False,
+                        },
+                    )
                 self._emit(
                     session_id,
                     run_id,
@@ -1129,12 +1168,21 @@ class AgentOrchestrator:
                 completed_data["attachments"] = safe_result["attachments"]
             if isinstance(safe_result.get("phoneTransfer"), Mapping):
                 completed_data["phoneTransfer"] = safe_result["phoneTransfer"]
-        self._emit(
-            session_id,
-            run_id,
-            "tool.completed",
-            completed_data,
-        )
+        try:
+            self._emit(
+                session_id,
+                run_id,
+                "tool.completed",
+                completed_data,
+            )
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "agent_tool_completion_event_failed",
+                "工具已经执行并保存，但完成状态未能同步；请刷新会话查看结果，不要直接重复执行。",
+                recoverable=False,
+                outcome_indeterminate=False,
+                execution_may_continue=False,
+            ) from exc
         self._pending_inputs.pop((run_id, call_id), None)
         return safe_result
 
@@ -1410,6 +1458,18 @@ def _previous_completed_tool_result(checkpoint: Mapping[str, Any], fingerprint: 
     return None
 
 
+def _previous_tool_result_by_call_id(checkpoint: Mapping[str, Any], call_id: str) -> Json | None:
+    tool_results = checkpoint.get("toolResults")
+    if not isinstance(tool_results, list):
+        return None
+    for item in reversed(tool_results):
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("toolCallId") or "") == call_id:
+            return dict(item)
+    return None
+
+
 def _tool_result_requires_refresh(value: Any, *, depth: int = 0) -> bool:
     if depth > 5:
         return False
@@ -1453,7 +1513,7 @@ def _close_failed_tool_checkpoint(
     already_closed = any(
         isinstance(item, Mapping)
         and str(item.get("toolCallId") or "") == call_id
-        and str(item.get("status") or "") == "failed"
+        and str(item.get("status") or "") in {"completed", "failed"}
         for item in tool_results
     )
     if call_id and not already_closed:

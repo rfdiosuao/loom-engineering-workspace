@@ -462,7 +462,7 @@ UNSAFE_CLI_GLOBAL_OPTIONS = frozenset(
     }
 )
 
-MCP_PRE_EXECUTION_ERROR_CODES = frozenset(
+PRE_EXECUTION_ERROR_CODES = frozenset(
     {
         "approval_already_resolved",
         "approval_conflict",
@@ -474,10 +474,70 @@ MCP_PRE_EXECUTION_ERROR_CODES = frozenset(
         "capability_not_found",
         "capability_unavailable",
         "critical_target_required",
+        "invalid_action_body_json",
+        "invalid_actual_model",
+        "invalid_codex_toml",
+        "invalid_control",
+        "invalid_dispatch",
+        "invalid_input",
+        "invalid_json",
+        "invalid_lease",
+        "invalid_media_file",
+        "invalid_media_kind",
+        "invalid_model",
+        "invalid_option",
+        "invalid_permission",
+        "invalid_phone_mode",
+        "invalid_phone_profile",
+        "invalid_phone_token",
+        "invalid_phone_url",
+        "invalid_provider_url",
+        "invalid_runtime",
+        "invalid_schedule_command",
+        "invalid_target",
+        "invalid_task_transition",
+        "invalid_user_model",
         "matrix_campaign_scope_required",
         "matrix_campaign_scope_violation",
         "matrix_target_scope_required",
         "media_asset_not_found",
+        "missing_action",
+        "missing_action_body_json",
+        "missing_adb",
+        "missing_agent_result_json",
+        "missing_api_token",
+        "missing_campaign",
+        "missing_check_id",
+        "missing_component",
+        "missing_config_path",
+        "missing_config_write_fields",
+        "missing_email",
+        "missing_email_code",
+        "missing_feishu_table",
+        "missing_helper_script",
+        "missing_ids",
+        "missing_job_id",
+        "missing_lead_summary",
+        "missing_license_code",
+        "missing_local_phone_model_config",
+        "missing_login_identity",
+        "missing_merchant_id",
+        "missing_model",
+        "missing_option_value",
+        "missing_packages",
+        "missing_password",
+        "missing_phone_llm_config",
+        "missing_phone_token",
+        "missing_phone_url",
+        "missing_prompt",
+        "missing_register_fields",
+        "missing_schedule_command",
+        "missing_schedule_time",
+        "missing_target",
+        "missing_task_id",
+        "missing_template_id",
+        "missing_ticket",
+        "missing_wire_custom_fields",
         "permission_denied",
         "phone_single_target_required",
         "phone_target_not_found",
@@ -1294,11 +1354,7 @@ def _mcp_execution_error(
 
 def _error_is_definitely_pre_execution(code: str) -> bool:
     normalized = str(code or "").strip().lower()
-    return (
-        normalized in MCP_PRE_EXECUTION_ERROR_CODES
-        or normalized.startswith("invalid_")
-        or normalized.startswith("missing_")
-    )
+    return normalized in PRE_EXECUTION_ERROR_CODES
 
 
 def _default_cli_catalog_provider() -> Any:

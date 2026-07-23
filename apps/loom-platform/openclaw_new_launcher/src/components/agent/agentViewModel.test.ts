@@ -390,6 +390,25 @@ test('post-execution persistence failure warns against duplicate side effects', 
   assert.doesNotMatch(JSON.stringify(summary), /agent_tool|persistence|internal/i);
 });
 
+test('completed tool event failure says the operation finished and forbids replay', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_tool_completion_event_failed',
+      message: 'Tool completed but its realtime event could not be persisted.',
+      recoverable: false,
+      outcomeIndeterminate: false,
+      executionMayContinue: false,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '操作已完成，界面同步失败',
+    message: '工具结果已经执行并保存，但完成状态没有及时显示。请刷新会话查看结果，不要直接重跑，以免重复操作。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /agent_tool|realtime|persisted/i);
+});
+
 test('approval state failures are localized without exposing policy protocol text', () => {
   const rejected = agentViewModel.userFacingAgentError({
     error: {
@@ -516,6 +535,25 @@ test('invalid model protocol is localized as a safe pre-tool failure', () => {
   assert.match(summary.message, /未继续执行新的工具/);
   assert.equal(summary.recoverable, true);
   assert.doesNotMatch(JSON.stringify(summary), /protocol|malformed|gateway/i);
+});
+
+test('conflicting reused tool call IDs warn about partial execution and forbid direct retry', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_tool_call_id_collision',
+      message: 'Runtime reused a completed toolCallId with different content.',
+      recoverable: false,
+      outcomeIndeterminate: true,
+      executionMayContinue: false,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '模型调用标识冲突',
+    message: '本轮已有工具完成，但模型又用相同标识请求了不同操作。麓鸣已停止后续执行，请先检查已有结果，避免直接重跑造成重复操作。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /toolCallId|runtime|collision/i);
 });
 
 test('runtime event persistence failure reports child termination and diagnostics', () => {

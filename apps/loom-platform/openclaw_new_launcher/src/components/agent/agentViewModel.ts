@@ -390,6 +390,13 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       recoverable: false,
     };
   }
+  if (code === 'agent_tool_completion_event_failed') {
+    return {
+      title: '操作已完成，界面同步失败',
+      message: '工具结果已经执行并保存，但完成状态没有及时显示。请刷新会话查看结果，不要直接重跑，以免重复操作。',
+      recoverable: false,
+    };
+  }
   if (code === 'approval_rejected' || code === 'approval_expired') {
     return {
       title: '操作未获授权',
@@ -459,6 +466,13 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
     return {
       title: '执行状态待确认',
       message: '操作已经发出，但连接在返回结果前中断，麓鸣无法确认是否已生效。请先查看手机、矩阵任务、素材库或发布记录，避免直接重复执行。',
+      recoverable: false,
+    };
+  }
+  if (code === 'agent_tool_call_id_collision') {
+    return {
+      title: '模型调用标识冲突',
+      message: '本轮已有工具完成，但模型又用相同标识请求了不同操作。麓鸣已停止后续执行，请先检查已有结果，避免直接重跑造成重复操作。',
       recoverable: false,
     };
   }

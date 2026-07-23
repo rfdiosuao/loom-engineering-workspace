@@ -39,6 +39,53 @@ def _post_submission_error(
     )
 
 
+def _submit_background_job(
+    job_manager: Any,
+    kind: str,
+    label: str,
+    target: Any,
+    *,
+    error_code: str,
+    error_message: str,
+) -> Any:
+    try:
+        return job_manager.submit_progress(kind, label, target)
+    except Exception as exc:
+        raise _post_submission_error(
+            error_code,
+            error_message,
+            execution_may_continue=True,
+        ) from exc
+
+
+def _read_background_job(
+    get_job: Any,
+    job_id: str,
+    *,
+    error_code: str,
+    error_message: str,
+) -> Any:
+    try:
+        return get_job(job_id)
+    except Exception as exc:
+        raise _post_submission_error(
+            error_code,
+            error_message,
+            execution_may_continue=True,
+        ) from exc
+
+
+def _request_background_job_cancel(job_manager: Any, job_id: str) -> bool:
+    cancel = getattr(job_manager, "cancel", None)
+    if not callable(cancel):
+        return False
+    try:
+        cancel(job_id)
+    except Exception:
+        return False
+    return True
+
+
 def _media_attachments(kind: str, result: Json) -> list[Json]:
     candidates = result.get("files") if isinstance(result.get("files"), list) else []
     if kind == "video" and not candidates and result.get("path"):
@@ -278,7 +325,14 @@ class AgentBuiltinCapabilityProvider:
             )
             return {**summary, "success": summary.get("status") == "succeeded"}
 
-        job = self.job_manager.submit_progress("media.transfer", "传输素材到手机", target)
+        job = _submit_background_job(
+            self.job_manager,
+            "media.transfer",
+            "传输素材到手机",
+            target,
+            error_code="media_transfer_submission_unknown",
+            error_message="素材传输任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+        )
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
             raise _post_submission_error(
@@ -432,7 +486,14 @@ class AgentBuiltinCapabilityProvider:
             )
 
         label = "图片生成" if kind == "image" else "视频生成"
-        job = self.job_manager.submit_progress(kind, label, target)
+        job = _submit_background_job(
+            self.job_manager,
+            kind,
+            label,
+            target,
+            error_code="media_job_submission_unknown",
+            error_message="媒体任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+        )
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
             raise _post_submission_error(
@@ -516,15 +577,19 @@ class AgentBuiltinCapabilityProvider:
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             if cancellation_token is not None and bool(getattr(cancellation_token, "cancelled", False)):
-                cancel = getattr(self.job_manager, "cancel", None)
-                if callable(cancel):
-                    cancel(job_id)
+                _request_background_job_cancel(self.job_manager, job_id)
                 raise _post_submission_error(
                     "capability_cancelled",
                     "媒体生成任务已请求取消，但任务可能仍在执行",
                     execution_may_continue=True,
                 )
-            job = get_job(job_id)
+            error_code = "media_transfer_status_unknown" if kind == "transfer" else "media_job_status_unknown"
+            job = _read_background_job(
+                get_job,
+                job_id,
+                error_code=error_code,
+                error_message="后台任务已经提交，但读取任务状态时连接中断，任务可能仍在执行",
+            )
             if isinstance(job, dict) and str(job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
                 return job
             token_wait = getattr(cancellation_token, "wait", None)
@@ -532,9 +597,7 @@ class AgentBuiltinCapabilityProvider:
                 token_wait(0.1)
             else:
                 time.sleep(0.1)
-        cancel = getattr(self.job_manager, "cancel", None)
-        if callable(cancel):
-            cancel(job_id)
+        _request_background_job_cancel(self.job_manager, job_id)
         if kind == "transfer":
             raise CapabilityExecutionError(
                 "media_transfer_timeout",
@@ -607,7 +670,14 @@ class AgentBuiltinCapabilityProvider:
             return run_phone_publish(context, normalized)
 
         label = "手机发布草稿" if normalized["draftOnly"] else "手机自动发布"
-        job = self.job_manager.submit_progress("publish", label, target)
+        job = _submit_background_job(
+            self.job_manager,
+            "publish",
+            label,
+            target,
+            error_code="publish_job_submission_unknown",
+            error_message="手机发布任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+        )
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
             raise _post_submission_error(
@@ -645,21 +715,22 @@ class AgentBuiltinCapabilityProvider:
         deadline = time.monotonic() + 675
         while time.monotonic() < deadline:
             if cancellation_token is not None and bool(getattr(cancellation_token, "cancelled", False)):
-                cancel = getattr(self.job_manager, "cancel", None)
-                if callable(cancel):
-                    cancel(job_id)
+                _request_background_job_cancel(self.job_manager, job_id)
                 raise _post_submission_error(
                     "capability_cancelled",
                     "手机发布任务已请求取消，但任务可能仍在执行",
                     execution_may_continue=True,
                 )
-            job = get_job(job_id)
+            job = _read_background_job(
+                get_job,
+                job_id,
+                error_code="publish_job_status_unknown",
+                error_message="手机发布任务已经提交，但读取任务状态时连接中断，任务可能仍在执行",
+            )
             if isinstance(job, dict) and str(job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
                 return job
             time.sleep(0.1)
-        cancel = getattr(self.job_manager, "cancel", None)
-        if callable(cancel):
-            cancel(job_id)
+        _request_background_job_cancel(self.job_manager, job_id)
         raise CapabilityExecutionError(
             "publish_job_timeout",
             "手机发布任务执行超时，取消请求已发出，但任务可能仍在执行",
