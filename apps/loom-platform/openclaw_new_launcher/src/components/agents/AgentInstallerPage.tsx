@@ -1,4 +1,5 @@
 import React from 'react';
+import { AlertTriangle, ShieldCheck } from 'lucide-react';
 import { loomClient } from '../../services/loomClient';
 import { loomErrorText, normalizeLoomError } from '../../services/loomErrors';
 import type {
@@ -721,6 +722,8 @@ const AgentModelConfigPanel: React.FC<{
   const customProviderOption = providerOptionById(customProviderId);
   const customProviderName = customProviderId === 'custom' ? customProvider.trim() : customProviderOption.label;
   const canApplyCustom = Boolean(customProviderName && customBaseUrl.trim() && customApiKey.trim() && draftModel.trim());
+  const sessionPreservation = status?.sessionPreservation;
+  const sessionsProtected = sessionPreservation?.protected !== false;
 
   React.useEffect(() => {
     if (status?.channelMode === 'official') {
@@ -756,6 +759,32 @@ const AgentModelConfigPanel: React.FC<{
           {busy ? '配置中' : modelConfigLabel(status)}
         </span>
       </div>
+
+      {sessionPreservation?.supported ? (
+        <div
+          data-agent-session-protection
+          className={`mt-4 flex items-start gap-3 border-y px-1 py-3 ${
+            sessionsProtected
+              ? 'border-status-success/25 text-status-success'
+              : 'border-status-danger/30 text-status-danger'
+          }`}
+        >
+          {sessionsProtected ? (
+            <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+          ) : (
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+          )}
+          <div className="min-w-0">
+            <div className="text-sm font-black">
+              {sessionsProtected ? '原有会话已保护' : '原有会话需要检查'}
+            </div>
+            <div className="mt-1 text-xs leading-5 text-text-muted">
+              {sessionPreservation.message}
+              {sessionPreservation.lastVerifiedAt ? '，本次配置已完成前后校验' : ''}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div data-agent-model-source-card className="mt-4 rounded-[16px] border border-border/70 bg-surface-alt/35 p-4">
         <div className="text-sm font-black text-text">模型来源</div>

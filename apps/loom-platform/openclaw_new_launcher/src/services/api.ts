@@ -1011,6 +1011,20 @@ export interface AgentModelConfigStatus {
     verifiedAt?: string;
   };
   officialAuthUnchanged?: boolean;
+  sessionPreservation?: {
+    supported: boolean;
+    protected: boolean;
+    status: 'ready' | 'protected' | 'attention' | 'not_applicable' | string;
+    message: string;
+    componentId?: string;
+    homePath?: string;
+    homeSource?: string;
+    homeExists?: boolean;
+    totalThreads?: number;
+    baselineThreads?: number;
+    lastVerifiedAt?: string;
+    detail?: string;
+  };
   updatedAt?: string;
   componentStatus?: string;
 }

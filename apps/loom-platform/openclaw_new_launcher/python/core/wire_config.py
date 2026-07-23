@@ -20,6 +20,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
+from core.agent_session_retention import (
+    SessionRetentionError,
+    assert_agent_sessions_preserved,
+    capture_agent_session_inventory,
+)
 from core.openclaw_model_sync import sync_openclaw_models_from_gateway_profile
 from core.paths import AppPaths
 from core.secret_store import protect_secret, unprotect_secret
@@ -523,6 +528,11 @@ class WireService:
             if configured
             else "unconfigured"
         )
+        session_preservation = self._agent_session_preservation_status(
+            component_id,
+            metadata,
+            user_config_path=user_config_path,
+        )
         return {
             "componentId": component_id,
             "supported": True,
@@ -557,6 +567,7 @@ class WireService:
             "remoteVerified": remote_verified,
             "remoteValidation": metadata.get("remoteValidation") if isinstance(metadata.get("remoteValidation"), dict) else {},
             "officialAuthUnchanged": metadata.get("officialAuthUnchanged") is True,
+            "sessionPreservation": session_preservation,
             "updatedAt": metadata.get("updatedAt") or "",
         }
 
@@ -589,73 +600,102 @@ class WireService:
                 selected_model,
                 validate_remote=validate_remote,
             )
-        environment_changed = _clear_stale_agent_model_env_keys(self.paths, broadcast=False)
-
         if component_id == "openclaw-companion":
+            _clear_stale_agent_model_env_keys(self.paths, broadcast=False)
             return self._sync_openclaw_agent_model_config(component_id, wire, selected_model)
+        if component_id == "claude-code":
+            return self._sync_claude_model_config_transaction(wire, selected_model)
+        raise WireConfigError("该组件暂不支持模型配置")
 
+    def _sync_claude_model_config_transaction(
+        self,
+        wire: dict[str, Any],
+        selected_model: str,
+    ) -> dict[str, Any]:
+        component_id = "claude-code"
         config_path = self._agent_config_path(component_id)
-        config_text = self._agent_config_text(component_id, wire, selected_model)
-        backup_path = _write_text_with_backup(config_path, config_text)
-        user_config_path = ""
-        user_backup_path = ""
-        user_config_warning = ""
-        environment_warning = ""
-        if component_id == "codex-desktop":
-            user_config_path = _user_codex_config_path(self.paths)
-            existing_user_config = _read_text(user_config_path) if os.path.isfile(user_config_path) else ""
-            user_config_text = _codex_user_config_text(
-                existing_user_config,
-                base_url,
-                _pick_text(wire.get("provider"), "LOOM"),
-                selected_model,
-                _wire_managed_by(wire),
+        metadata_path = self._agent_config_metadata_path(component_id)
+        config_snapshot = _snapshot_text_file(config_path)
+        metadata_snapshot = _snapshot_text_file(metadata_path)
+        environment_names = (*AGENT_STALE_MODEL_ENV_KEYS, "LOOM_CLAUDE_API_KEY")
+        environment = {
+            name: _snapshot_environment_value(self.paths, name)
+            for name in environment_names
+        }
+        session_before = capture_agent_session_inventory(component_id)
+        environment_changed = False
+        try:
+            environment_changed = _clear_stale_agent_model_env_keys(
+                self.paths,
+                broadcast=False,
             )
-            try:
-                user_backup_path = _write_text_with_backup(user_config_path, user_config_text)
-            except Exception as exc:
-                user_config_warning = _redact_secret_text(str(exc)) or "用户 Codex 配置写入失败"
-                self.append_log(f"[Wire] optional Codex user config sync failed: {user_config_warning}\n")
-        if component_id == "codex-desktop":
-            try:
-                environment_changed = _persist_agent_env_key(
-                    self.paths,
-                    "LOOM_CODEX_API_KEY",
-                    api_key,
-                    broadcast=False,
-                ) or environment_changed
-            except Exception as exc:
-                environment_warning = _redact_secret_text(str(exc)) or "Codex 用户环境变量写入失败"
-                self.append_log(f"[Wire] optional Codex user environment sync failed: {environment_warning}\n")
-        elif component_id == "claude-code":
+            config_text = self._agent_config_text(component_id, wire, selected_model)
+            backup_path = _write_text_with_backup(config_path, config_text)
             environment_changed = _persist_agent_env_key(
                 self.paths,
                 "LOOM_CLAUDE_API_KEY",
-                api_key,
+                _pick_text(wire.get("apiKey")),
                 broadcast=False,
             ) or environment_changed
-        if environment_changed:
-            _broadcast_user_env_change()
-
-        metadata = {
-            "componentId": component_id,
-            "configured": True,
-            "managedBy": _wire_managed_by(wire),
-            "provider": _pick_text(wire.get("provider")),
-            "baseUrl": base_url,
-            "model": selected_model,
-            "configPath": config_path,
-            "userConfigPath": user_config_path,
-            "backupPath": backup_path or self._agent_config_metadata(component_id).get("backupPath") or "",
-            "userBackupPath": user_backup_path or self._agent_config_metadata(component_id).get("userBackupPath") or "",
-            "userConfigSynchronized": not bool(user_config_warning),
-            "userConfigWarning": user_config_warning,
-            "environmentSynchronized": not bool(environment_warning),
-            "environmentWarning": environment_warning,
-            "updatedAt": _iso_now(),
-        }
-        write_json(self._agent_config_metadata_path(component_id), metadata)
-        return self.agent_model_config_status(component_id)
+            session_after = capture_agent_session_inventory(component_id)
+            assert_agent_sessions_preserved(session_before, session_after)
+            metadata = {
+                "componentId": component_id,
+                "configured": True,
+                "managedBy": _wire_managed_by(wire),
+                "provider": _pick_text(wire.get("provider")),
+                "baseUrl": _pick_text(wire.get("baseUrl")).rstrip("/"),
+                "model": selected_model,
+                "configPath": config_path,
+                "userConfigPath": "",
+                "backupPath": (
+                    backup_path
+                    or self._agent_config_metadata(component_id).get("backupPath")
+                    or ""
+                ),
+                "userBackupPath": "",
+                "userConfigSynchronized": True,
+                "userConfigWarning": "",
+                "environmentSynchronized": True,
+                "environmentWarning": "",
+                "sessionInventoryBefore": session_before,
+                "sessionInventoryAfter": session_after,
+                "sessionVerifiedAt": _iso_now(),
+                "updatedAt": _iso_now(),
+            }
+            _atomic_write_text(
+                metadata_path,
+                json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            )
+            if environment_changed:
+                _broadcast_user_env_change()
+            return self.agent_model_config_status(component_id)
+        except Exception as exc:
+            try:
+                _restore_text_file_snapshot(config_snapshot)
+                _restore_text_file_snapshot(metadata_snapshot)
+                for name, snapshot in environment.items():
+                    _restore_environment_snapshot(name, snapshot)
+                _broadcast_user_env_change()
+            except Exception as rollback_error:
+                safe_error = _redact_secret_text(str(exc)) or "claude_config_transaction_failed"
+                safe_rollback = (
+                    _redact_secret_text(str(rollback_error))
+                    or "claude_config_rollback_failed"
+                )
+                raise WireConfigError(
+                    f"claude_config_recovery_required: {safe_error}; "
+                    f"rollback={safe_rollback}"
+                ) from exc
+            if isinstance(exc, SessionRetentionError):
+                raise WireConfigError(
+                    f"claude_session_preservation_failed: {exc}"
+                ) from exc
+            if isinstance(exc, WireConfigError):
+                raise
+            raise WireConfigError(
+                _redact_secret_text(str(exc)) or "claude_config_transaction_failed"
+            ) from exc
 
     def _sync_codex_model_config_transaction(
         self,
@@ -692,6 +732,11 @@ class WireService:
             user_env_path = _user_codex_env_path(self.paths)
             metadata_path = self._agent_config_metadata_path("codex-desktop")
             auth_path = os.path.join(os.path.dirname(user_config_path), "auth.json")
+            session_home = os.path.dirname(user_config_path)
+            session_before = capture_agent_session_inventory(
+                "codex-desktop",
+                home_path=session_home,
+            )
             existing_user_config = _read_text(user_config_path) if os.path.isfile(user_config_path) else ""
             managed_text = _codex_config_text(base_url, provider, selected_model, managed_by)
             user_text = _codex_user_config_text(
@@ -748,6 +793,7 @@ class WireService:
                 "officialAuthPath": auth_path,
                 "officialAuthSha256": auth_before,
                 "remoteValidation": remote_validation,
+                "sessionInventoryBefore": session_before,
             }
             self._write_codex_transaction_journal(journal)
             environment_changed = False
@@ -792,6 +838,16 @@ class WireService:
                     raise WireConfigError("codex_api_key_dotenv_mismatch")
                 if _sha256_file(auth_path) != auth_before:
                     raise WireConfigError("official_codex_auth_changed")
+                session_after = capture_agent_session_inventory(
+                    "codex-desktop",
+                    home_path=session_home,
+                )
+                try:
+                    assert_agent_sessions_preserved(session_before, session_after)
+                except SessionRetentionError as exc:
+                    raise WireConfigError(f"codex_session_preservation_failed: {exc}") from exc
+                journal["sessionInventoryAfter"] = session_after
+                journal["sessionVerifiedAt"] = _iso_now()
 
                 metadata = {
                     "componentId": "codex-desktop",
@@ -814,6 +870,9 @@ class WireService:
                     "remoteVerified": bool(validate_remote),
                     "remoteValidation": remote_validation,
                     "officialAuthUnchanged": True,
+                    "sessionInventoryBefore": session_before,
+                    "sessionInventoryAfter": session_after,
+                    "sessionVerifiedAt": journal["sessionVerifiedAt"],
                     "rollbackAvailable": True,
                     "updatedAt": _iso_now(),
                 }
@@ -851,6 +910,65 @@ class WireService:
                 if isinstance(exc, WireConfigError):
                     raise
                 raise WireConfigError(safe_error) from exc
+
+    def _agent_session_preservation_status(
+        self,
+        component_id: str,
+        metadata: dict[str, Any],
+        *,
+        user_config_path: str = "",
+    ) -> dict[str, Any]:
+        if component_id not in {"codex-desktop", "claude-code"}:
+            return {
+                "supported": False,
+                "protected": False,
+                "status": "not_applicable",
+                "message": "该组件不使用本机会话保留护栏",
+            }
+
+        home_path = (
+            os.path.dirname(user_config_path)
+            if component_id == "codex-desktop" and user_config_path
+            else None
+        )
+        current = capture_agent_session_inventory(component_id, home_path=home_path)
+        baseline = (
+            metadata.get("sessionInventoryBefore")
+            if isinstance(metadata.get("sessionInventoryBefore"), dict)
+            else current
+        )
+        protected = True
+        detail = ""
+        try:
+            assert_agent_sessions_preserved(baseline, current)
+        except SessionRetentionError as exc:
+            protected = False
+            detail = str(exc)
+        total_threads = int(current.get("totalThreads") or 0)
+        baseline_threads = int(baseline.get("totalThreads") or 0)
+        if protected and metadata.get("sessionVerifiedAt"):
+            status = "protected"
+            message = f"原有会话已保护，已识别 {total_threads} 个会话"
+        elif protected:
+            status = "ready"
+            message = f"已识别 {total_threads} 个原有会话，配置时将自动保护"
+        else:
+            status = "attention"
+            message = "会话目录状态发生变化，请先停止配置并检查原有会话目录"
+        return {
+            "supported": True,
+            "protected": protected,
+            "status": status,
+            "message": message,
+            "componentId": component_id,
+            "homePath": current.get("homePath") or "",
+            "homeSource": current.get("homeSource") or "",
+            "homeExists": current.get("homeExists") is True,
+            "totalThreads": total_threads,
+            "baselineThreads": baseline_threads,
+            "lastVerifiedAt": metadata.get("sessionVerifiedAt") or "",
+            "detail": detail,
+        }
 
     def _codex_transaction_journal_path(self) -> str:
         return os.path.join(

@@ -51,6 +51,17 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertIn("工具调用", message)
         self.assertIn("没有写入", message)
 
+    def test_session_preservation_failure_has_actionable_chinese_message(self) -> None:
+        message = _model_config_error_text(
+            WireConfigError(
+                "codex_session_preservation_failed: "
+                "agent_session_count_decreased: before=8; after=7"
+            )
+        )
+
+        self.assertIn("原有会话", message)
+        self.assertIn("已自动回滚", message)
+
     def test_dry_run_can_use_fallback_component_when_manifest_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             component, error = _resolve_component_for_action(

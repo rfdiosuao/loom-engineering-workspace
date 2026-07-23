@@ -141,8 +141,12 @@ def _model_config_error_text(error: Exception) -> str:
         return "另一个 Codex 配置任务正在执行，请稍后再试。"
     if detail.startswith("codex_config_recovery_required"):
         return "Codex 配置失败且自动恢复未完成，请保留日志并重新启动麓鸣后再试。"
+    if detail.startswith("claude_config_recovery_required"):
+        return "Claude Code 配置失败且自动恢复未完成，请保留日志并重新启动麓鸣后再试。"
     if detail.startswith("codex_official_restore_unmanaged_config"):
         return "检测到不属于麓鸣的 Codex 配置，为避免覆盖你的设置，已停止恢复。"
+    if detail.startswith(("codex_session_preservation_failed", "claude_session_preservation_failed")):
+        return "检测到原有会话目录或会话数量发生变化，模型配置已停止并已自动回滚。请确认会话目录可访问后重试。"
     return detail or "模型配置写入失败"
 
 

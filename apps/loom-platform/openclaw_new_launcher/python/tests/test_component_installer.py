@@ -2939,39 +2939,48 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://api.heang.top")
             self.assertEqual(env["ANTHROPIC_MODEL"], "qwen3.7-plus")
 
-    def test_codex_launcher_environment_creates_managed_home(self) -> None:
+    def test_codex_launcher_environment_preserves_existing_codex_home_and_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            build_env = getattr(component_installer_module, "build_agent_launcher_environment", lambda *_args, **_kwargs: {})
-
-            env = build_env(temp_dir, "codex-desktop")
-
-            expected_home = os.path.join(temp_dir, "data", ".codex")
-            self.assertEqual(env["CODEX_HOME"], expected_home)
-            self.assertTrue(os.path.isdir(expected_home))
-            agents_path = os.path.join(expected_home, "AGENTS.md")
-            self.assertTrue(os.path.isfile(agents_path))
-            with open(agents_path, "r", encoding="utf-8") as handle:
-                guidance = handle.read()
-            self.assertIn("默认使用简体中文", guidance)
-            self.assertIn("命令、路径、代码和日志保持原文", guidance)
-
-    def test_codex_launcher_preserves_existing_global_guidance(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            codex_home = os.path.join(temp_dir, "data", ".codex")
-            os.makedirs(codex_home, exist_ok=True)
-            agents_path = os.path.join(codex_home, "AGENTS.md")
-            custom_guidance = "# My Codex rules\n\nAlways answer briefly.\n"
-            with open(agents_path, "w", encoding="utf-8") as handle:
-                handle.write(custom_guidance)
+            user_home = os.path.join(temp_dir, "customer")
+            codex_home = os.path.join(user_home, "existing-codex-home")
+            session_path = os.path.join(codex_home, "sessions", "2026", "07", "thread.jsonl")
+            os.makedirs(os.path.dirname(session_path), exist_ok=True)
+            with open(session_path, "w", encoding="utf-8") as handle:
+                handle.write('{"type":"session_meta","payload":{"id":"customer-thread"}}\n')
 
             build_env = getattr(component_installer_module, "build_agent_launcher_environment", lambda *_args, **_kwargs: {})
-            build_env(temp_dir, "codex-desktop")
+            with mock.patch.dict(
+                os.environ,
+                {"USERPROFILE": user_home, "HOME": user_home, "CODEX_HOME": codex_home},
+                clear=True,
+            ):
+                env = build_env(temp_dir, "codex-desktop")
 
-            with open(agents_path, "r", encoding="utf-8") as handle:
-                guidance = handle.read()
-            self.assertIn(custom_guidance.strip(), guidance)
-            self.assertIn("默认使用简体中文", guidance)
-            self.assertEqual(guidance.count("LOOM:BEGIN DEFAULT-LANGUAGE"), 1)
+            self.assertEqual(env["CODEX_HOME"], codex_home)
+            self.assertTrue(os.path.isfile(session_path))
+            with open(session_path, "r", encoding="utf-8") as handle:
+                self.assertIn("customer-thread", handle.read())
+            self.assertFalse(os.path.exists(os.path.join(temp_dir, "data", ".codex")))
+
+    def test_codex_launcher_environment_uses_official_default_home_when_unconfigured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            user_home = os.path.join(temp_dir, "customer")
+            session_path = os.path.join(user_home, ".codex", "sessions", "thread.jsonl")
+            os.makedirs(os.path.dirname(session_path), exist_ok=True)
+            with open(session_path, "w", encoding="utf-8") as handle:
+                handle.write('{"type":"session_meta","payload":{"id":"default-thread"}}\n')
+
+            build_env = getattr(component_installer_module, "build_agent_launcher_environment", lambda *_args, **_kwargs: {})
+            with mock.patch.dict(
+                os.environ,
+                {"USERPROFILE": user_home, "HOME": user_home},
+                clear=True,
+            ):
+                env = build_env(temp_dir, "codex-desktop")
+
+            self.assertNotIn("CODEX_HOME", env)
+            self.assertTrue(os.path.isfile(session_path))
+            self.assertFalse(os.path.exists(os.path.join(temp_dir, "data", ".codex")))
 
     def test_component_experience_syncs_chinese_guidance_to_real_user_homes_without_overwriting(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
