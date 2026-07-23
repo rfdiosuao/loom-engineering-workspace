@@ -569,6 +569,163 @@ class WireServiceTests(unittest.TestCase):
             self.assertEqual(parsed["model"], "gpt-4o")
             self.assertEqual(parsed["model_providers"]["heang"]["env_key"], "LOOM_CODEX_API_KEY")
 
+    def test_codex_transaction_reports_and_preserves_existing_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            service.sync_from_session(session_snapshot(), targets=())
+            user_config_path = wire_config_module._user_codex_config_path(paths)
+            codex_home = os.path.dirname(user_config_path)
+            active_dir = os.path.join(codex_home, "sessions", "2026", "07")
+            archived_dir = os.path.join(codex_home, "archived_sessions")
+            os.makedirs(active_dir, exist_ok=True)
+            os.makedirs(archived_dir, exist_ok=True)
+            session_paths = (
+                os.path.join(active_dir, "active.jsonl"),
+                os.path.join(archived_dir, "archived.jsonl"),
+            )
+            for path in session_paths:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write('{"type":"session_meta"}\n')
+
+            status = service.sync_agent_model_config("codex-desktop", model="gpt-4o")
+
+            self.assertEqual(status["sessionPreservation"]["status"], "protected")
+            self.assertEqual(status["sessionPreservation"]["totalThreads"], 2)
+            self.assertEqual(status["sessionPreservation"]["baselineThreads"], 2)
+            self.assertEqual(status["sessionPreservation"]["homePath"], codex_home)
+            for path in session_paths:
+                self.assertTrue(os.path.isfile(path))
+
+    def test_codex_switching_relay_preserves_all_existing_session_files_and_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            codex_home = os.path.join(temp_dir, "customer-codex-home")
+            active_path = os.path.join(
+                codex_home,
+                "sessions",
+                "2026",
+                "07",
+                "old-relay-active.jsonl",
+            )
+            archived_path = os.path.join(
+                codex_home,
+                "archived_sessions",
+                "old-relay-archived.jsonl",
+            )
+            index_path = os.path.join(codex_home, "session_index.jsonl")
+            state_path = os.path.join(codex_home, "state_5.sqlite")
+            expected_files = {
+                active_path: b'{"type":"session_meta","provider":"old-relay"}\n',
+                archived_path: b'{"type":"session_meta","provider":"older-relay"}\n',
+                index_path: b'{"thread_id":"old-relay-thread"}\n',
+                state_path: b"sqlite-session-index-sentinel",
+            }
+            for path, content in expected_files.items():
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as handle:
+                    handle.write(content)
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": codex_home}, clear=False):
+                service.sync_custom_provider(
+                    provider="old-relay",
+                    base_url="https://old-relay.example.invalid/v1",
+                    api_key="sk-old-relay-not-real",
+                    text_model="old-relay-model",
+                    targets=(),
+                )
+                service.sync_agent_model_config(
+                    "codex-desktop",
+                    model="old-relay-model",
+                )
+
+                service.sync_custom_provider(
+                    provider="new-relay",
+                    base_url="https://new-relay.example.invalid/v1",
+                    api_key="sk-new-relay-not-real",
+                    text_model="new-relay-model",
+                    targets=(),
+                )
+                status = service.sync_agent_model_config(
+                    "codex-desktop",
+                    model="new-relay-model",
+                )
+
+            self.assertEqual(status["baseUrl"], "https://new-relay.example.invalid/v1")
+            self.assertEqual(status["sessionPreservation"]["status"], "protected")
+            self.assertEqual(status["sessionPreservation"]["totalThreads"], 2)
+            self.assertEqual(status["sessionPreservation"]["homePath"], codex_home)
+            for path, expected in expected_files.items():
+                with open(path, "rb") as handle:
+                    self.assertEqual(handle.read(), expected)
+
+    def test_codex_transaction_rolls_back_when_session_inventory_drops(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            service.sync_from_session(session_snapshot(), targets=())
+            user_config_path = wire_config_module._user_codex_config_path(paths)
+            os.makedirs(os.path.dirname(user_config_path), exist_ok=True)
+            original_config = 'model = "customer-model"\n'
+            with open(user_config_path, "w", encoding="utf-8") as handle:
+                handle.write(original_config)
+            baseline = {
+                "componentId": "codex-desktop",
+                "homePath": os.path.dirname(user_config_path),
+                "totalThreads": 3,
+                "indexes": {"stateDatabase": True},
+            }
+            reduced = {
+                **baseline,
+                "totalThreads": 2,
+            }
+
+            with mock.patch(
+                "core.wire_config.capture_agent_session_inventory",
+                side_effect=(baseline, reduced),
+            ):
+                with self.assertRaisesRegex(WireConfigError, "agent_session_count_decreased"):
+                    service.sync_agent_model_config("codex-desktop", model="gpt-4o")
+
+            with open(user_config_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), original_config)
+
+    def test_claude_transaction_rolls_back_config_and_environment_when_sessions_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            service.sync_from_session(session_snapshot(), targets=())
+            config_path = service._agent_config_path("claude-code")
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            original_config = '{"customerSetting":true}\n'
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(original_config)
+            baseline = {
+                "componentId": "claude-code",
+                "homePath": os.path.join(temp_dir, "customer-claude"),
+                "totalThreads": 4,
+                "indexes": {},
+            }
+            reduced = {
+                **baseline,
+                "totalThreads": 3,
+            }
+
+            with (
+                mock.patch.dict(os.environ, {"LOOM_CLAUDE_API_KEY": "customer-key"}, clear=False),
+                mock.patch(
+                    "core.wire_config.capture_agent_session_inventory",
+                    side_effect=(baseline, reduced),
+                ),
+            ):
+                with self.assertRaisesRegex(WireConfigError, "agent_session_count_decreased"):
+                    service.sync_agent_model_config("claude-code", model="gpt-4o")
+                self.assertEqual(os.environ.get("LOOM_CLAUDE_API_KEY"), "customer-key")
+
+            with open(config_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), original_config)
+
     def test_codex_transaction_writes_desktop_dotenv_and_preserves_existing_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)

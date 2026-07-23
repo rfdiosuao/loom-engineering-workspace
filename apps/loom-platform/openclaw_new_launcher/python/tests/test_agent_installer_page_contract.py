@@ -179,6 +179,19 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         self.assertIn("只有点击“写入配置”后才会更新 Codex / Claude Code", source)
         self.assertIn("Codex / Claude Code 模型", source)
 
+    def test_model_config_visibly_protects_existing_agent_sessions(self) -> None:
+        with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        with open(API_FILE, "r", encoding="utf-8") as handle:
+            api_source = handle.read()
+
+        self.assertIn("data-agent-session-protection", source)
+        self.assertIn("原有会话", source)
+        self.assertIn("sessionPreservation", source)
+        self.assertIn("sessionPreservation?:", api_source)
+        self.assertIn("baselineThreads?: number", api_source)
+        self.assertIn("lastVerifiedAt?: string", api_source)
+
     def test_codex_model_source_can_restore_official_channel_explicitly(self) -> None:
         with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()

@@ -459,11 +459,28 @@ import os
 import sys
 
 root = os.path.abspath(sys.argv[1])
+case_root = os.path.abspath(sys.argv[2])
 sys.path.insert(0, os.path.join(root, "_up_", "python"))
-from core.component_installer import build_agent_launcher_environment
+from core.component_installer import (
+    _ensure_component_language_guidance,
+    build_agent_launcher_environment,
+)
 
+customer_profile = os.path.join(case_root, "agent-session-profile")
+codex_home = os.path.join(customer_profile, "existing-codex-home")
+session_path = os.path.join(codex_home, "sessions", "session-retention-sentinel.jsonl")
+os.makedirs(os.path.dirname(session_path), exist_ok=True)
+with open(session_path, "w", encoding="utf-8") as handle:
+    handle.write('{"type":"session_meta","payload":{"id":"keep-me"}}\n')
+os.environ["USERPROFILE"] = customer_profile
+os.environ["HOME"] = customer_profile
+os.environ["CODEX_HOME"] = codex_home
+_ensure_component_language_guidance(root, "codex-desktop", include_user_home=True)
 environment = build_agent_launcher_environment(root, "codex-desktop")
-codex_home = environment["CODEX_HOME"]
+if os.path.normcase(environment.get("CODEX_HOME") or "") != os.path.normcase(codex_home):
+    raise SystemExit("Packaged launcher changed CODEX_HOME")
+if not os.path.isfile(session_path):
+    raise SystemExit("Packaged launcher removed an existing Codex session")
 guidance_path = os.path.join(codex_home, "AGENTS.md")
 with open(guidance_path, "r", encoding="utf-8") as handle:
     guidance = handle.read()
@@ -476,7 +493,8 @@ print(guidance_path)
     Invoke-ProcessAndWait -FilePath $pythonExe -Arguments @(
         "-c",
         $codexGuidanceProbe,
-        $InstallPath
+        $InstallPath,
+        $CaseDataRoot
     ) -StandardOutputPath $codexGuidanceOutput -StandardErrorPath $codexGuidanceError
 
     $routeProbeOutput = Join-Path $CaseDataRoot "protected-routes.stdout.log"
