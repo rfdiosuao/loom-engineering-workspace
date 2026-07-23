@@ -819,6 +819,61 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertFalse(caught.exception.execution_may_continue)
         self.assertIn("output.receiptId is required", str(caught.exception))
 
+    def test_execute_treats_unknown_control_exception_as_indeterminate_nonrecoverable_failure(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        executions = []
+
+        def send_then_disconnect(payload):
+            executions.append(dict(payload))
+            raise ConnectionResetError("connection reset after request was sent")
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.side-effect": {
+                    "executor": send_then_disconnect,
+                    "permission": "control",
+                    "risk": "outbound",
+                }
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.test.side-effect", {"target": "phone-1"})
+
+        self.assertEqual(executions, [{"target": "phone-1"}])
+        self.assertEqual(caught.exception.code, "capability_execution_unknown")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
+    def test_execute_keeps_unknown_read_exception_recoverable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.read": {
+                    "executor": lambda _payload: (_ for _ in ()).throw(ConnectionError("temporary read failure")),
+                    "permission": "read",
+                    "risk": "read",
+                }
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.test.read", {})
+
+        self.assertEqual(caught.exception.code, "capability_failed")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
     def test_execute_returns_promptly_when_timed_out_work_keeps_running(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
 
@@ -972,6 +1027,78 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "permission_denied")
         self.assertEqual(str(caught.exception), "Admin permission is required.")
 
+    def test_mcp_control_error_without_no_effect_proof_is_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "local",
+                "name": "publish",
+                "permission": "control",
+                "risk": "outbound",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "ok": False,
+                        "error": {
+                            "code": "bridge_http_error",
+                            "message": "Connection closed before a receipt was returned.",
+                        },
+                    }),
+                }],
+                "isError": True,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.mcp.local.publish", {"body": "hello"})
+
+        self.assertEqual(caught.exception.code, "capability_execution_unknown")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
+    def test_mcp_control_preflight_denial_remains_recoverable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [{
+                "server": "local",
+                "name": "publish",
+                "permission": "control",
+                "risk": "outbound",
+            }],
+            mcp_executor=lambda _server, _tool, _payload: {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "ok": False,
+                        "error": {
+                            "code": "permission_denied",
+                            "message": "Control permission is required.",
+                        },
+                    }),
+                }],
+                "isError": True,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        with self.assertRaises(CapabilityExecutionError) as caught:
+            registry.execute("loom.mcp.local.publish", {"body": "hello"})
+
+        self.assertEqual(caught.exception.code, "permission_denied")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
     def test_registry_forwards_declared_permission_to_mcp_executor(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
 
@@ -1062,6 +1189,61 @@ class CapabilityRegistryTests(unittest.TestCase):
             ["matrix", "dispatch", "--target", "phone-1", "--prompt", "inspect", "--json"],
             source="agent",
         )
+
+    def test_default_cli_control_error_without_no_effect_proof_is_indeterminate(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, _default_cli_executor
+
+        dispatch = mock.Mock(return_value=(
+            4,
+            {
+                "ok": False,
+                "error": {
+                    "code": "bridge_http_error",
+                    "message": "Connection closed before a receipt was returned.",
+                },
+            },
+        ))
+        fake_loom_cli = types.SimpleNamespace(dispatch=dispatch)
+
+        with mock.patch.dict(sys.modules, {"loom_cli": fake_loom_cli}):
+            with self.assertRaises(CapabilityExecutionError) as caught:
+                _default_cli_executor(
+                    "matrix dispatch",
+                    {"args": ["--target", "phone-1", "--prompt", "inspect"]},
+                    permission="control",
+                )
+
+        self.assertEqual(caught.exception.code, "capability_execution_unknown")
+        self.assertFalse(caught.exception.recoverable)
+        self.assertTrue(caught.exception.outcome_indeterminate)
+        self.assertFalse(caught.exception.execution_may_continue)
+
+    def test_default_cli_control_preflight_denial_remains_recoverable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, _default_cli_executor
+
+        dispatch = mock.Mock(return_value=(
+            3,
+            {
+                "ok": False,
+                "error": {
+                    "code": "permission_denied",
+                    "message": "Control permission is required.",
+                },
+            },
+        ))
+        fake_loom_cli = types.SimpleNamespace(dispatch=dispatch)
+
+        with mock.patch.dict(sys.modules, {"loom_cli": fake_loom_cli}):
+            with self.assertRaises(CapabilityExecutionError) as caught:
+                _default_cli_executor(
+                    "matrix dispatch",
+                    {"args": ["--target", "phone-1", "--prompt", "inspect"]},
+                    permission="control",
+                )
+
+        self.assertEqual(caught.exception.code, "permission_denied")
+        self.assertTrue(caught.exception.recoverable)
+        self.assertFalse(caught.exception.outcome_indeterminate)
 
     def test_default_cli_executor_maps_phone_quick_task_structured_payload_to_flags(self) -> None:
         from core.agent_capabilities import _default_cli_executor

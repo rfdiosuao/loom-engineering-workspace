@@ -450,6 +450,44 @@ test('invalid tool output warns against blindly retrying a completed side effect
   assert.doesNotMatch(JSON.stringify(summary), /capability_invalid_output|output\.receiptId|required/i);
 });
 
+test('unknown control execution outcome warns against replaying the side effect', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'capability_execution_unknown',
+      message: 'connection reset after request was sent',
+      recoverable: false,
+      outcomeIndeterminate: true,
+      executionMayContinue: false,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '执行状态待确认',
+    message: '操作已经发出，但连接在返回结果前中断，麓鸣无法确认是否已生效。请先查看手机、矩阵任务、素材库或发布记录，避免直接重复执行。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /capability_execution_unknown|connection reset/i);
+});
+
+test('new indeterminate side-effect errors default to inspection instead of retry', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'media_transfer_failed',
+      message: 'one device failed after another device received the asset',
+      recoverable: true,
+      outcomeIndeterminate: true,
+      executionMayContinue: false,
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: '部分结果待确认',
+    message: '任务可能已经在部分设备或平台生效。请先检查目标手机、素材库、矩阵任务或发布记录，再决定是否重新执行。',
+    recoverable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /media_transfer_failed|one device failed/i);
+});
+
 test('oversized runtime output explains that no new tool was executed', () => {
   const summary = agentViewModel.userFacingAgentError({
     error: {

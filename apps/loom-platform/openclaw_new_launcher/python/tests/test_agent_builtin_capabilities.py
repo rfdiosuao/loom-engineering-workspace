@@ -617,6 +617,79 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             ["phone-1"],
         )
 
+    def test_media_group_resolution_does_not_expand_group_inputs_quadratically(self) -> None:
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        with tempfile.TemporaryDirectory() as root:
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+            observed_groups: list[list[str]] = []
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: None,
+            )
+
+            def resolve(groups, *, all_online):
+                observed_groups.append(list(groups))
+                self.assertFalse(all_online)
+                return []
+
+            provider._resolve_media_target_device_ids = resolve
+            with patch(
+                "api.routes_media._image_generate_payload",
+                return_value={"files": [], "count": 0},
+            ), patch(
+                "api.routes_media._async_media_job_result",
+                return_value={
+                    "success": True,
+                    "files": [],
+                    "phoneTransfer": {"reason": "no_configured_phones"},
+                },
+            ):
+                provider._submit_media(
+                    "image",
+                    {"prompt": "group poster", "groups": ["招聘一组", "招聘二组"]},
+                )
+
+        self.assertEqual(observed_groups, [["招聘一组", "招聘二组"]])
+
+    def test_media_job_failure_after_generation_is_indeterminate_and_not_auto_retryable(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        with tempfile.TemporaryDirectory() as root:
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs, ImageClient(), VideoClient())
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: None,
+            )
+            with patch(
+                "api.routes_media._image_generate_payload",
+                return_value={"files": [{"path": os.path.join(root, "generated.png")}], "count": 1},
+            ), patch(
+                "api.routes_media._async_media_job_result",
+                return_value={
+                    "success": False,
+                    "errorCode": "media_transfer_failed",
+                    "message": "图片已生成，但一台手机传输失败",
+                    "files": [{"path": os.path.join(root, "generated.png")}],
+                    "phoneTransfer": {"status": "partial", "successCount": 1, "failureCount": 1},
+                },
+            ):
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    provider._submit_media(
+                        "image",
+                        {"prompt": "generate once", "allOnline": True},
+                    )
+
+        self.assertEqual(raised.exception.code, "media_transfer_failed")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertFalse(raised.exception.execution_may_continue)
+
     def test_media_capability_cancellation_cancels_background_job(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
         from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
@@ -909,6 +982,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.code, "phone_publish_semantic_failure")
             self.assertIn("未登录", str(raised.exception))
+            self.assertFalse(raised.exception.recoverable)
+            self.assertTrue(raised.exception.outcome_indeterminate)
+            self.assertFalse(raised.exception.execution_may_continue)
 
     def test_phone_publish_requires_existing_media_before_job_submit(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError

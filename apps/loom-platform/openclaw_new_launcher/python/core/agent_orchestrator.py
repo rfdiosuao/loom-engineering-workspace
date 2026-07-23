@@ -1404,8 +1404,9 @@ def _previous_completed_tool_result(checkpoint: Mapping[str, Any], fingerprint: 
         if not isinstance(item, Mapping):
             continue
         if str(item.get("status") or "") != "completed":
-            return None
-        return dict(item) if str(item.get("fingerprint") or "") == fingerprint else None
+            continue
+        if str(item.get("fingerprint") or "") == fingerprint:
+            return dict(item)
     return None
 
 

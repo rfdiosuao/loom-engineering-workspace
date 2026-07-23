@@ -24,6 +24,21 @@ from core.agent_capabilities import (
 Json = dict[str, Any]
 
 
+def _post_submission_error(
+    code: str,
+    message: str,
+    *,
+    execution_may_continue: bool = False,
+) -> CapabilityExecutionError:
+    return CapabilityExecutionError(
+        code,
+        message,
+        recoverable=False,
+        outcome_indeterminate=True,
+        execution_may_continue=execution_may_continue,
+    )
+
+
 def _media_attachments(kind: str, result: Json) -> list[Json]:
     candidates = result.get("files") if isinstance(result.get("files"), list) else []
     if kind == "video" and not candidates and result.get("path"):
@@ -266,7 +281,11 @@ class AgentBuiltinCapabilityProvider:
         job = self.job_manager.submit_progress("media.transfer", "传输素材到手机", target)
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
-            raise CapabilityExecutionError("capability_failed", "素材传输任务创建失败")
+            raise _post_submission_error(
+                "capability_execution_unknown",
+                "素材传输任务已经提交，但未返回可追踪的任务编号",
+                execution_may_continue=True,
+            )
         terminal = self._wait_for_media_job(
             job_id,
             kind="transfer",
@@ -274,13 +293,12 @@ class AgentBuiltinCapabilityProvider:
         )
         result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
         if terminal.get("status") == "cancelled":
-            raise CapabilityExecutionError("capability_cancelled", "素材传输任务已取消")
+            raise _post_submission_error("capability_cancelled", "素材传输任务已取消")
         if terminal.get("status") != "succeeded" or result.get("success") is False:
             failure = terminal.get("failure") if isinstance(terminal.get("failure"), dict) else {}
-            raise CapabilityExecutionError(
+            raise _post_submission_error(
                 str(result.get("reason") or failure.get("code") or "media_transfer_failed"),
                 str(terminal.get("error") or result.get("message") or "素材传输失败"),
-                recoverable=bool(failure.get("retryable", True)),
             )
         return {
             "jobId": job_id,
@@ -417,9 +435,10 @@ class AgentBuiltinCapabilityProvider:
         job = self.job_manager.submit_progress(kind, label, target)
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
-            raise CapabilityExecutionError(
-                "capability_failed",
-                "媒体任务创建失败",
+            raise _post_submission_error(
+                "capability_execution_unknown",
+                "媒体任务已经提交，但未返回可追踪的任务编号",
+                execution_may_continue=True,
             )
         terminal = self._wait_for_media_job(
             job_id,
@@ -428,7 +447,7 @@ class AgentBuiltinCapabilityProvider:
         )
         result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
         if terminal.get("status") == "cancelled":
-            raise CapabilityExecutionError("capability_cancelled", "媒体生成任务已取消")
+            raise _post_submission_error("capability_cancelled", "媒体生成任务已取消")
         if terminal.get("status") != "succeeded" or result.get("success") is False:
             failure = terminal.get("failure") if isinstance(terminal.get("failure"), dict) else {}
             code = str(result.get("errorCode") or failure.get("code") or "media_job_failed")
@@ -438,11 +457,7 @@ class AgentBuiltinCapabilityProvider:
                 or result.get("message")
                 or "媒体生成任务失败"
             )
-            raise CapabilityExecutionError(
-                code,
-                message,
-                recoverable=bool(failure.get("retryable", True)),
-            )
+            raise _post_submission_error(code, message)
         return {
             "jobId": job_id,
             "kind": kind,
@@ -492,7 +507,11 @@ class AgentBuiltinCapabilityProvider:
     ) -> Json:
         get_job = getattr(self.job_manager, "get", None)
         if not callable(get_job):
-            raise CapabilityExecutionError("capability_unavailable", "媒体任务状态服务尚未就绪")
+            raise _post_submission_error(
+                "media_job_status_unavailable",
+                "媒体任务已经提交，但状态服务尚未就绪",
+                execution_may_continue=True,
+            )
         wait_seconds = 570 if kind in {"image", "transfer"} else 1770
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
@@ -500,7 +519,11 @@ class AgentBuiltinCapabilityProvider:
                 cancel = getattr(self.job_manager, "cancel", None)
                 if callable(cancel):
                     cancel(job_id)
-                raise CapabilityExecutionError("capability_cancelled", "媒体生成任务已取消")
+                raise _post_submission_error(
+                    "capability_cancelled",
+                    "媒体生成任务已请求取消，但任务可能仍在执行",
+                    execution_may_continue=True,
+                )
             job = get_job(job_id)
             if isinstance(job, dict) and str(job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
                 return job
@@ -587,7 +610,11 @@ class AgentBuiltinCapabilityProvider:
         job = self.job_manager.submit_progress("publish", label, target)
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
-            raise CapabilityExecutionError("capability_failed", "手机发布任务创建失败")
+            raise _post_submission_error(
+                "capability_execution_unknown",
+                "手机发布任务已经提交，但未返回可追踪的任务编号",
+                execution_may_continue=True,
+            )
         terminal = self._wait_for_publish_job(job_id, cancellation_token=cancellation_token)
         result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
         if terminal.get("status") != "succeeded" or result.get("success") is False:
@@ -599,11 +626,7 @@ class AgentBuiltinCapabilityProvider:
                 or result.get("message")
                 or "手机发布任务失败"
             )
-            raise CapabilityExecutionError(
-                code,
-                message,
-                recoverable=bool(failure.get("retryable", True)),
-            )
+            raise _post_submission_error(code, message)
         return {
             "jobId": job_id,
             "kind": "publish",
@@ -614,14 +637,22 @@ class AgentBuiltinCapabilityProvider:
     def _wait_for_publish_job(self, job_id: str, *, cancellation_token: Any | None = None) -> Json:
         get_job = getattr(self.job_manager, "get", None)
         if not callable(get_job):
-            raise CapabilityExecutionError("capability_unavailable", "手机发布任务状态服务尚未就绪")
+            raise _post_submission_error(
+                "publish_job_status_unavailable",
+                "手机发布任务已经提交，但状态服务尚未就绪",
+                execution_may_continue=True,
+            )
         deadline = time.monotonic() + 675
         while time.monotonic() < deadline:
             if cancellation_token is not None and bool(getattr(cancellation_token, "cancelled", False)):
                 cancel = getattr(self.job_manager, "cancel", None)
                 if callable(cancel):
                     cancel(job_id)
-                raise CapabilityExecutionError("capability_cancelled", "手机发布任务已取消")
+                raise _post_submission_error(
+                    "capability_cancelled",
+                    "手机发布任务已请求取消，但任务可能仍在执行",
+                    execution_may_continue=True,
+                )
             job = get_job(job_id)
             if isinstance(job, dict) and str(job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
                 return job

@@ -462,6 +462,35 @@ UNSAFE_CLI_GLOBAL_OPTIONS = frozenset(
     }
 )
 
+MCP_PRE_EXECUTION_ERROR_CODES = frozenset(
+    {
+        "approval_already_resolved",
+        "approval_conflict",
+        "approval_expired",
+        "approval_rejected",
+        "approval_scope_mismatch",
+        "bridge_not_configured",
+        "capability_invalid_input",
+        "capability_not_found",
+        "capability_unavailable",
+        "critical_target_required",
+        "matrix_campaign_scope_required",
+        "matrix_campaign_scope_violation",
+        "matrix_target_scope_required",
+        "media_asset_not_found",
+        "permission_denied",
+        "phone_single_target_required",
+        "phone_target_not_found",
+        "phone_target_scope_required",
+        "phone_target_unavailable",
+        "publish_media_missing",
+        "safety_confirmation_required",
+        "unknown_command",
+        "unknown_tool",
+        "unsupported_command",
+    }
+)
+
 
 DEFAULT_INTERNAL_SPECS: dict[str, Json] = {
     "loom.capabilities.list": {
@@ -655,7 +684,19 @@ class CapabilityRegistry:
                 raise state.error
             if not isinstance(state.error, Exception):
                 raise state.error
-            raise CapabilityExecutionError("capability_failed", f"Capability failed: {name}: {state.error}") from state.error
+            detail = str(redact_sensitive(str(state.error)))[:500]
+            if capability.permission == "read" and capability.risk == "read":
+                raise CapabilityExecutionError(
+                    "capability_failed",
+                    f"Capability failed: {name}: {detail}",
+                ) from state.error
+            raise CapabilityExecutionError(
+                "capability_execution_unknown",
+                f"Capability execution outcome is unknown: {name}: {detail}",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=False,
+            ) from state.error
         result = state.result
         safe_result = redact_sensitive(result)
         try:
@@ -803,6 +844,7 @@ class CapabilityRegistry:
                     tool=tool,
                     mcp_executor=mcp_executor,
                     permission=permission,
+                    risk=risk,
                 ):
                     result = _invoke_with_optional_cancellation(
                         mcp_executor,
@@ -813,7 +855,13 @@ class CapabilityRegistry:
                         permission=permission,
                     )
                     if isinstance(result, Mapping) and result.get("isError") is True:
-                        raise _mcp_execution_error(server, tool, result)
+                        raise _mcp_execution_error(
+                            server,
+                            tool,
+                            result,
+                            permission=permission,
+                            risk=risk,
+                        )
                     return result
             localized = _external_capability_metadata("mcp", tool, server=server)
             capabilities.append(
@@ -1188,9 +1236,17 @@ def _default_mcp_executor(server: str, tool: str, payload: Json, *, permission: 
     return loom_mcp.call_tool(tool, payload, permission=permission, trusted_internal=True)
 
 
-def _mcp_execution_error(server: str, tool: str, result: Mapping[str, Any]) -> CapabilityExecutionError:
+def _mcp_execution_error(
+    server: str,
+    tool: str,
+    result: Mapping[str, Any],
+    *,
+    permission: str = "read",
+    risk: str = "read",
+) -> CapabilityExecutionError:
     code = "mcp_tool_failed"
     message = f"MCP tool failed: {server}/{tool}"
+    error_payload: Mapping[str, Any] = {}
     content = result.get("content")
     if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
         for item in content:
@@ -1206,10 +1262,43 @@ def _mcp_execution_error(server: str, tool: str, result: Mapping[str, Any]) -> C
                 break
             error = payload.get("error") if isinstance(payload, Mapping) else None
             if isinstance(error, Mapping):
+                error_payload = error
                 code = str(error.get("code") or code)
                 message = str(error.get("message") or message)
             break
-    return CapabilityExecutionError(code, message)
+    outcome_indeterminate = error_payload.get("outcomeIndeterminate") is True
+    execution_may_continue = error_payload.get("executionMayContinue") is True
+    recoverable_value = error_payload.get("recoverable")
+    if not isinstance(recoverable_value, bool):
+        recoverable_value = error_payload.get("retryable")
+    recoverable = recoverable_value if isinstance(recoverable_value, bool) else True
+    if outcome_indeterminate or execution_may_continue:
+        return CapabilityExecutionError(
+            code,
+            message,
+            recoverable=False,
+            outcome_indeterminate=outcome_indeterminate or execution_may_continue,
+            execution_may_continue=execution_may_continue,
+        )
+    side_effecting = permission != "read" or risk != "read"
+    if side_effecting and not _error_is_definitely_pre_execution(code):
+        return CapabilityExecutionError(
+            "capability_execution_unknown",
+            f"MCP control outcome is unknown after {code}: {message}",
+            recoverable=False,
+            outcome_indeterminate=True,
+            execution_may_continue=False,
+        )
+    return CapabilityExecutionError(code, message, recoverable=recoverable)
+
+
+def _error_is_definitely_pre_execution(code: str) -> bool:
+    normalized = str(code or "").strip().lower()
+    return (
+        normalized in MCP_PRE_EXECUTION_ERROR_CODES
+        or normalized.startswith("invalid_")
+        or normalized.startswith("missing_")
+    )
 
 
 def _default_cli_catalog_provider() -> Any:
@@ -1243,5 +1332,15 @@ def _default_cli_executor(command: str, payload: Json, *, permission: str | None
     code, result = loom_cli.dispatch([*command.split(), *extra, "--json", *permission_args], source="agent")
     if code != 0:
         error = result.get("error", {}) if isinstance(result, Mapping) else {}
-        raise CapabilityExecutionError(str(error.get("code") or "cli_failed"), str(error.get("message") or "CLI command failed"))
+        error_code = str(error.get("code") or "cli_failed")
+        message = str(error.get("message") or "CLI command failed")
+        if permission != "read" and not _error_is_definitely_pre_execution(error_code):
+            raise CapabilityExecutionError(
+                "capability_execution_unknown",
+                f"CLI control outcome is unknown after {error_code}: {message}",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=False,
+            )
+        raise CapabilityExecutionError(error_code, message)
     return result.get("data", result) if isinstance(result, Mapping) else result

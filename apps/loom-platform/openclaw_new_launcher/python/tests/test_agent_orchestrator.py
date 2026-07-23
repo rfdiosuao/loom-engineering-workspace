@@ -1324,6 +1324,113 @@ class AgentOrchestratorTests(unittest.TestCase):
             0,
         )
 
+    def test_completed_side_effect_is_deduplicated_across_an_intervening_tool_result(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime(
+            [
+                {
+                    "toolCalls": [{
+                        "toolCallId": "call-a-first",
+                        "name": "loom.matrix.dispatch",
+                        "input": {"prompt": "打开目标应用"},
+                    }],
+                },
+                {
+                    "toolCalls": [{
+                        "toolCallId": "call-b",
+                        "name": "loom.matrix.dispatch",
+                        "input": {"prompt": "读取当前页面"},
+                    }],
+                },
+                {
+                    "toolCalls": [{
+                        "toolCallId": "call-a-repeated",
+                        "name": "loom.matrix.dispatch",
+                        "input": {"prompt": "打开目标应用"},
+                    }],
+                },
+                {"final": {"text": "done"}},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-nonconsecutive-dedupe")
+
+            completed = orchestrator.execute_run(
+                "session-1",
+                "run-nonconsecutive-dedupe",
+                {"prompt": "执行完整流程", "targets": {"deviceIds": ["phone-1"]}},
+            )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(
+            [item["prompt"] for item in calls],
+            ["打开目标应用", "读取当前页面"],
+        )
+        checkpoint = json.loads(completed["checkpoint"])
+        repeated = next(
+            item
+            for item in checkpoint["toolResults"]
+            if item["toolCallId"] == "call-a-repeated"
+        )
+        self.assertTrue(repeated["deduplicated"])
+        self.assertEqual(repeated["result"], checkpoint["toolResults"][0]["result"])
+
+    def test_unknown_control_exception_never_retries_a_possible_side_effect(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime(
+            [
+                {
+                    "toolCalls": [{
+                        "toolCallId": "call-disconnected-after-send",
+                        "name": "loom.matrix.dispatch",
+                        "input": {"prompt": "打开目标应用"},
+                    }],
+                },
+                {"final": {"text": "must not retry"}},
+            ]
+        )
+
+        def send_then_disconnect(_payload):
+            raise ConnectionResetError("connection reset after request was sent")
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                operation=send_then_disconnect,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-disconnected-after-send")
+
+            failed = orchestrator.execute_run(
+                "session-1",
+                "run-disconnected-after-send",
+                {"prompt": "在 phone-1 打开目标应用", "targets": {"deviceIds": ["phone-1"]}},
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(runtime.requests), 1)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "capability_execution_unknown")
+        self.assertFalse(failed["error"]["recoverable"])
+        self.assertTrue(failed["error"]["outcomeIndeterminate"])
+        self.assertFalse(failed["error"]["executionMayContinue"])
+        self.assertEqual(
+            [event["type"] for event in events].count("tool.input_rejected"),
+            0,
+        )
+
     def test_post_execution_persistence_failure_is_indeterminate_and_never_retried(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
 

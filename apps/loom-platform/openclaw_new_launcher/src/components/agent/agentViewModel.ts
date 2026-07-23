@@ -455,6 +455,13 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       recoverable: false,
     };
   }
+  if (code === 'capability_execution_unknown') {
+    return {
+      title: '执行状态待确认',
+      message: '操作已经发出，但连接在返回结果前中断，麓鸣无法确认是否已生效。请先查看手机、矩阵任务、素材库或发布记录，避免直接重复执行。',
+      recoverable: false,
+    };
+  }
   if (isProtocolError(data)) {
     return {
       title: '能力暂不可用',
@@ -473,6 +480,13 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       title: '抖音需要登录',
       message: '请先在手机上手动登录抖音，完成后重试。麓鸣不会代填账号、密码或验证码。',
       recoverable: true,
+    };
+  }
+  if (error.outcomeIndeterminate === true || data.outcomeIndeterminate === true) {
+    return {
+      title: '部分结果待确认',
+      message: '任务可能已经在部分设备或平台生效。请先检查目标手机、素材库、矩阵任务或发布记录，再决定是否重新执行。',
+      recoverable: false,
     };
   }
   if (code.includes('device_offline') || message.includes('device offline')) {
