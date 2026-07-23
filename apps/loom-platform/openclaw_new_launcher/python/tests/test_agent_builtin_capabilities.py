@@ -336,8 +336,23 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
         self.assertEqual(image_schema["properties"]["count"]["maximum"], 9)
         self.assertEqual(
             set(video_schema["properties"]),
-            {"prompt", "model", "duration", "ratio", "imagePath", "deviceIds", "groups", "allOnline"},
+            {
+                "prompt",
+                "providerId",
+                "apiBase",
+                "model",
+                "duration",
+                "ratio",
+                "imagePath",
+                "requestKey",
+                "continuationMessage",
+                "deviceIds",
+                "groups",
+                "allOnline",
+            },
         )
+        self.assertIn("pippit", video_schema["properties"]["providerId"]["enum"])
+        self.assertIn("原 requestKey", video_schema["properties"]["continuationMessage"]["description"])
         self.assertEqual(
             publish_schema["required"],
             ["platform", "title", "body", "mediaPaths", "deviceId"],

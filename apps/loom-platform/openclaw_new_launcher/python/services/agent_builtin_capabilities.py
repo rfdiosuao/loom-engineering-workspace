@@ -697,9 +697,12 @@ class AgentBuiltinCapabilityProvider:
             _async_media_job_result,
             _configured_phone_snapshot,
             _image_generate_payload,
+            _video_generation_failure,
             _local_only_phone_snapshot,
             _video_generate_payload,
         )
+        from services.pippit_video_api import PippitManualRequired, PippitResumeRequired
+        from services.video_api import VideoApiError
 
         requested_device_ids = list(dict.fromkeys([
             str(value).strip()
@@ -780,16 +783,20 @@ class AgentBuiltinCapabilityProvider:
                 generated = _image_generate_payload(context, body)
             else:
                 update_progress(job_id, "正在提交视频任务", phase="submitting")
-                generated = _video_generate_payload(
-                    context,
-                    body,
-                    on_status=lambda message, tone="neutral": update_progress(
-                        job_id,
-                        message,
-                        tone,
-                        phase="generating",
-                    ),
-                )
+                try:
+                    generated = _video_generate_payload(
+                        context,
+                        body,
+                        on_status=lambda message, tone="neutral": update_progress(
+                            job_id,
+                            message,
+                            tone,
+                            phase="generating",
+                        ),
+                        request_key=str(body.get("requestKey") or job_id),
+                    )
+                except (VideoApiError, PippitManualRequired, PippitResumeRequired, ValueError) as exc:
+                    return _video_generation_failure(exc)
             ensure_job_active(job_id)
             if phone_snapshot.get("devices"):
                 update_progress(job_id, "正在传送到指定手机相册", phase="phone-transfer")
@@ -822,8 +829,31 @@ class AgentBuiltinCapabilityProvider:
             cancellation_token=cancellation_token,
         )
         result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
+        if terminal.get("status") == "needs_manual":
+            return {
+                "jobId": job_id,
+                "kind": kind,
+                "status": "needs_manual",
+                "result": result,
+                "manualRequired": True,
+                "question": result.get("question"),
+                "requestKey": result.get("requestKey"),
+                "webThreadLink": result.get("webThreadLink"),
+                "attachments": [],
+            }
         if terminal.get("status") == "cancelled":
             raise _post_submission_error("capability_cancelled", "媒体生成任务已取消")
+        if result.get("resumeRequired") is True:
+            return {
+                "jobId": job_id,
+                "kind": kind,
+                "status": "resume_required",
+                "result": result,
+                "resumeRequired": True,
+                "requestKey": result.get("requestKey"),
+                "webThreadLink": result.get("webThreadLink"),
+                "attachments": [],
+            }
         if terminal.get("status") != "succeeded" or result.get("success") is False:
             transfer = result.get("phoneTransfer") if isinstance(result.get("phoneTransfer"), dict) else {}
             transfer_status = str(transfer.get("status") or "")
@@ -924,7 +954,12 @@ class AgentBuiltinCapabilityProvider:
                 error_code=error_code,
                 error_message="后台任务已经提交，但读取任务状态时连接中断，任务可能仍在执行",
             )
-            if isinstance(job, dict) and str(job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
+            if isinstance(job, dict) and str(job.get("status") or "") in {
+                "succeeded",
+                "failed",
+                "cancelled",
+                "needs_manual",
+            }:
                 return job
             token_wait = getattr(cancellation_token, "wait", None)
             if callable(token_wait):

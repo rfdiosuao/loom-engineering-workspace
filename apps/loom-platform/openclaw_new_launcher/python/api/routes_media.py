@@ -10,15 +10,18 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 
 from fastapi import Request
 from fastapi.responses import FileResponse, Response
 
 from api.safe_payload import redact_secret_text
 from core.constants import IMAGE_MODEL
+from core.secret_store import protect_secret, unprotect_secret
 from core.storage import read_json, write_json
 from services.image_api import ImageApiError
 from services.media_library import MediaLibrary, MediaLibraryError
+from services.pippit_video_api import PippitManualRequired, PippitResumeRequired
 from services.video_api import VideoApiError
 
 
@@ -705,20 +708,82 @@ def _media_file_response(asset, range_header: str) -> Response:
 
 def _read_config(path: str) -> dict:
     payload = read_json(path, {})
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    config = dict(payload)
+    for key in ("apiKey", "dashKey"):
+        if key in config:
+            config[key] = unprotect_secret(config.get(key))
+    provider_keys = config.get("providerApiKeys")
+    if isinstance(provider_keys, dict):
+        config["providerApiKeys"] = {
+            _text(provider).lower(): unprotect_secret(value)
+            for provider, value in provider_keys.items()
+            if _text(provider)
+        }
+    return config
 
 
-def _write_merged_config(path: str, incoming: dict) -> dict:
+def _write_merged_config(
+    path: str,
+    incoming: dict,
+    *,
+    clear_keys: set[str] | None = None,
+) -> dict:
     current = _read_config(path)
     merged = dict(current)
     for key, value in incoming.items():
+        if key == "providerApiKeys" and isinstance(value, dict):
+            provider_keys = (
+                dict(merged.get("providerApiKeys"))
+                if isinstance(merged.get("providerApiKeys"), dict)
+                else {}
+            )
+            for provider, secret in value.items():
+                if _text(provider) and _text(secret):
+                    provider_keys[_text(provider).lower()] = _text(secret)
+            merged[key] = provider_keys
+            continue
         if key in {"apiKey", "dashKey"} and not _text(value):
             continue
         if value is None:
             continue
         merged[key] = value
-    write_json(path, merged)
+    for key in clear_keys or set():
+        merged.pop(key, None)
+    stored = dict(merged)
+    for key in ("apiKey", "dashKey"):
+        if _text(stored.get(key)):
+            stored[key] = protect_secret(stored[key])
+    provider_keys = stored.get("providerApiKeys")
+    if isinstance(provider_keys, dict):
+        stored["providerApiKeys"] = {
+            provider: protect_secret(secret)
+            for provider, secret in provider_keys.items()
+            if _text(secret)
+        }
+    write_json(path, stored)
     return merged
+
+
+def _canonical_video_provider(value: object) -> str:
+    provider = _text(value).lower() or "dashscope"
+    if provider in {"pippit", "xyq", "xiaoyunque", "小云雀"}:
+        return "pippit"
+    return provider
+
+
+def _video_provider_api_key(config: dict, provider_id: str) -> str:
+    provider = _canonical_video_provider(provider_id)
+    provider_keys = config.get("providerApiKeys")
+    if isinstance(provider_keys, dict):
+        secret = _text(provider_keys.get(provider))
+        if secret:
+            return secret
+    saved_provider = _canonical_video_provider(config.get("providerId"))
+    if saved_provider == provider:
+        return _text(config.get("apiKey")) or _text(config.get("dashKey"))
+    return ""
 
 
 def _public_image_config(config: dict) -> dict:
@@ -733,15 +798,26 @@ def _public_image_config(config: dict) -> dict:
 
 
 def _public_video_config(config: dict) -> dict:
+    provider_id = _canonical_video_provider(config.get("providerId"))
+    is_pippit = provider_id == "pippit"
+    provider_keys = config.get("providerApiKeys")
+    configured_providers = {
+        _canonical_video_provider(provider)
+        for provider, secret in provider_keys.items()
+        if isinstance(provider_keys, dict) and _text(secret)
+    } if isinstance(provider_keys, dict) else set()
+    if _video_provider_api_key(config, provider_id):
+        configured_providers.add(provider_id)
     return {
-        "providerId": _text(config.get("providerId")) or "dashscope",
-        "apiBase": _text(config.get("apiBase")),
-        "model": _text(config.get("model")),
+        "providerId": "pippit" if is_pippit else provider_id,
+        "apiBase": _text(config.get("apiBase")) or ("https://xyq.jianying.com" if is_pippit else ""),
+        "model": _text(config.get("model")) or ("pippit-video" if is_pippit else ""),
         "mode": _text(config.get("mode")) or "t2v",
         "resolution": _text(config.get("resolution")) or "720P",
         "duration": int(config.get("duration") or 5),
         "ratio": _text(config.get("ratio")) or "16:9",
-        "hasApiKey": bool(_text(config.get("apiKey")) or _text(config.get("dashKey"))),
+        "hasApiKey": bool(_video_provider_api_key(config, provider_id)),
+        "configuredProviders": sorted(configured_providers),
         "updatedAt": _text(config.get("updatedAt")),
     }
 
@@ -752,8 +828,15 @@ def _image_config_fallback(ctx) -> dict:
 
 def _video_config_fallback(ctx) -> dict:
     config = _read_config(ctx.paths.video_config)
-    if not _text(config.get("apiKey")) and _text(config.get("dashKey")):
-        config["apiKey"] = _text(config.get("dashKey"))
+    provider_id = _canonical_video_provider(config.get("providerId"))
+    config["providerId"] = provider_id
+    active_key = _video_provider_api_key(config, provider_id)
+    config["apiKey"] = active_key
+    config["dashKey"] = active_key
+    if provider_id == "pippit":
+        config["providerId"] = "pippit"
+        config["apiBase"] = _text(config.get("apiBase")) or "https://xyq.jianying.com"
+        config["model"] = _text(config.get("model")) or "pippit-video"
     return config
 
 
@@ -789,18 +872,31 @@ def _save_media_config(ctx, body: dict) -> dict:
         except (TypeError, ValueError):
             raise ValueError("视频时长必须是数字")
         api_key = _text(video.get("apiKey")) or _text(video.get("dashKey"))
+        provider_id = _canonical_video_provider(video.get("providerId"))
+        is_pippit = provider_id == "pippit"
+        current = _video_config_fallback(ctx)
+        provider_keys = (
+            dict(current.get("providerApiKeys"))
+            if isinstance(current.get("providerApiKeys"), dict)
+            else {}
+        )
+        current_provider = _canonical_video_provider(current.get("providerId"))
+        current_key = _text(current.get("apiKey")) or _text(current.get("dashKey"))
+        if current_key and not _text(provider_keys.get(current_provider)):
+            provider_keys[current_provider] = current_key
+        if api_key:
+            provider_keys[provider_id] = api_key
         _write_merged_config(ctx.paths.video_config, {
-            "providerId": _text(video.get("providerId")) or "dashscope",
-            "apiBase": _text(video.get("apiBase")),
-            "apiKey": api_key,
-            "dashKey": api_key,
-            "model": _text(video.get("model")),
+            "providerId": provider_id,
+            "apiBase": _text(video.get("apiBase")) or ("https://xyq.jianying.com" if is_pippit else ""),
+            "providerApiKeys": provider_keys,
+            "model": _text(video.get("model")) or ("pippit-video" if is_pippit else ""),
             "mode": _text(video.get("mode")) or "t2v",
             "resolution": _text(video.get("resolution")) or "720P",
             "duration": duration,
             "ratio": _text(video.get("ratio")) or "16:9",
             "updatedAt": now,
-        })
+        }, clear_keys={"apiKey", "dashKey"})
 
     return _media_config_snapshot(ctx)
 
@@ -813,7 +909,7 @@ def _test_media_config(ctx, body: dict) -> dict:
     if kind == "video":
         if not target.get("hasApiKey"):
             missing.append("API Key")
-        if not target.get("model"):
+        if target.get("providerId") != "pippit" and not target.get("model"):
             missing.append("模型")
     else:
         if not target.get("baseUrl"):
@@ -911,50 +1007,63 @@ def _image_generate_payload(ctx, body: dict) -> dict:
                 pass
 
 
-def _video_generate_payload(ctx, body: dict, on_status=None) -> dict:
+def _video_generate_payload(ctx, body: dict, on_status=None, *, request_key: str = "") -> dict:
     client = ctx.get_video_client()
     saved_config = _video_config_fallback(ctx)
-    provider_id = str(body.get("providerId") or saved_config.get("providerId") or "dashscope").strip().lower()
+    provider_id = _canonical_video_provider(body.get("providerId") or saved_config.get("providerId"))
+    saved_provider_id = _canonical_video_provider(saved_config.get("providerId"))
+    same_saved_provider = provider_id == saved_provider_id
     gateway_profile = ctx.get_license_mgr().current_gateway_profile()
-    api_base = (
-        str(body.get("apiBase", "") or "").strip()
-        or str(saved_config.get("apiBase") or "").strip()
-        or str((gateway_profile or {}).get("videoBaseUrl") or "").strip()
-        or str((gateway_profile or {}).get("baseUrl") or "").strip()
-    )
-    model = (
-        str(body.get("model", "") or "").strip()
-        or str(saved_config.get("model") or "").strip()
-        or str((gateway_profile or {}).get("videoDraftModel") or "").strip()
-        or str((gateway_profile or {}).get("defaultModel") or "").strip()
-    )
+    api_base = str(body.get("apiBase", "") or "").strip()
+    model = str(body.get("model", "") or "").strip()
+    if provider_id == "pippit":
+        api_base = api_base or "https://xyq.jianying.com"
+        model = "pippit-video"
+    else:
+        api_base = (
+            api_base
+            or (str(saved_config.get("apiBase") or "").strip() if same_saved_provider else "")
+            or str((gateway_profile or {}).get("videoBaseUrl") or "").strip()
+            or str((gateway_profile or {}).get("baseUrl") or "").strip()
+        )
+        model = (
+            model
+            or (str(saved_config.get("model") or "").strip() if same_saved_provider else "")
+            or str((gateway_profile or {}).get("videoDraftModel") or "").strip()
+            or str((gateway_profile or {}).get("defaultModel") or "").strip()
+        )
     if "agnes-video" in model.lower():
         provider_id = "agnes"
-    dash_key = (
+    explicit_key = (
         str(body.get("dashKey", "") or "").strip()
         or str(body.get("apiKey", "") or "").strip()
-        or str(saved_config.get("apiKey") or "").strip()
-        or str(saved_config.get("dashKey") or "").strip()
-        or str((gateway_profile or {}).get("videoApiKey") or "").strip()
-        or str((gateway_profile or {}).get("apiKey") or "").strip()
     )
+    dash_key = explicit_key or _video_provider_api_key(saved_config, provider_id)
+    if not dash_key and provider_id != "pippit":
+        dash_key = (
+            str((gateway_profile or {}).get("videoApiKey") or "").strip()
+            or str((gateway_profile or {}).get("apiKey") or "").strip()
+        )
     prompt = body.get("prompt", "")
     mode = body.get("mode") or saved_config.get("mode") or "t2v"
     resolution = body.get("resolution") or saved_config.get("resolution") or "720P"
     duration = body.get("duration") or saved_config.get("duration") or 5
     ratio = body.get("ratio") or saved_config.get("ratio") or "16:9"
     image_path = body.get("imagePath")
+    continuation_message = _text(body.get("continuationMessage") or body.get("reply"))
+    resume_existing = body.get("resumeExisting") is True
+    request_key = _text(body.get("requestKey")) or _text(request_key)
 
     if not dash_key:
         diag = ctx.get_license_mgr().gateway_diagnosis()
         if not diag.get("ok") and diag.get("code") == "gateway_fields_missing":
             raise VideoApiError(str(diag["message"]))
         raise VideoApiError("视频服务密钥不能为空")
-    if not prompt:
+    if not prompt and not continuation_message and not resume_existing:
         raise VideoApiError("提示词不能为空")
 
     temp_file: str | None = None
-    if image_path and image_path.startswith("data:"):
+    if image_path and not resume_existing and image_path.startswith("data:"):
         image_path, temp_file = ctx.data_url_to_temp_file(image_path)
 
     try:
@@ -970,6 +1079,12 @@ def _video_generate_payload(ctx, body: dict, on_status=None) -> dict:
             api_base=api_base,
             model=model,
             on_status=on_status,
+            request_key=request_key,
+            state_path=os.path.join(ctx.paths.data_dir, "pippit-video-runs.json"),
+            continuation_message=continuation_message,
+            resume_existing=resume_existing,
+            poll_interval_ms=body.get("pollIntervalMs"),
+            timeout_ms=body.get("timeoutMs"),
         )
         video_dir = os.path.join(ctx.paths.data_dir, "videos")
         os.makedirs(video_dir, exist_ok=True)
@@ -1053,13 +1168,44 @@ def _log_image_generation_failure(ctx, job_id: str, error: Exception) -> None:
 
 
 def _video_generation_failure(error: Exception) -> dict:
+    if isinstance(error, PippitResumeRequired):
+        return {
+            "success": False,
+            "resumeRequired": True,
+            "errorCode": "pippit_resume_required",
+            "message": "小云雀原任务仍在服务端，请继续查询原任务",
+            "error": str(error),
+            "requestKey": error.request_key,
+            "threadId": error.thread_id,
+            "runId": error.run_id,
+            "webThreadLink": error.web_thread_link,
+            "retryable": True,
+        }
+    if isinstance(error, PippitManualRequired):
+        return {
+            "success": False,
+            "manualRequired": True,
+            "errorCode": "pippit_manual_required",
+            "message": "小云雀需要补充信息后继续",
+            "error": "小云雀正在等待您的确认或补充信息",
+            "question": error.question,
+            "requestKey": error.request_key,
+            "threadId": error.thread_id,
+            "runId": error.run_id,
+            "webThreadLink": error.web_thread_link,
+            "retryable": True,
+        }
     detail = str(error or "").strip()
     lowered = detail.lower()
-    if "invalid url" in lowered or "http 404" in lowered or "not found" in lowered:
+    if "重复计费" in detail or ("提交结果" in detail and "不确定" in detail):
+        code = "pippit_submission_uncertain"
+        message = "小云雀上次提交结果不确定，已停止自动重提。请打开小云雀任务页确认。"
+        retryable = False
+    elif "invalid url" in lowered or "http 404" in lowered or "not found" in lowered:
         code = "video_provider_endpoint_mismatch"
         message = "视频 Provider、Base URL 与模型接口不匹配，请检查后重试。"
         retryable = False
-    elif "http 401" in lowered or "unauthorized" in lowered or "authentication" in lowered:
+    elif "http 401" in lowered or "http 403" in lowered or "unauthorized" in lowered or "authentication" in lowered:
         code = "video_provider_auth_failed"
         message = "视频服务鉴权失败，请检查 API Key 和账号状态。"
         retryable = False
@@ -1067,7 +1213,7 @@ def _video_generation_failure(error: Exception) -> dict:
         code = "video_provider_rate_limited"
         message = "视频服务当前请求过多，请稍后再试。"
         retryable = True
-    elif "http 503" in lowered or "service busy" in lowered or "unavailable" in lowered:
+    elif any(marker in lowered for marker in ("http 502", "http 503", "http 504", "http 524", "service busy", "unavailable")):
         code = "video_provider_unavailable"
         message = "视频服务暂时不可用，请稍后重试。"
         retryable = True
@@ -1270,7 +1416,11 @@ def register_media_routes(app, ctx) -> None:
         except MediaTargetError as exc:
             return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
         try:
-            generated = _video_generate_payload(ctx, body)
+            generated = _video_generate_payload(
+                ctx,
+                body,
+                request_key=_text(body.get("requestKey")) or f"sync_{uuid.uuid4().hex}",
+            )
             return ctx.fastapi_json(
                 _async_media_job_result(
                     ctx,
@@ -1280,9 +1430,13 @@ def register_media_routes(app, ctx) -> None:
                     compact=False,
                 )
             )
-        except (VideoApiError, ValueError) as exc:
+        except (VideoApiError, PippitManualRequired, PippitResumeRequired, ValueError) as exc:
             _log_video_generation_failure(ctx, "sync", exc)
-            return ctx.fastapi_json(_video_generation_failure(exc), 500)
+            failure = _video_generation_failure(exc)
+            return ctx.fastapi_json(
+                failure,
+                409 if failure.get("manualRequired") or failure.get("resumeRequired") else 500,
+            )
 
     @app.post("/api/video/generate/submit")
     async def video_generate_submit(request: Request):
@@ -1309,8 +1463,9 @@ def register_media_routes(app, ctx) -> None:
                         tone,
                         phase="generating",
                     ),
+                    request_key=_text(body.get("requestKey")) or job_id,
                 )
-            except (VideoApiError, ValueError) as exc:
+            except (VideoApiError, PippitManualRequired, PippitResumeRequired, ValueError) as exc:
                 _log_video_generation_failure(ctx, job_id, exc)
                 return _video_generation_failure(exc)
             if phone_snapshot.get("devices"):

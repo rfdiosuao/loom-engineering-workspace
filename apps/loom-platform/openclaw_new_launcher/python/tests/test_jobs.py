@@ -21,13 +21,37 @@ def wait_for_terminal(manager: JobManager, job_id: str, timeout: float = 2.0) ->
     deadline = time.time() + timeout
     while time.time() < deadline:
         job = manager.get(job_id)
-        if job and job.get("status") in {"succeeded", "failed"}:
+        if job and job.get("status") in {"succeeded", "failed", "needs_manual"}:
             return job
         time.sleep(0.02)
     raise AssertionError(f"job did not finish: {job_id}")
 
 
 class JobManagerStateTests(unittest.TestCase):
+    def test_manual_media_result_is_preserved_as_actionable_terminal_state(self) -> None:
+        manager = JobManager(lambda _message: None)
+
+        submitted = manager.submit_progress(
+            "video",
+            "小云雀视频生成",
+            lambda _job_id: {
+                "success": False,
+                "manualRequired": True,
+                "errorCode": "pippit_manual_required",
+                "message": "小云雀需要补充信息",
+                "question": "是否确认开始生成完整成片？",
+                "requestKey": "request-1",
+                "threadId": "thread-1",
+                "runId": "run-1",
+            },
+        )
+        finished = wait_for_terminal(manager, submitted["id"])
+
+        self.assertEqual(finished["status"], "needs_manual")
+        self.assertEqual(finished["phase"], "needs_manual")
+        self.assertIsNone(finished["error"])
+        self.assertEqual(finished["result"]["question"], "是否确认开始生成完整成片？")
+
     def test_cancel_waits_for_cooperative_worker_before_publishing_terminal_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = os.path.join(temp_dir, "jobs-state.json")

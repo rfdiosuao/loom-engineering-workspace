@@ -50,6 +50,15 @@ type VideoResult = {
   filename?: string;
   size?: number;
   phoneTransfer?: PhoneTransferState;
+  success?: boolean;
+  manualRequired?: boolean;
+  resumeRequired?: boolean;
+  message?: string;
+  question?: string;
+  requestKey?: string;
+  threadId?: string;
+  runId?: string;
+  webThreadLink?: string;
 };
 
 let rememberedCreativeJobs: Partial<Record<CreativeTab, string>> = {};
@@ -104,6 +113,17 @@ function jobDone(job: BridgeJob | null): boolean {
 
 function jobFailed(job: BridgeJob | null): boolean {
   return Boolean(job && ['failed', 'error', 'cancelled', 'canceled'].includes(String(job.status || '').toLowerCase()));
+}
+
+function jobNeedsManual(job: BridgeJob | null): boolean {
+  return Boolean(job && String(job.status || '').toLowerCase() === 'needs_manual');
+}
+
+function createVideoRequestKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `video_${crypto.randomUUID()}`;
+  }
+  return `video_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 function friendlyError(error: unknown, fallback: string): string {
@@ -188,11 +208,20 @@ export const CreativeMediaPage: React.FC = () => {
   const [videoMode, setVideoMode] = React.useState<VideoMode>('t2v');
   const [videoReference, setVideoReference] = React.useState<ReferenceImage | null>(null);
   const [videoPrompt, setVideoPrompt] = React.useState('商务科技短片，多设备协同工作。');
+  const [videoRequestKey, setVideoRequestKey] = React.useState('');
+  const [videoManualReply, setVideoManualReply] = React.useState('');
 
   const activeJob = activeJobs[tab];
   const imageRunning = Boolean(activeJobs.image && !jobDone(activeJobs.image) && !jobFailed(activeJobs.image));
-  const videoRunning = Boolean(activeJobs.video && !jobDone(activeJobs.video) && !jobFailed(activeJobs.video));
+  const videoRunning = Boolean(activeJobs.video && !jobDone(activeJobs.video) && !jobFailed(activeJobs.video) && !jobNeedsManual(activeJobs.video));
+  const videoManualResult = (activeJobs.video?.result || videoResult || null) as VideoResult | null;
+  const videoNeedsManual = jobNeedsManual(activeJobs.video);
   const generationRunning = tab === 'image' ? imageRunning : videoRunning;
+  const videoProviderHasApiKey = Boolean(
+    videoApiKey.trim()
+    || config?.video?.configuredProviders?.includes(videoProvider)
+    || (config?.video?.providerId === videoProvider && config?.video?.hasApiKey),
+  );
   const activeMessage = String(activeJob?.progress?.message || activeJob?.message || '生成中');
   const selectedImagePreset = IMAGE_RATIO_PRESETS.find((preset) => preset.ratio === imageRatio) || IMAGE_RATIO_PRESETS[0];
   const imagePreviewSources = React.useMemo(() => {
@@ -246,7 +275,7 @@ export const CreativeMediaPage: React.FC = () => {
     if (snapshot.image?.count) setImageCount(snapshot.image.count);
     if (snapshot.video?.model?.toLowerCase().includes('agnes-video')) {
       setVideoProvider('agnes');
-    } else if (snapshot.video?.providerId && ['dashscope', 'agnes', 'seedance', 'custom'].includes(String(snapshot.video.providerId))) {
+    } else if (snapshot.video?.providerId && ['dashscope', 'agnes', 'seedance', 'pippit', 'custom'].includes(String(snapshot.video.providerId))) {
       setVideoProvider(String(snapshot.video.providerId) as VideoProviderId);
     }
     if (snapshot.video?.apiBase) setVideoBaseUrl(snapshot.video.apiBase);
@@ -322,9 +351,32 @@ export const CreativeMediaPage: React.FC = () => {
           applyFinishedJob(job, kind);
           void refreshAssets(false);
           showToast(kind === 'image' ? '图片生成完成' : '视频生成完成', 'success');
+        } else if (jobNeedsManual(job)) {
+          stopPolling(kind);
+          const result = (job.result || null) as VideoResult | null;
+          if (kind === 'video') {
+            setVideoResult(result);
+            setVideoRequestKey(result?.requestKey || '');
+            setVideoManualReply('');
+          }
+          // Keep the terminal job id so leaving and returning to the page restores
+          // the manual continuation instead of silently losing the paid run.
+          rememberedCreativeJobs[kind] = jobId;
+          showToast(result?.question || '小云雀需要补充信息后继续', 'info');
         } else if (jobFailed(job)) {
           stopPolling(kind);
-          delete rememberedCreativeJobs[kind];
+          const result = (job.result || null) as VideoResult | null;
+          if (kind === 'video') {
+            setVideoResult(result);
+            if (result?.resumeRequired && result.requestKey) {
+              setVideoRequestKey(result.requestKey);
+              rememberedCreativeJobs[kind] = jobId;
+            } else {
+              delete rememberedCreativeJobs[kind];
+            }
+          } else {
+            delete rememberedCreativeJobs[kind];
+          }
           showToast(job.error || job.message || '生成失败', 'error');
         }
       } catch (error) {
@@ -441,13 +493,17 @@ export const CreativeMediaPage: React.FC = () => {
     setTab('video');
     setKindJob('video', optimistic);
     setVideoResult(null);
+    setVideoManualReply('');
     try {
       const params = videoPayload({ videoProvider, videoBaseUrl, videoApiKey, videoModel, videoResolution, videoDuration, videoRatio, videoMode });
+      const requestKey = videoProvider === 'pippit' ? createVideoRequestKey() : '';
+      setVideoRequestKey(requestKey);
       await mediaApi.saveConfig({ video: params });
       const { jobId, job } = await videoApi.submit({
         ...params,
         prompt: videoPrompt.trim(),
         source: 'ui',
+        ...(requestKey ? { requestKey } : {}),
         ...(videoMode === 'i2v' ? { imagePath: videoReference?.requestValue } : {}),
       });
       rememberedCreativeJobs.video = jobId;
@@ -457,6 +513,73 @@ export const CreativeMediaPage: React.FC = () => {
       delete rememberedCreativeJobs.video;
       setKindJob('video', { ...optimistic, status: 'failed', error: friendlyError(error, '视频生成提交失败') });
       showToast(friendlyError(error, '视频生成提交失败'), 'error');
+    }
+  };
+
+  const continuePippitVideo = async () => {
+    const requestKey = videoManualResult?.requestKey || videoRequestKey;
+    const reply = videoManualReply.trim();
+    if (!requestKey || !reply) {
+      showToast('请先填写给小云雀的补充信息', 'error');
+      return;
+    }
+    const optimistic: BridgeJob = {
+      id: `pending_video_continue_${Date.now()}`,
+      kind: 'video',
+      label: '继续小云雀视频生成',
+      status: 'queued',
+      message: '正在继续原任务',
+      progress: { message: '正在用原小云雀会话继续生成', phase: 'submitting' },
+    };
+    setKindJob('video', optimistic);
+    try {
+      const params = videoPayload({ videoProvider, videoBaseUrl, videoApiKey, videoModel, videoResolution, videoDuration, videoRatio, videoMode });
+      const { jobId, job } = await videoApi.submit({
+        ...params,
+        prompt: videoPrompt.trim(),
+        source: 'ui',
+        requestKey,
+        continuationMessage: reply,
+      });
+      rememberedCreativeJobs.video = jobId;
+      setKindJob('video', job);
+      pollJob(jobId, 'video');
+    } catch (error) {
+      setKindJob('video', { ...optimistic, status: 'failed', error: friendlyError(error, '继续小云雀任务失败') });
+      showToast(friendlyError(error, '继续小云雀任务失败'), 'error');
+    }
+  };
+
+  const resumePippitVideo = async () => {
+    const requestKey = videoManualResult?.requestKey || videoRequestKey;
+    if (!requestKey) {
+      showToast('没有可恢复的小云雀原任务', 'error');
+      return;
+    }
+    const optimistic: BridgeJob = {
+      id: `pending_video_resume_${Date.now()}`,
+      kind: 'video',
+      label: '恢复小云雀视频生成',
+      status: 'queued',
+      message: '正在查询原任务',
+      progress: { message: '正在查询原小云雀任务，不会重复创建', phase: 'generating' },
+    };
+    setKindJob('video', optimistic);
+    try {
+      const params = videoPayload({ videoProvider, videoBaseUrl, videoApiKey, videoModel, videoResolution, videoDuration, videoRatio, videoMode });
+      const { jobId, job } = await videoApi.submit({
+        ...params,
+        prompt: videoPrompt.trim(),
+        source: 'ui',
+        requestKey,
+        resumeExisting: true,
+      });
+      rememberedCreativeJobs.video = jobId;
+      setKindJob('video', job);
+      pollJob(jobId, 'video');
+    } catch (error) {
+      setKindJob('video', { ...optimistic, status: 'failed', error: friendlyError(error, '恢复小云雀原任务失败') });
+      showToast(friendlyError(error, '恢复小云雀原任务失败'), 'error');
     }
   };
 
@@ -598,7 +721,7 @@ export const CreativeMediaPage: React.FC = () => {
                 </p>
               </div>
               <span className="rounded-full border border-border bg-surface px-3 py-1 text-xs font-black text-text-muted">
-                {tab === 'image' ? (config?.image?.hasApiKey ? '生图已配置' : '生图未配置') : (config?.video?.hasApiKey ? '视频已配置' : '视频未配置')}
+                {tab === 'image' ? (config?.image?.hasApiKey ? '生图已配置' : '生图未配置') : (videoProviderHasApiKey ? '视频已配置' : '视频未配置')}
               </span>
             </div>
 
@@ -630,47 +753,74 @@ export const CreativeMediaPage: React.FC = () => {
               <div className="mt-4 grid gap-3">
                 <label>
                   <FieldLabel text="Provider" />
-                  <Select value={videoProvider} onChange={(event) => setVideoProvider(event.target.value as VideoProviderId)} className="w-full">
+                  <Select
+                    value={videoProvider}
+                    onChange={(event) => {
+                      const provider = event.target.value as VideoProviderId;
+                      setVideoProvider(provider);
+                      setVideoApiKey('');
+                      if (provider === 'pippit') {
+                        setVideoBaseUrl('https://xyq.jianying.com');
+                        setVideoModel('pippit-video');
+                      } else {
+                        if (videoBaseUrl === 'https://xyq.jianying.com') setVideoBaseUrl('');
+                        if (videoModel === 'pippit-video') setVideoModel('');
+                      }
+                    }}
+                    className="w-full"
+                  >
                     <option value="dashscope">DashScope</option>
                     <option value="agnes">Agnes / OpenAI 视频</option>
                     <option value="seedance">Seedance</option>
+                    <option value="pippit">小云雀 / Pippit</option>
                     <option value="custom">自定义 OpenAI 兼容</option>
                   </Select>
                 </label>
                 <label>
                   <FieldLabel text="API Base" />
-                  <Input value={videoBaseUrl} onChange={(event) => setVideoBaseUrl(event.target.value)} placeholder="留空使用 provider 默认地址" />
+                  <Input value={videoBaseUrl} onChange={(event) => setVideoBaseUrl(event.target.value)} placeholder="留空使用 provider 默认地址" disabled={videoProvider === 'pippit'} />
                 </label>
                 <label>
                   <FieldLabel text="API Key" />
-                  <Input type="password" value={videoApiKey} onChange={(event) => setVideoApiKey(event.target.value)} placeholder={config?.video?.hasApiKey ? '已保存，留空继续使用' : 'sk-...'} autoComplete="off" />
+                  <Input type="password" value={videoApiKey} onChange={(event) => setVideoApiKey(event.target.value)} placeholder={videoProviderHasApiKey ? '已保存，留空继续使用' : videoProvider === 'pippit' ? '小云雀 Access Key' : 'sk-...'} autoComplete="off" />
+                  {videoProvider === 'pippit' ? (
+                    <div className="mt-1.5 text-xs leading-5 text-text-muted">使用小云雀 Agent 会话 Access Key，不是火山引擎 AK/SK。</div>
+                  ) : null}
                 </label>
-                <label>
-                  <FieldLabel text="模型" />
-                  <Input value={videoModel} onChange={(event) => setVideoModel(event.target.value)} placeholder="留空使用 provider 默认模型" />
-                </label>
-                <div className="grid grid-cols-3 gap-3">
+                {videoProvider !== 'pippit' ? (
                   <label>
-                    <FieldLabel text="清晰度" />
-                    <Select value={videoResolution} onChange={(event) => setVideoResolution(event.target.value)} className="w-full">
-                      <option value="480P">480P</option>
-                      <option value="720P">720P</option>
-                      <option value="1080P">1080P</option>
-                    </Select>
+                    <FieldLabel text="模型" />
+                    <Input value={videoModel} onChange={(event) => setVideoModel(event.target.value)} placeholder="留空使用 provider 默认模型" />
                   </label>
-                  <label>
-                    <FieldLabel text="秒数" />
-                    <Input type="number" min={1} max={30} value={videoDuration} onChange={(event) => setVideoDuration(Number(event.target.value || 5))} />
-                  </label>
-                  <label>
-                    <FieldLabel text="比例" />
-                    <Select value={videoRatio} onChange={(event) => setVideoRatio(event.target.value)} className="w-full">
-                      <option value="16:9">16:9</option>
-                      <option value="9:16">9:16</option>
-                      <option value="1:1">1:1</option>
-                    </Select>
-                  </label>
-                </div>
+                ) : null}
+                {videoProvider === 'pippit' ? (
+                  <div className="rounded-[6px] border border-border bg-surface-alt/45 px-3 py-2 text-xs leading-5 text-text-muted">
+                    小云雀由后端 Agent 自主编排。画幅、时长和清晰度请直接写在提示词中，LOOM 会原样传递。
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-3">
+                    <label>
+                      <FieldLabel text="清晰度" />
+                      <Select value={videoResolution} onChange={(event) => setVideoResolution(event.target.value)} className="w-full">
+                        <option value="480P">480P</option>
+                        <option value="720P">720P</option>
+                        <option value="1080P">1080P</option>
+                      </Select>
+                    </label>
+                    <label>
+                      <FieldLabel text="秒数" />
+                      <Input type="number" min={1} max={30} value={videoDuration} onChange={(event) => setVideoDuration(Number(event.target.value || 5))} />
+                    </label>
+                    <label>
+                      <FieldLabel text="比例" />
+                      <Select value={videoRatio} onChange={(event) => setVideoRatio(event.target.value)} className="w-full">
+                        <option value="16:9">16:9</option>
+                        <option value="9:16">9:16</option>
+                        <option value="1:1">1:1</option>
+                      </Select>
+                    </label>
+                  </div>
+                )}
               </div>
             )}
 
@@ -777,8 +927,8 @@ export const CreativeMediaPage: React.FC = () => {
               <div className="rounded-[8px] border border-border bg-surface-alt/35 p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-black text-text">任务状态</span>
-                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-black ${jobFailed(activeJob) ? 'bg-status-danger/12 text-status-danger' : generationRunning ? 'bg-accent-soft text-accent' : 'bg-surface text-text-muted'}`}>
-                    {generationRunning ? '生成中' : jobFailed(activeJob) ? '失败' : jobDone(activeJob) ? '完成' : '待提交'}
+                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-black ${jobFailed(activeJob) ? 'bg-status-danger/12 text-status-danger' : videoNeedsManual && tab === 'video' ? 'bg-status-warning/12 text-status-warning' : generationRunning ? 'bg-accent-soft text-accent' : 'bg-surface text-text-muted'}`}>
+                    {generationRunning ? '生成中' : videoNeedsManual && tab === 'video' ? '待补充' : jobFailed(activeJob) ? '失败' : jobDone(activeJob) ? '完成' : '待提交'}
                   </span>
                 </div>
                 <div className="mt-5 flex min-h-[178px] flex-col items-center justify-center rounded-[8px] bg-surface/70 p-5 text-center">
@@ -790,8 +940,41 @@ export const CreativeMediaPage: React.FC = () => {
                         <div className="creative-progress-bar h-full w-2/3 rounded-full bg-accent" />
                       </div>
                     </>
+                  ) : videoNeedsManual && tab === 'video' ? (
+                    <div className="w-full max-w-xl text-left">
+                      <div className="text-sm font-black text-text">小云雀需要补充信息</div>
+                      <div className="mt-2 text-sm leading-6 text-text-muted">
+                        {videoManualResult?.question || '请确认生成要求后继续原任务。'}
+                      </div>
+                      <TextArea
+                        className="mt-4 min-h-24"
+                        value={videoManualReply}
+                        onChange={(event) => setVideoManualReply(event.target.value)}
+                        placeholder="输入补充信息或确认内容"
+                      />
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button variant="primary" onClick={() => void continuePippitVideo()} disabled={!videoManualReply.trim()}>
+                          继续原任务
+                        </Button>
+                        {videoManualResult?.webThreadLink ? (
+                          <Button variant="quiet" onClick={() => window.open(videoManualResult.webThreadLink, '_blank', 'noopener,noreferrer')}>
+                            打开任务页
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
                   ) : jobFailed(activeJob) ? (
-                    <div className="text-sm leading-6 text-status-danger">{activeJob?.error || activeJob?.message || '生成失败'}</div>
+                    <div className="w-full max-w-xl text-left">
+                      <div className="text-sm leading-6 text-status-danger">{activeJob?.error || activeJob?.message || '生成失败'}</div>
+                      {tab === 'video' && videoManualResult?.resumeRequired ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Button variant="primary" onClick={() => void resumePippitVideo()}>继续原任务</Button>
+                          {videoManualResult.webThreadLink ? (
+                            <Button variant="quiet" onClick={() => window.open(videoManualResult.webThreadLink, '_blank', 'noopener,noreferrer')}>打开任务页</Button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
                   ) : (
                     <div className="text-sm leading-6 text-text-muted">提交任务后会显示阶段状态。</div>
                   )}

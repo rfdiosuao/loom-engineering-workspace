@@ -127,7 +127,7 @@ class JobManager:
         now = time.time()
         with self._lock:
             job = self._jobs.get(job_id)
-            if not job or str(job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
+            if not job or str(job.get("status") or "") in {"succeeded", "failed", "cancelled", "needs_manual"}:
                 return False
             event = self._cancel_events.setdefault(job_id, threading.Event())
             event.set()
@@ -160,7 +160,7 @@ class JobManager:
             job_ids = [
                 job_id
                 for job_id, job in self._jobs.items()
-                if str(job.get("status") or "") not in {"succeeded", "failed", "cancelled"}
+                if str(job.get("status") or "") not in {"succeeded", "failed", "cancelled", "needs_manual"}
                 and predicate(dict(job))
             ]
         return [
@@ -219,6 +219,20 @@ class JobManager:
             result = target(job_id)
             if self.is_cancelled(job_id):
                 self.append_log(f"{log_prefix} cancelled\n")
+                return
+            if isinstance(result, dict) and result.get("manualRequired") is True:
+                self._patch(
+                    job_id,
+                    status="needs_manual",
+                    phase="needs_manual",
+                    message=str(result.get("message") or "等待用户补充信息"),
+                    result=result,
+                    error=None,
+                    failure=None,
+                    finishedAt=time.time(),
+                    updatedAt=time.time(),
+                )
+                self.append_log(f"{log_prefix} needs manual input\n")
                 return
             if isinstance(result, dict) and result.get("success") is False:
                 failure = _public_failure(classify_failure(result))
@@ -307,7 +321,7 @@ class JobManager:
 
     def _prune_locked(self) -> bool:
         changed = self._prune_expired_locked()
-        terminal_states = {"succeeded", "failed", "cancelled"}
+        terminal_states = {"succeeded", "failed", "cancelled", "needs_manual"}
         terminal_jobs = sorted(
             (
                 job for job in self._jobs.values()
@@ -338,7 +352,7 @@ class JobManager:
         changed = False
         cutoff = time.time() - self.max_age_seconds
         for job_id, job in list(self._jobs.items()):
-            if str(job.get("status") or "") not in {"succeeded", "failed", "cancelled"}:
+            if str(job.get("status") or "") not in {"succeeded", "failed", "cancelled", "needs_manual"}:
                 continue
             timestamp = float(job.get("finishedAt") or job.get("updatedAt") or job.get("createdAt") or 0)
             if timestamp and timestamp < cutoff:

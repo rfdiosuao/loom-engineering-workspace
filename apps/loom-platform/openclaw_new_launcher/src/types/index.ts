@@ -73,7 +73,7 @@ export interface VideoConfig {
   gatewayMode?: 'member' | 'manual';
 }
 
-export type VideoProviderId = 'dashscope' | 'agnes' | 'seedance' | 'custom';
+export type VideoProviderId = 'dashscope' | 'agnes' | 'seedance' | 'pippit' | 'custom';
 
 export type VideoMode = 't2v' | 'i2v';
 
