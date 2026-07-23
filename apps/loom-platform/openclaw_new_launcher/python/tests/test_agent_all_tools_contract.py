@@ -360,7 +360,10 @@ class AgentAllToolsContractTests(unittest.TestCase):
             cli_catalog_provider=lambda: {"domains": []},
         )
         capabilities = registry.list_capabilities(available_only=True)
-        expected_approvals = sum(capability["risk"] == "critical" for capability in capabilities)
+        expected_approvals = sum(
+            capability["risk"] in {"outbound", "critical"}
+            for capability in capabilities
+        )
         approval_count = 0
 
         with tempfile.TemporaryDirectory() as root:
@@ -532,6 +535,8 @@ class AgentAllToolsContractTests(unittest.TestCase):
                             )
                         )
                     )
+                elif name == "loom.matrix.retry":
+                    requires_approval = True
                 expected_approvals += int(requires_approval)
 
                 before_calls = len(calls)

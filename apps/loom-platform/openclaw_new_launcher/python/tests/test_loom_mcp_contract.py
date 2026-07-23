@@ -191,6 +191,18 @@ class LoomMcpContractTests(unittest.TestCase):
         self.assertEqual(tools["loom_media_test_video"]["permission"], "control")
         self.assertEqual(tools["loom_media_test_video"]["risk"], "control_safe")
 
+    def test_external_writes_publish_explicit_risk_instead_of_generic_control(self) -> None:
+        import loom_mcp
+
+        tools = {tool["name"]: tool for tool in loom_mcp.tool_definitions()}
+
+        self.assertEqual(tools["loom_account_send_code"]["risk"], "outbound")
+        self.assertEqual(tools["loom_feishu_create_table"]["risk"], "critical")
+        self.assertEqual(tools["loom_feishu_test_write"]["risk"], "outbound")
+        self.assertEqual(tools["loom_feishu_retry_sync"]["risk"], "outbound")
+        self.assertEqual(tools["loom_feishu_reconcile"]["risk"], "control_safe")
+        self.assertEqual(tools["loom_acquisition_agent_result"]["risk"], "outbound")
+
     def test_restricted_cli_arguments_are_discoverable_in_tool_schemas(self) -> None:
         import loom_mcp
 

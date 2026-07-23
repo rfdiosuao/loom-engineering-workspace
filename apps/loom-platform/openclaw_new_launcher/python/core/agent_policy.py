@@ -63,6 +63,8 @@ class AgentPolicyEngine:
         name = str(_capability_value(capability, "name", "") or "").lower()
         action_content = _action_content(capability, tool_input or {})
         searchable = f"{name} {action_content}"
+        if _is_real_acquisition_run(name, tool_input or {}):
+            return "critical"
         if any(marker in searchable for marker in _CRITICAL_MARKERS):
             return "critical"
         if any(marker in searchable for marker in _OUTBOUND_MARKERS):
@@ -74,7 +76,10 @@ class AgentPolicyEngine:
     def evaluate(self, capability: Any, tool_input: Mapping[str, Any] | None = None) -> PolicyDecision:
         classification = self.classify(capability, tool_input)
         capability_name = str(_capability_value(capability, "name", "") or "").lower()
-        approval_for_dispatch = _matrix_dispatch_requires_approval(capability_name, tool_input or {})
+        approval_for_matrix_operation = _matrix_operation_requires_approval(
+            capability_name,
+            tool_input or {},
+        )
         targets = _targets(tool_input or {})
         allowed = self._targets_allowed(targets)
         if not allowed:
@@ -82,7 +87,7 @@ class AgentPolicyEngine:
         requires_approval = (
             classification == "critical"
             if self.approval_mode == "weak"
-            else classification in {"outbound", "critical"} or approval_for_dispatch
+            else classification in {"outbound", "critical"} or approval_for_matrix_operation
         )
         reasons = {
             "read": "Read-only capability may execute automatically.",
@@ -95,10 +100,10 @@ class AgentPolicyEngine:
             "critical": "Critical account, payment, deletion, or security action requires approval.",
         }
         reason = (
-            "Free-form or full-control Matrix dispatch requires user approval."
-            if approval_for_dispatch and self.approval_mode == "strong"
+            "Matrix dispatch or retry requires user approval."
+            if approval_for_matrix_operation and self.approval_mode == "strong"
             else "Explicit user request may execute automatically within the authorized target scope."
-            if approval_for_dispatch
+            if approval_for_matrix_operation
             else reasons[classification]
         )
         return PolicyDecision(classification, requires_approval, True, reason)
@@ -303,7 +308,9 @@ def _input_hash(tool_input: Mapping[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
-def _matrix_dispatch_requires_approval(capability_name: str, tool_input: Mapping[str, Any]) -> bool:
+def _matrix_operation_requires_approval(capability_name: str, tool_input: Mapping[str, Any]) -> bool:
+    if capability_name == "loom.matrix.retry":
+        return True
     if capability_name != "loom.matrix.dispatch":
         return False
     if str(tool_input.get("mode") or "").strip().lower() == "full":
@@ -318,6 +325,13 @@ def _matrix_dispatch_requires_approval(capability_name: str, tool_input: Mapping
         and bool(str(assignment.get("prompt") or "").strip())
         for assignment in assignments
     )
+
+
+def _is_real_acquisition_run(capability_name: str, tool_input: Mapping[str, Any]) -> bool:
+    if not capability_name.endswith("loom_acquisition_agent_run"):
+        return False
+    value = tool_input.get("realRun")
+    return value is True or str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _summarize(value: Any, *, depth: int = 0) -> Any:

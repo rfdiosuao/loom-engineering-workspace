@@ -210,6 +210,27 @@ class ConfirmationMatrix(ProgressMatrix):
         return super().dispatch(body)
 
 
+class ConfirmationRetryMatrix(ConfirmationMatrix):
+    def __init__(self, *, require_confirmation: bool = False) -> None:
+        super().__init__(require_confirmation=require_confirmation)
+        self.retries: list[dict] = []
+
+    def retry_failed(self, campaign_id, body):
+        self.retries.append({"campaignId": campaign_id, **dict(body)})
+        if self.require_confirmation and body.get("confirmed") is not True:
+            raise ValueError("server confirmation required")
+        return {
+            "retried": True,
+            "retryOf": campaign_id,
+            "task": {
+                "campaignId": "campaign-retry-progress",
+                "status": "queued",
+                "missions": [],
+            },
+            "dispatchBody": dict(body),
+        }
+
+
 class MultiPhoneMatrix(ConfirmationMatrix):
     def __init__(self) -> None:
         super().__init__()
@@ -1627,6 +1648,115 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertEqual([event["type"] for event in events].count("runtime.requested"), 1)
             finally:
                 service.shutdown()
+
+    def test_approved_matrix_retry_receives_one_server_confirmation(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "dispatch-before-retry",
+                    "name": "loom.matrix.dispatch",
+                    "input": {
+                        "prompt": "prepare the selected device",
+                        "target": {"deviceIds": ["phone-progress"]},
+                    },
+                }]
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "retry-confirmed",
+                    "name": "loom.matrix.retry",
+                    "input": {"campaignId": "campaign-progress"},
+                }]
+            },
+            {"final": {"text": "approved retry complete"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            matrix = ConfirmationRetryMatrix(require_confirmation=True)
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="strong"),
+            )
+            try:
+                session = service.create_session({"title": "Confirmed retry"})
+                sent = service.send_message(session["sessionId"], {
+                    "clientMessageId": "confirmed-retry-client",
+                    "text": "dispatch and then retry the selected device",
+                    "targets": {"deviceIds": ["phone-progress"]},
+                })
+                first_waiting = _wait_for_status(service, sent["run"]["runId"], "waiting_approval")
+                self.assertEqual(matrix.retries, [])
+                first_approval = service.get_trace(first_waiting["runId"])["approvals"][0]
+
+                first_outcome = service.resolve_approval(
+                    first_approval["approvalId"],
+                    {"decision": "approved"},
+                )
+                self.assertEqual(first_outcome["run"]["status"], "waiting_approval")
+                self.assertEqual(len(matrix.dispatches), 1)
+                self.assertEqual(matrix.retries, [])
+                approvals = service.get_trace(first_waiting["runId"])["approvals"]
+                self.assertEqual(len(approvals), 2)
+
+                outcome = service.resolve_approval(
+                    approvals[-1]["approvalId"],
+                    {"decision": "approved"},
+                )
+                self.assertEqual(outcome["run"]["status"], "completed")
+                self.assertEqual(len(matrix.retries), 1)
+                self.assertIs(matrix.retries[0].get("confirmed"), True)
+            finally:
+                service.shutdown()
+
+    def test_weak_policy_auto_confirms_matrix_retry_without_approval(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "dispatch-before-weak-retry",
+                    "name": "loom.matrix.dispatch",
+                    "input": {
+                        "prompt": "prepare the selected device",
+                        "target": {"deviceIds": ["phone-progress"]},
+                    },
+                }]
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "retry-weak",
+                    "name": "loom.matrix.retry",
+                    "input": {"campaignId": "campaign-progress"},
+                }]
+            },
+            {"final": {"text": "retry complete"}},
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            matrix = ConfirmationRetryMatrix(require_confirmation=True)
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            try:
+                session = service.create_session({"title": "Weak retry"})
+                sent = service.send_message(session["sessionId"], {
+                    "clientMessageId": "weak-retry-client",
+                    "text": "dispatch and then retry the selected device",
+                    "targets": {"deviceIds": ["phone-progress"]},
+                })
+                completed = _wait_for_status(service, sent["run"]["runId"], "completed")
+                trace = service.get_trace(completed["runId"])
+            finally:
+                service.shutdown()
+
+        self.assertEqual(trace["approvals"], [])
+        self.assertEqual(len(matrix.retries), 1)
+        self.assertIs(matrix.retries[0].get("confirmed"), True)
 
     def test_cancel_run_cascades_to_linked_matrix_campaigns_and_jobs(self) -> None:
         from services.agent_service import AgentService

@@ -33,6 +33,10 @@ RunContinuation = tuple[str, Json, bool, bool, Callable[[], None] | None]
 TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled"}
 TERMINAL_MATRIX_STATUSES = {"succeeded", "completed", "failed", "cancelled"}
 NATIVE_RUNTIME_PROFILE_ID = "loom-native"
+MATRIX_CONFIRMATION_CAPABILITIES = frozenset({
+    "loom.matrix.dispatch",
+    "loom.matrix.retry",
+})
 _SCOPE_CONTINUATION_TERMS = (
     "\u7ee7\u7eed",
     "\u91cd\u8bd5",
@@ -551,7 +555,7 @@ class AgentService:
         decision = str(body.get("decision") or "").strip().lower()
         decision = {"approve": "approved", "reject": "rejected"}.get(decision, decision)
         confirmation_token: tuple[str, str] | None = None
-        if decision == "approved" and approval.get("capability") == "loom.matrix.dispatch":
+        if decision == "approved" and approval.get("capability") in MATRIX_CONFIRMATION_CAPABILITIES:
             input_hash = str(approval.get("inputHash") or "")
             if input_hash:
                 confirmation_token = (input_hash, approval_id)
@@ -580,7 +584,7 @@ class AgentService:
         decision = str(body.get("decision") or "").strip().lower()
         decision = {"approve": "approved", "reject": "rejected"}.get(decision, decision)
         confirmation_token: tuple[str, str] | None = None
-        if decision == "approved" and approval.get("capability") == "loom.matrix.dispatch":
+        if decision == "approved" and approval.get("capability") in MATRIX_CONFIRMATION_CAPABILITIES:
             input_hash = str(approval.get("inputHash") or "")
             if input_hash:
                 confirmation_token = (input_hash, approval_id)
@@ -1091,19 +1095,7 @@ class AgentService:
 
     def _matrix_dispatch(self, payload: Json) -> Json:
         self._require_matrix_access()
-        body = dict(payload)
-        input_hash = _tool_input_hash(body)
-        body.pop("confirmed", None)
-        if self.policy.approval_mode == "weak":
-            body["confirmed"] = True
-        else:
-            with self._lock:
-                confirmation_tokens = self._matrix_confirmation_tokens.get(input_hash, [])
-                if confirmation_tokens:
-                    confirmation_tokens.pop(0)
-                    body["confirmed"] = True
-                    if not confirmation_tokens:
-                        self._matrix_confirmation_tokens.pop(input_hash, None)
+        body = self._matrix_confirmed_payload(payload)
         if "targets" in body and "target" not in body:
             body["target"] = body.pop("targets")
         matrix = self._matrix_factory()
@@ -1112,6 +1104,7 @@ class AgentService:
         return self._matrix_attachment(task, job)
 
     def _matrix_cancel(self, payload: Json) -> Json:
+        self._require_matrix_access()
         campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
         if not campaign_id:
             raise ValueError("campaignId is required")
@@ -1127,17 +1120,43 @@ class AgentService:
         if not campaign_id:
             raise ValueError("campaignId is required")
         matrix = self._matrix_factory()
-        body = dict(payload)
-        body.pop("confirmed", None)
-        if self.policy.approval_mode == "weak":
-            body["confirmed"] = True
+        body = self._matrix_confirmed_payload(payload)
         retry = matrix.retry_failed(campaign_id, body)
+        if retry.get("retried") is not True:
+            reason = str(retry.get("reason") or "当前矩阵任务没有可重试的失败项").strip()
+            raise CapabilityExecutionError(
+                "matrix_retry_not_started",
+                f"未创建矩阵重试任务：{reason}",
+                recoverable=True,
+            )
         task = retry.get("task") if isinstance(retry.get("task"), dict) else None
         if not task:
-            return retry
+            raise CapabilityExecutionError(
+                "matrix_retry_result_invalid",
+                "矩阵重试可能已经创建，但未返回可追踪的新任务",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
         body = retry.get("dispatchBody") if isinstance(retry.get("dispatchBody"), dict) else body
         job = self._start_matrix_job("matrix.retry", "Agent Matrix retry", matrix, task, body)
         return self._matrix_attachment(task, job)
+
+    def _matrix_confirmed_payload(self, payload: Mapping[str, Any]) -> Json:
+        body = dict(payload)
+        input_hash = _tool_input_hash(body)
+        body.pop("confirmed", None)
+        if self.policy.approval_mode == "weak":
+            body["confirmed"] = True
+            return body
+        with self._lock:
+            confirmation_tokens = self._matrix_confirmation_tokens.get(input_hash, [])
+            if confirmation_tokens:
+                confirmation_tokens.pop(0)
+                body["confirmed"] = True
+                if not confirmation_tokens:
+                    self._matrix_confirmation_tokens.pop(input_hash, None)
+        return body
 
     def _start_matrix_job(self, kind: str, title: str, matrix: MatrixControlPlane, task: Json, body: Json) -> Json | None:
         if self.job_manager is None or self.context_factory is None:
@@ -1147,17 +1166,36 @@ class AgentService:
         def run(job_id: str) -> Json:
             return _run_matrix_campaign(self.context_factory(), matrix, task, body, job_id)
 
-        return self.job_manager.submit_progress(
-            kind,
-            title,
-            run,
-            initial_progress={
-                "message": "Matrix task queued by central agent",
-                "phase": f"{kind}.queued",
-                "commandId": kind,
-                "campaignId": task.get("campaignId"),
-            },
-        )
+        try:
+            job = self.job_manager.submit_progress(
+                kind,
+                title,
+                run,
+                initial_progress={
+                    "message": "Matrix task queued by central agent",
+                    "phase": f"{kind}.queued",
+                    "commandId": kind,
+                    "campaignId": task.get("campaignId"),
+                },
+            )
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "matrix_job_submission_unknown",
+                "矩阵任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            ) from exc
+        job_id = str(job.get("id") or "").strip() if isinstance(job, Mapping) else ""
+        if not job_id:
+            raise CapabilityExecutionError(
+                "matrix_job_submission_unknown",
+                "矩阵任务已经提交，但未返回可追踪的任务编号，任务可能仍在执行",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        return job
 
     def _matrix_attachment(self, task: Json, job: Json | None) -> Json:
         rows = [

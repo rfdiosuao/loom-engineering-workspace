@@ -167,7 +167,13 @@ def tool_definitions() -> list[Json]:
         ),
         _tool("loom_agent_model_rollback", "Rollback one Agent model config.", "control", {"component": _string_schema("Agent component ID")}),
         _tool("loom_account_current", "Read current relay account snapshot.", "read", {}),
-        _tool("loom_account_send_code", "Send relay account email verification code.", "control", {"email": _string_schema("Email address"), "baseUrl": _string_schema("Relay base URL", required=False)}),
+        _tool(
+            "loom_account_send_code",
+            "Send relay account email verification code.",
+            "control",
+            {"email": _string_schema("Email address"), "baseUrl": _string_schema("Relay base URL", required=False)},
+            risk="outbound",
+        ),
         _tool("loom_account_login_code", "Login relay account with email code.", "control", {"email": _string_schema("Email address"), "code": _string_schema("Verification code"), "baseUrl": _string_schema("Relay base URL", required=False)}),
         _tool("loom_account_login_password", "Login relay account with username/email and password.", "control", {"username": _string_schema("Username or email"), "password": _string_schema("Password"), "baseUrl": _string_schema("Relay base URL", required=False)}),
         _tool("loom_account_sync", "Sync relay account balance and models.", "control", {}),
@@ -298,7 +304,7 @@ def tool_definitions() -> list[Json]:
             "deviceId": _string_schema("Bound device ID", required=False),
             "topic": _string_schema("Acquisition topic", required=False),
             "action": _string_schema("Acquisition action", required=False),
-        }),
+        }, risk="outbound"),
         _tool("loom_feishu_doctor", "Inspect the Feishu integration environment.", "read", {}),
         _tool("loom_feishu_status", "Read Feishu integration status.", "read", {}),
         _tool("loom_feishu_install", "Install the Feishu integration.", "admin", {
@@ -311,9 +317,9 @@ def tool_definitions() -> list[Json]:
         }),
         _tool("loom_feishu_create_table", "Create a Feishu lead table.", "control", {
             "confirmed": {"type": "boolean", "required": False},
-        }),
-        _tool("loom_feishu_test_write", "Test writing a lead row to Feishu.", "control", {}),
-        _tool("loom_feishu_retry_sync", "Retry pending Feishu synchronization.", "control", {}),
+        }, risk="critical"),
+        _tool("loom_feishu_test_write", "Test writing a lead row to Feishu.", "control", {}, risk="outbound"),
+        _tool("loom_feishu_retry_sync", "Retry pending Feishu synchronization.", "control", {}, risk="outbound"),
         _tool("loom_feishu_reconcile", "Reconcile local and Feishu synchronization state.", "control", {}),
         _tool("loom_schedule_list", "Read scheduled tasks.", "read", {}),
         _tool(
@@ -902,6 +908,7 @@ def _tool(
     *,
     target_scope: str = "none",
     any_of: Any = None,
+    risk: str | None = None,
 ) -> Json:
     required = []
     schema_properties = {}
@@ -912,12 +919,15 @@ def _tool(
             required.append(key)
         schema_properties[key] = schema
     schema_properties["dryRun"] = {"type": "boolean", "description": "只返回计划，不执行动作。"}
-    risk = {
+    derived_risk = {
         "read": "read",
         "control": "control_safe",
         "automation": "critical",
         "admin": "critical",
     }.get(permission, "critical")
+    resolved_risk = str(risk or derived_risk).strip().lower()
+    if resolved_risk not in {"read", "control_safe", "outbound", "critical"}:
+        raise ValueError(f"Unsupported tool risk: {risk}")
     input_schema = {
         "type": "object",
         "properties": schema_properties,
@@ -930,7 +940,7 @@ def _tool(
         "name": name,
         "description": f"{description} 权限：{permission}。",
         "permission": permission,
-        "risk": risk,
+        "risk": resolved_risk,
         "targetScope": target_scope,
         "inputSchema": input_schema,
     }

@@ -107,6 +107,49 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertTrue(critical.requires_approval)
         self.assertFalse(policy.evaluate({"name": "loom.matrix.status", "permission": "read", "risk": "read"}, {}).requires_approval)
 
+    def test_real_acquisition_run_requires_approval_but_preview_does_not(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="strong")
+        capability = {
+            "name": "loom.mcp.loom.loom_acquisition_agent_run",
+            "permission": "control",
+            "risk": "control_safe",
+            "targetScope": "single-device-write",
+        }
+
+        preview = policy.evaluate(
+            capability,
+            {"realRun": False, "confirmed": True, "deviceId": "phone-1"},
+        )
+        real_run = policy.evaluate(
+            capability,
+            {"realRun": True, "confirmed": True, "deviceId": "phone-1"},
+        )
+
+        self.assertFalse(preview.requires_approval)
+        self.assertEqual(real_run.classification, "critical")
+        self.assertTrue(real_run.requires_approval)
+
+    def test_real_acquisition_run_still_requires_approval_in_weak_mode(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="weak")
+        capability = {
+            "name": "loom_acquisition_agent_run",
+            "permission": "control",
+            "risk": "control_safe",
+            "targetScope": "single-device-write",
+        }
+
+        decision = policy.evaluate(
+            capability,
+            {"realRun": True, "confirmed": True, "deviceId": "phone-1"},
+        )
+
+        self.assertEqual(decision.classification, "critical")
+        self.assertTrue(decision.requires_approval)
+
     def test_free_form_and_full_matrix_dispatch_require_approval_despite_confirmed_input(self) -> None:
         from core.agent_policy import AgentPolicyEngine
 
@@ -158,6 +201,24 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertTrue(full_template.requires_approval)
         self.assertTrue(canonical_prompt_with_template.requires_approval)
         self.assertFalse(bounded_template.requires_approval)
+
+    def test_matrix_retry_requires_reapproval_in_strong_mode_only(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        capability = {
+            "name": "loom.matrix.retry",
+            "permission": "control",
+            "risk": "control_safe",
+            "targetScope": "campaign-write",
+        }
+        tool_input = {"campaignId": "campaign-full-control"}
+
+        strong = AgentPolicyEngine(approval_mode="strong").evaluate(capability, tool_input)
+        weak = AgentPolicyEngine(approval_mode="weak").evaluate(capability, tool_input)
+
+        self.assertTrue(strong.requires_approval)
+        self.assertIn("retry", strong.reason.lower())
+        self.assertFalse(weak.requires_approval)
 
     def test_weak_mode_only_requires_approval_for_critical_actions(self) -> None:
         from core.agent_policy import AgentPolicyEngine

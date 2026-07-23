@@ -236,6 +236,26 @@ class AgentSessionRepositoryTests(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(self.repository.get_approval("approval_cas")["decidedBy"], winners[0]["decidedBy"])
 
+    def test_approval_list_preserves_creation_order_when_timestamps_match(self) -> None:
+        self.repository.create_session(title="Approval order", session_id="session_order")
+        for approval_id in ("approval_z_first", "approval_a_second"):
+            self.repository.create_approval(
+                {
+                    "approvalId": approval_id,
+                    "sessionId": "session_order",
+                    "runId": "run_order",
+                    "status": "pending",
+                    "requestedAt": "2026-07-23T06:01:05Z",
+                }
+            )
+
+        approvals = self.repository.list_approvals("session_order", run_id="run_order")
+
+        self.assertEqual(
+            [approval["approvalId"] for approval in approvals],
+            ["approval_z_first", "approval_a_second"],
+        )
+
     def test_recover_unfinished_runs_after_restart(self) -> None:
         self.repository.create_session(title="Recovery", session_id="session_runs")
         for run_id, status in (

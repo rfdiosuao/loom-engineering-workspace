@@ -1024,7 +1024,10 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
         from services.agent_service import AgentService
 
         with tempfile.TemporaryDirectory() as root:
-            jobs = RecordingJobManager()
+            jobs = SimpleNamespace(
+                submit_progress=lambda *_args, **_kwargs: {"id": "job-never"},
+                cancel_matching=lambda _predicate: [],
+            )
             context = self._context(
                 root,
                 jobs,
@@ -1037,16 +1040,188 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
                 runtime=UnavailableRuntime(),
                 context_factory=lambda: context,
                 job_manager=jobs,
-                matrix_factory=lambda: SimpleNamespace(status=lambda: {"devices": []}),
+                matrix_factory=lambda: SimpleNamespace(
+                    status=lambda: {"devices": []},
+                    dispatch=lambda _payload: {"campaignId": "campaign-never"},
+                    cancel=lambda campaign_id: {"campaignId": campaign_id, "cancelled": True},
+                    retry_failed=lambda campaign_id, _payload: {
+                        "campaignId": campaign_id,
+                        "retried": True,
+                    },
+                ),
             )
             try:
-                with self.assertRaises(CapabilityExecutionError) as raised:
-                    service.capabilities.execute("loom.matrix.status", {})
+                cases = {
+                    "loom.matrix.status": {},
+                    "loom.matrix.dispatch": {
+                        "prompt": "inspect",
+                        "targets": {"deviceIds": ["phone-1"]},
+                    },
+                    "loom.matrix.screenshot": {"deviceId": "phone-1"},
+                    "loom.matrix.cancel": {"campaignId": "campaign-1"},
+                    "loom.matrix.retry": {"campaignId": "campaign-1"},
+                }
+                for capability_name, payload in cases.items():
+                    with self.subTest(capability=capability_name):
+                        with self.assertRaises(CapabilityExecutionError) as raised:
+                            service.capabilities.execute(capability_name, payload)
+                        self.assertEqual(raised.exception.code, "LICENSE_FEATURE_REQUIRED")
             finally:
                 service.shutdown()
 
             self.assertEqual(raised.exception.code, "LICENSE_FEATURE_REQUIRED")
             self.assertIn("手机连接页", str(raised.exception))
+
+    def test_matrix_job_submit_disconnect_is_indeterminate_and_may_continue(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        class SubmitDisconnectJobManager:
+            def submit_progress(self, *_args, **_kwargs):
+                raise ConnectionResetError("submit response lost")
+
+        matrix = SimpleNamespace(
+            dispatch=lambda _payload: {
+                "campaignId": "campaign-submitted",
+                "status": "queued",
+                "missions": [],
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            jobs = SubmitDisconnectJobManager()
+            context = self._context(root, jobs)
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.dispatch",
+                        {
+                            "prompt": "inspect",
+                            "targets": {"deviceIds": ["phone-1"]},
+                        },
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_job_submission_unknown")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_matrix_job_submit_without_job_id_is_not_reported_as_completed(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        jobs = SimpleNamespace(
+            submit_progress=lambda *_args, **_kwargs: {"status": "queued"},
+        )
+        matrix = SimpleNamespace(
+            dispatch=lambda _payload: {
+                "campaignId": "campaign-missing-job-id",
+                "status": "queued",
+                "missions": [],
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            context = self._context(root, jobs)
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: matrix,
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.dispatch",
+                        {
+                            "prompt": "inspect",
+                            "targets": {"deviceIds": ["phone-1"]},
+                        },
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_job_submission_unknown")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
+
+    def test_matrix_retry_without_failed_tasks_is_not_reported_as_completed(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.agent_policy import AgentPolicyEngine
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        matrix = SimpleNamespace(
+            retry_failed=lambda campaign_id, _payload: {
+                "retried": False,
+                "campaignId": campaign_id,
+                "reason": "没有失败设备任务",
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.retry",
+                        {"campaignId": "campaign-no-failures"},
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_retry_not_started")
+        self.assertTrue(raised.exception.recoverable)
+        self.assertFalse(raised.exception.outcome_indeterminate)
+        self.assertFalse(raised.exception.execution_may_continue)
+
+    def test_matrix_retry_missing_new_task_is_indeterminate_not_completed(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.agent_policy import AgentPolicyEngine
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        matrix = SimpleNamespace(
+            retry_failed=lambda campaign_id, _payload: {
+                "retried": True,
+                "retryOf": campaign_id,
+            },
+        )
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            try:
+                with self.assertRaises(CapabilityExecutionError) as raised:
+                    service.capabilities.execute(
+                        "loom.matrix.retry",
+                        {"campaignId": "campaign-missing-task"},
+                    )
+            finally:
+                service.shutdown()
+
+        self.assertEqual(raised.exception.code, "matrix_retry_result_invalid")
+        self.assertFalse(raised.exception.recoverable)
+        self.assertTrue(raised.exception.outcome_indeterminate)
+        self.assertTrue(raised.exception.execution_may_continue)
 
     def test_phone_publish_terminal_job_failure_fails_the_agent_capability(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError

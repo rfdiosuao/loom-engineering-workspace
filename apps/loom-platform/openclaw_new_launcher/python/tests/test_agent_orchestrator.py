@@ -1711,6 +1711,74 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(resolved_event["data"]["status"], "approved")
         self.assertEqual(resolved_event["data"]["runId"], "run-approval")
 
+    def test_approval_injects_server_confirmation_for_confirmation_gated_tool(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        calls: list[dict] = []
+        runtime = ScriptedRuntime(
+            [
+                {
+                    "toolCalls": [
+                        {
+                            "toolCallId": "call-create-table",
+                            "name": "loom.mcp.loom.loom_feishu_create_table",
+                            "input": {"confirmed": False},
+                        }
+                    ]
+                },
+                {"final": {"text": "飞书表格已创建。"}},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.mcp.loom.loom_feishu_create_table": {
+                        "executor": lambda payload: calls.append(dict(payload)) or {"ok": True},
+                        "permission": "control",
+                        "risk": "critical",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"confirmed": {"type": "boolean"}},
+                        },
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                AgentEventBus(repository),
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="strong"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-create-table")
+
+            waiting = orchestrator.execute_run(
+                "session-1",
+                "run-create-table",
+                {"prompt": "创建飞书线索表"},
+            )
+            approval = repository.list_approvals("session-1", run_id="run-create-table")[0]
+            outcome = orchestrator.resolve_approval(
+                "session-1",
+                approval["approvalId"],
+                decision="approved",
+                decided_by="user-1",
+                request={"prompt": "创建飞书线索表"},
+            )
+
+        self.assertEqual(waiting["status"], "waiting_approval")
+        self.assertEqual(outcome["run"]["status"], "completed")
+        self.assertEqual(calls, [{"confirmed": True}])
+
     def test_rejected_approval_finishes_the_queued_tool_row(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
 
@@ -2919,7 +2987,11 @@ class AgentOrchestratorTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as root:
-            repository, bus, registry, policy, calls = self._dependencies(root, runtime)
+            repository, bus, registry, policy, calls = self._dependencies(
+                root,
+                runtime,
+                approval_mode="weak",
+            )
             orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
             orchestrator.queue_run("session-1", run_id="run-campaign-scope")
 

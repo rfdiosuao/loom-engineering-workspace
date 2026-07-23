@@ -1125,7 +1125,8 @@ class AgentOrchestrator:
             "tool.started",
             {"toolCallId": call_id, "capability": call["name"], "inputSummary": _summary(call["input"])},
         )
-        result = self.capabilities.execute(call["name"], call["input"])
+        execution_input = _approved_execution_input(call["input"], capability) if approval is not None else call["input"]
+        result = self.capabilities.execute(call["name"], execution_input)
         completed_checkpoint = copy.deepcopy(checkpoint)
         try:
             safe_result = redact_sensitive(result)
@@ -1728,6 +1729,15 @@ def _normalize_tool_call(value: Any) -> Json:
     ):
         raise ValueError("Tool call requires toolCallId, name, and object input.")
     return {"toolCallId": call_id, "name": name, "input": dict(raw_input)}
+
+
+def _approved_execution_input(tool_input: Mapping[str, Any], capability: Any) -> Json:
+    schema = capability.get("inputSchema") if isinstance(capability, Mapping) else getattr(capability, "input_schema", {})
+    properties = schema.get("properties") if isinstance(schema, Mapping) else {}
+    confirmed_schema = properties.get("confirmed") if isinstance(properties, Mapping) else None
+    if not isinstance(confirmed_schema, Mapping) or confirmed_schema.get("type") != "boolean":
+        return dict(tool_input)
+    return {**dict(tool_input), "confirmed": True}
 
 
 def _normalize_tool_call_batch(values: list[Any], request: Mapping[str, Any]) -> list[Json]:

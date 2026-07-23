@@ -528,19 +528,16 @@ class AgentSessionRepository:
     def list_approvals(self, session_id: str, run_id: Optional[str] = None) -> list[JsonObject]:
         with self._lock:
             self._require_session_unlocked(session_id)
-            approvals_dir = os.path.join(self._session_dir(session_id), "approvals")
+            index = self._load_index_unlocked()
             approvals = []
-            try:
-                filenames = os.listdir(approvals_dir)
-            except OSError:
-                filenames = []
-            for filename in filenames:
-                if not filename.endswith(".json"):
+            for approval_id, owner in index["approvals"].items():
+                if owner != session_id:
                     continue
-                approval = _read_json(os.path.join(approvals_dir, filename))
+                approval = _read_json(self._approval_path(session_id, approval_id))
                 if isinstance(approval, dict) and (run_id is None or approval.get("runId") == run_id):
                     approvals.append(approval)
-            return copy.deepcopy(sorted(approvals, key=lambda item: str(item.get("approvalId", ""))))
+            approvals.sort(key=lambda item: str(item.get("requestedAt") or ""))
+            return copy.deepcopy(approvals)
 
     def create_message_run(
         self,
