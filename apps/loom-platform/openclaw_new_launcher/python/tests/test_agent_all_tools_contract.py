@@ -419,6 +419,158 @@ class AgentAllToolsContractTests(unittest.TestCase):
         self.assertEqual(len(calls), len(capabilities))
         self.assertEqual(approval_count, expected_approvals)
 
+    def test_every_connected_production_tool_completes_the_agent_orchestration_contract(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+        from core.paths import AppPaths
+        from services.agent_service import AgentService
+
+        class _ConnectedJobManager:
+            def submit_progress(self, *_args, **_kwargs):
+                return {"id": "unused-contract-job"}
+
+        calls: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory() as root:
+            discovery_service = AgentService(
+                AppPaths(root),
+                runtime=object(),
+                context_factory=lambda: object(),
+                job_manager=_ConnectedJobManager(),
+            )
+            try:
+                production_capabilities = discovery_service.capabilities.list_capabilities(
+                    available_only=True,
+                )
+            finally:
+                discovery_service.shutdown()
+
+            operations: dict[str, dict[str, Any]] = {}
+            for capability in production_capabilities:
+                name = str(capability["name"])
+                output = _minimal_value(capability["outputSchema"])
+
+                def execute(
+                    payload,
+                    *,
+                    cancellation_token=None,
+                    capability_name=name,
+                    capability_output=output,
+                ):
+                    calls.append({
+                        "name": capability_name,
+                        "payload": dict(payload),
+                        "cancelled": bool(cancellation_token and cancellation_token.cancelled),
+                    })
+                    return capability_output
+
+                operations[name] = {
+                    **capability,
+                    "executor": execute,
+                }
+
+            registry = CapabilityRegistry(
+                internal_operations=operations,
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            connected = registry.list_capabilities(available_only=True)
+            self.assertEqual(
+                {item["name"] for item in connected},
+                {item["name"] for item in production_capabilities},
+            )
+
+            repository = AgentSessionRepository(root)
+            event_bus = AgentEventBus(repository)
+            expected_approvals = 0
+            approval_count = 0
+
+            for index, capability in enumerate(connected):
+                name = str(capability["name"])
+                session_id = f"production-tool-session-{index}"
+                run_id = f"production-tool-run-{index}"
+                repository.create_session(capability["displayName"], session_id=session_id)
+                payload = _minimal_value(capability["inputSchema"])
+                target_scope = capability["targetScope"]
+                request: dict[str, Any] = {
+                    "prompt": capability["displayName"],
+                    "capabilityHints": [name],
+                }
+
+                if target_scope in {
+                    "single-device-read",
+                    "single-device-write",
+                    "optional-device-write",
+                }:
+                    for key in ("deviceId", "device", "target", "targets", "deviceIds", "groups", "allOnline"):
+                        payload.pop(key, None)
+                    request["targets"] = {"deviceIds": ["phone-1"]}
+                elif target_scope == "matrix-write":
+                    for key in ("deviceId", "group", "target", "targets", "deviceIds", "groups", "allOnline"):
+                        payload.pop(key, None)
+                    request["targets"] = {"allOnline": True}
+                elif target_scope == "campaign-write":
+                    for key in ("campaignId", "id"):
+                        payload.pop(key, None)
+                    request["campaignIds"] = ["campaign-1"]
+
+                requires_approval = capability["risk"] in {"outbound", "critical"}
+                if name == "loom.matrix.dispatch":
+                    assignments = payload.get("deviceAssignments")
+                    requires_approval = requires_approval or (
+                        str(payload.get("mode") or "").strip().lower() == "full"
+                        or bool(str(payload.get("prompt") or "").strip())
+                        or (
+                            isinstance(assignments, list)
+                            and any(
+                                isinstance(assignment, Mapping)
+                                and bool(str(assignment.get("prompt") or "").strip())
+                                for assignment in assignments
+                            )
+                        )
+                    )
+                expected_approvals += int(requires_approval)
+
+                before_calls = len(calls)
+                orchestrator = AgentOrchestrator(
+                    repository,
+                    event_bus,
+                    _SingleToolRuntime(name, payload),
+                    registry,
+                    AgentPolicyEngine(approval_mode="strong"),
+                )
+                orchestrator.queue_run(session_id, run_id=run_id)
+                result = orchestrator.execute_run(session_id, run_id, request)
+                if result["status"] == "waiting_approval":
+                    self.assertTrue(requires_approval, name)
+                    approval_count += 1
+                    approvals = repository.list_approvals(session_id, run_id=run_id)
+                    self.assertEqual(len(approvals), 1, name)
+                    result = orchestrator.resolve_approval(
+                        session_id,
+                        approvals[0]["approvalId"],
+                        decision="approved",
+                        decided_by="production-contract-test",
+                        request=request,
+                    )["run"]
+                else:
+                    self.assertFalse(requires_approval, name)
+
+                self.assertEqual(result["status"], "completed", name)
+                self.assertEqual(len(calls), before_calls + 1, name)
+                if target_scope in {"single-device-read", "single-device-write"}:
+                    self.assertEqual(calls[-1]["payload"]["deviceId"], "phone-1", name)
+                if target_scope == "matrix-write":
+                    self.assertEqual(calls[-1]["payload"]["targets"], {"allOnline": True}, name)
+                if target_scope == "campaign-write":
+                    self.assertEqual(calls[-1]["payload"]["campaignId"], "campaign-1", name)
+
+            self.assertEqual(len(calls), len(connected))
+            self.assertEqual(approval_count, expected_approvals)
+
 
 if __name__ == "__main__":
     unittest.main()
