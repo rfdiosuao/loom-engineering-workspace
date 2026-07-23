@@ -65,6 +65,8 @@ class AgentPolicyEngine:
         searchable = f"{name} {action_content}"
         if _is_real_acquisition_run(name, tool_input or {}):
             return "critical"
+        if _is_committed_external_publish(name, tool_input or {}):
+            return "critical"
         if _is_media_generation_capability(name) and _media_transfer_targets(tool_input or {}):
             return "outbound"
         if any(marker in searchable for marker in _CRITICAL_MARKERS):
@@ -99,7 +101,7 @@ class AgentPolicyEngine:
                 if self.approval_mode == "weak"
                 else "External communication requires approval."
             ),
-            "critical": "Critical account, payment, deletion, or security action requires approval.",
+            "critical": "Critical account, payment, deletion, security, or committed external action requires approval.",
         }
         reason = (
             "Matrix dispatch or retry requires user approval."
@@ -210,6 +212,8 @@ class AgentPolicyEngine:
     def _targets_allowed(self, targets: Mapping[str, Any]) -> bool:
         if self.authorized_device_ids is None:
             return True
+        if "groups" in targets or "allOnline" in targets:
+            return False
         raw_devices = targets.get("deviceIds", [])
         if not isinstance(raw_devices, list):
             return False
@@ -368,6 +372,10 @@ def _is_real_acquisition_run(capability_name: str, tool_input: Mapping[str, Any]
         return False
     value = tool_input.get("realRun")
     return value is True or str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_committed_external_publish(capability_name: str, tool_input: Mapping[str, Any]) -> bool:
+    return capability_name == "loom.phone.publish" and tool_input.get("draftOnly") is False
 
 
 def _summarize(value: Any, *, depth: int = 0) -> Any:

@@ -570,6 +570,25 @@ class FeishuAcquisitionIntegrationContractTests(unittest.TestCase):
         self.assertNotIn("secret-token", serialized)
         self.assertNotIn("13800000000", serialized)
 
+    def test_test_write_uses_a_unique_business_key_even_within_one_second(self) -> None:
+        from core.feishu_integration import FeishuAcquisitionIntegration
+        from core.paths import AppPaths
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch("core.feishu_integration.time.time", return_value=1234):
+            integration = FeishuAcquisitionIntegration(
+                AppPaths(base_path=temp_dir),
+                command_resolver=lambda _name: "",
+            )
+            first = integration.test_write()
+            second = integration.test_write()
+            pending = integration.pending_syncs()
+
+        self.assertEqual(first["syncStatus"], "pending_sync")
+        self.assertEqual(second["syncStatus"], "pending_sync")
+        self.assertNotEqual(first["leadId"], second["leadId"])
+        self.assertEqual(len(pending), 2)
+        self.assertEqual({item["businessKey"] for item in pending}, {first["leadId"], second["leadId"]})
+
     def test_acquisition_demo_flow_uses_pending_sync_when_feishu_unbound(self) -> None:
         from core.paths import AppPaths
         from core.phone_matrix import MatrixControlPlane

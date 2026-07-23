@@ -774,6 +774,44 @@ class MatrixRouteContractTests(unittest.TestCase):
         self.assertEqual(states[first["campaignId"]], "cancelled")
         self.assertEqual(states[second["campaignId"]], "cancelled")
 
+    def test_matrix_cancel_missing_campaign_returns_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+
+            response = client.post(
+                "/api/matrix/cancel",
+                json={"campaignId": "campaign-missing"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "matrix_campaign_not_found")
+
+    def test_matrix_cancel_false_result_is_not_reported_as_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            from core.phone_matrix import MatrixControlPlane
+
+            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            task = matrix.dispatch(
+                {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
+            )
+            matrix.record_result(
+                task["missions"][0]["deviceTasks"][0]["deviceTaskId"],
+                ok=True,
+                duration_ms=10,
+            )
+
+            response = client.post(
+                "/api/matrix/cancel",
+                json={"campaignId": task["campaignId"]},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "matrix_cancel_not_applied")
+        self.assertFalse(response.json()["cancelled"])
+        self.assertEqual(response.json()["campaignStatus"], "succeeded")
+
     def test_matrix_cancel_all_never_starts_a_device_waiting_for_concurrency(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             first_started = threading.Event()
@@ -1209,6 +1247,45 @@ class MatrixRouteContractTests(unittest.TestCase):
         self.assertTrue(retry_payload["retry"]["retried"])
         self.assertEqual(retry_payload["retry"]["retryOf"], campaign_id)
         self.assertTrue(retry_payload["retry"]["task"]["campaignId"].startswith("campaign_"))
+
+    def test_matrix_retry_missing_campaign_returns_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+
+            response = client.post(
+                "/api/matrix/retry",
+                json={"campaignId": "campaign-missing"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "matrix_campaign_not_found")
+
+    def test_matrix_retry_without_failed_tasks_returns_actionable_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            from core.phone_matrix import MatrixControlPlane
+
+            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            task = matrix.dispatch(
+                {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
+            )
+            matrix.record_result(
+                task["missions"][0]["deviceTasks"][0]["deviceTaskId"],
+                ok=True,
+                duration_ms=10,
+            )
+
+            response = client.post(
+                "/api/matrix/retry",
+                json={"campaignId": task["campaignId"]},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertEqual(payload["code"], "matrix_retry_not_available")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["error"], payload["retry"]["reason"])
 
 
 def _write_script(base_path: str, name: str, *, return_code: int = 0, body: str = "") -> None:

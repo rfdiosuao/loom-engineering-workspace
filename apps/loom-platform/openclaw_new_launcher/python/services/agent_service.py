@@ -152,7 +152,7 @@ class AgentService:
             skill_provider=self._skill_service.list_skills,
             skill_executor=self._load_skill_instructions,
         )
-        self.policy = policy or AgentPolicyEngine(approval_mode="weak")
+        self.policy = policy if policy is not None else AgentPolicyEngine(approval_mode="strong")
         self.orchestrator = AgentOrchestrator(
             self.repository,
             self.event_bus,
@@ -359,7 +359,8 @@ class AgentService:
         if model_id:
             run["modelId"] = model_id
             run["modelSource"] = model_source
-        with self._lock:
+        # Span the active-run check and commit across services sharing this repository.
+        with self._lock, self.repository._lock:
             existing = self.repository.find_message_run(session_id, client_message_id)
             if existing is not None:
                 return {"message": existing["message"], "run": existing["run"]}

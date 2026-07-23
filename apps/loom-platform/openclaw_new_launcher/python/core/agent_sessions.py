@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -12,13 +13,20 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 JsonObject = Dict[str, Any]
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: Dict[str, threading.RLock] = {}
+_PROCESS_LOCKS: Dict[str, "_InterProcessFileLock"] = {}
 _REDACTED = "[REDACTED]"
 _REMOVABLE_RUN_FIELDS = frozenset({"error", "completedAt"})
 _SENSITIVE_KEYS = {
@@ -52,6 +60,94 @@ class RepositoryConflictError(RuntimeError):
     """Raised when a repository compare-and-swap observes stale state."""
 
 
+class _InterProcessFileLock:
+    """Exclusive OS lock with recursion handled by the surrounding path RLock."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._owner_pid: Optional[int] = None
+        self._owner_thread: Optional[int] = None
+        self._depth = 0
+        self._handle: Any = None
+
+    def __enter__(self) -> "_InterProcessFileLock":
+        pid = os.getpid()
+        thread_id = threading.get_ident()
+        if self._owner_pid == pid and self._owner_thread == thread_id:
+            self._depth += 1
+            return self
+
+        if self._owner_pid is not None and self._owner_pid != pid:
+            self._discard_inherited_state()
+        if self._depth:
+            raise RuntimeError("repository process lock entered without its path RLock")
+
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        handle = open(self.path, "a+b", buffering=0)
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+            self._acquire_os_lock(handle)
+        except BaseException:
+            handle.close()
+            raise
+
+        self._handle = handle
+        self._owner_pid = pid
+        self._owner_thread = thread_id
+        self._depth = 1
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        if self._owner_pid != os.getpid() or self._owner_thread != threading.get_ident():
+            raise RuntimeError("repository process lock released by a non-owner")
+        self._depth -= 1
+        if self._depth:
+            return
+
+        handle = self._handle
+        self._handle = None
+        self._owner_pid = None
+        self._owner_thread = None
+        try:
+            self._release_os_lock(handle)
+        finally:
+            handle.close()
+
+    def _discard_inherited_state(self) -> None:
+        handle = self._handle
+        self._handle = None
+        self._owner_pid = None
+        self._owner_thread = None
+        self._depth = 0
+        if handle is not None:
+            handle.close()
+
+    @staticmethod
+    def _acquire_os_lock(handle: Any) -> None:
+        if os.name != "nt":
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            return
+        while True:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                time.sleep(0.025)
+
+    @staticmethod
+    def _release_os_lock(handle: Any) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -60,6 +156,16 @@ def _path_lock(path: str) -> threading.RLock:
     key = os.path.normcase(os.path.abspath(path))
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(key, threading.RLock())
+
+
+def _path_process_lock(path: str) -> _InterProcessFileLock:
+    absolute = os.path.abspath(path)
+    key = os.path.normcase(absolute)
+    with _LOCKS_GUARD:
+        return _PROCESS_LOCKS.setdefault(
+            key,
+            _InterProcessFileLock(os.path.join(absolute, ".repository.lock")),
+        )
 
 
 def _atomic_write_json(path: str, value: Any) -> None:
@@ -197,14 +303,21 @@ class AgentSessionRepository:
         self.sessions_root = os.path.join(self.root, "sessions")
         self.index_path = os.path.join(self.root, "sessions-index.json")
         self._lock = _path_lock(self.root)
+        self._process_lock = _path_process_lock(self.root)
         self._event_states: dict[
             str,
             tuple[tuple[int, int], int, dict[str, JsonObject], list[JsonObject]],
         ] = {}
-        with self._lock:
+        with self._locked():
             os.makedirs(self.sessions_root, exist_ok=True)
             index = self._load_index_unlocked()
             self._recover_message_transactions_unlocked(index)
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self._lock:
+            with self._process_lock:
+                yield
 
     def create_session(
         self,
@@ -231,7 +344,7 @@ class AgentSessionRepository:
         }
         if safe_model_id:
             session["modelId"] = safe_model_id
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             if session_id in index["sessions"]:
                 raise ValueError("session already exists")
@@ -246,7 +359,7 @@ class AgentSessionRepository:
         return copy.deepcopy(session)
 
     def get_session(self, session_id: str) -> JsonObject:
-        with self._lock:
+        with self._locked():
             session = self._load_index_unlocked()["sessions"].get(session_id)
             if not isinstance(session, dict):
                 raise KeyError(session_id)
@@ -274,7 +387,7 @@ class AgentSessionRepository:
         for key in ("title", "runtimeProfileId", "lastMessagePreview"):
             if key in requested:
                 requested[key] = sanitize_for_storage(requested[key])
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             current = index["sessions"].get(session_id)
             if not isinstance(current, dict):
@@ -305,7 +418,7 @@ class AgentSessionRepository:
         if limit < 1 or limit > 200:
             raise ValueError("limit must be between 1 and 200")
         offset = _decode_cursor(cursor)
-        with self._lock:
+        with self._locked():
             sessions = list(self._load_index_unlocked()["sessions"].values())
         if status is not None:
             sessions = [item for item in sessions if item.get("status") == status]
@@ -326,7 +439,7 @@ class AgentSessionRepository:
         return result
 
     def append_message(self, session_id: str, message: JsonObject) -> JsonObject:
-        with self._lock:
+        with self._locked():
             self._require_session_unlocked(session_id)
             sanitized = sanitize_for_storage(message)
             self._validate_owned_record(sanitized, "messageId", session_id)
@@ -347,7 +460,7 @@ class AgentSessionRepository:
         if limit < 1 or limit > 500:
             raise ValueError("limit must be between 1 and 500")
         cursor_end = _decode_cursor(cursor) if cursor else None
-        with self._lock:
+        with self._locked():
             self._require_session_unlocked(session_id)
             messages = _read_jsonl(self._messages_path(session_id))
         end = len(messages) if cursor_end is None else min(cursor_end, len(messages))
@@ -359,13 +472,13 @@ class AgentSessionRepository:
         return result
 
     def create_run(self, run: JsonObject) -> JsonObject:
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             sanitized = sanitize_for_storage(run)
             return copy.deepcopy(self._create_run_unlocked(index, sanitized))
 
     def get_run(self, run_id: str, session_id: Optional[str] = None) -> JsonObject:
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             owner = session_id or index["runs"].get(run_id)
             if not owner:
@@ -388,7 +501,7 @@ class AgentSessionRepository:
         allowed_statuses = frozenset(str(status) for status in expected_statuses if str(status))
         if not allowed_statuses:
             raise ValueError("expected_statuses is required")
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             owner = session_id or index["runs"].get(run_id)
             if not owner:
@@ -427,7 +540,7 @@ class AgentSessionRepository:
     ) -> JsonObject:
         if not isinstance(lease_id, str) or not lease_id.strip():
             raise ValueError("lease_id is required")
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             owner = session_id or index["runs"].get(run_id)
             if not owner:
@@ -472,7 +585,7 @@ class AgentSessionRepository:
         *,
         remove_fields: tuple[str, ...] = (),
     ) -> JsonObject:
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             owner = session_id or index["runs"].get(run_id)
             if not owner:
@@ -509,7 +622,7 @@ class AgentSessionRepository:
         *,
         remove_fields: tuple[str, ...] = (),
     ) -> JsonObject:
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             owner = session_id or index["runs"].get(run_id)
             if not owner:
@@ -530,7 +643,7 @@ class AgentSessionRepository:
             return copy.deepcopy(updated)
 
     def list_runs(self, session_id: str) -> list[JsonObject]:
-        with self._lock:
+        with self._locked():
             self._require_session_unlocked(session_id)
             runs_dir = os.path.join(self._session_dir(session_id), "runs")
             runs = []
@@ -548,7 +661,7 @@ class AgentSessionRepository:
 
     def recover_unfinished_runs(self) -> list[JsonObject]:
         unfinished_statuses = {"queued", "running", "waiting_approval", "paused"}
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             recovered_with_times = []
             for run_id, session_id in index["runs"].items():
@@ -579,7 +692,7 @@ class AgentSessionRepository:
             return [copy.deepcopy(item[2]) for item in recovered_with_times]
 
     def create_approval(self, approval: JsonObject) -> JsonObject:
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             sanitized = sanitize_for_storage(approval)
             session_id = sanitized.get("sessionId")
@@ -595,7 +708,7 @@ class AgentSessionRepository:
             return copy.deepcopy(sanitized)
 
     def get_approval(self, approval_id: str, session_id: Optional[str] = None) -> JsonObject:
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             owner = session_id or index["approvals"].get(approval_id)
             if not owner:
@@ -611,7 +724,7 @@ class AgentSessionRepository:
         changes: JsonObject,
         session_id: Optional[str] = None,
     ) -> JsonObject:
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             owner = session_id or index["approvals"].get(approval_id)
             if not owner:
@@ -633,7 +746,7 @@ class AgentSessionRepository:
         expected_status: str,
         session_id: Optional[str] = None,
     ) -> JsonObject:
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             owner = session_id or index["approvals"].get(approval_id)
             if not owner:
@@ -652,7 +765,7 @@ class AgentSessionRepository:
             return copy.deepcopy(updated)
 
     def list_approvals(self, session_id: str, run_id: Optional[str] = None) -> list[JsonObject]:
-        with self._lock:
+        with self._locked():
             self._require_session_unlocked(session_id)
             index = self._load_index_unlocked()
             approvals = []
@@ -674,7 +787,7 @@ class AgentSessionRepository:
     ) -> JsonObject:
         if not client_message_id:
             raise ValueError("clientMessageId is required")
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             self._require_session_unlocked(session_id, index)
             session_keys = index["clientMessages"].setdefault(session_id, {})
@@ -709,7 +822,7 @@ class AgentSessionRepository:
     def find_message_run(self, session_id: str, client_message_id: str) -> JsonObject | None:
         if not client_message_id:
             return None
-        with self._lock:
+        with self._locked():
             index = self._load_index_unlocked()
             self._require_session_unlocked(session_id, index)
             existing = index["clientMessages"].get(session_id, {}).get(client_message_id)
@@ -722,7 +835,7 @@ class AgentSessionRepository:
             }
 
     def append_event(self, session_id: str, event: JsonObject) -> JsonObject:
-        with self._lock:
+        with self._locked():
             self._require_session_unlocked(session_id)
             sanitized = sanitize_for_storage(event)
             event_id = sanitized.get("eventId")
@@ -777,7 +890,7 @@ class AgentSessionRepository:
             raise ValueError("after_seq must not be negative")
         if limit is not None and limit < 1:
             raise ValueError("limit must be positive")
-        with self._lock:
+        with self._locked():
             self._require_session_unlocked(session_id)
             _last_seq, _events_by_id, cached_events = self._event_state_unlocked(
                 self._events_path(session_id)
@@ -793,7 +906,7 @@ class AgentSessionRepository:
         return copy.deepcopy(events)
 
     def rebuild_index(self) -> JsonObject:
-        with self._lock:
+        with self._locked():
             return copy.deepcopy(self._rebuild_index_unlocked())
 
     def _session_dir(self, session_id: str) -> str:

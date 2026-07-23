@@ -15,7 +15,27 @@ def register_diagnostics_routes(app, ctx) -> None:
     async def diagnostics_run(request: Request):
         if error := ctx.auth_error(request):
             return error
-        return ctx.fastapi_json(ctx.build_diagnostics_payload())
+        body = await ctx.body(request)
+        scope = str(
+            body.get("scope")
+            or request.query_params.get("scope")
+            or ""
+        ).strip().lower()
+        if scope == "prerequisites":
+            payload = dict(ctx.build_prerequisite_diagnostics_payload())
+            payload["scope"] = scope
+            return ctx.fastapi_json(payload)
+        if scope not in {"", "all", "environment"}:
+            return ctx.fastapi_json({
+                "error": {
+                    "code": "unsupported_diagnostics_scope",
+                    "message": f"不支持 diagnostics scope: {scope}",
+                },
+            }, 400)
+        payload = dict(ctx.build_diagnostics_payload())
+        if scope:
+            payload["scope"] = scope
+        return ctx.fastapi_json(payload)
 
     @app.api_route("/api/diagnostics/prerequisites", methods=["GET", "POST"])
     async def diagnostics_prerequisites(request: Request):

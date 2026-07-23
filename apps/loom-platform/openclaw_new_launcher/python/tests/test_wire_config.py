@@ -1376,6 +1376,53 @@ class WireServiceTests(unittest.TestCase):
             )
 
             self.assertFalse(os.path.exists(paths.wire_last_good))
+
+    def test_verify_candidate_checks_remote_models_without_persisting_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            secret = "sk-candidate-secret-not-real"
+
+            with mock.patch.object(
+                wire_config_module,
+                "_provider_json_request",
+                return_value={"data": [{"id": "gpt-test"}, {"id": "gpt-other"}]},
+            ) as request:
+                result = service.verify_candidate(
+                    provider="Example",
+                    base_url="https://api.example.invalid/v1",
+                    api_key=secret,
+                    text_model="gpt-test",
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["model"], "gpt-test")
+            self.assertEqual(result["availableModelCount"], 2)
+            self.assertNotIn(secret, repr(result))
+            self.assertFalse(os.path.exists(paths.wire_current))
+            request.assert_called_once_with(
+                "https://api.example.invalid/v1/models",
+                secret,
+                method="GET",
+            )
+
+    def test_verify_candidate_rejects_model_missing_from_remote_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = WireService(AppPaths(temp_dir))
+            with mock.patch.object(
+                wire_config_module,
+                "_provider_json_request",
+                return_value={"data": [{"id": "gpt-other"}]},
+            ):
+                with self.assertRaises(WireConfigError) as caught:
+                    service.verify_candidate(
+                        provider="Example",
+                        base_url="https://api.example.invalid/v1",
+                        api_key="sk-candidate-secret-not-real",
+                        text_model="gpt-missing",
+                    )
+
+            self.assertIn("selected_model_not_listed", str(caught.exception))
             with self.assertRaises(WireConfigError):
                 service.rollback()
 

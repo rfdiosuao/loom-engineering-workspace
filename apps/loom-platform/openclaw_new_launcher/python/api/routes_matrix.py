@@ -411,11 +411,49 @@ def register_matrix_routes(app, ctx) -> None:
         campaign_id = str(body.get("campaignId") or body.get("id") or "").strip()
         if not campaign_id:
             return ctx.fastapi_json({"error": "campaignId is required"}, 400)
+        matrix = _matrix(ctx)
+        try:
+            result = matrix.cancel(campaign_id)
+        except MatrixTargetError as exc:
+            return _matrix_target_error_response(ctx, exc)
+        status = matrix.status(campaign_id)
+        campaign = _matrix_campaign_from_status(status, campaign_id)
+        campaign_status = str(campaign.get("status") or "") if campaign else ""
+        if result.get("cancelled") is not True:
+            execution_may_continue = campaign_status not in {
+                "succeeded",
+                "completed",
+                "failed",
+                "needs_human",
+                "cancelled",
+            }
+            return ctx.fastapi_json({
+                **result,
+                "error": "Matrix campaign cancellation was not applied.",
+                "code": "matrix_cancel_not_applied",
+                "campaignStatus": campaign_status,
+                "status": status,
+                "retryable": False,
+                "outcomeIndeterminate": execution_may_continue,
+                "executionMayContinue": execution_may_continue,
+            }, 409)
         job_ids = job_manager.cancel_matching(
             lambda job: str((job.get("progress") or {}).get("campaignId") or "") == campaign_id
         )
-        result = _matrix(ctx).cancel(campaign_id)
         result["cancelledJobIds"] = job_ids
+        if not campaign:
+            return ctx.fastapi_json({
+                **result,
+                "error": "Cancellation was requested, but authoritative campaign status is unavailable.",
+                "code": "matrix_cancel_status_unknown",
+                "campaignStatus": "",
+                "status": status,
+                "retryable": False,
+                "outcomeIndeterminate": True,
+                "executionMayContinue": True,
+            }, 409)
+        result["campaignStatus"] = campaign_status
+        result["status"] = status
         return ctx.fastapi_json(result)
 
     @app.post("/api/matrix/emergency-stop")
@@ -493,11 +531,20 @@ def register_matrix_routes(app, ctx) -> None:
         except MatrixSafetyError as exc:
             return ctx.fastapi_json({"error": exc.message, "code": exc.code}, 403)
         except MatrixTargetError as exc:
-            return ctx.fastapi_json({"error": exc.message, "code": exc.code}, 409)
+            return _matrix_target_error_response(ctx, exc)
         task = retry.get("task") if isinstance(retry.get("task"), dict) else None
         dispatch_body = retry.get("dispatchBody") if isinstance(retry.get("dispatchBody"), dict) else body
         if not task:
-            return ctx.fastapi_json({"retry": retry, "status": matrix.status()})
+            reason = str(retry.get("reason") or "Matrix retry was not started.")
+            return ctx.fastapi_json({
+                "error": reason,
+                "code": str(retry.get("code") or "matrix_retry_not_started"),
+                "retryable": retry.get("retryable") is not False,
+                "outcomeIndeterminate": retry.get("outcomeIndeterminate") is True,
+                "executionMayContinue": retry.get("executionMayContinue") is True,
+                "retry": retry,
+                "status": matrix.status(campaign_id),
+            }, 409)
 
         def run(job_id: str) -> dict:
             ctx.get_job_mgr().progress(
@@ -847,13 +894,24 @@ def _submit_matrix_resume_job(ctx, matrix: MatrixControlPlane, device_task_id: s
 
 
 def _matrix_target_error_response(ctx, exc: MatrixTargetError):
-    if exc.code in {"matrix_target_not_found", "matrix_task_not_found"}:
+    if exc.code in {"matrix_target_not_found", "matrix_task_not_found", "matrix_campaign_not_found"}:
         status = 404
     elif exc.code in {"matrix_invalid_lease", "matrix_invalid_control"}:
         status = 400
     else:
         status = 409
     return ctx.fastapi_json({"error": exc.message, "code": exc.code}, status)
+
+
+def _matrix_campaign_from_status(status: dict, campaign_id: str) -> dict | None:
+    campaigns = status.get("campaigns") if isinstance(status, dict) else None
+    for campaign in campaigns if isinstance(campaigns, list) else []:
+        if (
+            isinstance(campaign, dict)
+            and str(campaign.get("campaignId") or "") == campaign_id
+        ):
+            return campaign
+    return None
 
 
 def _normalize_matrix_control_request(raw: dict) -> dict:

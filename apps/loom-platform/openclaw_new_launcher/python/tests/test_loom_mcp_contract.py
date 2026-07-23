@@ -209,11 +209,34 @@ class LoomMcpContractTests(unittest.TestCase):
         tools = {tool["name"]: tool for tool in loom_mcp.tool_definitions()}
 
         self.assertEqual(tools["loom_account_send_code"]["risk"], "outbound")
+        self.assertEqual(tools["loom_account_login_code"]["risk"], "critical")
+        self.assertEqual(tools["loom_account_login_password"]["risk"], "critical")
         self.assertEqual(tools["loom_feishu_create_table"]["risk"], "critical")
         self.assertEqual(tools["loom_feishu_test_write"]["risk"], "outbound")
         self.assertEqual(tools["loom_feishu_retry_sync"]["risk"], "outbound")
         self.assertEqual(tools["loom_feishu_reconcile"]["risk"], "control_safe")
         self.assertEqual(tools["loom_acquisition_agent_result"]["risk"], "outbound")
+
+    def test_state_changing_phone_event_tools_require_control_permission(self) -> None:
+        import loom_mcp
+
+        tools = {tool["name"]: tool for tool in loom_mcp.tool_definitions()}
+
+        self.assertEqual(tools["loom_phone_events_start"]["permission"], "control")
+        self.assertEqual(tools["loom_phone_events_status"]["permission"], "read")
+        self.assertEqual(tools["loom_phone_events_stop"]["permission"], "control")
+
+    def test_account_send_code_is_pinned_to_login_purpose(self) -> None:
+        import loom_mcp
+
+        tool = next(item for item in loom_mcp.tool_definitions() if item["name"] == "loom_account_send_code")
+        purpose = tool["inputSchema"]["properties"]["purpose"]
+
+        self.assertEqual(purpose["enum"], ["login"])
+        self.assertEqual(
+            loom_mcp._tool_to_cli_args("loom_account_send_code", {"email": "user@example.com"}),
+            ["account", "send-code", "--email", "user@example.com", "--purpose", "login"],
+        )
 
     def test_restricted_cli_arguments_are_discoverable_in_tool_schemas(self) -> None:
         import loom_mcp

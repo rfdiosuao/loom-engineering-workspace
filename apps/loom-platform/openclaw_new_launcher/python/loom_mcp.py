@@ -177,11 +177,20 @@ def tool_definitions() -> list[Json]:
             "loom_account_send_code",
             "Send relay account email verification code.",
             "control",
-            {"email": _string_schema("Email address"), "baseUrl": _string_schema("Relay base URL", required=False)},
+            {
+                "email": _string_schema("Email address"),
+                "baseUrl": _string_schema("Relay base URL", required=False),
+                "purpose": {
+                    "type": "string",
+                    "enum": ["login"],
+                    "description": "Verification purpose; Agent access only supports login.",
+                    "required": False,
+                },
+            },
             risk="outbound",
         ),
-        _tool("loom_account_login_code", "Login relay account with email code.", "control", {"email": _string_schema("Email address"), "code": _string_schema("Verification code"), "baseUrl": _string_schema("Relay base URL", required=False)}),
-        _tool("loom_account_login_password", "Login relay account with username/email and password.", "control", {"username": _string_schema("Username or email"), "password": _string_schema("Password"), "baseUrl": _string_schema("Relay base URL", required=False)}),
+        _tool("loom_account_login_code", "Login relay account with email code.", "control", {"email": _string_schema("Email address"), "code": _string_schema("Verification code"), "baseUrl": _string_schema("Relay base URL", required=False)}, risk="critical"),
+        _tool("loom_account_login_password", "Login relay account with username/email and password.", "control", {"username": _string_schema("Username or email"), "password": _string_schema("Password"), "baseUrl": _string_schema("Relay base URL", required=False)}, risk="critical"),
         _tool("loom_account_sync", "Sync relay account balance and models.", "control", {}),
         _tool("loom_account_subscription", "Read relay account subscription snapshot.", "read", {}),
         _tool(
@@ -282,7 +291,7 @@ def tool_definitions() -> list[Json]:
             "launch": {"type": "boolean", "required": False},
             "restartServer": {"type": "boolean", "required": False},
         }),
-        _tool("loom_phone_events_start", "Start phone event synchronization.", "read", {
+        _tool("loom_phone_events_start", "Start phone event synchronization.", "control", {
             "deviceId": _string_schema("Bound device ID", required=False),
             "maxSec": {"type": "integer", "minimum": 1, "required": False},
             "maxEvents": {"type": "integer", "minimum": 1, "required": False},
@@ -290,7 +299,7 @@ def tool_definitions() -> list[Json]:
         _tool("loom_phone_events_status", "Read phone event synchronization status.", "read", {
             "deviceId": _string_schema("Bound device ID", required=False),
         }),
-        _tool("loom_phone_events_stop", "Stop phone event synchronization.", "read", {
+        _tool("loom_phone_events_stop", "Stop phone event synchronization.", "control", {
             "deviceId": _string_schema("Bound device ID", required=False),
         }),
         _tool("loom_acquisition_agent_run", "Prepare or start a compliant acquisition Agent task.", "control", {
@@ -365,13 +374,14 @@ def tool_definitions() -> list[Json]:
                     "properties": {
                         "deviceIds": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                         "groups": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "allOnline": {"type": "boolean"},
+                        "allOnline": {"type": "boolean", "enum": [True]},
                     },
                     "oneOf": [
                         {"required": ["deviceIds"]},
                         {"required": ["groups"]},
                         {"required": ["allOnline"]},
                     ],
+                    "additionalProperties": False,
                     "required": False,
                 },
                 "mode": {"type": "string", "enum": ["observe", "safe", "full", "deep"], "required": False},
@@ -563,6 +573,7 @@ def _tool_to_cli_args(name: str, args: Json) -> list[str]:
     if name == "loom_account_send_code":
         argv = ["account", "send-code", "--email", _required(args, "email")]
         _append_optional(argv, args, "baseUrl", "--base-url")
+        argv.extend(["--purpose", str(args.get("purpose") or "login")])
         return argv
     if name == "loom_account_login_code":
         argv = ["account", "login-code", "--email", _required(args, "email"), "--code", _required(args, "code")]

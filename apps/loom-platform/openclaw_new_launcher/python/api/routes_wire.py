@@ -50,6 +50,18 @@ def register_wire_routes(app, ctx) -> None:
     async def wire_verify(request: Request):
         if error := ctx.auth_error(request):
             return error
+        body = await ctx.body(request)
+        candidate_fields = {
+            "provider": str(body.get("provider") or "").strip(),
+            "base_url": str(body.get("baseUrl") or body.get("url") or "").strip(),
+            "api_key": str(body.get("apiKey") or body.get("token") or "").strip(),
+            "text_model": str(body.get("textModel") or body.get("model") or "").strip(),
+        }
+        if any(candidate_fields.values()):
+            try:
+                return ctx.fastapi_json(ctx.get_wire_svc().verify_candidate(**candidate_fields))
+            except WireConfigError as exc:
+                return ctx.fastapi_json({"error": str(exc)}, 400)
         return ctx.fastapi_json(ctx.get_wire_svc().verify())
 
     @app.post("/api/wire/rollback")

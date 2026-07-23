@@ -85,6 +85,25 @@ class LoomCliContractTests(unittest.TestCase):
         )
         self.assertEqual(commands["phone status"].get("targetScope", "none"), "none")
 
+    def test_phone_event_stream_mutations_require_control_permission(self) -> None:
+        from loom_cli import _command_catalog, dispatch
+
+        catalog = _command_catalog()
+        commands = {
+            command["name"]: command
+            for domain in catalog["domains"]
+            for command in domain["commands"]
+        }
+
+        self.assertEqual(commands["phone events-start"]["permission"], "control")
+        self.assertEqual(commands["phone events-stop"]["permission"], "control")
+        for action in ("events-start", "events-stop"):
+            with self.subTest(action=action):
+                code, payload = dispatch(["phone", action, "--json", "--dry-run"])
+
+                self.assertEqual(code, 3)
+                self.assertEqual(payload["error"]["code"], "permission_denied")
+
     def test_commands_catalog_exposes_runtime_paths_for_packaged_layouts(self) -> None:
         from loom_cli import dispatch
 
@@ -285,6 +304,16 @@ class LoomCliContractTests(unittest.TestCase):
             {"scope": "prerequisites", "confirmed": True},
         )
 
+    def test_diagnostics_run_preserves_scope(self) -> None:
+        from loom_cli import dispatch
+
+        code, payload = dispatch(
+            ["diagnostics", "run", "--scope", "prerequisites", "--dry-run", "--json"]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["data"]["body"], {"scope": "prerequisites"})
+
     def test_diagnostics_repair_rejects_unsupported_target(self) -> None:
         from loom_cli import dispatch
 
@@ -361,12 +390,25 @@ class LoomCliContractTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(payload["error"]["code"], "permission_denied")
 
-    def test_phone_event_stream_wrappers_are_read_permission_dry_runs(self) -> None:
+    def test_phone_event_stream_wrappers_use_matching_permissions(self) -> None:
         from loom_cli import dispatch
 
         cases = [
             (
-                ["phone", "events-start", "--device-id", "phone-1", "--max-sec", "3600", "--max-events", "0", "--json", "--dry-run"],
+                [
+                    "phone",
+                    "events-start",
+                    "--device-id",
+                    "phone-1",
+                    "--max-sec",
+                    "3600",
+                    "--max-events",
+                    "0",
+                    "--permission",
+                    "control",
+                    "--json",
+                    "--dry-run",
+                ],
                 "POST",
                 "/api/phone/events/start",
             ),
@@ -376,7 +418,16 @@ class LoomCliContractTests(unittest.TestCase):
                 "/api/phone/events/status?deviceId=phone-1",
             ),
             (
-                ["phone", "events-stop", "--device-id", "phone-1", "--json", "--dry-run"],
+                [
+                    "phone",
+                    "events-stop",
+                    "--device-id",
+                    "phone-1",
+                    "--permission",
+                    "control",
+                    "--json",
+                    "--dry-run",
+                ],
                 "POST",
                 "/api/phone/events/stop",
             ),
@@ -931,6 +982,159 @@ class LoomCliContractTests(unittest.TestCase):
         self.assertNotIn("secret-value", json.dumps(payloads[1], ensure_ascii=False))
         self.assertEqual(payloads[2]["data"]["endpoint"], "/api/components/model-config/apply")
         self.assertEqual(payloads[3]["data"]["endpoint"], "/api/account/subscription")
+
+    def test_account_send_code_is_explicitly_for_login(self) -> None:
+        from loom_cli import dispatch
+
+        code, payload = dispatch(
+            [
+                "account",
+                "send-code",
+                "--email",
+                "user@example.invalid",
+                "--permission",
+                "control",
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["data"]["body"]["purpose"], "login")
+
+    def test_account_select_models_preserves_phone_model(self) -> None:
+        from loom_cli import dispatch
+
+        code, payload = dispatch(
+            [
+                "account",
+                "select-models",
+                "--phone-model",
+                "agnes-2.0-flash",
+                "--permission",
+                "control",
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["data"]["body"]["phoneModel"], "agnes-2.0-flash")
+
+    def test_wire_verify_preserves_declared_provider_options(self) -> None:
+        from loom_cli import dispatch
+
+        code, payload = dispatch(
+            [
+                "wire",
+                "verify",
+                "--base-url",
+                "https://api.example.invalid/v1",
+                "--api-key",
+                "not-a-real-secret",
+                "--text-model",
+                "qwen-test",
+                "--provider",
+                "example",
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            payload["data"]["body"],
+            {
+                "baseUrl": "https://api.example.invalid/v1",
+                "apiKey": "***",
+                "textModel": "qwen-test",
+                "provider": "example",
+            },
+        )
+
+    def test_settings_theme_set_uses_persisting_route(self) -> None:
+        from loom_cli import dispatch
+
+        code, payload = dispatch(
+            [
+                "settings",
+                "theme",
+                "--set",
+                "dark",
+                "--permission",
+                "control",
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["data"]["method"], "POST")
+        self.assertEqual(payload["data"]["endpoint"], "/api/theme/current")
+        self.assertEqual(payload["data"]["body"], {"theme": "dark"})
+
+    def test_bridge_2xx_business_failures_return_structured_errors(self) -> None:
+        import loom_cli
+
+        cases = [
+            (
+                {"ok": False, "error": {"code": "operation_blocked", "message": "blocked"}},
+                "operation_blocked",
+            ),
+            (
+                {"success": False, "code": "sync_failed", "message": "sync failed"},
+                "sync_failed",
+            ),
+            (
+                {"sent": False, "error": {"code": "email_code_not_sent", "message": "not sent"}},
+                "email_code_not_sent",
+            ),
+            (
+                {"status": "failed", "error": {"code": "verification_failed", "message": "bad wire"}},
+                "verification_failed",
+            ),
+            (
+                {"status": "error", "code": "runtime_error", "message": "runtime failed"},
+                "runtime_error",
+            ),
+            (
+                {"error": {"code": "upstream_error", "message": "upstream failed"}},
+                "upstream_error",
+            ),
+        ]
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+        for bridge_payload, expected_code in cases:
+            with self.subTest(bridge_payload=bridge_payload):
+                with patch(
+                    "urllib.request.urlopen",
+                    return_value=FakeResponse(bridge_payload),
+                ):
+                    code, payload = loom_cli.dispatch(
+                        [
+                            "account",
+                            "current",
+                            "--bridge-url",
+                            "http://127.0.0.1:18888",
+                            "--json",
+                        ]
+                    )
+
+                self.assertEqual(code, 4)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], expected_code)
 
     def test_media_generation_cli_commands_mark_shared_library_source(self) -> None:
         from loom_cli import dispatch

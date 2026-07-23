@@ -172,14 +172,22 @@ def register_account_routes(app, ctx) -> None:
         body = await ctx.body(request)
         email = str(body.get("email") or "").strip()
         base_url = str(body.get("baseUrl") or "").strip()
-        purpose = str(body.get("purpose") or body.get("mode") or body.get("scene") or "").strip()
+        purpose = str(body.get("purpose") or body.get("mode") or body.get("scene") or "login").strip()
         try:
             result = ctx.get_newapi_account_mgr().send_email_code(
                 email,
                 base_url=base_url,
                 purpose=purpose,
             )
-            return ctx.fastapi_json(_public_email_code_response(result, email))
+            response = _public_email_code_response(result, email)
+            if response.get("sent") is False:
+                message = _friendly_account_error(response.get("message") or "email code was not sent")
+                response["error"] = {
+                    "code": "email_code_not_sent",
+                    "message": message,
+                }
+                return ctx.fastapi_json(response, 502)
+            return ctx.fastapi_json(response)
         except NewApiAccountError as exc:
             return ctx.fastapi_json({"error": _friendly_account_error(exc, f"email_code_send:{purpose}")}, 400)
 
@@ -285,12 +293,16 @@ def register_account_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         body = await ctx.body(request)
+        phone_model = str(body.get("phoneModel") or body.get("phone") or "").strip()
+        model_args = {
+            "text_model": str(body.get("textModel") or body.get("text") or "").strip(),
+            "image_model": str(body.get("imageModel") or body.get("image") or "").strip(),
+            "video_model": str(body.get("videoModel") or body.get("video") or "").strip(),
+        }
+        if phone_model:
+            model_args["phone_model"] = phone_model
         try:
-            account = ctx.get_newapi_account_mgr().select_models(
-                text_model=str(body.get("textModel") or body.get("text") or "").strip(),
-                image_model=str(body.get("imageModel") or body.get("image") or "").strip(),
-                video_model=str(body.get("videoModel") or body.get("video") or "").strip(),
-            )
+            account = ctx.get_newapi_account_mgr().select_models(**model_args)
             return ctx.fastapi_json({"account": account})
         except NewApiAccountError as exc:
             return ctx.fastapi_json({"error": _friendly_account_error(exc)}, 400)

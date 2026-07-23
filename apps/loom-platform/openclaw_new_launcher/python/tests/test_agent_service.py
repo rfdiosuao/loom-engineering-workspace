@@ -469,8 +469,8 @@ class AgentServiceTests(unittest.TestCase):
             {"modelId": "glm-5", "name": "glm-5", "available": True},
             {"modelId": "qwen3.7-plus", "name": "qwen3.7-plus", "available": True},
         ])
-        self.assertEqual(bootstrap["policy"]["mode"], "weak")
-        self.assertEqual(bootstrap["policy"]["approvalRequired"], ["critical"])
+        self.assertEqual(bootstrap["policy"]["mode"], "strong")
+        self.assertEqual(bootstrap["policy"]["approvalRequired"], ["outbound", "critical"])
         self.assertTrue(bootstrap["permissions"]["outbound"])
 
     def test_native_capability_catalog_returns_the_live_connected_registry(self) -> None:
@@ -665,6 +665,76 @@ class AgentServiceTests(unittest.TestCase):
             finally:
                 runtime.release.set()
                 service.shutdown()
+
+    def test_session_active_run_check_is_atomic_across_service_instances(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            first_runtime = BlockingRuntime()
+            second_runtime = BlockingRuntime()
+            first_service = AgentService(AppPaths(root), runtime=first_runtime, capabilities=_registry())
+            second_service = AgentService(AppPaths(root), runtime=second_runtime, capabilities=_registry())
+            release_first_check = threading.Event()
+            first_check_completed = threading.Event()
+            second_submission_completed = threading.Event()
+            outcomes: dict[str, object] = {}
+            threads: list[threading.Thread] = []
+            try:
+                session = first_service.create_session({"title": "Cross-service single run"})
+                original_list_runs = first_service.repository.list_runs
+
+                def pause_after_first_check(session_id: str) -> list[dict]:
+                    runs = original_list_runs(session_id)
+                    first_check_completed.set()
+                    if not release_first_check.wait(5.0):
+                        raise RuntimeError("timed out waiting to continue first submission")
+                    return runs
+
+                first_service.repository.list_runs = pause_after_first_check  # type: ignore[method-assign]
+
+                def submit(label: str, service: AgentService) -> None:
+                    try:
+                        outcomes[label] = service.send_message(
+                            session["sessionId"],
+                            {
+                                "clientMessageId": f"cross-service-{label}",
+                                "text": label,
+                            },
+                        )
+                    except Exception as exc:
+                        outcomes[label] = exc
+                    finally:
+                        if label == "second":
+                            second_submission_completed.set()
+
+                first_thread = threading.Thread(target=submit, args=("first", first_service))
+                second_thread = threading.Thread(target=submit, args=("second", second_service))
+                threads = [first_thread, second_thread]
+                first_thread.start()
+                self.assertTrue(first_check_completed.wait(2.0))
+                second_thread.start()
+
+                crossed_check_create_window = second_submission_completed.wait(2.0)
+                release_first_check.set()
+                for thread in threads:
+                    thread.join(5.0)
+
+                self.assertFalse(crossed_check_create_window)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+                successes = [value for value in outcomes.values() if isinstance(value, dict)]
+                failures = [value for value in outcomes.values() if isinstance(value, Exception)]
+                self.assertEqual(len(successes), 1)
+                self.assertEqual(len(failures), 1)
+                self.assertRegex(str(failures[0]), "already active")
+                self.assertEqual(len(original_list_runs(session["sessionId"])), 1)
+            finally:
+                release_first_check.set()
+                first_runtime.release.set()
+                second_runtime.release.set()
+                for thread in threads:
+                    thread.join(1.0)
+                first_service.shutdown()
+                second_service.shutdown()
 
     def test_quick_pause_then_resume_chains_continuation_after_worker_wind_down(self) -> None:
         from services.agent_service import AgentService
@@ -1540,7 +1610,12 @@ class AgentServiceTests(unittest.TestCase):
         ])
         with tempfile.TemporaryDirectory() as root:
             matrix = ConfirmationMatrix(require_confirmation=True)
-            service = AgentService(AppPaths(root), runtime=runtime, matrix_factory=lambda: matrix)
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
             try:
                 session = service.create_session({"title": "Weak dispatch"})
                 sent = service.send_message(session["sessionId"], {

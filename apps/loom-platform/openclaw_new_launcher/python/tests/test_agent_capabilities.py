@@ -617,6 +617,88 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(mcp["tool"], "search_logs")
         self.assertEqual(cli["command"], "phone status")
 
+    def test_mcp_discovery_preserves_original_ids_and_avoids_sanitized_collisions(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        calls = []
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [
+                {
+                    "server": "local server",
+                    "name": "read/a",
+                    "description": "slash tool",
+                    "inputSchema": {"type": "object", "additionalProperties": False},
+                    "permission": "read",
+                    "risk": "read",
+                },
+                {
+                    "server": "local server",
+                    "name": "read a",
+                    "description": "space tool",
+                    "inputSchema": {"type": "object", "additionalProperties": False},
+                    "permission": "read",
+                    "risk": "read",
+                },
+            ],
+            mcp_executor=lambda server, tool, payload: calls.append((server, tool, payload)) or {
+                "server": server,
+                "tool": tool,
+            },
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        tools = {
+            item["description"]: item["name"]
+            for item in registry.list_capabilities(available_only=True)
+        }
+        self.assertNotEqual(tools["slash tool"], tools["space tool"])
+        self.assertEqual(
+            registry.execute(tools["slash tool"], {}),
+            {"server": "local server", "tool": "read/a"},
+        )
+        self.assertEqual(
+            registry.execute(tools["space tool"], {}),
+            {"server": "local server", "tool": "read a"},
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("local server", "read/a", {}),
+                ("local server", "read a", {}),
+            ],
+        )
+
+    def test_skill_discovery_preserves_original_id_after_safe_model_naming(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+
+        calls = []
+        registry = CapabilityRegistry(
+            internal_operations={},
+            skill_provider=lambda: [{
+                "id": "screen reader/zh",
+                "description": "screen reader",
+                "permission": "read",
+                "risk": "read",
+            }],
+            skill_executor=lambda skill_id, payload: calls.append((skill_id, payload)) or {
+                "skillId": skill_id,
+            },
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        capability = next(
+            item
+            for item in registry.list_capabilities(available_only=True)
+            if item["description"] == "screen reader"
+        )
+        result = registry.execute(capability["name"], {})
+
+        self.assertEqual(result, {"skillId": "screen reader/zh"})
+        self.assertEqual(calls, [("screen reader/zh", {})])
+
     def test_discovery_is_reused_across_list_resolve_validate_and_read_execution(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import re
 import threading
@@ -847,14 +848,20 @@ class CapabilityRegistry:
         for item in items if isinstance(items, Sequence) and not isinstance(items, (str, bytes)) else []:
             if not isinstance(item, Mapping) or not item.get("installed", True) or not item.get("enabled", True):
                 continue
-            skill_id = _safe_name(item.get("id") or item.get("name"))
-            if not skill_id:
+            raw_skill_id = str(item.get("id") or item.get("name") or "").strip()
+            if not raw_skill_id or not _safe_name(raw_skill_id):
                 continue
             executor = item.get("executor") if callable(item.get("executor")) else None
             if executor is None and self.skill_executor is not None:
                 skill_executor = self.skill_executor
 
-                def executor(payload, *, cancellation_token, skill_id=skill_id, skill_executor=skill_executor):
+                def executor(
+                    payload,
+                    *,
+                    cancellation_token,
+                    skill_id=raw_skill_id,
+                    skill_executor=skill_executor,
+                ):
                     return _invoke_with_optional_cancellation(
                         skill_executor,
                         skill_id,
@@ -864,7 +871,7 @@ class CapabilityRegistry:
             permission, risk = _external_policy_metadata(item)
             capabilities.append(
                 _capability_from_spec(
-                    f"loom.skill.{skill_id}",
+                    _external_capability_id("skill", raw_skill_id),
                     "skill",
                     {
                         **item,
@@ -884,16 +891,16 @@ class CapabilityRegistry:
         for item in items if isinstance(items, Sequence) and not isinstance(items, (str, bytes)) else []:
             if not isinstance(item, Mapping):
                 continue
-            server = _safe_name(item.get("server") or "default")
-            tool = _safe_name(item.get("name"))
-            if not server or not tool:
+            raw_server = str(item.get("server") or "default").strip()
+            raw_tool = str(item.get("name") or "").strip()
+            if not raw_server or not raw_tool or not _safe_name(raw_server) or not _safe_name(raw_tool):
                 continue
             permission, risk = _external_policy_metadata(item)
             executor = item.get("executor") if callable(item.get("executor")) else None
             if (
                 executor is None
                 and self.mcp_executor is not None
-                and (not self._uses_default_mcp_executor or server == "loom")
+                and (not self._uses_default_mcp_executor or raw_server == "loom")
             ):
                 mcp_executor = self.mcp_executor
 
@@ -901,8 +908,8 @@ class CapabilityRegistry:
                     payload,
                     *,
                     cancellation_token,
-                    server=server,
-                    tool=tool,
+                    server=raw_server,
+                    tool=raw_tool,
                     mcp_executor=mcp_executor,
                     permission=permission,
                     risk=risk,
@@ -937,10 +944,10 @@ class CapabilityRegistry:
                             risk=risk,
                         )
                     return payload
-            localized = _external_capability_metadata("mcp", tool, server=server)
+            localized = _external_capability_metadata("mcp", raw_tool, server=raw_server)
             capabilities.append(
                 _capability_from_spec(
-                    f"loom.mcp.{server}.{tool}",
+                    _external_capability_id("mcp", raw_server, raw_tool),
                     "mcp",
                     {
                         **item,
@@ -1192,6 +1199,16 @@ def _external_policy_metadata(spec: Mapping[str, Any], *, derive_risk_from_permi
 
 def _safe_name(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip(".-")[:160]
+
+
+def _external_capability_id(source: str, *raw_parts: str) -> str:
+    safe_parts = [_safe_name(part) for part in raw_parts]
+    base = ".".join(["loom", _safe_name(source), *safe_parts])
+    if all(raw == safe for raw, safe in zip(raw_parts, safe_parts)):
+        return base
+    digest_input = json.dumps(list(raw_parts), ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:12]
+    return f"{base}.{digest}"
 
 
 def _safe_provider_call(provider: Callable[[], Any]) -> Any:

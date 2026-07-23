@@ -167,6 +167,22 @@ class AgentBuiltinCapabilityProvider:
             getattr(self.job_manager, "submit_progress", None)
         )
         return {
+            "loom.matrix.status": {
+                "executor": self._matrix_status,
+                "permission": "read",
+                "risk": "read",
+            },
+            "loom.matrix.cancel": {
+                "executor": self._matrix_cancel,
+                "permission": "control",
+                "risk": "control_safe",
+            },
+            "loom.matrix.retry": {
+                "executor": self._matrix_retry,
+                "permission": "control",
+                "risk": "control_safe",
+                "timeoutSec": 180,
+            },
             "loom.media.assets.list": {
                 "executor": self._list_media_assets if context_connected else None,
                 "displayName": "查看本地素材",
@@ -240,6 +256,237 @@ class AgentBuiltinCapabilityProvider:
                 "outputSchema": MEDIA_JOB_OUTPUT_SCHEMA,
             },
         }
+
+    def _require_matrix_access(self) -> None:
+        if not callable(self.context_factory):
+            return
+        try:
+            context = self.context_factory()
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "手机矩阵授权校验服务尚未就绪",
+            ) from exc
+        protected_error = getattr(context, "protected_error", None)
+        if not callable(protected_error):
+            raise CapabilityExecutionError(
+                "capability_unavailable",
+                "手机矩阵授权校验服务尚未就绪",
+            )
+        if protected_error("/api/matrix/status"):
+            raise CapabilityExecutionError(
+                "LICENSE_FEATURE_REQUIRED",
+                "请先在手机连接页激活手机矩阵授权",
+                recoverable=False,
+            )
+
+    def _matrix_status(self, payload: Json) -> Json:
+        self._require_matrix_access()
+        campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
+        return self.matrix_factory().status(campaign_id or None)
+
+    def _matrix_cancel(self, payload: Json) -> Json:
+        self._require_matrix_access()
+        campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
+        if not campaign_id:
+            raise ValueError("campaignId is required")
+        matrix = self.matrix_factory()
+        before = matrix.status(campaign_id)
+        if self._matrix_campaign_status(before, campaign_id) is None:
+            raise CapabilityExecutionError(
+                "matrix_campaign_not_found",
+                f"Matrix campaign not found: {campaign_id}",
+                recoverable=False,
+            )
+        result = matrix.cancel(campaign_id)
+        if not isinstance(result, dict):
+            raise CapabilityExecutionError(
+                "matrix_cancel_result_invalid",
+                "Matrix cancellation returned an invalid receipt.",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        status = matrix.status(campaign_id)
+        campaign_status = self._matrix_campaign_status(status, campaign_id)
+        if campaign_status is None:
+            raise CapabilityExecutionError(
+                "matrix_cancel_status_unknown",
+                "Cancellation was requested, but authoritative campaign status is unavailable.",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        if result.get("cancelled") is not True:
+            execution_may_continue = campaign_status not in {
+                "succeeded",
+                "completed",
+                "failed",
+                "needs_human",
+                "cancelled",
+            }
+            raise CapabilityExecutionError(
+                "matrix_cancel_not_applied",
+                f"Matrix cancellation was not applied; campaign status is {campaign_status}.",
+                recoverable=False,
+                outcome_indeterminate=execution_may_continue,
+                execution_may_continue=execution_may_continue,
+            )
+        local_cancellation_requested = None
+        if self.job_manager is not None:
+            try:
+                self.job_manager.cancel_matching(
+                    lambda job: str((job.get("progress") or {}).get("campaignId") or "") == campaign_id
+                )
+                local_cancellation_requested = True
+            except Exception:
+                local_cancellation_requested = False
+        return {
+            **result,
+            "campaignStatus": campaign_status,
+            "authoritativeStatus": status,
+            "localCancellationRequested": local_cancellation_requested,
+        }
+
+    def _matrix_retry(self, payload: Json) -> Json:
+        self._require_matrix_access()
+        campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
+        if not campaign_id:
+            raise ValueError("campaignId is required")
+        matrix = self.matrix_factory()
+        body = dict(payload)
+        # Capability execution only occurs after the Agent policy gate approves the call.
+        body["confirmed"] = True
+        try:
+            retry = matrix.retry_failed(campaign_id, body)
+        except Exception as exc:
+            code = str(getattr(exc, "code", "") or "")
+            if code == "matrix_campaign_not_found":
+                raise CapabilityExecutionError(
+                    code,
+                    str(exc),
+                    recoverable=False,
+                ) from exc
+            raise
+        if retry.get("retried") is not True:
+            reason = str(
+                retry.get("reason")
+                or "No retryable failed Matrix device tasks are available."
+            ).strip()
+            outcome_indeterminate = (
+                retry.get("outcomeIndeterminate") is True
+                or retry.get("executionMayContinue") is True
+            )
+            raise CapabilityExecutionError(
+                str(retry.get("code") or "matrix_retry_not_started"),
+                f"Matrix retry was not created: {reason}",
+                recoverable=bool(retry.get("retryable", True)) and not outcome_indeterminate,
+                outcome_indeterminate=outcome_indeterminate,
+                execution_may_continue=retry.get("executionMayContinue") is True,
+            )
+        task = retry.get("task") if isinstance(retry.get("task"), dict) else None
+        if not task:
+            raise CapabilityExecutionError(
+                "matrix_retry_result_invalid",
+                "Matrix retry may have been created, but no trackable task was returned.",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=True,
+            )
+        dispatch_body = (
+            retry.get("dispatchBody")
+            if isinstance(retry.get("dispatchBody"), dict)
+            else body
+        )
+        job = self._start_matrix_job(
+            "matrix.retry",
+            "Agent Matrix retry",
+            matrix,
+            task,
+            dispatch_body,
+        )
+        return {
+            **self._matrix_attachment(task, job),
+            "retryOf": campaign_id,
+            "failureReasons": retry.get("failureReasons", []),
+        }
+
+    def _start_matrix_job(
+        self,
+        kind: str,
+        title: str,
+        matrix: Any,
+        task: Json,
+        body: Json,
+    ) -> Json | None:
+        if self.job_manager is None or not callable(self.context_factory):
+            return None
+        from api.routes_matrix import _run_matrix_campaign
+
+        def run(job_id: str) -> Json:
+            return _run_matrix_campaign(self.context_factory(), matrix, task, body, job_id)
+
+        try:
+            job = self.job_manager.submit_progress(
+                kind,
+                title,
+                run,
+                initial_progress={
+                    "message": "Matrix task queued by central agent",
+                    "phase": f"{kind}.queued",
+                    "commandId": kind,
+                    "campaignId": task.get("campaignId"),
+                },
+            )
+        except Exception as exc:
+            raise _post_submission_error(
+                "matrix_job_submission_unknown",
+                "Matrix retry may have been submitted, but its receipt was lost.",
+                execution_may_continue=True,
+            ) from exc
+        job_id = str(job.get("id") or "").strip() if isinstance(job, dict) else ""
+        if not job_id:
+            raise _post_submission_error(
+                "matrix_job_submission_unknown",
+                "Matrix retry was submitted without a trackable job ID.",
+                execution_may_continue=True,
+            )
+        return job
+
+    @staticmethod
+    def _matrix_attachment(task: Json, job: Json | None) -> Json:
+        rows = [
+            item
+            for mission in task.get("missions", [])
+            if isinstance(mission, dict)
+            for item in mission.get("deviceTasks", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "campaignId": str(task.get("campaignId") or ""),
+            "jobId": str(job.get("id") or "") if isinstance(job, dict) else "",
+            "status": str(task.get("status") or "queued"),
+            "counts": {
+                "total": len(rows),
+                "completed": sum(
+                    item.get("status") in {"completed", "succeeded"} for item in rows
+                ),
+                "failed": sum(item.get("status") in {"failed", "needs_human"} for item in rows),
+                "running": sum(item.get("status") in {"running", "queued", "retrying"} for item in rows),
+            },
+            "deviceTasks": rows,
+        }
+
+    @staticmethod
+    def _matrix_campaign_status(status: Json, campaign_id: str) -> str | None:
+        campaigns = status.get("campaigns") if isinstance(status, dict) else None
+        for campaign in campaigns if isinstance(campaigns, list) else []:
+            if (
+                isinstance(campaign, dict)
+                and str(campaign.get("campaignId") or "") == campaign_id
+            ):
+                return str(campaign.get("status") or "")
+        return None
 
     def _list_media_assets(self, payload: Json) -> Json:
         if not callable(self.context_factory):

@@ -144,6 +144,37 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertTrue(critical.requires_approval)
         self.assertFalse(policy.evaluate({"name": "loom.matrix.status", "permission": "read", "risk": "read"}, {}).requires_approval)
 
+    def test_device_allowlist_fails_closed_for_unresolved_group_and_all_online_targets(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(
+            approval_mode="strong",
+            authorized_device_ids={"phone-1"},
+        )
+        capability = {
+            "name": "loom.matrix.dispatch",
+            "permission": "control",
+            "risk": "control_safe",
+        }
+
+        explicit = policy.evaluate(
+            capability,
+            {"targets": {"deviceIds": ["phone-1"]}},
+        )
+        unresolved_targets = (
+            {"groups": ["sales"]},
+            {"allOnline": True},
+            {"deviceIds": ["phone-1"], "groups": ["sales"]},
+        )
+
+        self.assertTrue(explicit.allowed)
+        for targets in unresolved_targets:
+            with self.subTest(targets=targets):
+                decision = policy.evaluate(capability, {"targets": targets})
+                self.assertFalse(decision.allowed)
+                self.assertFalse(decision.requires_approval)
+                self.assertIn("authorized device scope", decision.reason)
+
     def test_real_acquisition_run_requires_approval_but_preview_does_not(self) -> None:
         from core.agent_policy import AgentPolicyEngine
 
@@ -279,6 +310,30 @@ class AgentPolicyEngineTests(unittest.TestCase):
         self.assertFalse(free_form_matrix.requires_approval)
         self.assertTrue(critical.requires_approval)
         self.assertIn("explicit user request", outbound.reason.lower())
+
+    def test_weak_mode_requires_approval_for_committed_external_publish(self) -> None:
+        from core.agent_policy import AgentPolicyEngine
+
+        policy = AgentPolicyEngine(approval_mode="weak")
+        capability = {
+            "name": "loom.phone.publish",
+            "permission": "control",
+            "risk": "outbound",
+        }
+
+        draft = policy.evaluate(
+            capability,
+            {"target": {"deviceIds": ["phone-1"]}, "draftOnly": True},
+        )
+        committed_publish = policy.evaluate(
+            capability,
+            {"target": {"deviceIds": ["phone-1"]}, "draftOnly": False},
+        )
+
+        self.assertFalse(draft.requires_approval)
+        self.assertEqual(committed_publish.classification, "critical")
+        self.assertTrue(committed_publish.requires_approval)
+        self.assertIn("approval", committed_publish.reason.lower())
 
     def test_approval_is_redacted_and_scoped_to_one_exact_tool_call(self) -> None:
         from core.agent_policy import AgentPolicyEngine
