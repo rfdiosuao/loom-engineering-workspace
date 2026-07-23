@@ -47,7 +47,14 @@ RUNTIME_PROGRESS_EVENT_TYPES = frozenset({
 class AgentRepositoryProtocol(Protocol):
     def create_run(self, run: Json) -> Json: ...
     def get_run(self, run_id: str, session_id: str | None = None) -> Json: ...
-    def update_run(self, run_id: str, changes: Json, session_id: str | None = None) -> Json: ...
+    def update_run(
+        self,
+        run_id: str,
+        changes: Json,
+        session_id: str | None = None,
+        *,
+        remove_fields: tuple[str, ...] = (),
+    ) -> Json: ...
     def recover_unfinished_runs(self) -> list[Json]: ...
     def create_approval(self, approval: Json) -> Json: ...
     def get_approval(self, approval_id: str, session_id: str | None = None) -> Json: ...
@@ -506,7 +513,12 @@ class AgentOrchestrator:
         session_id = str(run["sessionId"])
         with self._lock:
             self._controls[run_id] = _RunControl()
-        self.repository.update_run(run_id, {"status": "queued"}, session_id=session_id)
+        self.repository.update_run(
+            run_id,
+            {"status": "queued"},
+            session_id=session_id,
+            remove_fields=("error", "completedAt"),
+        )
         return self.execute_run(session_id, run_id, request)
 
     def cancel_run(self, run_id: str, *, session_id: str | None = None) -> Json:

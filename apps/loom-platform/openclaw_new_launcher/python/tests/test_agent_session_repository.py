@@ -259,6 +259,41 @@ class AgentSessionRepositoryTests(unittest.TestCase):
         self.assertEqual({run["runId"] for run in recovered}, {"run_running", "run_paused"})
         self.assertEqual(restarted.get_session("session_runs")["activeRunId"], "run_paused")
 
+    def test_run_update_only_removes_allowlisted_transient_fields(self) -> None:
+        self.repository.create_session(title="Transient fields", session_id="session_transient")
+        self.repository.create_run(
+            {
+                "schema": "loom.agent.run.v1",
+                "runId": "run_transient",
+                "sessionId": "session_transient",
+                "status": "paused",
+                "campaignIds": [],
+                "error": {
+                    "code": "agent_restart_recovery",
+                    "message": "safe to resume",
+                    "recoverable": True,
+                },
+                "completedAt": "2026-07-23T00:00:00Z",
+            }
+        )
+
+        updated = self.repository.update_run(
+            "run_transient",
+            {"status": "queued"},
+            remove_fields=("error", "completedAt"),
+        )
+
+        self.assertEqual(updated["status"], "queued")
+        self.assertNotIn("error", updated)
+        self.assertNotIn("completedAt", updated)
+        with self.assertRaisesRegex(ValueError, "run field cannot be removed"):
+            self.repository.update_run(
+                "run_transient",
+                {},
+                remove_fields=("runId",),
+            )
+        self.assertEqual(self.repository.get_run("run_transient")["runId"], "run_transient")
+
     def test_client_message_id_is_idempotent_after_restart_and_index_rebuild(self) -> None:
         self.repository.create_session(title="Idempotency", session_id="session_idempotent")
         first = self.repository.create_message_run(

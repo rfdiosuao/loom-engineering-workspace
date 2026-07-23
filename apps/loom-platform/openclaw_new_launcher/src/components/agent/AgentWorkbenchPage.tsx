@@ -102,6 +102,11 @@ function isTerminalRun(run: AgentRun): boolean {
   return run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
 }
 
+export function afterAgentResumeAccepted(run: AgentRun): AgentRun {
+  if (run.status !== 'paused') return run;
+  return { ...run, status: 'queued', error: undefined };
+}
+
 export function sessionRetryDelayMs(attempt: number): number {
   return Math.min(1000 * (2 ** Math.max(0, attempt - 1)), 8000);
 }
@@ -409,6 +414,20 @@ export function AgentWorkbenchPage() {
     }
   };
 
+  const resumeCurrentRun = async () => {
+    if (!currentRun || currentRun.status !== 'paused') return;
+    setBusyKey(currentRun.runId);
+    try {
+      const response = await agentApi.resume(currentRun.runId);
+      useAgentStore.getState().upsertRun(afterAgentResumeAccepted(response.run));
+      setTraceRefreshToken((value) => value + 1);
+    } catch (reason) {
+      showToast(errorMessage(reason, '继续任务失败'), 'error');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const matrixAction = async (scopeId: string, action: 'pause' | 'resume' | 'cancel') => {
     const actionLabels = { pause: '暂停', resume: '继续', cancel: '中断' } as const;
     setBusyKey(scopeId);
@@ -499,9 +518,12 @@ export function AgentWorkbenchPage() {
             disabled={!currentSession || currentSession.status === 'archived'}
             sending={sending}
             running={runActive}
+            paused={currentRun?.status === 'paused'}
+            controlBusy={Boolean(currentRun && busyKey === currentRun.runId)}
             onChange={(next) => currentSessionId && useAgentStore.getState().updateDraft(currentSessionId, next)}
             onSubmit={() => void sendMessage()}
             onStop={() => void stopCurrentRun()}
+            onResume={() => void resumeCurrentRun()}
             onSelectModel={selectSessionModel}
             onSetDefaultModel={setDefaultModel}
             onManageModels={() => openFeature('models')}

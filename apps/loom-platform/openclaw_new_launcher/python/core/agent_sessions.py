@@ -20,6 +20,7 @@ JsonObject = Dict[str, Any]
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: Dict[str, threading.RLock] = {}
 _REDACTED = "[REDACTED]"
+_REMOVABLE_RUN_FIELDS = frozenset({"error", "completedAt"})
 _SENSITIVE_KEYS = {
     "apikey",
     "authorization",
@@ -374,7 +375,14 @@ class AgentSessionRepository:
                 raise KeyError(run_id)
             return copy.deepcopy(run)
 
-    def update_run(self, run_id: str, changes: JsonObject, session_id: Optional[str] = None) -> JsonObject:
+    def update_run(
+        self,
+        run_id: str,
+        changes: JsonObject,
+        session_id: Optional[str] = None,
+        *,
+        remove_fields: tuple[str, ...] = (),
+    ) -> JsonObject:
         with self._lock:
             index = self._load_index_unlocked()
             owner = session_id or index["runs"].get(run_id)
@@ -386,6 +394,10 @@ class AgentSessionRepository:
                 raise KeyError(run_id)
             updated = dict(current)
             updated.update(sanitize_for_storage(changes))
+            for field in remove_fields:
+                if field not in _REMOVABLE_RUN_FIELDS:
+                    raise ValueError(f"run field cannot be removed: {field}")
+                updated.pop(field, None)
             _atomic_write_json(path, updated)
             self._sync_active_run_unlocked(index, owner, updated)
             self._write_index_unlocked(index)

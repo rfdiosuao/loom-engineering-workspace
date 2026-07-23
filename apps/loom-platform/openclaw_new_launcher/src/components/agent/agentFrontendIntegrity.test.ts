@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as agentWorkbench from './AgentWorkbenchPage.tsx';
+import { AgentComposer } from './AgentComposer.tsx';
 import { ConversationSidebar } from './ConversationSidebar.tsx';
 import { AgentMarkdown } from './messageBlocks.tsx';
 
@@ -62,6 +63,8 @@ test('Agent command buttons route to concrete callbacks', async () => {
     'AgentComposer.tsx': [
       /onClick=\{\(\) => onChange\(\{ attachments:/,
       /onClick=\{\(\) => fileInputRef\.current\?\.click\(\)\}/,
+      /onClick=\{onResume\}/,
+      /onClick=\{onStop\}/,
       /onClick=\{onSubmit\}/,
     ],
     'AgentApprovalCard.tsx': [/onClick=\{\(\) => void approve\(\)\}/, /onResolve\(approvalId, 'reject'\)/],
@@ -391,4 +394,60 @@ test('Agent composer owns model and scope routing without exposing capability pl
   assert.match(workbench, /accountApi\.selectModels/);
   assert.match(workbench, /agentApi\.updateSession\([^,]+, agentModelUpdateRequest\(modelId\)\)/);
   assert.doesNotMatch(workbench, /capabilityHints: outgoing|targets: outgoing/);
+});
+
+test('a safely paused Agent run exposes resume and cancel controls', () => {
+  const markup = renderToStaticMarkup(React.createElement(AgentComposer, {
+    draft: {
+      text: '',
+      attachments: [],
+      scopeMode: 'auto',
+      scope: { deviceIds: [], groups: [], allOnline: false },
+      runtimeProfileId: 'loom-native',
+    },
+    session: {
+      schema: 'loom.agent.session.v1',
+      sessionId: 'session-paused',
+      title: 'safe pause',
+      status: 'active',
+      runtimeProfileId: 'loom-native',
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    },
+    bootstrap: null,
+    running: true,
+    paused: true,
+    onChange: () => undefined,
+    onSubmit: () => undefined,
+    onStop: () => undefined,
+    onResume: () => undefined,
+    onSelectModel: async () => undefined,
+    onSetDefaultModel: async () => undefined,
+    onManageModels: () => undefined,
+  }));
+
+  assert.match(markup, /\u4efb\u52a1\u5df2\u5b89\u5168\u6682\u505c/);
+  assert.match(markup, /aria-label="\u7ee7\u7eed\u4efb\u52a1"/);
+  assert.match(markup, /aria-label="\u4e2d\u65ad\u4efb\u52a1"/);
+});
+
+test('accepted Agent resume is reflected as queued before realtime catches up', () => {
+  const afterResumeAccepted = (
+    agentWorkbench as typeof agentWorkbench & {
+      afterAgentResumeAccepted?: (run: {
+        status: string;
+        error?: unknown;
+      }) => { status: string; error?: unknown };
+    }
+  ).afterAgentResumeAccepted;
+
+  assert.equal(typeof afterResumeAccepted, 'function');
+  if (!afterResumeAccepted) return;
+  const resumed = afterResumeAccepted({
+    status: 'paused',
+    error: { code: 'agent_restart_recovery', recoverable: true },
+  });
+
+  assert.equal(resumed.status, 'queued');
+  assert.equal(resumed.error, undefined);
 });

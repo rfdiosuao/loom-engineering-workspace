@@ -1077,6 +1077,46 @@ class AgentServiceTests(unittest.TestCase):
             finally:
                 service.shutdown()
 
+    def test_restart_recovery_allows_safe_pre_tool_run_to_resume(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            repository = AgentSessionRepository(paths)
+            repository.create_session("Safe paused run", session_id="session-safe-paused")
+            repository.create_run({
+                "schema": "loom.agent.run.v1",
+                "runId": "run-safe-paused",
+                "sessionId": "session-safe-paused",
+                "status": "running",
+                "campaignIds": [],
+                "checkpoint": json.dumps({
+                    "version": 1,
+                    "completedToolCallIds": [],
+                    "toolResults": [],
+                    "inFlightToolCall": None,
+                }),
+                "request": {"prompt": "continue after restart", "runtimeProfileId": "loom-native"},
+            })
+
+            runtime = ScriptedRuntime([{"final": {"text": "resumed safely"}}])
+            service = AgentService(paths, runtime=runtime, capabilities=_registry())
+            try:
+                recovered = service.get_run("run-safe-paused")
+                self.assertEqual(recovered["status"], "paused")
+                self.assertEqual(recovered["error"]["code"], "agent_restart_recovery")
+                self.assertTrue(recovered["error"]["recoverable"])
+
+                service.resume_run("run-safe-paused")
+                completed = _wait_for_status(service, "run-safe-paused", "completed")
+
+                self.assertEqual(completed["status"], "completed")
+                self.assertNotIn("error", completed)
+                self.assertEqual(len(runtime.requests), 1)
+                self.assertEqual(runtime.requests[0]["prompt"], "continue after restart")
+            finally:
+                service.shutdown()
+
     def test_worker_crash_with_inflight_tool_is_indeterminate_and_not_retryable(self) -> None:
         from services.agent_service import AgentService
 

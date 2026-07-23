@@ -1,4 +1,4 @@
-import { ArrowUp, Paperclip, Square, X } from 'lucide-react';
+import { ArrowUp, Paperclip, Play, Square, X } from 'lucide-react';
 import { useRef, useState } from 'react';
 import type { AgentBootstrapResponse, AgentSession } from '../../types/agent';
 import type { AgentAttachmentMetadata, AgentDraft } from '../../stores/agentStore';
@@ -12,9 +12,12 @@ interface AgentComposerProps {
   disabled?: boolean;
   sending?: boolean;
   running?: boolean;
+  paused?: boolean;
+  controlBusy?: boolean;
   onChange: (draft: Partial<AgentDraft>) => void;
   onSubmit: () => void;
   onStop: () => void;
+  onResume: () => void;
   onSelectModel: (modelId?: string) => Promise<void>;
   onSetDefaultModel: (modelId: string) => Promise<void>;
   onManageModels: () => void;
@@ -78,9 +81,12 @@ export function AgentComposer({
   disabled,
   sending,
   running,
+  paused,
+  controlBusy,
   onChange,
   onSubmit,
   onStop,
+  onResume,
   onSelectModel,
   onSetDefaultModel,
   onManageModels,
@@ -94,6 +100,11 @@ export function AgentComposer({
   return (
     <div className="shrink-0 border-t border-border bg-surface px-4 pb-4 pt-3">
       <div className="mx-auto w-full max-w-[920px] overflow-visible rounded-[8px] border border-border-strong bg-input shadow-[0_10px_30px_rgba(5,35,29,0.08)] focus-within:ring-2 focus-within:ring-accent/15">
+        {paused ? (
+          <div role="status" className="flex min-h-9 items-center border-b border-status-warning/25 bg-status-warning/8 px-4 text-xs font-semibold text-text-muted">
+            任务已安全暂停，可继续执行或中断本轮任务。
+          </div>
+        ) : null}
         {draft.attachments.length ? (
           <div className="flex flex-wrap gap-2 border-b border-border px-3 py-2">
             {draft.attachments.map((attachment, index) => (
@@ -185,16 +196,41 @@ export function AgentComposer({
           />
 
           {busy ? (
-            <button
-              type="button"
-              title="停止任务"
-              aria-label="停止任务"
-              disabled={!running}
-              onClick={onStop}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[7px] bg-text text-surface hover:opacity-85 disabled:cursor-wait disabled:opacity-45"
-            >
-              <Square size={14} fill="currentColor" aria-hidden="true" />
-            </button>
+            paused ? (
+              <>
+                <button
+                  type="button"
+                  title="继续任务"
+                  aria-label="继续任务"
+                  disabled={controlBusy}
+                  onClick={onResume}
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[7px] bg-accent text-accent-ink hover:bg-accent-hover disabled:cursor-wait disabled:opacity-45"
+                >
+                  <Play size={16} fill="currentColor" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  title="中断任务"
+                  aria-label="中断任务"
+                  disabled={!running || controlBusy}
+                  onClick={onStop}
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[7px] border border-status-danger/30 bg-status-danger/10 text-status-danger hover:bg-status-danger/15 disabled:cursor-wait disabled:opacity-45"
+                >
+                  <Square size={14} fill="currentColor" aria-hidden="true" />
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                title="停止任务"
+                aria-label="停止任务"
+                disabled={!running || controlBusy}
+                onClick={onStop}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[7px] bg-text text-surface hover:opacity-85 disabled:cursor-wait disabled:opacity-45"
+              >
+                <Square size={14} fill="currentColor" aria-hidden="true" />
+              </button>
+            )
           ) : (
             <button
               type="button"
