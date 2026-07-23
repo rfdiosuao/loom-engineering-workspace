@@ -1031,7 +1031,7 @@ class AgentServiceTests(unittest.TestCase):
                 release.set()
                 service.shutdown()
 
-    def test_restart_recovery_pauses_uncertain_run_and_starts_safe_queued_run(self) -> None:
+    def test_restart_recovery_terminalizes_uncertain_run_and_starts_safe_queued_run(self) -> None:
         from services.agent_service import AgentService
 
         with tempfile.TemporaryDirectory() as root:
@@ -1066,12 +1066,157 @@ class AgentServiceTests(unittest.TestCase):
             service = AgentService(paths, runtime=runtime, capabilities=_registry())
             try:
                 uncertain = service.get_run("run-uncertain")
-                self.assertEqual(uncertain["status"], "paused")
+                self.assertEqual(uncertain["status"], "failed")
                 self.assertEqual(uncertain["error"]["code"], "agent_restart_inflight_unknown")
-                self.assertTrue(uncertain["error"]["recoverable"])
+                self.assertFalse(uncertain["error"]["recoverable"])
+                self.assertTrue(uncertain["error"]["outcomeIndeterminate"])
+                self.assertTrue(uncertain["error"]["executionMayContinue"])
                 self.assertEqual(_wait_for_status(service, "run-queued", "completed")["status"], "completed")
                 self.assertEqual(len(runtime.requests), 1)
                 self.assertEqual(runtime.requests[0]["runtimeProfileId"], "loom-native")
+            finally:
+                service.shutdown()
+
+    def test_worker_crash_with_inflight_tool_is_indeterminate_and_not_retryable(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                capabilities=_registry(),
+            )
+            try:
+                session = service.create_session({"title": "Worker crash"})
+
+                def crash_with_inflight_tool(session_id, run_id, request=None):
+                    run = service.repository.get_run(run_id, session_id=session_id)
+                    checkpoint = json.loads(str(run.get("checkpoint") or "{}"))
+                    checkpoint["inFlightToolCall"] = {
+                        "toolCallId": "tool-crashed",
+                        "name": "loom.phone.task",
+                        "input": {"deviceId": "phone-1", "task": "发布内容"},
+                    }
+                    service.repository.update_run(
+                        run_id,
+                        {
+                            "status": "running",
+                            "checkpoint": json.dumps(checkpoint, ensure_ascii=False),
+                        },
+                        session_id=session_id,
+                    )
+                    raise RuntimeError("simulated service worker crash")
+
+                service.orchestrator.execute_run = crash_with_inflight_tool
+                sent = service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "worker-crash-client", "text": "执行手机任务"},
+                )
+                failed = _wait_for_status(service, sent["run"]["runId"], "failed")
+
+                self.assertEqual(failed["error"]["code"], "agent_service_inflight_unknown")
+                self.assertFalse(failed["error"]["recoverable"])
+                self.assertTrue(failed["error"]["outcomeIndeterminate"])
+                self.assertTrue(failed["error"]["executionMayContinue"])
+                checkpoint = json.loads(failed["checkpoint"])
+                self.assertIsNone(checkpoint["inFlightToolCall"])
+                self.assertEqual(checkpoint["completedToolCallIds"], ["tool-crashed"])
+                self.assertEqual(checkpoint["toolResults"][-1]["status"], "failed")
+            finally:
+                service.shutdown()
+
+    def test_worker_crash_discards_queued_continuation_after_terminal_failure(self) -> None:
+        from services.agent_service import AgentService
+
+        started = threading.Event()
+        release = threading.Event()
+        continuation_released = threading.Event()
+        invocations: list[dict] = []
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                capabilities=_registry(),
+            )
+            try:
+                session = service.create_session({"title": "Queued crash continuation"})
+
+                def crash_with_inflight_tool(session_id, run_id, request=None):
+                    invocations.append(dict(request or {}))
+                    run = service.repository.get_run(run_id, session_id=session_id)
+                    checkpoint = json.loads(str(run.get("checkpoint") or "{}"))
+                    checkpoint["inFlightToolCall"] = {
+                        "toolCallId": "tool-before-queued-crash",
+                        "name": "loom.phone.publish",
+                        "input": {"target": {"deviceIds": ["phone-1"]}, "text": "publish once"},
+                    }
+                    service.repository.update_run(
+                        run_id,
+                        {
+                            "status": "running",
+                            "checkpoint": json.dumps(checkpoint, ensure_ascii=False),
+                        },
+                        session_id=session_id,
+                    )
+                    started.set()
+                    release.wait(3)
+                    raise RuntimeError("simulated crash after queuing a continuation")
+
+                service.orchestrator.execute_run = crash_with_inflight_tool
+                sent = service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "queued-crash-client", "text": "publish once"},
+                )
+                self.assertTrue(started.wait(1))
+                queued = service._submit_run(
+                    session["sessionId"],
+                    sent["run"]["runId"],
+                    {"prompt": "queued approval continuation"},
+                    emit_runtime_requested=False,
+                    on_complete=continuation_released.set,
+                    queue_if_busy=True,
+                )
+                self.assertTrue(queued)
+
+                release.set()
+                failed = _wait_for_status(service, sent["run"]["runId"], "failed")
+
+                self.assertEqual(failed["error"]["code"], "agent_service_inflight_unknown")
+                self.assertTrue(continuation_released.wait(1))
+                time.sleep(0.05)
+                self.assertEqual(len(invocations), 1)
+                self.assertNotIn(sent["run"]["runId"], service._pending_continuations)
+            finally:
+                release.set()
+                service.shutdown()
+
+    def test_worker_crash_before_tool_execution_remains_retryable(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=UnavailableRuntime(),
+                capabilities=_registry(),
+            )
+            try:
+                session = service.create_session({"title": "Pre-tool worker crash"})
+
+                def crash_before_tool(session_id, run_id, request=None):
+                    raise RuntimeError("simulated pre-tool service crash")
+
+                service.orchestrator.execute_run = crash_before_tool
+                sent = service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "pre-tool-crash-client", "text": "分析任务"},
+                )
+                failed = _wait_for_status(service, sent["run"]["runId"], "failed")
+
+                self.assertEqual(failed["error"]["code"], "agent_service_failed")
+                self.assertTrue(failed["error"]["recoverable"])
+                self.assertNotIn("outcomeIndeterminate", failed["error"])
+                checkpoint = json.loads(failed["checkpoint"])
+                self.assertIsNone(checkpoint["inFlightToolCall"])
             finally:
                 service.shutdown()
 

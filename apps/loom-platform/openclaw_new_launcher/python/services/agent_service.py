@@ -690,17 +690,11 @@ class AgentService:
                 except Exception as error:
                     safe_error = str(redact_sensitive(str(error)))[:500]
                     try:
-                        run = self.repository.get_run(run_id, session_id=session_id)
-                        if run.get("status") not in TERMINAL_RUN_STATUSES:
-                            self.repository.update_run(
-                                run_id,
-                                {
-                                    "status": "failed",
-                                    "completedAt": _utc_now(),
-                                    "error": {"code": "agent_service_failed", "message": safe_error, "recoverable": True},
-                                },
-                                session_id=session_id,
-                            )
+                        self.orchestrator.record_unexpected_service_failure(
+                            session_id,
+                            run_id,
+                            safe_error,
+                        )
                     except Exception:
                         pass
                 continuation: RunContinuation | None = None
@@ -717,6 +711,23 @@ class AgentService:
                         pass
                 if continuation is not None:
                     next_session_id, next_request, next_resume, next_emit, next_on_complete = continuation
+                    try:
+                        latest_run = self.repository.get_run(run_id, session_id=next_session_id)
+                        continuation_is_still_valid = (
+                            str(latest_run.get("status") or "") not in TERMINAL_RUN_STATUSES
+                        )
+                    except Exception:
+                        continuation_is_still_valid = False
+                    if not continuation_is_still_valid:
+                        if next_on_complete is not None:
+                            try:
+                                next_on_complete()
+                            except Exception:
+                                pass
+                        with self._lock:
+                            if next_resume:
+                                self._resume_requests.discard(run_id)
+                        return
                     try:
                         self._submit_run(
                             next_session_id,

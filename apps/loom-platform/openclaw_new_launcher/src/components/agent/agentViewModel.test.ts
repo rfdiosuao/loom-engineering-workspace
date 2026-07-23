@@ -355,6 +355,24 @@ test('restart recovery never encourages replaying an uncertain side effect', () 
   assert.doesNotMatch(JSON.stringify(summary), /agent_restart|in flight|repeated automatically/i);
 });
 
+test('service worker crash during a tool never encourages replaying the side effect', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'agent_service_inflight_unknown',
+      message: 'simulated service worker crash',
+      recoverable: true,
+      outcomeIndeterminate: true,
+      executionMayContinue: true,
+    },
+  });
+
+  assert.equal(summary.title, '执行状态待确认');
+  assert.match(summary.message, /服务异常/);
+  assert.match(summary.message, /避免重复执行/);
+  assert.equal(summary.recoverable, false);
+  assert.doesNotMatch(JSON.stringify(summary), /agent_service|worker crash|simulated/i);
+});
+
 test('post-execution persistence failure warns against duplicate side effects', () => {
   const summary = agentViewModel.userFacingAgentError({
     error: {

@@ -376,6 +376,13 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
       recoverable: false,
     };
   }
+  if (code === 'agent_service_inflight_unknown') {
+    return {
+      title: '执行状态待确认',
+      message: '智能体服务异常时有工具正在执行，操作可能仍在手机或平台端继续。请先查看目标状态和任务记录，避免重复执行。',
+      recoverable: false,
+    };
+  }
   if (code === 'agent_tool_result_persistence_failed') {
     return {
       title: '执行结果未能保存',

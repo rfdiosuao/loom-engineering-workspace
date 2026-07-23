@@ -611,22 +611,35 @@ class AgentOrchestrator:
             checkpoint = _load_checkpoint(run.get("checkpoint"))
             in_flight = bool(checkpoint.get("inFlightToolCall"))
             code = "agent_restart_inflight_unknown" if in_flight else "agent_restart_recovery"
-            message = (
-                "A tool was in flight when the app stopped; it will not be repeated automatically."
+            error = (
+                {
+                    "code": code,
+                    "message": "应用停止时有工具正在执行；操作可能仍在目标端继续，麓鸣不会自动重放。",
+                    "recoverable": False,
+                    "outcomeIndeterminate": True,
+                    "executionMayContinue": True,
+                }
                 if in_flight
-                else "The run was paused after application restart and can be resumed."
+                else {
+                    "code": code,
+                    "message": "The run was paused after application restart and can be resumed.",
+                    "recoverable": True,
+                }
             )
-            error = {"code": code, "message": message, "recoverable": True}
             tool_call = checkpoint.get("inFlightToolCall")
             if in_flight:
                 _close_failed_tool_checkpoint(checkpoint, tool_call, error)
+            status = "failed" if in_flight else "paused"
+            changes = {
+                "status": status,
+                "error": error,
+                "checkpoint": _dump_checkpoint(checkpoint),
+            }
+            if in_flight:
+                changes["completedAt"] = _utc_now()
             updated = self.repository.update_run(
                 run["runId"],
-                {
-                    "status": "paused",
-                    "error": error,
-                    "checkpoint": _dump_checkpoint(checkpoint),
-                },
+                changes,
                 session_id=run["sessionId"],
             )
             if in_flight and isinstance(tool_call, Mapping):
@@ -641,9 +654,75 @@ class AgentOrchestrator:
                         "error": error,
                     },
                 )
-            self._emit(run["sessionId"], run["runId"], "run.paused", {"reason": code})
+            if in_flight:
+                self._emit(run["sessionId"], run["runId"], "run.failed", {"error": error})
+            else:
+                self._emit(run["sessionId"], run["runId"], "run.paused", {"reason": code})
             recovered.append(updated)
         return recovered
+
+    def record_unexpected_service_failure(
+        self,
+        session_id: str,
+        run_id: str,
+        message: str,
+    ) -> Json:
+        run = self.repository.get_run(run_id, session_id=session_id)
+        if run.get("status") in TERMINAL_STATUSES:
+            return run
+        checkpoint = _load_checkpoint(run.get("checkpoint"))
+        tool_call = checkpoint.get("inFlightToolCall")
+        in_flight = isinstance(tool_call, Mapping) and bool(tool_call)
+        if in_flight:
+            error = {
+                "code": "agent_service_inflight_unknown",
+                "message": "智能体服务在工具执行期间异常退出；操作可能仍在目标端执行，请先检查实际状态，不要直接重试。",
+                "recoverable": False,
+                "outcomeIndeterminate": True,
+                "executionMayContinue": True,
+            }
+            _close_failed_tool_checkpoint(checkpoint, tool_call, error)
+        else:
+            error = {
+                "code": "agent_service_failed",
+                "message": str(redact_sensitive(message or "Agent service failed unexpectedly."))[:500],
+                "recoverable": True,
+            }
+        with self._lock:
+            current = self.repository.get_run(run_id, session_id=session_id)
+            if current.get("status") in TERMINAL_STATUSES:
+                return current
+            updated = self.repository.update_run(
+                run_id,
+                {
+                    "status": "failed",
+                    "completedAt": _utc_now(),
+                    "checkpoint": _dump_checkpoint(checkpoint),
+                    "error": error,
+                },
+                session_id=session_id,
+            )
+        if in_flight:
+            call = dict(tool_call)
+            try:
+                self._emit(
+                    session_id,
+                    run_id,
+                    "tool.failed",
+                    {
+                        "toolCallId": str(call.get("toolCallId") or call.get("id") or ""),
+                        "capability": str(call.get("name") or call.get("capability") or ""),
+                        "status": "failed",
+                        "error": error,
+                    },
+                )
+            except Exception:
+                pass
+        try:
+            self._emit(session_id, run_id, "run.failed", {"error": error})
+        except Exception:
+            pass
+        return updated
 
     def _wait_for_approval(self, session_id: str, run_id: str, call: Json, capability: Any, checkpoint: Json) -> Json:
         approval = self.policy.create_approval(

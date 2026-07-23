@@ -140,6 +140,80 @@ class AgentScopeTests(unittest.TestCase):
         self.assertEqual(result.status, "resolved")
         self.assertEqual(result.device_ids, ["phone-2"])
 
+    def test_platform_name_collision_requires_explicit_device_context(self) -> None:
+        matrix_status = {
+            "devices": [
+                {"deviceId": "phone-1", "name": "小红书", "online": True, "group": "设备一组"},
+                {"deviceId": "phone-2", "name": "备用机", "online": True, "group": "设备二组"},
+            ],
+        }
+
+        platform_request = resolve_request_scope(
+            "把海报发布到小红书",
+            {"mode": "auto"},
+            matrix_status,
+        )
+        explicit_device = resolve_request_scope(
+            "让名为小红书的手机发布海报",
+            {"mode": "auto"},
+            matrix_status,
+        )
+
+        self.assertEqual(platform_request.status, "ambiguous")
+        self.assertEqual(platform_request.targets(), {})
+        self.assertEqual(explicit_device.status, "resolved")
+        self.assertEqual(explicit_device.device_ids, ["phone-1"])
+
+    def test_platform_name_collision_requires_explicit_group_context(self) -> None:
+        matrix_status = {
+            "devices": [
+                {"deviceId": "phone-1", "online": True, "group": "小红书"},
+                {"deviceId": "phone-2", "online": True, "group": "默认组"},
+            ],
+        }
+
+        platform_request = resolve_request_scope(
+            "把海报发布到小红书",
+            {"mode": "auto"},
+            matrix_status,
+        )
+        explicit_group = resolve_request_scope(
+            "让设备组小红书发布海报",
+            {"mode": "auto"},
+            matrix_status,
+        )
+
+        self.assertEqual(platform_request.status, "ambiguous")
+        self.assertEqual(platform_request.targets(), {})
+        self.assertEqual(explicit_group.status, "resolved")
+        self.assertEqual(explicit_group.groups, ["小红书"])
+
+    def test_platform_collision_distinguishes_device_alias_from_group(self) -> None:
+        matrix_status = {
+            "devices": [
+                {"deviceId": "phone-1", "name": "小红书", "online": True, "group": "默认组"},
+                {"deviceId": "phone-2", "name": "备用机", "online": True, "group": "小红书"},
+            ],
+        }
+
+        explicit_device = resolve_request_scope(
+            "让小红书这台手机打开应用",
+            {"mode": "auto"},
+            matrix_status,
+        )
+        explicit_group = resolve_request_scope(
+            "让设备组小红书打开应用",
+            {"mode": "auto"},
+            matrix_status,
+        )
+
+        self.assertEqual(explicit_device.status, "resolved")
+        self.assertEqual(explicit_device.device_ids, ["phone-1"])
+        self.assertEqual(explicit_device.groups, [])
+        self.assertEqual(explicit_group.status, "resolved")
+        self.assertEqual(explicit_group.groups, ["小红书"])
+        self.assertEqual(explicit_group.device_ids, [])
+
     def test_resolves_two_explicit_prefix_device_names_without_dropping_one(self) -> None:
         matrix_status = {
             "devices": [

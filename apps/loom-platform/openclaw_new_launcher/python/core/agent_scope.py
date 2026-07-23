@@ -81,6 +81,7 @@ _MOBILE_PLATFORM_TERMS = (
     "xiaohongshu",
     "rednote",
 )
+_RESERVED_SELECTOR_LABELS = frozenset(term.casefold() for term in _MOBILE_PLATFORM_TERMS)
 _DEVICE_LIKE_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])(?:P|PHONE|ANDROID)[-_]?\d[A-Za-z0-9_-]*(?![A-Za-z0-9_-])", re.IGNORECASE)
 
 
@@ -130,7 +131,7 @@ def resolve_request_scope(text: str, explicit_scope: Mapping[str, Any] | None, m
         return _ambiguous(mode, "设备名称对应多台手机，请改用设备 ID")
     selected_device_ids = set([*direct_device_ids, *alias_device_ids])
     device_ids = [device_id for device_id in devices if device_id in selected_device_ids]
-    matched_groups = [group for group in groups if _contains_label(content, group)]
+    matched_groups = [group for group in groups if _contains_group_label(content, group)]
     folded = content.casefold()
     all_online = has_positive_term(folded, tuple(phrase.casefold() for phrase in _ALL_ONLINE_PHRASES))
     selector_count = sum(bool(value) for value in (device_ids, matched_groups, all_online))
@@ -242,11 +243,11 @@ def _matrix_facts(
 
 
 def _resolve_device_aliases(text: str, aliases: Mapping[str, Sequence[str]]) -> tuple[list[str], bool]:
-    matched_labels = [
-        (label, _label_spans(text, label))
-        for label in aliases
-        if _contains_label(text, label)
-    ]
+    matched_labels = []
+    for label in aliases:
+        spans = _device_alias_spans(text, label)
+        if spans:
+            matched_labels.append((label, spans))
     matched_labels.sort(key=lambda item: len(item[0]), reverse=True)
     specific_labels: list[str] = []
     covered_spans: list[tuple[int, int]] = []
@@ -280,6 +281,64 @@ def _contains_identifier(text: str, identifier: str) -> bool:
 
 def _contains_label(text: str, label: str) -> bool:
     return bool(_label_spans(text, label))
+
+
+def _contains_group_label(text: str, label: str) -> bool:
+    spans = _label_spans(text, label)
+    if not _requires_explicit_selector_context(label):
+        return bool(spans)
+    return any(_has_explicit_group_context(text, start, end) for start, end in spans)
+
+
+def _device_alias_spans(text: str, label: str) -> list[tuple[int, int]]:
+    spans = _label_spans(text, label)
+    if not _requires_explicit_selector_context(label):
+        return spans
+    return [
+        (start, end)
+        for start, end in spans
+        if _has_explicit_device_context(text, start, end)
+    ]
+
+
+def _requires_explicit_selector_context(label: str) -> bool:
+    return str(label or "").strip().casefold() in _RESERVED_SELECTOR_LABELS
+
+
+def _has_explicit_device_context(text: str, start: int, end: int) -> bool:
+    prefix = text[max(0, start - 24):start]
+    suffix = text[end:min(len(text), end + 24)]
+    explicit_prefix = re.search(
+        r"(?:设备名(?:称)?|手机名(?:称)?|终端名(?:称)?)(?:为|是|叫(?:作|做)?)?\s*$",
+        prefix,
+        re.IGNORECASE,
+    )
+    explicit_suffix = re.match(
+        r"^\s*(?:的\s*)?(?:(?:这|那)\s*)?(?:台\s*)?(?:手机|设备|终端|机器)",
+        suffix,
+        re.IGNORECASE,
+    )
+    english_prefix = re.search(r"(?:device|phone)(?:\s+(?:name|named))?\s*$", prefix, re.IGNORECASE)
+    english_suffix = re.match(r"^\s+(?:device|phone)\b", suffix, re.IGNORECASE)
+    return bool(explicit_prefix or explicit_suffix or english_prefix or english_suffix)
+
+
+def _has_explicit_group_context(text: str, start: int, end: int) -> bool:
+    prefix = text[max(0, start - 24):start]
+    suffix = text[end:min(len(text), end + 24)]
+    explicit_prefix = re.search(
+        r"(?:设备组|分组|组名(?:称)?)(?:为|是|叫(?:作|做)?)?\s*$",
+        prefix,
+        re.IGNORECASE,
+    )
+    explicit_suffix = re.match(
+        r"^\s*(?:的\s*)?(?:(?:这|那)\s*)?(?:个\s*)?(?:设备组|分组|组)",
+        suffix,
+        re.IGNORECASE,
+    )
+    english_prefix = re.search(r"(?:device\s+group|group(?:\s+(?:name|named))?)\s*$", prefix, re.IGNORECASE)
+    english_suffix = re.match(r"^\s+(?:device\s+group|group)\b", suffix, re.IGNORECASE)
+    return bool(explicit_prefix or explicit_suffix or english_prefix or english_suffix)
 
 
 def _label_spans(text: str, label: str) -> list[tuple[int, int]]:

@@ -1967,7 +1967,7 @@ class AgentOrchestratorTests(unittest.TestCase):
                 self.assertEqual(repository.get_run("run-tool-race")["status"], expected)
                 self.assertFalse({"running", "completed"}.intersection(status_changes[status_marker:]))
 
-    def test_restart_recovery_pauses_running_run_without_repeating_inflight_tool(self) -> None:
+    def test_restart_recovery_terminalizes_inflight_tool_without_repeating_it(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
 
         runtime = ScriptedRuntime([])
@@ -1999,9 +1999,11 @@ class AgentOrchestratorTests(unittest.TestCase):
             stored = repository.get_run("run-restart")
             events = bus.replay("session-1")
 
-        self.assertEqual(recovered[0]["status"], "paused")
+        self.assertEqual(recovered[0]["status"], "failed")
         self.assertEqual(stored["error"]["code"], "agent_restart_inflight_unknown")
-        self.assertTrue(stored["error"]["recoverable"])
+        self.assertFalse(stored["error"]["recoverable"])
+        self.assertTrue(stored["error"]["outcomeIndeterminate"])
+        self.assertTrue(stored["error"]["executionMayContinue"])
         self.assertEqual(calls, [])
         checkpoint = json.loads(stored["checkpoint"])
         self.assertIsNone(checkpoint["inFlightToolCall"])
@@ -2010,12 +2012,46 @@ class AgentOrchestratorTests(unittest.TestCase):
         lifecycle = [
             event["type"]
             for event in events
-            if event["type"] in {"tool.failed", "run.paused"}
+            if event["type"] in {"tool.failed", "run.failed"}
         ]
-        self.assertEqual(lifecycle[-2:], ["tool.failed", "run.paused"])
+        self.assertEqual(lifecycle[-2:], ["tool.failed", "run.failed"])
         failed_event = next(event for event in events if event["type"] == "tool.failed")
         self.assertEqual(failed_event["data"]["toolCallId"], "call-unknown")
         self.assertEqual(failed_event["data"]["error"]["code"], "agent_restart_inflight_unknown")
+
+    def test_restart_recovery_pauses_run_before_any_tool_started(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime([])
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, calls = self._dependencies(root, runtime)
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-restart-safe")
+            repository.update_run(
+                "run-restart-safe",
+                {
+                    "status": "running",
+                    "checkpoint": json.dumps(
+                        {
+                            "version": 1,
+                            "completedToolCallIds": [],
+                            "toolResults": [],
+                            "inFlightToolCall": None,
+                        }
+                    ),
+                },
+                session_id="session-1",
+            )
+
+            recovered = orchestrator.recover_unfinished_runs()
+            stored = repository.get_run("run-restart-safe")
+            events = bus.replay("session-1")
+
+        self.assertEqual(recovered[0]["status"], "paused")
+        self.assertEqual(stored["error"]["code"], "agent_restart_recovery")
+        self.assertTrue(stored["error"]["recoverable"])
+        self.assertEqual(calls, [])
+        self.assertIn("run.paused", [event["type"] for event in events])
 
     def test_runtime_events_are_redacted_before_persistence(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
