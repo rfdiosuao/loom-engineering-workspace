@@ -52,6 +52,13 @@ class ReleaseScriptsContractTests(unittest.TestCase):
         self.assertIn("npm run build:platform-tools &&", tauri_source)
         self.assertIn("npm run build:platform-tools &&", protected_source)
 
+    def test_platform_tools_build_script_is_windows_powershell_ascii_safe(self) -> None:
+        script_path = os.path.join(LAUNCHER_SCRIPTS_DIR, "build-platform-tools.ps1")
+        with open(script_path, "rb") as handle:
+            raw = handle.read()
+
+        raw.decode("ascii")
+
     def test_dual_nsis_script_declares_validate_only_and_distinct_outputs(self) -> None:
         source = read_script("build-dual-nsis.ps1")
 
