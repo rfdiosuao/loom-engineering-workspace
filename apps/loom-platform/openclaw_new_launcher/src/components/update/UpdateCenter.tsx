@@ -394,7 +394,7 @@ export const UpdateCenter: React.FC = () => {
                 <div className="min-w-0 flex-1">
                   <div className="text-base font-black text-text">
                     {phase === 'verifying'
-                      ? '正在验证安装包签名'
+                      ? '正在验证 LOOM 官方发布签名'
                       : phase === 'ready'
                         ? '下载与安全校验已完成'
                         : phase === 'restarting'
@@ -418,7 +418,7 @@ export const UpdateCenter: React.FC = () => {
                   />
                 </div>
                 <div className="mt-2 flex items-center justify-between text-xs font-semibold text-text-muted">
-                  <span>{phase === 'verifying' ? 'SHA256 与 Windows 发布者校验' : progress?.total ? `${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)}` : '准备下载'}</span>
+                  <span>{phase === 'verifying' ? 'SHA256 与 LOOM 官方发布签名校验' : progress?.total ? `${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)}` : '准备下载'}</span>
                   <span>{phase === 'ready' || phase === 'restarting' ? '100%' : `${percent}%`}</span>
                 </div>
               </div>

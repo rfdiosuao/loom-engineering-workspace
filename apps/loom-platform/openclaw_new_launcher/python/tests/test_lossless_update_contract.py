@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -12,6 +20,7 @@ INSTALLER_HOOKS = os.path.join(ROOT, "src-tauri", "installer", "upgrade-hooks.ns
 HANDOFF_SCRIPT = os.path.join(ROOT, "src-tauri", "installer", "update-handoff.ps1")
 INSTALLER_PROCESS_CLEANUP = os.path.join(ROOT, "src-tauri", "installer", "stop-owned-install-processes.ps1")
 UPDATE_RELEASE_SCRIPT = os.path.join(ROOT, "scripts", "prepare-desktop-update-release.ps1")
+UPDATE_SIGNER_SCRIPT = os.path.join(ROOT, "scripts", "sign-desktop-update.py")
 
 
 class LosslessUpdateContractTests(unittest.TestCase):
@@ -25,6 +34,69 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("Get-AuthenticodeSignature", source)
         self.assertIn("NotSigned", source)
         self.assertIn(".sha256.txt", source)
+
+    def test_update_release_preparation_emits_a_required_loom_signature_manifest(self) -> None:
+        with open(UPDATE_RELEASE_SCRIPT, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("LOOM_DESKTOP_UPDATE_PRIVATE_KEY", source)
+        self.assertIn(".update.json", source)
+        self.assertIn("sign-desktop-update.py", source)
+        self.assertIn("updateManifest", source)
+
+    def test_desktop_update_signer_binds_the_installer_metadata(self) -> None:
+        installer = b"unsigned-but-loom-signed-installer"
+        private_key = Ed25519PrivateKey.generate()
+        private_key_value = base64.b64encode(
+            private_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer_path = os.path.join(temp_dir, "LOOM-2.3.19-setup.exe")
+            manifest_path = installer_path + ".update.json"
+            with open(installer_path, "wb") as handle:
+                handle.write(installer)
+            env = os.environ.copy()
+            env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    UPDATE_SIGNER_SCRIPT,
+                    "--installer",
+                    installer_path,
+                    "--version",
+                    "2.3.19",
+                    "--output",
+                    manifest_path,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+
+        self.assertEqual(manifest["filename"], "LOOM-2.3.19-setup.exe")
+        self.assertEqual(manifest["version"], "2.3.19")
+        self.assertEqual(manifest["size"], len(installer))
+        self.assertEqual(manifest["sha256"], hashlib.sha256(installer).hexdigest())
+        signature = base64.b64decode(manifest["signature"]["value"])
+        unsigned = dict(manifest)
+        unsigned.pop("signature")
+        payload = json.dumps(
+            unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        private_key.public_key().verify(signature, payload)
 
     def test_nsis_blocks_downgrades_and_loads_upgrade_hooks(self) -> None:
         with open(TAURI_CONFIG, "r", encoding="utf-8") as handle:

@@ -39,6 +39,7 @@
     "resources": [
       "../../release-manifest.json",
       "../../release-public-key.txt",
+      "../desktop-update-public-key.txt",
       "../.mcp.json",
       "../python/**/*",
       "../python-runtime/**/*",

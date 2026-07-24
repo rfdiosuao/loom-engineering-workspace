@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import copy
 import errno
 import hashlib
 import json
@@ -16,6 +18,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from core.paths import AppPaths
 
 
@@ -24,6 +30,9 @@ DEFAULT_RELEASE_API_URLS = (
 )
 SETUP_NAME_RE = re.compile(r"^LOOM-(?P<version>\d+\.\d+\.\d+)-setup\.exe$", re.IGNORECASE)
 SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
+UPDATE_MANIFEST_SUFFIX = ".update.json"
+UPDATE_PUBLIC_KEY_ENV = "LOOM_DESKTOP_UPDATE_PUBLIC_KEY"
+UPDATE_PUBLIC_KEY_PATH_ENV = "LOOM_DESKTOP_UPDATE_PUBLIC_KEY_PATH"
 
 
 @dataclass(frozen=True)
@@ -37,6 +46,7 @@ class LoomRelease:
     notes: str = ""
     published_at: str = ""
     release_url: str = ""
+    update_manifest: dict[str, Any] | None = None
 
 
 class UpdateCancelled(Exception):
@@ -107,12 +117,12 @@ def _classify_update_failure(error: Exception) -> UpdateFailure:
             True,
             ("网络恢复后点击重试，LOOM 会从已下载的位置继续。",),
         )
-    if "windows 签名验证失败" in lowered:
+    if "签名验证失败" in lowered or "signature verification failed" in lowered:
         return UpdateFailure(
             "signature_invalid",
-            "更新包发布者签名无效，已拒绝安装。",
+            "更新包官方发布签名无效，已拒绝安装。",
             False,
-            ("请只使用 LOOM 官方发布的签名安装包。",),
+            ("请只使用 LOOM 官方发布的更新包。",),
         )
     if "sha256" in lowered or "安装包大小不一致" in lowered:
         return UpdateFailure(
@@ -154,6 +164,94 @@ def _default_update_cache_dir() -> str:
     if not root:
         root = tempfile.gettempdir()
     return os.path.join(root, "LOOM-Update-Recovery", "updates")
+
+
+def _canonical_update_manifest_payload(data: dict[str, Any]) -> bytes:
+    payload = copy.deepcopy(data)
+    payload.pop("signature", None)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _load_update_public_key(value: str) -> Ed25519PublicKey:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("LOOM 更新公钥为空")
+    if text.startswith("-----BEGIN"):
+        loaded = serialization.load_pem_public_key(text.encode("utf-8"))
+        if not isinstance(loaded, Ed25519PublicKey):
+            raise ValueError("LOOM 更新公钥必须使用 Ed25519")
+        return loaded
+    if text.lower().startswith("ed25519:"):
+        text = text.split(":", 1)[1].strip()
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except Exception as error:
+        raise ValueError("LOOM 更新公钥不是有效的 Base64") from error
+    if len(raw) != 32:
+        raise ValueError("LOOM 更新公钥必须是 32 字节 Ed25519 公钥")
+    return Ed25519PublicKey.from_public_bytes(raw)
+
+
+def _default_update_public_key(paths: AppPaths) -> str:
+    inline_key = str(os.environ.get(UPDATE_PUBLIC_KEY_ENV) or "").strip()
+    if inline_key:
+        return inline_key
+    configured_path = str(os.environ.get(UPDATE_PUBLIC_KEY_PATH_ENV) or "").strip()
+    candidates = [
+        configured_path,
+        os.path.join(paths.base_path, "desktop-update-public-key.txt"),
+        os.path.join(paths.base_path, "_up_", "desktop-update-public-key.txt"),
+        os.path.join(paths.base_path, "resources", "desktop-update-public-key.txt"),
+    ]
+    for candidate in candidates:
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        with open(candidate, "r", encoding="utf-8-sig") as handle:
+            return handle.read().strip()
+    return ""
+
+
+def _verify_loom_update_signature(
+    release: LoomRelease,
+    public_key: str,
+) -> tuple[bool, str]:
+    manifest = release.update_manifest
+    if not isinstance(manifest, dict):
+        return False, "发布页缺少 LOOM 官方更新签名"
+    try:
+        if manifest.get("schemaVersion") != 1:
+            raise ValueError("schemaVersion 必须为 1")
+        if manifest.get("product") != "LOOM":
+            raise ValueError("product 必须为 LOOM")
+        if manifest.get("channel") != "stable":
+            raise ValueError("channel 必须为 stable")
+        signature = manifest.get("signature")
+        if not isinstance(signature, dict) or signature.get("algorithm") != "ed25519":
+            raise ValueError("signature.algorithm 必须为 ed25519")
+        signature_bytes = base64.b64decode(str(signature.get("value") or ""), validate=True)
+        if len(signature_bytes) != 64:
+            raise ValueError("signature.value 必须是 64 字节 Ed25519 签名")
+        _load_update_public_key(public_key).verify(
+            signature_bytes,
+            _canonical_update_manifest_payload(manifest),
+        )
+        expected = {
+            "version": release.version,
+            "filename": release.filename,
+            "size": release.size,
+            "sha256": release.sha256,
+        }
+        for field, value in expected.items():
+            actual = manifest.get(field)
+            if field == "sha256":
+                actual = str(actual or "").lower()
+            if actual != value:
+                raise ValueError(f"{field} 与发布资产不一致")
+    except InvalidSignature:
+        return False, "LOOM 官方更新签名无效"
+    except Exception as error:
+        return False, f"LOOM 官方更新签名验证失败：{error}"
+    return True, "LOOM 官方发布签名（Ed25519）"
 
 
 def _verify_windows_signature(path: str) -> tuple[bool, str]:
@@ -238,6 +336,7 @@ class LoomAppUpdater:
         opener: Callable[..., Any] = urllib.request.urlopen,
         launcher: Callable[[str], None] | None = None,
         signature_verifier: Callable[[str], tuple[bool, str]] = _verify_windows_signature,
+        update_public_key: str | None = None,
         update_cache_dir: str | None = None,
     ) -> None:
         self.paths = paths
@@ -246,6 +345,11 @@ class LoomAppUpdater:
         self.opener = opener
         self.launcher = launcher or self._deferred_launcher
         self.signature_verifier = signature_verifier
+        self.update_public_key = (
+            str(update_public_key).strip()
+            if update_public_key is not None
+            else _default_update_public_key(paths)
+        )
         self.update_cache_dir = os.path.abspath(update_cache_dir or _default_update_cache_dir())
         self.cached_release: LoomRelease | None = None
         self.last_installer_path = ""
@@ -368,6 +472,15 @@ class LoomAppUpdater:
 
     def is_newer_version(self, version: str) -> bool:
         return _version_tuple(version) > _version_tuple(self.current_version())
+
+    def _verify_release_authenticity(self, path: str, release: LoomRelease) -> tuple[bool, str]:
+        windows_ok, windows_signer = self.signature_verifier(path)
+        if windows_ok:
+            return True, f"Windows 发布者：{windows_signer}"
+        loom_ok, loom_signer = _verify_loom_update_signature(release, self.update_public_key)
+        if loom_ok:
+            return True, loom_signer
+        return False, f"Windows Authenticode：{windows_signer}；{loom_signer}"
 
     def _report(
         self,
@@ -496,10 +609,10 @@ class LoomAppUpdater:
                             message="正在重新验证已下载的更新包",
                             callback=progress_callback,
                         )
-                        signature_ok, signer = self.signature_verifier(final_path)
+                        signature_ok, signer = self._verify_release_authenticity(final_path, release)
                         if not signature_ok:
                             os.remove(final_path)
-                            raise ValueError(f"Windows 签名验证失败：{signer}")
+                            raise ValueError(f"LOOM 官方签名验证失败：{signer}")
                         self.last_installer_path = final_path
                         self.launcher(final_path)
                         self._report(
@@ -512,7 +625,7 @@ class LoomAppUpdater:
                         )
                         return True, release.version, [
                             f"已验证 SHA256：{cached_hash}",
-                            f"已验证 Windows 发布者：{signer}",
+                            f"已验证 {signer}",
                             f"LOOM {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
                         ]
                 written, digest = self._prepare_partial(partial_path, release.size)
@@ -548,16 +661,16 @@ class LoomAppUpdater:
                     downloaded=written,
                     total=release.size,
                     version=release.version,
-                    message="正在验证 Windows 发布者签名",
+                    message="正在验证 LOOM 官方发布签名",
                     callback=progress_callback,
                 )
-                signature_ok, signer = self.signature_verifier(final_path)
+                signature_ok, signer = self._verify_release_authenticity(final_path, release)
                 if not signature_ok:
                     try:
                         os.remove(final_path)
                     except OSError:
                         pass
-                    raise ValueError(f"Windows 签名验证失败：{signer}")
+                    raise ValueError(f"LOOM 官方签名验证失败：{signer}")
 
                 self.last_installer_path = final_path
                 self.launcher(final_path)
@@ -571,7 +684,7 @@ class LoomAppUpdater:
                 )
                 return True, release.version, [
                     f"已验证 SHA256：{actual_sha}",
-                    f"已验证 Windows 发布者：{signer}",
+                    f"已验证 {signer}",
                     f"LOOM {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
                 ]
             except UpdateCancelled:
@@ -739,7 +852,7 @@ class LoomAppUpdater:
             sha256 = self._fetch_sidecar_sha(assets, filename)
         if not SHA256_RE.fullmatch(sha256):
             raise ValueError("正式发布缺少可验证的 SHA256")
-        return LoomRelease(
+        release = LoomRelease(
             version=version,
             filename=filename,
             url=url,
@@ -749,7 +862,16 @@ class LoomAppUpdater:
             notes=str(payload.get("body") or payload.get("description") or "").strip()[:20000],
             published_at=str(payload.get("published_at") or payload.get("created_at") or "").strip(),
             release_url=str(payload.get("html_url") or payload.get("url") or "").strip(),
+            update_manifest=self._fetch_update_manifest(assets, filename),
         )
+        if release.update_manifest is not None and self.update_public_key:
+            signature_ok, signature_detail = _verify_loom_update_signature(
+                release,
+                self.update_public_key,
+            )
+            if not signature_ok:
+                raise ValueError(signature_detail)
+        return release
 
     def _fetch_sidecar_sha(self, assets: list[Any], filename: str) -> str:
         expected_name = filename + ".sha256.txt"
@@ -766,6 +888,27 @@ class LoomAppUpdater:
             match = SHA256_RE.search(text)
             return match.group(1).lower() if match else ""
         return ""
+
+    def _fetch_update_manifest(self, assets: list[Any], filename: str) -> dict[str, Any] | None:
+        expected_name = filename + UPDATE_MANIFEST_SUFFIX
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            name = str(asset.get("name") or asset.get("filename") or "").strip()
+            if name.lower() != expected_name.lower():
+                continue
+            url = _safe_https_url(asset.get("browser_download_url") or asset.get("download_url"))
+            request = urllib.request.Request(
+                url,
+                headers={"Accept": "application/json", "User-Agent": "LOOM-Updater/2"},
+            )
+            with self.opener(request, timeout=15) as response:
+                raw = response.read(64 * 1024)
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("LOOM 更新签名文件必须是 JSON 对象")
+            return payload
+        return None
 
     @staticmethod
     def _deferred_launcher(_path: str) -> None:
