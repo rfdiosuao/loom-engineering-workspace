@@ -103,6 +103,14 @@ jobs:
         working-directory: apps/loom-platform/openclaw_new_launcher
         run: npm run build
 
+      - name: Build bundled Python runtime
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm run build:python-runtime
+
+      - name: Build bundled Node runtime
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: npm run build:node-runtime
+
       - name: Check Rust
         working-directory: apps/loom-platform/openclaw_new_launcher/src-tauri
         run: cargo check
