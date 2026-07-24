@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -10,6 +11,9 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from core.paths import AppPaths
 from services.app_updater import (
     DEFAULT_RELEASE_API_URLS,
@@ -17,6 +21,43 @@ from services.app_updater import (
     LoomRelease,
     _default_update_cache_dir,
 )
+
+
+def _signed_update_manifest(
+    private_key: Ed25519PrivateKey,
+    *,
+    version: str,
+    filename: str,
+    size: int,
+    sha256: str,
+) -> tuple[dict[str, object], str]:
+    manifest: dict[str, object] = {
+        "schemaVersion": 1,
+        "product": "LOOM",
+        "channel": "stable",
+        "version": version,
+        "filename": filename,
+        "size": size,
+        "sha256": sha256,
+        "publishedAt": "2026-07-24T08:00:00Z",
+    }
+    payload = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    manifest["signature"] = {
+        "algorithm": "ed25519",
+        "value": base64.b64encode(private_key.sign(payload)).decode("ascii"),
+    }
+    public_key = base64.b64encode(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    ).decode("ascii")
+    return manifest, public_key
 
 
 class _Response:
@@ -99,6 +140,58 @@ class LoomAppUpdaterTests(unittest.TestCase):
         self.assertIn("全新更新中心", latest.notes)
         self.assertEqual(latest.published_at, "2026-07-22T08:30:00Z")
         self.assertEqual(latest.release_url, "https://example.invalid/releases/v2.3.0")
+
+    def test_latest_release_rejects_an_invalid_loom_signature_before_prompting(self) -> None:
+        installer = b"release-with-tampered-signature"
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.3.1-setup.exe"
+        manifest_name = filename + ".update.json"
+        private_key = Ed25519PrivateKey.generate()
+        update_manifest, public_key = _signed_update_manifest(
+            private_key,
+            version="2.3.1",
+            filename=filename,
+            size=len(installer),
+            sha256=digest,
+        )
+        update_manifest["sha256"] = "0" * 64
+        release = {
+            "tag_name": "v2.3.1",
+            "assets": [
+                {
+                    "name": filename,
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": f"https://downloads.example/{filename}",
+                },
+                {
+                    "name": manifest_name,
+                    "browser_download_url": f"https://downloads.example/{manifest_name}",
+                },
+            ],
+        }
+
+        def opener(request, timeout=0):
+            del timeout
+            payload = (
+                json.dumps(release).encode("utf-8")
+                if request.full_url.endswith("/latest")
+                else json.dumps(update_manifest).encode("utf-8")
+            )
+            return _Response(payload, url=request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(temp_dir),
+                current_version="2.3.0",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                update_public_key=public_key,
+            )
+            latest, error = updater.latest_release()
+
+        self.assertIsNone(latest)
+        self.assertIn("LOOM 官方更新签名", error or "")
 
     def test_cancelled_download_keeps_partial_file_for_a_later_resume(self) -> None:
         installer = b"x" * (2 * 1024 * 1024 + 64)
@@ -784,6 +877,68 @@ class LoomAppUpdaterTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertFalse(launched)
         self.assertTrue(any("签名" in line or "signature" in line.lower() for line in output))
+        self.assertEqual(updater.status()["errorCode"], "signature_invalid")
+        self.assertFalse(updater.status()["retryable"])
+
+    def test_install_latest_accepts_valid_loom_signature_when_authenticode_is_unavailable(self) -> None:
+        installer = b"loom-signed-but-authenticode-unavailable"
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.1.63-setup.exe"
+        manifest_name = filename + ".update.json"
+        private_key = Ed25519PrivateKey.generate()
+        update_manifest, public_key = _signed_update_manifest(
+            private_key,
+            version="2.1.63",
+            filename=filename,
+            size=len(installer),
+            sha256=digest,
+        )
+        release = {
+            "tag_name": "v2.1.63",
+            "assets": [
+                {
+                    "name": filename,
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": f"https://downloads.example/{filename}",
+                },
+                {
+                    "name": manifest_name,
+                    "size": len(json.dumps(update_manifest)),
+                    "browser_download_url": f"https://downloads.example/{manifest_name}",
+                },
+            ],
+        }
+        launched: list[str] = []
+
+        def opener(request, timeout=0):
+            del timeout
+            url = request.full_url
+            if url.endswith("/releases/latest"):
+                payload = json.dumps(release).encode("utf-8")
+            elif url.endswith(manifest_name):
+                payload = json.dumps(update_manifest).encode("utf-8")
+            else:
+                payload = installer
+            return _Response(payload, url=url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.1.62",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                launcher=launched.append,
+                signature_verifier=lambda _path: (False, "NotSigned"),
+                update_public_key=public_key,
+                update_cache_dir=os.path.join(temp_dir, "cache"),
+            )
+            success, version, output = updater.install_latest()
+
+        self.assertTrue(success)
+        self.assertEqual(version, "2.1.63")
+        self.assertEqual(len(launched), 1)
+        self.assertTrue(any("LOOM 官方发布签名" in line for line in output))
 
     def test_status_exposes_download_state_without_install_path_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

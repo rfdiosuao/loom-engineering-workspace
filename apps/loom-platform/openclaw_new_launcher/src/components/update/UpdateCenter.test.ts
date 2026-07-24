@@ -25,3 +25,9 @@ test('post-restart receipt polling stops when the backend reports no pending rec
   const source = readFileSync(new URL('./UpdateCenter.tsx', import.meta.url), 'utf8');
   assert.match(source, /if \(!response\.pending\) return;/);
 });
+
+test('update verification copy describes the LOOM release signature', () => {
+  const source = readFileSync(new URL('./UpdateCenter.tsx', import.meta.url), 'utf8');
+  assert.match(source, /LOOM 官方发布签名/);
+  assert.doesNotMatch(source, /SHA256 与 Windows 发布者校验/);
+});

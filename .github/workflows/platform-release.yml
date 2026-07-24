@@ -61,6 +61,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install release signing dependency
+        run: python -m pip install "cryptography>=42,<47"
+
       - name: Setup Rust
         run: |
           rustup default stable
@@ -109,8 +112,13 @@ jobs:
           WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
           WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_BASE64) -and [string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_PASSWORD)) {
+            Write-Warning "Windows Authenticode certificate is not configured. The release will use the required LOOM Ed25519 signature."
+            "WINDOWS_CERTIFICATE_THUMBPRINT=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            return
+          }
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_PASSWORD)) {
-            throw "Stable Windows releases require WINDOWS_PFX_BASE64 and WINDOWS_PFX_PASSWORD."
+            throw "WINDOWS_PFX_BASE64 and WINDOWS_PFX_PASSWORD must either both be configured or both be empty."
           }
           $pfxPath = Join-Path $env:RUNNER_TEMP "loom-code-signing.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
@@ -122,7 +130,7 @@ jobs:
           }
           "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Build signed protected NSIS
+      - name: Build protected NSIS
         working-directory: apps/loom-platform/openclaw_new_launcher
         run: |
           # Canonical bundle root: apps/loom-platform/openclaw_new_launcher/src-tauri/target/release/bundle
@@ -140,23 +148,38 @@ jobs:
             throw "Protected NSIS output is missing under $bundleDir"
           }
 
-          $certificate = Get-Item -LiteralPath "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT"
-          $signature = Set-AuthenticodeSignature `
-            -FilePath $builtInstaller.FullName `
-            -Certificate $certificate `
-            -HashAlgorithm SHA256 `
-            -TimestampServer "http://timestamp.digicert.com"
-          if ($signature.Status -ne "Valid") {
-            throw "Protected NSIS signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)) {
+            $certificate = Get-Item -LiteralPath "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT"
+            $signature = Set-AuthenticodeSignature `
+              -FilePath $builtInstaller.FullName `
+              -Certificate $certificate `
+              -HashAlgorithm SHA256 `
+              -TimestampServer "http://timestamp.digicert.com"
+            if ($signature.Status -ne "Valid") {
+              throw "Protected NSIS signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+            }
           }
 
+          "LOOM_BUILT_INSTALLER=$($builtInstaller.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LOOM_RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Sign desktop update manifest
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        env:
+          LOOM_DESKTOP_UPDATE_PRIVATE_KEY: ${{ secrets.LOOM_DESKTOP_UPDATE_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:LOOM_DESKTOP_UPDATE_PRIVATE_KEY)) {
+            throw "LOOM_DESKTOP_UPDATE_PRIVATE_KEY is required for desktop auto-update releases."
+          }
           $outputRoot = Join-Path (Split-Path -Parent $PWD) "ci_release_nsis"
-          New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
-          $outputPath = Join-Path $outputRoot "LOOM-$version-setup.exe"
-          Copy-Item -LiteralPath $builtInstaller.FullName -Destination $outputPath -Force
-          $hash = Get-FileHash -LiteralPath $outputPath -Algorithm SHA256
-          "$($hash.Hash)  $(Split-Path -Leaf $outputPath)" |
-            Set-Content -LiteralPath "$outputPath.sha256.txt" -Encoding ASCII
+          & powershell -NoProfile -ExecutionPolicy Bypass `
+            -File scripts\prepare-desktop-update-release.ps1 `
+            -InstallerPath $env:LOOM_BUILT_INSTALLER `
+            -Version $env:LOOM_RELEASE_VERSION `
+            -OutputDirectory $outputRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw "Desktop update release preparation failed with exit code $LASTEXITCODE"
+          }
 
       - name: Smoke-test the exact complete installer
         working-directory: apps/loom-platform
@@ -270,11 +293,17 @@ jobs:
           $version = node -p "require('./openclaw_new_launcher/package.json').version"
           $setupPath = Join-Path $PWD "ci_release_nsis\LOOM-$version-setup.exe"
           $setupHashPath = "$setupPath.sha256.txt"
-          if (-not (Test-Path -LiteralPath $setupPath) -or -not (Test-Path -LiteralPath $setupHashPath)) {
+          $setupUpdateManifest = "$setupPath.update.json"
+          if (
+            -not (Test-Path -LiteralPath $setupPath) -or
+            -not (Test-Path -LiteralPath $setupHashPath) -or
+            -not (Test-Path -LiteralPath $setupUpdateManifest)
+          ) {
             throw "Complete NSIS output is missing: $setupPath"
           }
           Copy-Item -LiteralPath $setupPath -Destination (Join-Path $artifactDir "LOOM-$version-setup.exe")
           Copy-Item -LiteralPath $setupHashPath -Destination (Join-Path $artifactDir "LOOM-$version-setup.exe.sha256.txt")
+          Copy-Item -LiteralPath $setupUpdateManifest -Destination (Join-Path $artifactDir "LOOM-$version-setup.exe.update.json")
 
           Get-ChildItem -LiteralPath (Join-Path $PWD "release") -File -Filter "LOOM-Portable-*.zip*" |
             ForEach-Object {
@@ -319,3 +348,4 @@ jobs:
             apps/loom-platform/ci_artifacts/*.exe
             apps/loom-platform/ci_artifacts/*.zip
             apps/loom-platform/ci_artifacts/*.sha256.txt
+            apps/loom-platform/ci_artifacts/*.update.json

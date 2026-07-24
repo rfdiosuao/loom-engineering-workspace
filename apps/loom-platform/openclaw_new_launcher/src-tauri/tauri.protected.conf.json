@@ -7,6 +7,7 @@
     "resources": {
       "../../release-manifest.json": "_up_/release-manifest.json",
       "../../release-public-key.txt": "_up_/release-public-key.txt",
+      "../desktop-update-public-key.txt": "_up_/desktop-update-public-key.txt",
       "../.mcp.json": "_up_/.mcp.json",
       "../build/protected-resources/python/": "_up_/python/",
       "../python-runtime/": "_up_/python-runtime/",
