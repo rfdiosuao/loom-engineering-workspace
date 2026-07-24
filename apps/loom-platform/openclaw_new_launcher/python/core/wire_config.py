@@ -1866,6 +1866,8 @@ def _probe_codex_provider(base_url: str, api_key: str, model: str) -> dict[str, 
     if not base.endswith("/v1"):
         candidates.append(f"{base}/v1")
     errors: list[str] = []
+    responses_errors: list[str] = []
+    model_listed = False
     for candidate in candidates:
         models_verified = False
         try:
@@ -1877,6 +1879,7 @@ def _probe_codex_provider(base_url: str, api_key: str, model: str) -> dict[str, 
             model_ids = _extract_remote_model_ids(models_payload)
             if model_ids:
                 models_verified = model in model_ids
+                model_listed = model_listed or models_verified
                 if not models_verified:
                     errors.append(f"{candidate}: selected_model_not_listed")
         except WireConfigError as exc:
@@ -1937,9 +1940,31 @@ def _probe_codex_provider(base_url: str, api_key: str, model: str) -> dict[str, 
                 "verifiedAt": _iso_now(),
             }
         except WireConfigError as exc:
-            errors.append(f"{candidate}/responses: {exc}")
+            response_error = str(exc or "").strip()
+            responses_errors.append(response_error)
+            errors.append(f"{candidate}/responses: {response_error}")
     safe = _redact_secret_text("; ".join(errors[-4:]))
-    raise WireConfigError(f"remote_responses_probe_failed: {safe}")
+    failure_code = _classify_codex_responses_failure(responses_errors, model_listed=model_listed)
+    raise WireConfigError(f"{failure_code}: {safe}")
+
+
+def _classify_codex_responses_failure(errors: list[str], *, model_listed: bool) -> str:
+    detail = "; ".join(errors).lower()
+    if "responses_tool_call_missing" in detail:
+        return "codex_responses_tool_call_missing"
+    if "http_401" in detail:
+        return "codex_responses_auth_failed"
+    if "http_403" in detail:
+        return "codex_responses_permission_denied"
+    if "http_429" in detail:
+        return "codex_responses_rate_limited"
+    if "http_404" in detail:
+        return "codex_model_responses_unsupported" if model_listed else "codex_responses_endpoint_unavailable"
+    if "network_error" in detail:
+        return "codex_responses_network_failed"
+    if re.search(r"\bhttp_5\d\d\b", detail):
+        return "codex_responses_service_unavailable"
+    return "remote_responses_probe_failed"
 
 
 def _has_codex_probe_tool_call(payload: dict[str, Any]) -> bool:

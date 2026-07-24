@@ -1434,6 +1434,21 @@ class WireServiceTests(unittest.TestCase):
                     "qwen3.7-plus",
                 )
 
+    def test_codex_remote_probe_classifies_listed_model_without_responses_support(self) -> None:
+        with mock.patch(
+            "core.wire_config._provider_json_request",
+            side_effect=[
+                {"data": [{"id": "chat-only-model"}]},
+                WireConfigError('http_404: {"error":{"message":"openai_error"}}'),
+            ],
+        ):
+            with self.assertRaisesRegex(WireConfigError, "codex_model_responses_unsupported"):
+                wire_config_module._probe_codex_provider(
+                    "https://api.heang.top/v1",
+                    "test-key-not-real",
+                    "chat-only-model",
+                )
+
     def test_codex_remote_probe_rejects_http_200_error_payload(self) -> None:
         with mock.patch(
             "core.wire_config._provider_json_request",

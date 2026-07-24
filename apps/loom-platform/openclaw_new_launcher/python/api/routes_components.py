@@ -131,23 +131,107 @@ def _truthy(value: object) -> bool:
     return False
 
 
-def _model_config_error_text(error: Exception) -> str:
+def _model_config_error_payload(error: Exception, *, custom_provider: bool = False) -> dict[str, str]:
     detail = str(error or "").strip()
     if "responses_tool_call_missing" in detail:
-        return "模型能够返回文字，但没有返回 Codex 所需的标准工具调用，配置没有写入。请改用支持 Responses function_call 的模型。"
+        return {
+            "error": "该模型能够返回文字，但不能返回 Codex 所需的原生工具调用，配置没有写入。请选择支持 Responses API 与 function_call 的模型。",
+            "code": "codex_responses_tool_call_missing",
+            "action": "choose_compatible_model",
+        }
+    if detail.startswith("codex_model_responses_unsupported"):
+        return {
+            "error": "该模型已出现在模型列表中，但不能通过 Codex 必需的 Responses API 执行工具调用，配置未写入。请选择标注支持 Codex / Responses API 的文本模型。",
+            "code": "codex_model_responses_unsupported",
+            "action": "choose_compatible_model",
+        }
+    if detail.startswith("codex_responses_endpoint_unavailable"):
+        return {
+            "error": "当前模型站没有为所选模型提供 Codex 必需的 Responses API，配置未写入。请更换兼容模型，或联系模型站开通 /v1/responses。",
+            "code": "codex_responses_endpoint_unavailable",
+            "action": "choose_compatible_model",
+        }
+    if detail.startswith("codex_responses_auth_failed"):
+        return {
+            "error": "模型站拒绝了当前 API Key，配置未写入。请重新登录模型账号或检查密钥是否有效。",
+            "code": "codex_responses_auth_failed",
+            "action": "review_api_key" if custom_provider else "open_model_account",
+        }
+    if detail.startswith("codex_responses_permission_denied"):
+        return {
+            "error": "当前账号没有调用该模型或 Responses API 的权限，配置未写入。请更换有权限的模型或账号。",
+            "code": "codex_responses_permission_denied",
+            "action": "choose_compatible_model",
+        }
+    if detail.startswith("codex_responses_rate_limited"):
+        return {
+            "error": "模型站当前限流，配置未写入。请稍后重试；若持续出现，请检查账号额度。",
+            "code": "codex_responses_rate_limited",
+            "action": "retry_model_config",
+        }
+    if detail.startswith("codex_responses_service_unavailable"):
+        return {
+            "error": "模型站或上游服务暂时不可用，配置未写入。请稍后重试或更换模型。",
+            "code": "codex_responses_service_unavailable",
+            "action": "retry_model_config",
+        }
+    if detail.startswith("codex_responses_network_failed"):
+        return {
+            "error": "无法连接模型站，配置未写入。请检查网络、代理和 Base URL 后重试。",
+            "code": "codex_responses_network_failed",
+            "action": "retry_model_config",
+        }
     if detail.startswith("remote_responses_probe_failed"):
-        return f"模型连接验证失败，配置没有写入。请检查 API Key、模型权限和网络连接。{detail}"
+        return {
+            "error": "模型连接验证失败，配置没有写入。该模型未通过 Codex Responses API 与原生工具调用验证，请更换兼容模型；完整原因已写入系统日志。",
+            "code": "codex_responses_probe_failed",
+            "action": "choose_compatible_model",
+        }
     if detail.startswith("codex_config_busy"):
-        return "另一个 Codex 配置任务正在执行，请稍后再试。"
+        return {
+            "error": "另一个 Codex 配置任务正在执行，请稍后再试。",
+            "code": "codex_config_busy",
+            "action": "retry_model_config",
+        }
     if detail.startswith("codex_config_recovery_required"):
-        return "Codex 配置失败且自动恢复未完成，请保留日志并重新启动麓鸣后再试。"
+        return {
+            "error": "Codex 配置失败且自动恢复未完成，请保留日志并重新启动麓鸣后再试。",
+            "code": "codex_config_recovery_required",
+            "action": "restart_loom",
+        }
     if detail.startswith("claude_config_recovery_required"):
-        return "Claude Code 配置失败且自动恢复未完成，请保留日志并重新启动麓鸣后再试。"
+        return {
+            "error": "Claude Code 配置失败且自动恢复未完成，请保留日志并重新启动麓鸣后再试。",
+            "code": "claude_config_recovery_required",
+            "action": "restart_loom",
+        }
     if detail.startswith("codex_official_restore_unmanaged_config"):
-        return "检测到不属于麓鸣的 Codex 配置，为避免覆盖你的设置，已停止恢复。"
+        return {
+            "error": "检测到不属于麓鸣的 Codex 配置，为避免覆盖你的设置，已停止恢复。",
+            "code": "codex_official_restore_unmanaged_config",
+            "action": "review_system_log",
+        }
     if detail.startswith(("codex_session_preservation_failed", "claude_session_preservation_failed")):
-        return "检测到原有会话目录或会话数量发生变化，模型配置已停止并已自动回滚。请确认会话目录可访问后重试。"
-    return detail or "模型配置写入失败"
+        return {
+            "error": "检测到原有会话目录或会话数量发生变化，模型配置已停止并已自动回滚。请确认会话目录可访问后重试。",
+            "code": "agent_session_preservation_failed",
+            "action": "review_system_log",
+        }
+    return {
+        "error": detail or "模型配置写入失败",
+        "code": "model_config_write_failed",
+        "action": "retry_model_config",
+    }
+
+
+def _model_config_error_text(error: Exception) -> str:
+    return _model_config_error_payload(error)["error"]
+
+
+def _log_model_config_failure(ctx, component_id: str, error: Exception) -> None:
+    append_log = getattr(ctx, "append_log", None)
+    if callable(append_log):
+        append_log(f"[ModelConfig] {component_id} validation failed: {error}\n")
 
 
 def register_component_routes(app, ctx) -> None:
@@ -224,11 +308,13 @@ def register_component_routes(app, ctx) -> None:
                 validate_remote=component_id == "codex-desktop",
             )
         except WireConfigError as exc:
-            error_text = _model_config_error_text(exc)
+            error_payload = _model_config_error_payload(exc)
+            error_text = error_payload["error"]
+            _log_model_config_failure(ctx, component_id, exc)
             failed = _model_config_status(ctx, component_id)
             failed["status"] = "failed"
             failed["message"] = error_text
-            return ctx.fastapi_json({"error": error_text, "status": failed}, 400)
+            return ctx.fastapi_json({**error_payload, "status": failed}, 400)
         status = dict(status)
         status["installed"] = current.get("installed")
         status["componentStatus"] = current.get("componentStatus")
@@ -276,11 +362,13 @@ def register_component_routes(app, ctx) -> None:
                 model=str(body.get("model") or "").strip(),
             )
         except WireConfigError as exc:
-            error_text = _model_config_error_text(exc)
+            error_payload = _model_config_error_payload(exc, custom_provider=True)
+            error_text = error_payload["error"]
+            _log_model_config_failure(ctx, component_id, exc)
             failed = dict(current)
             failed["status"] = "failed"
             failed["message"] = error_text
-            return ctx.fastapi_json({"error": error_text, "status": failed}, 400)
+            return ctx.fastapi_json({**error_payload, "status": failed}, 400)
         status = dict(status)
         status["installed"] = current.get("installed")
         status["componentStatus"] = current.get("componentStatus")

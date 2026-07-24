@@ -240,6 +240,12 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         self.assertIn("account_relogin_required", source)
         self.assertIn("setCurrentPage('license')", source)
         self.assertIn("normalizeLoomError", source)
+        self.assertIn("choose_compatible_model", source)
+        self.assertIn("重新选择模型", source)
+        self.assertIn("review_api_key", source)
+        self.assertIn("检查 API Key", source)
+        self.assertIn("Responses API", source)
+        self.assertIn("原生工具调用", source)
         self.assertIn("throw { ...result, error:", api_source)
 
     def test_openclaw_exposes_one_click_model_config_and_web_entry(self) -> None:
