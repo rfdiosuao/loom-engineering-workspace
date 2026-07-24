@@ -3,7 +3,7 @@ import 'tsx/esm';
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
-import { api, updateApi } from './api.ts';
+import { api, jobApi, updateApi, waitForJob } from './api.ts';
 import * as apiModule from './api.ts';
 
 const originalWindow = globalThis.window;
@@ -74,4 +74,34 @@ test('automatic update presentation respects a skipped version but manual checks
   assert.equal(shouldPresent('2.3.0', '2.3.0', false), false);
   assert.equal(shouldPresent('2.3.0', '2.3.0', true), true);
   assert.equal(shouldPresent('2.3.1', '2.3.0', false), true);
+});
+
+test('job polling returns needs_manual as a terminal result', async () => {
+  const originalGet = jobApi.get;
+  let polls = 0;
+  const manualJob = {
+    id: 'job-manual-install',
+    status: 'needs_manual',
+    result: {
+      manualRequired: true,
+      message: '请在 Microsoft Store 完成安装',
+    },
+  };
+
+  jobApi.get = async () => {
+    polls += 1;
+    return { job: manualJob };
+  };
+
+  try {
+    const result = await waitForJob('job-manual-install', {
+      intervalMs: 1,
+      timeoutMs: 25,
+    });
+
+    assert.equal(result, manualJob);
+    assert.equal(polls, 1);
+  } finally {
+    jobApi.get = originalGet;
+  }
 });
