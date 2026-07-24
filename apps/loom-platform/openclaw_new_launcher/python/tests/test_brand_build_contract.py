@@ -126,7 +126,9 @@ class BrandBuildContractTests(unittest.TestCase):
             self.assertEqual(plan["desktop"]["mainBinaryName"], "northstar")
             self.assertEqual(plan["android"]["applicationId"], "top.heang.oem.northstar.phone")
             self.assertEqual(plan["update"]["channelId"], "northstar-internal")
-            self.assertEqual(plan["frontend"]["logoAsset"], str(brand_root / "assets" / "logo.svg"))
+            self.assertTrue(
+                Path(plan["frontend"]["logoAsset"]).samefile(brand_root / "assets" / "logo.svg")
+            )
             self.assertEqual(
                 plan["frontend"]["bundledLogoRelativePath"],
                 "oem-brand/brand-logo.svg",
