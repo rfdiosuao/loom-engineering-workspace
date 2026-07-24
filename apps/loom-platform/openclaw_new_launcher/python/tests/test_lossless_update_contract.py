@@ -66,7 +66,10 @@ class LosslessUpdateContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_installer = os.path.join(temp_dir, "source-installer.exe")
             output_dir = os.path.join(temp_dir, "release")
-            shutil.copyfile(shutil.which("powershell"), source_installer)
+            system_root = os.environ.get("SystemRoot", r"C:\Windows")
+            fixture_executable = os.path.join(system_root, "System32", "where.exe")
+            self.assertTrue(os.path.isfile(fixture_executable), fixture_executable)
+            shutil.copyfile(fixture_executable, source_installer)
             env = os.environ.copy()
             env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
 
