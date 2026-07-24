@@ -124,6 +124,12 @@ function friendlyErrorText(text: string): string {
   if (/bind_ticket_no_key/i.test(text)) {
     return '网站绑定成功但未返回可用 API Key，请重新生成绑定码后再试';
   }
+  if (/managed model login is required|agent_account_login_required/i.test(text)) {
+    return '请先在“模型账号”完成登录，然后返回当前页面重试。';
+  }
+  if (/managed model account must be signed in again|agent_account_relogin_required/i.test(text)) {
+    return '模型账号登录已失效，请重新登录后再重试。';
+  }
   if (/not_logged_in/i.test(text)) {
     return '尚未登录模型账号';
   }

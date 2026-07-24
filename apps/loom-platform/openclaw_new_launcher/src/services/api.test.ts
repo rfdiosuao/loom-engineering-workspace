@@ -105,3 +105,10 @@ test('job polling returns needs_manual as a terminal result', async () => {
     jobApi.get = originalGet;
   }
 });
+
+test('parseErrorText localizes managed model login failures', () => {
+  assert.equal(
+    apiModule.parseErrorText('Managed model login is required.'),
+    '请先在“模型账号”完成登录，然后返回当前页面重试。',
+  );
+});
