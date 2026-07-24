@@ -60,6 +60,22 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertNotIn("CodexPackagePath", release)
         self.assertNotIn("Get-ChildItem -LiteralPath $bundleDir -Recurse -File", release)
 
+    def test_windows_release_stages_bundled_runtimes_before_rust_check(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+
+        self.assertIn("- name: Build bundled Python runtime", release)
+        self.assertIn("run: npm run build:python-runtime", release)
+        self.assertIn("- name: Build bundled Node runtime", release)
+        self.assertIn("run: npm run build:node-runtime", release)
+        self.assertLess(
+            release.index("- name: Build bundled Python runtime"),
+            release.index("- name: Check Rust"),
+        )
+        self.assertLess(
+            release.index("- name: Build bundled Node runtime"),
+            release.index("- name: Check Rust"),
+        )
+
     def test_windows_release_uses_loom_signatures_when_authenticode_secrets_are_absent(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
 
