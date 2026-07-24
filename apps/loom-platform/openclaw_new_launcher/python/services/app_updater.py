@@ -49,6 +49,19 @@ class LoomRelease:
     update_manifest: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class UpdateBrand:
+    brand_id: str = "loom"
+    display_name: str = "LOOM"
+    product: str = "LOOM"
+    channel: str = "stable"
+    channel_id: str = "loom-stable"
+    file_prefix: str = "LOOM"
+    manifest_url: str = ""
+    cache_key: str = "LOOM"
+    public_key: str = ""
+
+
 class UpdateCancelled(Exception):
     """Raised after the user asks the resumable downloader to stop."""
 
@@ -61,7 +74,10 @@ class UpdateFailure:
     remediation: tuple[str, ...]
 
 
-def _classify_update_failure(error: Exception) -> UpdateFailure:
+def _classify_update_failure(
+    error: Exception,
+    display_name: str = "LOOM",
+) -> UpdateFailure:
     raw = str(error or "").strip()
     lowered = raw.casefold()
     error_number = getattr(error, "errno", None)
@@ -105,7 +121,7 @@ def _classify_update_failure(error: Exception) -> UpdateFailure:
             "permission_denied",
             "没有权限写入更新缓存，更新未安装，当前版本保持不变。",
             False,
-            ("确认当前账户可写入 LOOM 更新目录，并检查安全软件是否拦截。",),
+            (f"确认当前账户可写入 {display_name} 更新目录，并检查安全软件是否拦截。",),
         )
     if isinstance(error, (ConnectionError, TimeoutError, urllib.error.URLError)) or any(
         marker in lowered
@@ -115,14 +131,14 @@ def _classify_update_failure(error: Exception) -> UpdateFailure:
             "network_interrupted",
             "网络连接中断，已保留下载进度。",
             True,
-            ("网络恢复后点击重试，LOOM 会从已下载的位置继续。",),
+            (f"网络恢复后点击重试，{display_name} 会从已下载的位置继续。",),
         )
     if "签名验证失败" in lowered or "signature verification failed" in lowered:
         return UpdateFailure(
             "signature_invalid",
             "更新包官方发布签名无效，已拒绝安装。",
             False,
-            ("请只使用 LOOM 官方发布的更新包。",),
+            (f"请只使用 {display_name} 官方发布的更新包。",),
         )
     if "sha256" in lowered or "安装包大小不一致" in lowered:
         return UpdateFailure(
@@ -156,14 +172,53 @@ def _safe_https_url(value: Any) -> str:
     return text
 
 
-def _default_update_cache_dir() -> str:
+def _load_update_brand(paths: AppPaths) -> UpdateBrand:
+    config_path = getattr(paths, "desktop_update_brand", "")
+    if not config_path or not os.path.isfile(config_path):
+        return UpdateBrand()
+    try:
+        with open(config_path, "r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"OEM update configuration is invalid: {error}") from error
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
+        raise ValueError("OEM update configuration must use schemaVersion 1")
+
+    def required(key: str) -> str:
+        value = str(payload.get(key) or "").strip()
+        if not value:
+            raise ValueError(f"OEM update configuration is missing {key}")
+        return value
+
+    manifest_url = _safe_https_url(required("manifestUrl"))
+    file_prefix = required("filePrefix")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{2,63}", file_prefix):
+        raise ValueError("OEM update filePrefix is invalid")
+    cache_key = required("cacheKey")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{2,127}", cache_key):
+        raise ValueError("OEM update cacheKey is invalid")
+    return UpdateBrand(
+        brand_id=required("brandId"),
+        display_name=required("displayName"),
+        product=required("product"),
+        channel=required("channel"),
+        channel_id=required("channelId"),
+        file_prefix=file_prefix,
+        manifest_url=manifest_url,
+        cache_key=cache_key,
+        public_key=str(payload.get("publicKey") or "").strip(),
+    )
+
+
+def _default_update_cache_dir(cache_key: str = "LOOM") -> str:
     explicit = str(os.environ.get("LOOM_UPDATE_CACHE_DIR") or "").strip()
     if explicit:
         return os.path.abspath(explicit)
     root = str(os.environ.get("LOCALAPPDATA") or "").strip()
     if not root:
         root = tempfile.gettempdir()
-    return os.path.join(root, "LOOM-Update-Recovery", "updates")
+    safe_key = re.sub(r"[^A-Za-z0-9.-]+", "-", str(cache_key or "LOOM")).strip(".-") or "LOOM"
+    return os.path.join(root, f"{safe_key}-Update-Recovery", "updates")
 
 
 def _canonical_update_manifest_payload(data: dict[str, Any]) -> bytes:
@@ -175,27 +230,29 @@ def _canonical_update_manifest_payload(data: dict[str, Any]) -> bytes:
 def _load_update_public_key(value: str) -> Ed25519PublicKey:
     text = str(value or "").strip()
     if not text:
-        raise ValueError("LOOM 更新公钥为空")
+        raise ValueError("更新公钥为空")
     if text.startswith("-----BEGIN"):
         loaded = serialization.load_pem_public_key(text.encode("utf-8"))
         if not isinstance(loaded, Ed25519PublicKey):
-            raise ValueError("LOOM 更新公钥必须使用 Ed25519")
+            raise ValueError("更新公钥必须使用 Ed25519")
         return loaded
     if text.lower().startswith("ed25519:"):
         text = text.split(":", 1)[1].strip()
     try:
         raw = base64.b64decode(text, validate=True)
     except Exception as error:
-        raise ValueError("LOOM 更新公钥不是有效的 Base64") from error
+        raise ValueError("更新公钥不是有效的 Base64") from error
     if len(raw) != 32:
-        raise ValueError("LOOM 更新公钥必须是 32 字节 Ed25519 公钥")
+        raise ValueError("更新公钥必须是 32 字节 Ed25519 公钥")
     return Ed25519PublicKey.from_public_bytes(raw)
 
 
-def _default_update_public_key(paths: AppPaths) -> str:
+def _default_update_public_key(paths: AppPaths, brand: UpdateBrand | None = None) -> str:
     inline_key = str(os.environ.get(UPDATE_PUBLIC_KEY_ENV) or "").strip()
     if inline_key:
         return inline_key
+    if brand is not None and brand.public_key:
+        return brand.public_key
     configured_path = str(os.environ.get(UPDATE_PUBLIC_KEY_PATH_ENV) or "").strip()
     candidates = [
         configured_path,
@@ -214,17 +271,22 @@ def _default_update_public_key(paths: AppPaths) -> str:
 def _verify_loom_update_signature(
     release: LoomRelease,
     public_key: str,
+    brand: UpdateBrand | None = None,
 ) -> tuple[bool, str]:
+    expected_brand = brand or UpdateBrand()
     manifest = release.update_manifest
     if not isinstance(manifest, dict):
-        return False, "发布页缺少 LOOM 官方更新签名"
+        return False, f"发布页缺少 {expected_brand.display_name} 官方更新签名"
     try:
         if manifest.get("schemaVersion") != 1:
             raise ValueError("schemaVersion 必须为 1")
-        if manifest.get("product") != "LOOM":
-            raise ValueError("product 必须为 LOOM")
-        if manifest.get("channel") != "stable":
-            raise ValueError("channel 必须为 stable")
+        if manifest.get("product") != expected_brand.product:
+            raise ValueError(f"product 必须为 {expected_brand.product}")
+        if manifest.get("channel") != expected_brand.channel:
+            raise ValueError(f"channel 必须为 {expected_brand.channel}")
+        manifest_channel_id = str(manifest.get("channelId") or "").strip()
+        if manifest_channel_id and manifest_channel_id != expected_brand.channel_id:
+            raise ValueError(f"channelId 必须为 {expected_brand.channel_id}")
         signature = manifest.get("signature")
         if not isinstance(signature, dict) or signature.get("algorithm") != "ed25519":
             raise ValueError("signature.algorithm 必须为 ed25519")
@@ -248,10 +310,10 @@ def _verify_loom_update_signature(
             if actual != value:
                 raise ValueError(f"{field} 与发布资产不一致")
     except InvalidSignature:
-        return False, "LOOM 官方更新签名无效"
+        return False, f"{expected_brand.display_name} 官方更新签名无效"
     except Exception as error:
-        return False, f"LOOM 官方更新签名验证失败：{error}"
-    return True, "LOOM 官方发布签名（Ed25519）"
+        return False, f"{expected_brand.display_name} 官方更新签名验证失败：{error}"
+    return True, f"{expected_brand.display_name} 官方发布签名（Ed25519）"
 
 
 def _verify_windows_signature(path: str) -> tuple[bool, str]:
@@ -340,17 +402,23 @@ class LoomAppUpdater:
         update_cache_dir: str | None = None,
     ) -> None:
         self.paths = paths
+        self.brand = _load_update_brand(paths)
         self._current_version = str(current_version or os.environ.get("LOOM_APP_VERSION") or "0.0.0").strip()
-        self.release_api_urls = tuple(str(url).strip() for url in release_api_urls if str(url).strip())
+        configured_urls = tuple(str(url).strip() for url in release_api_urls if str(url).strip())
+        if self.brand.manifest_url and configured_urls == DEFAULT_RELEASE_API_URLS:
+            configured_urls = (self.brand.manifest_url,)
+        self.release_api_urls = configured_urls
         self.opener = opener
         self.launcher = launcher or self._deferred_launcher
         self.signature_verifier = signature_verifier
         self.update_public_key = (
             str(update_public_key).strip()
             if update_public_key is not None
-            else _default_update_public_key(paths)
+            else _default_update_public_key(paths, self.brand)
         )
-        self.update_cache_dir = os.path.abspath(update_cache_dir or _default_update_cache_dir())
+        self.update_cache_dir = os.path.abspath(
+            update_cache_dir or _default_update_cache_dir(self.brand.cache_key)
+        )
         self.cached_release: LoomRelease | None = None
         self.last_installer_path = ""
         self._status_lock = threading.Lock()
@@ -477,7 +545,11 @@ class LoomAppUpdater:
         windows_ok, windows_signer = self.signature_verifier(path)
         if windows_ok:
             return True, f"Windows 发布者：{windows_signer}"
-        loom_ok, loom_signer = _verify_loom_update_signature(release, self.update_public_key)
+        loom_ok, loom_signer = _verify_loom_update_signature(
+            release,
+            self.update_public_key,
+            self.brand,
+        )
         if loom_ok:
             return True, loom_signer
         return False, f"Windows Authenticode：{windows_signer}；{loom_signer}"
@@ -612,7 +684,7 @@ class LoomAppUpdater:
                         signature_ok, signer = self._verify_release_authenticity(final_path, release)
                         if not signature_ok:
                             os.remove(final_path)
-                            raise ValueError(f"LOOM 官方签名验证失败：{signer}")
+                            raise ValueError(f"{self.brand.display_name} 官方签名验证失败：{signer}")
                         self.last_installer_path = final_path
                         self.launcher(final_path)
                         self._report(
@@ -626,7 +698,7 @@ class LoomAppUpdater:
                         return True, release.version, [
                             f"已验证 SHA256：{cached_hash}",
                             f"已验证 {signer}",
-                            f"LOOM {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
+                            f"{self.brand.display_name} {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
                         ]
                 written, digest = self._prepare_partial(partial_path, release.size)
                 self._report(
@@ -661,7 +733,7 @@ class LoomAppUpdater:
                     downloaded=written,
                     total=release.size,
                     version=release.version,
-                    message="正在验证 LOOM 官方发布签名",
+                    message=f"正在验证 {self.brand.display_name} 官方发布签名",
                     callback=progress_callback,
                 )
                 signature_ok, signer = self._verify_release_authenticity(final_path, release)
@@ -670,7 +742,7 @@ class LoomAppUpdater:
                         os.remove(final_path)
                     except OSError:
                         pass
-                    raise ValueError(f"LOOM 官方签名验证失败：{signer}")
+                    raise ValueError(f"{self.brand.display_name} 官方签名验证失败：{signer}")
 
                 self.last_installer_path = final_path
                 self.launcher(final_path)
@@ -685,7 +757,7 @@ class LoomAppUpdater:
                 return True, release.version, [
                     f"已验证 SHA256：{actual_sha}",
                     f"已验证 {signer}",
-                    f"LOOM {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
+                    f"{self.brand.display_name} {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
                 ]
             except UpdateCancelled:
                 message = "已取消更新，下载进度已保留"
@@ -701,7 +773,7 @@ class LoomAppUpdater:
                 )
                 return False, self.current_version(), [message, *remediation]
             except Exception as error:
-                failure = _classify_update_failure(error)
+                failure = _classify_update_failure(error, self.brand.display_name)
                 self._report(
                     "failed",
                     version=release.version,
@@ -756,7 +828,10 @@ class LoomAppUpdater:
         digest,
         progress_callback: Callable[[dict[str, Any]], None] | None,
     ) -> tuple[int, Any]:
-        headers = {"User-Agent": "LOOM-Updater/2", "Accept-Encoding": "identity"}
+        headers = {
+            "User-Agent": f"{self.brand.brand_id}-Updater/2",
+            "Accept-Encoding": "identity",
+        }
         if written > 0:
             headers["Range"] = f"bytes={written}-"
         request = urllib.request.Request(release.url, headers=headers)
@@ -816,11 +891,21 @@ class LoomAppUpdater:
         source_url = _safe_https_url(source_url)
         request = urllib.request.Request(
             source_url,
-            headers={"Accept": "application/json", "User-Agent": "LOOM-Updater/2"},
+            headers={
+                "Accept": "application/json",
+                "User-Agent": f"{self.brand.brand_id}-Updater/2",
+            },
         )
         with self.opener(request, timeout=15) as response:
             raw = response.read(2 * 1024 * 1024)
         payload = json.loads(raw.decode("utf-8"))
+        if (
+            isinstance(payload, dict)
+            and payload.get("schemaVersion") == 1
+            and isinstance(payload.get("signature"), dict)
+            and payload.get("filename")
+        ):
+            return self._release_from_direct_manifest(payload, source_url)
         if not isinstance(payload, dict) or bool(payload.get("draft")) or bool(payload.get("prerelease")):
             raise ValueError("更新源没有正式发布版本")
         assets = payload.get("assets")
@@ -833,13 +918,19 @@ class LoomAppUpdater:
             if not isinstance(asset, dict):
                 continue
             name = str(asset.get("name") or asset.get("filename") or "").strip()
-            match = SETUP_NAME_RE.fullmatch(name)
+            setup_name_re = re.compile(
+                rf"^{re.escape(self.brand.file_prefix)}-(?P<version>\d+\.\d+\.\d+)-setup\.exe$",
+                re.IGNORECASE,
+            )
+            match = setup_name_re.fullmatch(name)
             if match:
                 setup = asset
                 version = match.group("version")
                 break
         if setup is None:
-            raise ValueError("正式发布中没有唯一推荐的 LOOM 完整安装包")
+            raise ValueError(
+                f"正式发布中没有唯一推荐的 {self.brand.display_name} 完整安装包"
+            )
 
         filename = str(setup.get("name") or setup.get("filename") or "").strip()
         url = _safe_https_url(setup.get("browser_download_url") or setup.get("download_url"))
@@ -868,9 +959,55 @@ class LoomAppUpdater:
             signature_ok, signature_detail = _verify_loom_update_signature(
                 release,
                 self.update_public_key,
+                self.brand,
             )
             if not signature_ok:
                 raise ValueError(signature_detail)
+        return release
+
+    def _release_from_direct_manifest(
+        self,
+        payload: dict[str, Any],
+        source_url: str,
+    ) -> LoomRelease:
+        filename = str(payload.get("filename") or "").strip()
+        setup_name_re = re.compile(
+            rf"^{re.escape(self.brand.file_prefix)}-(?P<version>\d+\.\d+\.\d+)-setup\.exe$",
+            re.IGNORECASE,
+        )
+        match = setup_name_re.fullmatch(filename)
+        if not match:
+            raise ValueError(
+                f"更新清单 filename 必须匹配 {self.brand.file_prefix}-<version>-setup.exe"
+            )
+        download_url = _safe_https_url(payload.get("downloadUrl"))
+        size = int(payload.get("size") or 0)
+        sha256 = str(payload.get("sha256") or "").strip().lower()
+        if size <= 0:
+            raise ValueError("更新清单 size 必须大于 0")
+        if not SHA256_RE.fullmatch(sha256):
+            raise ValueError("更新清单 sha256 无效")
+        release = LoomRelease(
+            version=match.group("version"),
+            filename=filename,
+            url=download_url,
+            size=size,
+            sha256=sha256,
+            source=urlparse(source_url).hostname or source_url,
+            notes=str(payload.get("notes") or "").strip()[:20000],
+            published_at=str(payload.get("publishedAt") or "").strip(),
+            release_url=source_url,
+            update_manifest=payload,
+        )
+        if not self.update_public_key:
+            raise ValueError(f"{self.brand.display_name} 更新公钥缺失")
+        signature_ok, signature_detail = _verify_loom_update_signature(
+            release,
+            self.update_public_key,
+            self.brand,
+        )
+        if not signature_ok:
+            raise ValueError(signature_detail)
         return release
 
     def _fetch_sidecar_sha(self, assets: list[Any], filename: str) -> str:
@@ -882,7 +1019,10 @@ class LoomAppUpdater:
             if name.lower() != expected_name.lower():
                 continue
             url = _safe_https_url(asset.get("browser_download_url") or asset.get("download_url"))
-            request = urllib.request.Request(url, headers={"User-Agent": "LOOM-Updater/2"})
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": f"{self.brand.brand_id}-Updater/2"},
+            )
             with self.opener(request, timeout=15) as response:
                 text = response.read(4096).decode("ascii", errors="replace")
             match = SHA256_RE.search(text)
@@ -900,7 +1040,10 @@ class LoomAppUpdater:
             url = _safe_https_url(asset.get("browser_download_url") or asset.get("download_url"))
             request = urllib.request.Request(
                 url,
-                headers={"Accept": "application/json", "User-Agent": "LOOM-Updater/2"},
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": f"{self.brand.brand_id}-Updater/2",
+                },
             )
             with self.opener(request, timeout=15) as response:
                 raw = response.read(64 * 1024)

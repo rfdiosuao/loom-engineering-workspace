@@ -104,7 +104,7 @@ const SETTINGS_COPY: Record<AppLanguage, SettingsCopy> = {
       },
     },
     updates: {
-      checkTitle: 'LOOM 应用更新',
+      checkTitle: `${APP_DISPLAY_NAME} 应用更新`,
       checkDesc: '检查正式发布的完整安装包，校验 SHA256 后启动覆盖安装。',
       checkButton: '检查更新',
       installButton: '立即更新',
@@ -116,7 +116,7 @@ const SETTINGS_COPY: Record<AppLanguage, SettingsCopy> = {
       failedCheck: '检查更新失败',
       failedInstall: '更新失败',
       confirmTitle: '确认更新',
-      confirmMessage: '更新会下载经过 SHA256 校验的 LOOM 完整安装包并启动安装器。请先保存正在运行的任务。',
+      confirmMessage: `更新会下载经过 SHA256 校验的 ${APP_DISPLAY_NAME} 完整安装包并启动安装器。请先保存正在运行的任务。`,
       confirmText: '立即更新',
       current: '当前版本',
       latest: '最新版本',
@@ -186,7 +186,7 @@ const SETTINGS_COPY: Record<AppLanguage, SettingsCopy> = {
       },
     },
     updates: {
-      checkTitle: 'LOOM Application Updates',
+      checkTitle: `${APP_DISPLAY_NAME} Application Updates`,
       checkDesc: 'Check the complete release installer, verify SHA256, and start the upgrade.',
       checkButton: 'Check',
       installButton: 'Update Now',
@@ -373,7 +373,7 @@ export const SettingsPage: React.FC = () => {
             <SettingRow title={copy.updates.checkTitle} desc={copy.updates.checkDesc}>
               <div className="flex flex-wrap items-center justify-between gap-4 border-y border-border py-4">
                 <div>
-                  <div className="text-sm font-black text-text">LOOM {APP_VERSION}</div>
+                  <div className="text-sm font-black text-text">{APP_DISPLAY_NAME} {APP_VERSION}</div>
                   <div className="mt-1 text-xs leading-5 text-text-muted">启动后自动检查正式版本，下载、签名校验、备份和回滚均由更新中心管理。</div>
                 </div>
                 <Button variant="primary" onClick={requestUpdateCenterOpen}>{copy.updates.checkButton}</Button>

@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory = $true)][string]$MarkerPath,
     [Parameter(Mandatory = $true)][int]$ParentPid,
     [Parameter(Mandatory = $true)][string]$Version,
+    [string]$BrandId = "loom",
+    [string]$BrandDisplayName = "LOOM",
     [switch]$RecoveryOnly,
     [switch]$TestMode
 )
@@ -20,7 +22,11 @@ $healthMarkerPath = Join-Path $RecoveryRoot "new-version-health.txt"
 $successMarkerPath = Join-Path $RecoveryRoot "update-success.json"
 $registryBackup = Join-Path $RecoveryRoot "registry"
 $runOncePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
-$runOnceName = "!LOOMUpdateRecovery"
+$safeBrandId = ($BrandId.Trim() -replace '[^A-Za-z0-9._-]', '_')
+if ([string]::IsNullOrWhiteSpace($safeBrandId)) {
+    throw "BrandId must contain at least one safe character"
+}
+$runOnceName = "!${safeBrandId}UpdateRecovery"
 $dataBackupComplete = $false
 $originalDataPresent = $false
 $applicationBackupComplete = $false
@@ -482,7 +488,8 @@ function Register-UpdateRecoveryRunOnce([switch]$Retry) {
         "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
         "-Installer", $Installer, "-InstallRoot", $InstallRoot, "-AppExe", $AppExe,
         "-RecoveryRoot", $RecoveryRoot, "-MarkerPath", $MarkerPath, "-ParentPid", "0",
-        "-Version", $Version, "-RecoveryOnly"
+        "-Version", $Version, "-BrandId", $safeBrandId,
+        "-BrandDisplayName", $BrandDisplayName, "-RecoveryOnly"
     )
     $commandLine = (Quote-UpdateArgument $powershell) + " " + (($arguments | ForEach-Object { Quote-UpdateArgument ([string]$_) }) -join " ")
     $valueName = if ($Retry) {
@@ -510,14 +517,14 @@ function Clear-UpdateRecoveryRunOnce {
 }
 
 function Acquire-UpdateHandoffMutex {
-    $script:updateMutex = [System.Threading.Mutex]::new($false, "Local\LOOM.Update.Handoff")
+    $script:updateMutex = [System.Threading.Mutex]::new($false, "Local\$safeBrandId.Update.Handoff")
     try {
         $script:updateMutexOwned = $script:updateMutex.WaitOne([TimeSpan]::FromSeconds(45))
     } catch [System.Threading.AbandonedMutexException] {
         $script:updateMutexOwned = $true
     }
     if (-not $script:updateMutexOwned) {
-        throw "another LOOM update handoff is already running"
+        throw "another $BrandDisplayName update handoff is already running"
     }
 }
 

@@ -2,7 +2,12 @@ param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$OutputDirectory = "",
-    [string]$ReleaseNotesPath = ""
+    [string]$ReleaseNotesPath = "",
+    [string]$Product = "LOOM",
+    [string]$Channel = "stable",
+    [string]$ChannelId = "loom-stable",
+    [string]$FilePrefix = "LOOM",
+    [string]$DownloadUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,7 +31,7 @@ if ($signature.Status -ne "Valid" -and $signature.Status -ne "NotSigned") {
     throw "Installer signature is not valid: $($signature.Status) $($signature.StatusMessage)"
 }
 
-$canonicalName = "LOOM-$Version-setup.exe"
+$canonicalName = "$FilePrefix-$Version-setup.exe"
 $canonicalInstaller = Join-Path $outputRoot $canonicalName
 Copy-Item -LiteralPath $installer -Destination $canonicalInstaller -Force
 
@@ -50,7 +55,12 @@ $python = (Get-Command python -ErrorAction Stop).Source
 & $python $signerScript `
     --installer $canonicalInstaller `
     --version $Version `
-    --output $updateManifest
+    --output $updateManifest `
+    --product $Product `
+    --channel $Channel `
+    --channel-id $ChannelId `
+    --file-prefix $FilePrefix `
+    --download-url $DownloadUrl
 if ($LASTEXITCODE -ne 0) {
     throw "Desktop update signing failed with exit code $LASTEXITCODE"
 }

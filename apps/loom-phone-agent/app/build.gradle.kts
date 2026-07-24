@@ -17,13 +17,24 @@ val releaseSigningProperties = Properties().apply {
 }
 
 fun releaseSigningProperty(key: String): String {
-    return (providers.gradleProperty(key).orNull ?: releaseSigningProperties.getProperty(key, "")).trim()
+    return (
+        providers.gradleProperty(key).orNull
+            ?: System.getenv(key)
+            ?: releaseSigningProperties.getProperty(key, "")
+    ).trim()
 }
 
 val releaseKeystoreFile = releaseSigningProperty("KEYSTORE_FILE")
 val releaseKeystorePassword = releaseSigningProperty("KEYSTORE_PASSWORD")
 val releaseKeyAlias = releaseSigningProperty("KEY_ALIAS")
 val releaseKeyPassword = releaseSigningProperty("KEY_PASSWORD")
+val oemApplicationId = providers.gradleProperty("OEM_APPLICATION_ID").orNull?.trim().orEmpty()
+    .ifEmpty { "com.apk.claw.android" }
+val oemAppName = providers.gradleProperty("OEM_APP_NAME").orNull?.trim().orEmpty()
+    .ifEmpty { "Lumi Agent Phone" }
+val oemFilePrefix = providers.gradleProperty("OEM_FILE_PREFIX").orNull?.trim().orEmpty()
+    .ifEmpty { "AgentPhone" }
+val oemResDir = providers.gradleProperty("OEM_RES_DIR").orNull?.trim().orEmpty()
 
 fun releaseBuildRequested(): Boolean {
     return gradle.startParameter.taskNames.any { taskName ->
@@ -43,7 +54,7 @@ fun validateReleaseSigning() {
     if (releaseKeyPassword.isBlank()) missing += "KEY_PASSWORD"
     if (missing.isNotEmpty()) {
         throw GradleException(
-            "Release signing is incomplete. Set ${missing.joinToString(", ")} in local.properties or Gradle properties before building assembleRelease."
+            "Release signing is incomplete. Set ${missing.joinToString(", ")} in environment variables, local.properties, or Gradle properties before building assembleRelease."
         )
     }
 }
@@ -68,11 +79,14 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.apk.claw.android"
+        applicationId = oemApplicationId
         minSdk = if (android7Compat) 24 else 28
         targetSdk = 36
         versionCode = 922
         versionName = if (android7Compat) "6.53-stability-android7" else "6.53-stability"
+        manifestPlaceholders["oemAppLabel"] = oemAppName
+        manifestPlaceholders["oemAppIcon"] =
+            if (oemResDir.isNotEmpty()) "@mipmap/ic_launcher" else "@drawable/ic_lumi_agent_launcher"
         buildConfigField("String", "VERSION_INFO", getVersionGit())
         buildConfigField("boolean", "ANDROID7_COMPAT", android7Compat.toString())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -108,6 +122,14 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+
+    sourceSets {
+        getByName("main") {
+            if (oemResDir.isNotEmpty()) {
+                res.srcDir(file(oemResDir))
+            }
+        }
     }
 
     packaging {
@@ -173,7 +195,7 @@ androidComponents {
         variant.outputs.forEach { output ->
             if (output is com.android.build.api.variant.impl.VariantOutputImpl) {
                 val versionName = android.defaultConfig.versionName ?: "0.0.0"
-                val fileName = "AgentPhone_v${versionName}_${getDateTime()}.apk"
+                val fileName = "${oemFilePrefix}_v${versionName}_${getDateTime()}.apk"
                 println("output file name: $fileName")
                 output.outputFileName.set(fileName)
             }

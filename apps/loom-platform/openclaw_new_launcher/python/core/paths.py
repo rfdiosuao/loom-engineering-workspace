@@ -360,7 +360,18 @@ class AppPaths:
 
     @property
     def brand_profile(self) -> str:
+        bundled = os.path.join(self.base_path, "_up_", "data", "brand_profile.json")
+        if os.path.isfile(bundled):
+            return bundled
         return os.path.join(self.data_dir, "brand_profile.json")
+
+    @property
+    def desktop_update_brand(self) -> str:
+        candidates = [
+            os.path.join(self.base_path, "_up_", "data", "desktop-update-brand.json"),
+            os.path.join(self.data_dir, "desktop-update-brand.json"),
+        ]
+        return next((path for path in candidates if os.path.isfile(path)), candidates[0])
 
     @property
     def openclaw_mjs(self) -> str:

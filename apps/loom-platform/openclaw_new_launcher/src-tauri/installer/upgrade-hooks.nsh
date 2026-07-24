@@ -16,7 +16,7 @@
   loom_owned_process_shell_ready:
   ExecWait '"$1" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\loom-stop-owned-install-processes.ps1" -InstallRoot "$INSTDIR"' $0
   StrCmp $0 "0" loom_owned_process_cleanup_ok
-  MessageBox MB_ICONSTOP|MB_OK "LOOM background processes are still using installation files. Close LOOM and retry. Diagnostic log: $TEMP\LOOM-installer-process-cleanup.log"
+  MessageBox MB_ICONSTOP|MB_OK "Application background processes are still using installation files. Close the application and retry. Diagnostic log: $TEMP\application-installer-process-cleanup.log"
   Abort
   loom_owned_process_cleanup_ok:
 

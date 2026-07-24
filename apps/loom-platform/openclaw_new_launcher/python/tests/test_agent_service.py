@@ -362,6 +362,49 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(request["requestScope"]["status"], "resolved")
         self.assertEqual(runtime.requests[0]["requestScope"], request["requestScope"])
 
+    def test_oem_brand_identity_reaches_bootstrap_and_model_request(self) -> None:
+        from services.agent_service import AgentService
+
+        runtime = ScriptedRuntime([{"final": {"text": "done"}}])
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            os.makedirs(os.path.dirname(paths.brand_profile), exist_ok=True)
+            with open(paths.brand_profile, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "displayName": "Northstar AI Matrix",
+                        "nativeAgentName": "Northstar AI Matrix 原生智能体",
+                    },
+                    handle,
+                    ensure_ascii=False,
+                )
+            service = AgentService(
+                paths,
+                runtime=runtime,
+                capabilities=_registry(),
+                matrix_factory=ProgressMatrix,
+            )
+            try:
+                bootstrap = service.bootstrap()
+                session = service.create_session({"title": "OEM identity"})
+                sent = service.send_message(session["sessionId"], {
+                    "clientMessageId": "oem-identity-1",
+                    "text": "你好",
+                    "scopeMode": "auto",
+                })
+                _wait_for_status(service, sent["run"]["runId"], "completed")
+            finally:
+                service.shutdown()
+
+        self.assertEqual(
+            bootstrap["runtimeProfiles"][0]["name"],
+            "Northstar AI Matrix 原生智能体",
+        )
+        self.assertEqual(
+            runtime.requests[0]["brandDisplayName"],
+            "Northstar AI Matrix",
+        )
+
     def test_ambiguous_phone_scope_returns_clarification_without_runtime_or_dispatch(self) -> None:
         from services.agent_service import AgentService
 

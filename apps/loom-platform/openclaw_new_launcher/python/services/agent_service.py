@@ -20,6 +20,7 @@ from core.agent_policy import AgentPolicyEngine
 from core.agent_runtime import redact_sensitive
 from core.agent_scope import resolve_request_scope
 from core.agent_sessions import AgentSessionRepository, sanitize_for_storage
+from core.brand_identity import load_brand_identity
 from core.loom_model_client import LoomModelClient, extract_explicit_capability_hints
 from core.native_agent_runtime import LoomNativeRuntimeAdapter
 from core.newapi_account_manager import NewApiAccountManager
@@ -61,7 +62,6 @@ _SCOPE_INDEPENDENT_MEDIA_TERMS = (
     "做视频",
     "生视频",
 )
-NATIVE_RUNTIME_NAME = "麓鸣原生智能体"
 
 
 def _native_runtime_profile_id(_value: Any = None) -> str:
@@ -123,6 +123,8 @@ class AgentService:
         max_workers: int = 4,
     ) -> None:
         self.paths = paths
+        self.brand_identity = load_brand_identity(paths)
+        self.native_runtime_name = self.brand_identity.native_agent_name
         self.repository = AgentSessionRepository(paths)
         self.event_bus = AgentEventBus(self.repository)
         self.context_factory = context_factory
@@ -135,7 +137,10 @@ class AgentService:
         if runtime is None:
             self.account_manager = account_manager or NewApiAccountManager(paths, lambda _text: None)
             self.model_client = model_client or LoomModelClient(self.account_manager)
-            self.runtime = LoomNativeRuntimeAdapter(self.model_client)
+            self.runtime = LoomNativeRuntimeAdapter(
+                self.model_client,
+                runtime_name=self.native_runtime_name,
+            )
         else:
             self.runtime = runtime
         self._skill_service = SkillService(paths)
@@ -195,7 +200,7 @@ class AgentService:
         runtime_status = {**runtime_status, "profileId": NATIVE_RUNTIME_PROFILE_ID}
         profile: Json = {
             "runtimeProfileId": NATIVE_RUNTIME_PROFILE_ID,
-            "name": NATIVE_RUNTIME_NAME,
+            "name": self.native_runtime_name,
             "available": bool(runtime_status.get("available")),
             "isDefault": True,
         }
@@ -333,6 +338,7 @@ class AgentService:
         ]))
         runtime_request = {
             "prompt": text,
+            "brandDisplayName": self.brand_identity.display_name,
             "attachments": attachments,
             "scopeMode": scope_resolution.mode,
             "requestScope": scope_resolution.to_dict(),

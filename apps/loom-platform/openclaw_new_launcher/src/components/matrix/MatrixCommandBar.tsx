@@ -1,5 +1,6 @@
 import React from 'react';
 
+import { APP_TASK_PLACEHOLDER } from '../../version';
 import { Button, TextArea } from '../common';
 
 interface MatrixCommandBarProps {
@@ -35,7 +36,7 @@ export const MatrixCommandBar: React.FC<MatrixCommandBarProps> = ({
           value={prompt}
           onChange={(event) => onPromptChange(event.target.value)}
           rows={2}
-          placeholder="输入要在已选设备上执行的真实任务"
+          placeholder={APP_TASK_PLACEHOLDER}
           className="min-h-[58px] !rounded-[6px] !border-white/10 !bg-[#06131C] !px-3 !py-2 !text-xs !leading-5 !text-slate-100"
         />
       </label>

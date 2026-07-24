@@ -48,7 +48,8 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertGreaterEqual(source.count("<LoomLogoMark"), 2)
         self.assertNotIn('/logo.png', source)
         self.assertIn("new URL('../../assets/luming-logo.svg', import.meta.url).href", brand_source)
-        self.assertIn('src={LOGO_SRC}', brand_source)
+        self.assertIn("const { logoUrl } = useTheme()", brand_source)
+        self.assertIn('src={logoSrc}', brand_source)
         self.assertNotIn("'/loom-motion/logo.svg'", brand_source)
         self.assertTrue(os.path.isfile(PACKAGED_LOGO))
 

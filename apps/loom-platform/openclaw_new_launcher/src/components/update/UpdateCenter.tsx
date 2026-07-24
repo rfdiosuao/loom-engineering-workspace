@@ -24,6 +24,7 @@ import {
   type UpdateProgressResponse,
   type UpdateResultReceipt,
 } from '../../services/api';
+import { APP_DISPLAY_NAME } from '../../version';
 
 const UPDATE_CENTER_OPEN_EVENT = 'loom:update-center:open';
 const SKIPPED_VERSION_KEY = 'loom.update.skippedVersion';
@@ -77,8 +78,8 @@ function resultTitle(result: UpdateResultReceipt): string {
 }
 
 function resultMessage(result: UpdateResultReceipt): string {
-  if (result.status === 'success') return `LOOM ${result.version} 已安装并通过运行健康检查。`;
-  return result.message || '新版启动检查未通过，LOOM 已尝试恢复更新前的版本。';
+  if (result.status === 'success') return `${APP_DISPLAY_NAME} ${result.version} 已安装并通过运行健康检查。`;
+  return result.message || `新版启动检查未通过，${APP_DISPLAY_NAME} 已尝试恢复更新前的版本。`;
 }
 
 export const UpdateCenter: React.FC = () => {
@@ -238,7 +239,7 @@ export const UpdateCenter: React.FC = () => {
       setPhase('ready');
       setProgress((current) => current ? { ...current, phase: 'ready', percent: 100 } : current);
       if (!visibleRef.current) {
-        showToast(`LOOM ${response.current_version} 已下载完成，等待重启安装`, 'success');
+        showToast(`${APP_DISPLAY_NAME} ${response.current_version} 已下载完成，等待重启安装`, 'success');
       }
     } catch (error) {
       const detail = error && typeof error === 'object'
@@ -324,7 +325,7 @@ export const UpdateCenter: React.FC = () => {
           <div className="min-w-0 flex-1">
             <h2 id="loom-update-title" className="text-[18px] font-black text-text">{title}</h2>
             <p className="mt-0.5 truncate text-xs font-semibold text-text-muted">
-              {release ? `LOOM ${release.current}  →  ${release.latest}` : 'LOOM 安全更新中心'}
+              {release ? `${APP_DISPLAY_NAME} ${release.current}  →  ${release.latest}` : `${APP_DISPLAY_NAME} 安全更新中心`}
             </p>
           </div>
           <button
@@ -394,7 +395,7 @@ export const UpdateCenter: React.FC = () => {
                 <div className="min-w-0 flex-1">
                   <div className="text-base font-black text-text">
                     {phase === 'verifying'
-                      ? '正在验证 LOOM 官方发布签名'
+                      ? `正在验证 ${APP_DISPLAY_NAME} 官方发布签名`
                       : phase === 'ready'
                         ? '下载与安全校验已完成'
                         : phase === 'restarting'
@@ -405,7 +406,7 @@ export const UpdateCenter: React.FC = () => {
                     {phase === 'ready'
                       ? '重启后会自动备份数据、静默安装并执行健康检查；失败时恢复上一版本。'
                       : phase === 'restarting'
-                        ? 'LOOM 即将关闭，更新将在后台静默完成。'
+                        ? `${APP_DISPLAY_NAME} 即将关闭，更新将在后台静默完成。`
                         : '可以隐藏此窗口，下载会在后台继续。'}
                   </div>
                 </div>
@@ -418,7 +419,7 @@ export const UpdateCenter: React.FC = () => {
                   />
                 </div>
                 <div className="mt-2 flex items-center justify-between text-xs font-semibold text-text-muted">
-                  <span>{phase === 'verifying' ? 'SHA256 与 LOOM 官方发布签名校验' : progress?.total ? `${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)}` : '准备下载'}</span>
+                  <span>{phase === 'verifying' ? `SHA256 与 ${APP_DISPLAY_NAME} 官方发布签名校验` : progress?.total ? `${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)}` : '准备下载'}</span>
                   <span>{phase === 'ready' || phase === 'restarting' ? '100%' : `${percent}%`}</span>
                 </div>
               </div>
@@ -434,7 +435,7 @@ export const UpdateCenter: React.FC = () => {
               <div className="flex h-16 w-16 items-center justify-center rounded-full border border-status-success/25 bg-status-success/10 text-status-success">
                 <CheckCircle2 size={32} />
               </div>
-              <div className="mt-5 text-[26px] font-black text-text">LOOM {receipt.version}</div>
+              <div className="mt-5 text-[26px] font-black text-text">{APP_DISPLAY_NAME} {receipt.version}</div>
               <div className="mt-2 max-w-[440px] text-sm leading-6 text-text-muted">{resultMessage(receipt)}</div>
               <div className="mt-5 rounded-[8px] border border-status-success/20 bg-status-success/8 px-4 py-3 text-xs font-semibold text-status-success">
                 新版本运行时与 Bridge 已通过健康检查

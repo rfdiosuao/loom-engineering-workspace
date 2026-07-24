@@ -26,14 +26,15 @@ class NativeAgentUiContractTests(unittest.TestCase):
         source = self._source("src", "components", "agent", "AgentWorkbenchPage.tsx")
 
         self.assertNotIn("请选择已安装且可用的运行时", source)
-        self.assertIn("麓鸣原生智能体尚未就绪，请先登录模型账号", source)
+        self.assertIn("APP_NATIVE_AGENT_NAME", source)
+        self.assertIn("尚未就绪，请先登录模型账号", source)
         self.assertIn("runtimeProfileId: 'loom-native'", source)
         self.assertIn("智能体状态读取失败", source)
 
     def test_header_identifies_native_agent_and_profile_error(self) -> None:
         source = self._source("src", "components", "agent", "AgentHeader.tsx")
 
-        self.assertIn("麓鸣原生智能体", source)
+        self.assertIn("APP_NATIVE_AGENT_NAME", source)
         self.assertIn("profile.runtimeProfileId === 'loom-native'", source)
         self.assertIn("userFacingAgentError({ error: nativeProfile.error }).title", source)
         self.assertNotIn("nativeProfile?.error?.message", source)

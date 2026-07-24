@@ -1,6 +1,7 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
     [string]$Path,
+    [string]$LauncherExeName = "LOOM.exe",
     [switch]$AllowPhoneAgentApk,
     [switch]$Online
 )
@@ -10,7 +11,7 @@ $allowPhoneAgentApkEnv = if ([string]::IsNullOrWhiteSpace($env:OPENCLAW_ALLOW_PH
 $allowPhoneAgentApkEffective = $AllowPhoneAgentApk.IsPresent -or @('1', 'true', 'yes', 'on') -contains $allowPhoneAgentApkEnv
 
 $offlineRequiredFiles = @(
-    "LOOM.exe",
+    $LauncherExeName,
     "node/node.exe",
     "node_modules/openclaw/openclaw.mjs",
     "start.js",
@@ -55,7 +56,7 @@ $offlineRequiredFiles = @(
 )
 
 $onlineRequiredFiles = @(
-    "LOOM.exe",
+    $LauncherExeName,
     ".mcp.json",
     "start.js",
     "scripts/openclaw-context.mjs",
@@ -102,13 +103,13 @@ $onlineRequiredFiles = @(
 )
 
 $offlineAllowedTopLevelEntries = @(
-    "LOOM.exe",
+    $LauncherExeName,
     ".mcp.json",
     "LOOMFiles"
 )
 
 $onlineAllowedTopLevelEntries = @(
-    "LOOM.exe",
+    $LauncherExeName,
     ".mcp.json",
     "LOOMFiles",
     "README-ONLINE.txt"
@@ -265,7 +266,7 @@ function Get-PayloadRelativePaths {
 
     if (
         $topSegments.Count -eq 1 -and
-        $topSegments[0] -ne "LOOM.exe" -and
+        $topSegments[0] -ne $LauncherExeName -and
         $topSegments[0] -ne "LOOMFiles"
     ) {
         $prefix = "$($topSegments[0])/"
@@ -278,7 +279,7 @@ function Get-PayloadRelativePaths {
             ForEach-Object { ($_ -split "/")[0] } |
             Sort-Object -Unique)
 
-        if ($candidateTopSegments -contains "LOOM.exe" -or $candidateTopSegments -contains "LOOMFiles") {
+        if ($candidateTopSegments -contains $LauncherExeName -or $candidateTopSegments -contains "LOOMFiles") {
             return $candidate
         }
     }

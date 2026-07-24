@@ -124,6 +124,18 @@ class AgentCapabilityInheritanceTests(unittest.TestCase):
         self.assertIn("存在依赖关系的调用必须分轮执行", prompt)
         self.assertNotIn("让用户勾选能力", prompt)
 
+    def test_system_prompt_uses_the_compiled_oem_brand_name(self) -> None:
+        registry, _calls = self._registry()
+
+        prompt = build_agent_system_prompt(
+            registry.list_capabilities(available_only=True),
+            brand_display_name="Northstar AI Matrix",
+        )
+
+        self.assertIn("你是 Northstar AI Matrix 原生中枢智能体", prompt)
+        self.assertIn("由 Northstar AI Matrix 执行层强制控制", prompt)
+        self.assertNotIn("麓鸣原生中枢智能体", prompt)
+
     def test_every_connected_capability_is_injected_exactly_once_and_hints_do_not_filter(self) -> None:
         registry, _calls = self._registry()
         connected = registry.list_capabilities(available_only=True)

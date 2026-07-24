@@ -114,6 +114,16 @@ class LoomNativeRuntimeAdapterTests(unittest.TestCase):
         self.assertEqual(status["runtime"], "麓鸣原生智能体")
         self.assertEqual(status["accessToken"], "[REDACTED]")
 
+    def test_status_uses_the_oem_runtime_name(self) -> None:
+        from core.native_agent_runtime import LoomNativeRuntimeAdapter
+
+        status = LoomNativeRuntimeAdapter(
+            FakeModelClient(),
+            runtime_name="Northstar AI Matrix 原生智能体",
+        ).status()
+
+        self.assertEqual(status["runtime"], "Northstar AI Matrix 原生智能体")
+
     def test_pre_cancelled_request_returns_runtime_cancellation_without_calling_model(self) -> None:
         from core.agent_runtime import RuntimeExecutionError
         from core.native_agent_runtime import LoomNativeRuntimeAdapter

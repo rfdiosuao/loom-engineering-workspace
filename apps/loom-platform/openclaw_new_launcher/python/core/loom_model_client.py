@@ -610,7 +610,10 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
     system_override = request.get("systemOverride")
     system_content = (
         system_override if isinstance(system_override, str) and system_override.strip()
-        else build_agent_system_prompt(capabilities)
+        else build_agent_system_prompt(
+            capabilities,
+            brand_display_name=request.get("brandDisplayName"),
+        )
     )
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_content}]
     # Session artifacts are a native-agent runtime concern; skip them when a
