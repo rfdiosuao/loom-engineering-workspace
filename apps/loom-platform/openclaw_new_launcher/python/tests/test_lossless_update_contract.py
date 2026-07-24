@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,60 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn(".update.json", source)
         self.assertIn("sign-desktop-update.py", source)
         self.assertIn("updateManifest", source)
+
+    @unittest.skipUnless(
+        os.name == "nt" and shutil.which("powershell"),
+        "Windows PowerShell is required",
+    )
+    def test_update_release_preparation_allows_an_empty_download_url(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        private_key_value = base64.b64encode(
+            private_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_installer = os.path.join(temp_dir, "source-installer.exe")
+            output_dir = os.path.join(temp_dir, "release")
+            shutil.copyfile(shutil.which("powershell"), source_installer)
+            env = os.environ.copy()
+            env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
+
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    UPDATE_RELEASE_SCRIPT,
+                    "-InstallerPath",
+                    source_installer,
+                    "-Version",
+                    "2.3.19",
+                    "-OutputDirectory",
+                    output_dir,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            manifest_path = os.path.join(
+                output_dir,
+                "LOOM-2.3.19-setup.exe.update.json",
+            )
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+
+        self.assertNotIn("downloadUrl", manifest)
 
     def test_desktop_update_signer_binds_the_installer_metadata(self) -> None:
         installer = b"unsigned-but-loom-signed-installer"
