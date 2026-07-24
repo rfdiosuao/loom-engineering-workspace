@@ -52,15 +52,20 @@ if (
     throw "LOOM_DESKTOP_UPDATE_PRIVATE_KEY or LOOM_DESKTOP_UPDATE_PRIVATE_KEY_PATH is required."
 }
 $python = (Get-Command python -ErrorAction Stop).Source
-& $python $signerScript `
-    --installer $canonicalInstaller `
-    --version $Version `
-    --output $updateManifest `
-    --product $Product `
-    --channel $Channel `
-    --channel-id $ChannelId `
-    --file-prefix $FilePrefix `
-    --download-url $DownloadUrl
+$signerArguments = @(
+    $signerScript,
+    "--installer", $canonicalInstaller,
+    "--version", $Version,
+    "--output", $updateManifest,
+    "--product", $Product,
+    "--channel", $Channel,
+    "--channel-id", $ChannelId,
+    "--file-prefix", $FilePrefix
+)
+if (-not [string]::IsNullOrWhiteSpace($DownloadUrl)) {
+    $signerArguments += @("--download-url", $DownloadUrl)
+}
+& $python @signerArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Desktop update signing failed with exit code $LASTEXITCODE"
 }
