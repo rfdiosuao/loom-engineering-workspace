@@ -71,6 +71,9 @@ class LosslessUpdateContractTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(fixture_executable), fixture_executable)
             shutil.copyfile(fixture_executable, source_installer)
             env = os.environ.copy()
+            # PowerShell 7 module paths can prevent Windows PowerShell 5.1 from
+            # loading its built-in Microsoft.PowerShell.Security module.
+            env.pop("PSModulePath", None)
             env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
 
             result = subprocess.run(
