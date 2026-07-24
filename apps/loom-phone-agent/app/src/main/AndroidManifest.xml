@@ -34,8 +34,8 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
-        android:icon="@drawable/ic_lumi_agent_launcher"
-        android:label="@string/app_name"
+        android:icon="${oemAppIcon}"
+        android:label="${oemAppLabel}"
         android:supportsRtl="true"
         android:theme="@style/Theme.ApkClaw">
 

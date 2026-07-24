@@ -21,6 +21,22 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static UPDATE_HANDOFF_STARTED: AtomicBool = AtomicBool::new(false);
 static ACKNOWLEDGED_UPDATE_HEALTH_MARKER: std::sync::Mutex<Option<std::path::PathBuf>> =
     std::sync::Mutex::new(None);
+const BRAND_ID: &str = match option_env!("LOOM_BRAND_ID") {
+    Some(value) => value,
+    None => "loom",
+};
+const BRAND_DISPLAY_NAME: &str = match option_env!("LOOM_BRAND_DISPLAY_NAME") {
+    Some(value) => value,
+    None => "LOOM",
+};
+const UPDATE_CACHE_KEY: &str = match option_env!("LOOM_BRAND_UPDATE_CACHE_KEY") {
+    Some(value) => value,
+    None => "LOOM",
+};
+const UPDATE_FILE_PREFIX: &str = match option_env!("LOOM_BRAND_UPDATE_FILE_PREFIX") {
+    Some(value) => value,
+    None => "LOOM",
+};
 
 struct UpdateHandoffStartGuard {
     reset_on_drop: bool,
@@ -46,21 +62,25 @@ fn acquire_update_handoff_system_mutex() -> Result<UpdateHandoffSystemMutex, Str
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
-    let name = std::ffi::OsStr::new("Local\\LOOM.Update.Handoff")
+    let mutex_name = format!("Local\\{BRAND_ID}.Update.Handoff");
+    let name = std::ffi::OsStr::new(&mutex_name)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
     if handle.is_null() {
-        return Err(format!("unable to create LOOM update mutex: {}", unsafe {
-            GetLastError()
-        }));
+        return Err(format!(
+            "unable to create {BRAND_DISPLAY_NAME} update mutex: {}",
+            unsafe { GetLastError() }
+        ));
     }
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         unsafe {
             CloseHandle(handle);
         }
-        return Err("another LOOM update handoff is already running".to_string());
+        return Err(format!(
+            "another {BRAND_DISPLAY_NAME} update handoff is already running"
+        ));
     }
     Ok(UpdateHandoffSystemMutex {
         _handle: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) },
@@ -72,7 +92,14 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const PRIMARY_PAYLOAD_DIR: &str = "LOOMFiles";
 const LEGACY_PAYLOAD_DIR: &str = "OpenClawFiles";
 const PORTABLE_PAYLOAD_DIRS: [&str; 2] = [PRIMARY_PAYLOAD_DIR, LEGACY_PAYLOAD_DIR];
-const LAUNCHER_EXE_NAME: &str = "LOOM.exe";
+const LAUNCHER_EXE_NAME: &str = match option_env!("LOOM_BRAND_BINARY_NAME") {
+    Some(value) => value,
+    None => "LOOM.exe",
+};
+
+fn update_recovery_dir_name() -> String {
+    format!("{UPDATE_CACHE_KEY}-Update-Recovery")
+}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -982,7 +1009,9 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
     #[cfg(not(windows))]
     {
         let _ = (app, installer_path);
-        return Err("LOOM automatic update is currently available on Windows only".to_string());
+        return Err(format!(
+            "{BRAND_DISPLAY_NAME} automatic update is currently available on Windows only"
+        ));
     }
 
     #[cfg(windows)]
@@ -991,7 +1020,9 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Err("LOOM update handoff is already running".to_string());
+            return Err(format!(
+                "{BRAND_DISPLAY_NAME} update handoff is already running"
+            ));
         }
         let mut handoff_guard = UpdateHandoffStartGuard {
             reset_on_drop: true,
@@ -1002,22 +1033,25 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
         let local_app_data = std::env::var_os("LOCALAPPDATA")
             .map(std::path::PathBuf::from)
             .ok_or_else(|| "LOCALAPPDATA 不可用，无法创建安全更新目录".to_string())?;
-        let update_state_root = local_app_data.join("LOOM-Update-Recovery");
+        let update_state_root = local_app_data.join(update_recovery_dir_name());
         let cache_root = update_state_root.join("updates");
         let canonical_cache = std::fs::canonicalize(&cache_root)
             .map_err(|e| format!("更新缓存目录不可用: {e}"))?;
         if !installer.starts_with(&canonical_cache) {
-            return Err("拒绝启动更新：安装包不在 LOOM 外部更新缓存中".to_string());
+            return Err(format!(
+                "拒绝启动更新：安装包不在 {BRAND_DISPLAY_NAME} 外部更新缓存中"
+            ));
         }
         let filename = installer
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("");
-        if !filename.starts_with("LOOM-") || !filename.ends_with("-setup.exe") {
+        let expected_prefix = format!("{UPDATE_FILE_PREFIX}-");
+        if !filename.starts_with(&expected_prefix) || !filename.ends_with("-setup.exe") {
             return Err("拒绝启动更新：安装包名称不符合正式发布规则".to_string());
         }
         let target_version = filename
-            .strip_prefix("LOOM-")
+            .strip_prefix(&expected_prefix)
             .and_then(|value| value.strip_suffix("-setup.exe"))
             .ok_or_else(|| "拒绝启动更新：无法从安装包名称读取目标版本".to_string())?;
         let version_parts = target_version.split('.').collect::<Vec<_>>();
@@ -1032,9 +1066,10 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
 
         shutdown_backend().await;
         let install_root = bootstrap::install_root()?;
-        let app_exe = std::env::current_exe().map_err(|e| format!("无法定位当前 LOOM: {e}"))?;
+        let app_exe = std::env::current_exe()
+            .map_err(|e| format!("无法定位当前 {BRAND_DISPLAY_NAME}: {e}"))?;
         let recovery_root = local_app_data
-            .join("LOOM-Update-Recovery")
+            .join(update_recovery_dir_name())
             .join("upgrade-backups")
             .join(format!(
                 "{}-{}-{}",
@@ -1073,6 +1108,8 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
         command.arg("-MarkerPath").arg(&marker_path);
         command.arg("-ParentPid").arg(std::process::id().to_string());
         command.arg("-Version").arg(&target_version);
+        command.arg("-BrandId").arg(BRAND_ID);
+        command.arg("-BrandDisplayName").arg(BRAND_DISPLAY_NAME);
         let test_mode = std::env::var("LOOM_UPDATE_TEST_MODE").ok().as_deref() == Some("1");
         if test_mode {
             command.arg("-TestMode");
@@ -1136,7 +1173,7 @@ fn acknowledge_update_health() -> Result<(), String> {
         .map(std::path::PathBuf::from)
         .ok_or_else(|| "LOCALAPPDATA is unavailable for update health confirmation".to_string())?;
     let allowed_root = local_app_data
-        .join("LOOM-Update-Recovery")
+        .join(update_recovery_dir_name())
         .join("upgrade-backups");
     let canonical_allowed = std::fs::canonicalize(&allowed_root)
         .map_err(|error| format!("update recovery root is unavailable: {error}"))?;

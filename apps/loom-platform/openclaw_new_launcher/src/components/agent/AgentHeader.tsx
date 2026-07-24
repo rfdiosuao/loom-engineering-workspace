@@ -1,4 +1,5 @@
 import type { AgentBootstrapResponse, AgentRun } from '../../types/agent';
+import { APP_NATIVE_AGENT_NAME } from '../../version';
 import { LoomAgentMark } from '../brand/LoomBrand';
 import { userFacingAgentError } from './agentViewModel';
 
@@ -54,7 +55,7 @@ export function AgentHeader({
             <span className="shrink-0 text-[11px] font-semibold text-text-subtle">{streamLabels[streamStatus]}</span>
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-text-muted">
-            <span className="truncate">麓鸣原生智能体</span>
+            <span className="truncate">{APP_NATIVE_AGENT_NAME}</span>
             <span aria-hidden="true">/</span>
             <span className="truncate">{nativeState}</span>
             <span aria-hidden="true">/</span>

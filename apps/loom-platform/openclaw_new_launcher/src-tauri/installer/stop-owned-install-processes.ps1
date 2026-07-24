@@ -4,7 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$logPath = Join-Path $env:TEMP "LOOM-installer-process-cleanup.log"
+$logPath = Join-Path $env:TEMP "application-installer-process-cleanup.log"
 
 function Write-CleanupLog([string]$Message) {
     try {
@@ -107,7 +107,10 @@ function Invoke-TaskKillProcessTree([int]$ProcessId) {
 
 function Test-OwnedRuntimeFilesUnlocked {
     $runtimeFiles = @(
-        (Join-Path $resolvedRoot "LOOM.exe"),
+        Get-ChildItem -LiteralPath $resolvedRoot -File -Filter "*.exe" -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName }
+    )
+    $runtimeFiles += @(
         (Join-Path $resolvedRoot "_up_\node-runtime\node.exe"),
         (Join-Path $resolvedRoot "_up_\python-runtime\python.exe"),
         (Join-Path $resolvedRoot "node-runtime\node.exe"),
@@ -181,4 +184,4 @@ do {
 $remaining = @(Get-OwnedInstallProcesses)
 $remainingIds = ($remaining | ForEach-Object { [string]$_.ProcessId }) -join ","
 Write-CleanupLog "cleanup timed out remaining=$remainingIds"
-throw "LOOM-owned processes or runtime file locks did not clear before installation: $remainingIds"
+throw "application-owned processes or runtime file locks did not clear before installation: $remainingIds"

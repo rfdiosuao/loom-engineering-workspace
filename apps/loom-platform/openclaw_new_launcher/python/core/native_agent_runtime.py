@@ -15,15 +15,21 @@ class LoomNativeRuntimeAdapter:
 
     profile_id = "loom-native"
 
-    def __init__(self, client: LoomModelClient) -> None:
+    def __init__(
+        self,
+        client: LoomModelClient,
+        *,
+        runtime_name: str = "麓鸣原生智能体",
+    ) -> None:
         self.client = client
+        self.runtime_name = str(runtime_name or "").strip() or "麓鸣原生智能体"
 
     def status(self, profile_id: str | None = None) -> Json:
         status = self.client.status()
         return {
             **redact_sensitive(status),
             "profileId": self.profile_id,
-            "runtime": "麓鸣原生智能体",
+            "runtime": self.runtime_name,
         }
 
     def start(

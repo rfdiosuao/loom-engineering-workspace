@@ -1,6 +1,7 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [string]$Path
+    [string]$Path,
+    [string]$LauncherExeName = "LOOM.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,7 +84,7 @@ $packageRoot = Split-Path -Parent $payloadRoot
 Write-Host "Portable smoke target: $payloadRoot"
 
 Invoke-Checked "Required file layout" {
-    Assert-File -Root $packageRoot -RelativePath "LOOM.exe" | Out-Null
+    Assert-File -Root $packageRoot -RelativePath $LauncherExeName | Out-Null
     Assert-File -Root $payloadRoot -RelativePath "node\node.exe" | Out-Null
     Assert-File -Root $payloadRoot -RelativePath "start.js" | Out-Null
     Assert-File -Root $payloadRoot -RelativePath "node_modules\openclaw\openclaw.mjs" | Out-Null

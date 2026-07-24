@@ -105,6 +105,86 @@ class LoomAppUpdaterTests(unittest.TestCase):
             ("https://api.github.com/repos/rfdiosuao/loom-engineering-workspace/releases/latest",),
         )
 
+    def test_oem_runtime_uses_its_independent_signed_update_channel(self) -> None:
+        installer = b"northstar-oem-installer"
+        digest = hashlib.sha256(installer).hexdigest()
+        private_key = Ed25519PrivateKey.generate()
+        public_key = base64.b64encode(
+            private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+        manifest: dict[str, object] = {
+            "schemaVersion": 1,
+            "product": "northstar",
+            "channel": "internal",
+            "channelId": "northstar-internal",
+            "version": "2.4.0",
+            "filename": "northstar-2.4.0-setup.exe",
+            "size": len(installer),
+            "sha256": digest,
+            "publishedAt": "2026-07-24T08:00:00Z",
+            "downloadUrl": "https://download.northstar.cn/internal/northstar-2.4.0-setup.exe",
+        }
+        payload = json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        manifest["signature"] = {
+            "algorithm": "ed25519",
+            "value": base64.b64encode(private_key.sign(payload)).decode("ascii"),
+        }
+
+        requested_urls: list[str] = []
+
+        def opener(request, timeout=0):
+            del timeout
+            requested_urls.append(request.full_url)
+            return _Response(json.dumps(manifest).encode("utf-8"), url=request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = os.path.join(temp_dir, "_up_", "data")
+            os.makedirs(config_dir, exist_ok=True)
+            with open(
+                os.path.join(config_dir, "desktop-update-brand.json"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump(
+                    {
+                        "schemaVersion": 1,
+                        "brandId": "northstar",
+                        "displayName": "Northstar AI Matrix",
+                        "product": "northstar",
+                        "channel": "internal",
+                        "channelId": "northstar-internal",
+                        "filePrefix": "northstar",
+                        "manifestUrl": "https://download.northstar.cn/internal/latest.json",
+                        "cacheKey": "northstar-northstar-internal",
+                        "publicKey": public_key,
+                    },
+                    handle,
+                )
+            updater = LoomAppUpdater(
+                AppPaths(temp_dir),
+                current_version="2.3.18",
+                opener=opener,
+            )
+            latest, error = updater.latest_release()
+
+            self.assertIsNone(error)
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest.filename, "northstar-2.4.0-setup.exe")
+            self.assertEqual(updater.brand.channel_id, "northstar-internal")
+            self.assertIn("northstar-northstar-internal-Update-Recovery", updater.update_cache_dir)
+        self.assertEqual(
+            requested_urls,
+            ["https://download.northstar.cn/internal/latest.json"],
+        )
+
     def test_latest_release_exposes_release_notes_and_publication_metadata(self) -> None:
         installer = b"release-with-notes"
         digest = hashlib.sha256(installer).hexdigest()

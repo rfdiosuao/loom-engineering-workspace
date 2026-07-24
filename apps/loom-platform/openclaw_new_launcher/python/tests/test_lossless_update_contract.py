@@ -21,6 +21,9 @@ HANDOFF_SCRIPT = os.path.join(ROOT, "src-tauri", "installer", "update-handoff.ps
 INSTALLER_PROCESS_CLEANUP = os.path.join(ROOT, "src-tauri", "installer", "stop-owned-install-processes.ps1")
 UPDATE_RELEASE_SCRIPT = os.path.join(ROOT, "scripts", "prepare-desktop-update-release.ps1")
 UPDATE_SIGNER_SCRIPT = os.path.join(ROOT, "scripts", "sign-desktop-update.py")
+UPDATE_BRAND_CONFIG_SCRIPT = os.path.join(
+    ROOT, "scripts", "prepare-brand-update-config.py"
+)
 
 
 class LosslessUpdateContractTests(unittest.TestCase):
@@ -29,7 +32,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
         with open(UPDATE_RELEASE_SCRIPT, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn('"LOOM-$Version-setup.exe"', source)
+        self.assertIn('[string]$FilePrefix = "LOOM"', source)
+        self.assertIn('"$FilePrefix-$Version-setup.exe"', source)
         self.assertIn("Get-FileHash", source)
         self.assertIn("Get-AuthenticodeSignature", source)
         self.assertIn("NotSigned", source)
@@ -98,6 +102,49 @@ class LosslessUpdateContractTests(unittest.TestCase):
         ).encode("utf-8")
         private_key.public_key().verify(signature, payload)
 
+    def test_oem_update_config_contains_only_the_derived_public_key(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        private_key_value = base64.b64encode(
+            private_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+        expected_public_key = base64.b64encode(
+            private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "desktop-update-brand.json")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump({"schemaVersion": 1, "brandId": "northstar"}, handle)
+            env = os.environ.copy()
+            env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    UPDATE_BRAND_CONFIG_SCRIPT,
+                    "--config",
+                    config_path,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            with open(config_path, "r", encoding="utf-8") as handle:
+                config = json.load(handle)
+            serialized = json.dumps(config, sort_keys=True)
+
+        self.assertEqual(config["publicKey"], expected_public_key)
+        self.assertNotIn(private_key_value, serialized)
+
     def test_nsis_blocks_downgrades_and_loads_upgrade_hooks(self) -> None:
         with open(TAURI_CONFIG, "r", encoding="utf-8") as handle:
             config = json.load(handle)
@@ -126,7 +173,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("prepare_update_install", source)
         self.assertIn("shutdown_backend().await", source)
         self.assertIn("upgrade-backups", source)
-        self.assertIn("LOOM-Update-Recovery", source)
+        self.assertIn('None => "LOOM"', source)
+        self.assertIn("update_recovery_dir_name()", source)
         self.assertIn("update-pending", source)
         self.assertIn("/D=", handoff)
         self.assertIn("LOOM_UPDATE_TEST_MODE", source)
@@ -148,9 +196,9 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("Prune-SuccessfulRecoveryBackups", handoff)
         self.assertIn("RecoveryOnly", handoff)
         self.assertIn("Register-UpdateRecoveryRunOnce", handoff)
-        self.assertIn('$runOnceName = "!LOOMUpdateRecovery"', handoff)
+        self.assertIn('$runOnceName = "!${safeBrandId}UpdateRecovery"', handoff)
         self.assertIn("Register-UpdateRecoveryRunOnce -Retry", handoff)
-        self.assertIn('"Local\\LOOM.Update.Handoff"', handoff)
+        self.assertIn('"Local\\$safeBrandId.Update.Handoff"', handoff)
         self.assertIn("Backup-InstallerRegistryState", handoff)
         self.assertIn("Restore-InstallerRegistryState", handoff)
         self.assertIn("Restore-DataTree", handoff)
@@ -170,7 +218,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("bridge did not accept connections", source)
         self.assertIn("invalidate_update_health_marker", source)
         self.assertIn("bridge health was not stable", source)
-        self.assertIn('strip_prefix("LOOM-")', source)
+        self.assertIn('format!("{UPDATE_FILE_PREFIX}-")', source)
+        self.assertIn("strip_prefix(&expected_prefix)", source)
         self.assertIn('strip_suffix("-setup.exe")', source)
         self.assertIn('command.arg("-Version").arg(&target_version)', source)
 
@@ -206,6 +255,7 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("$emptyScans", cleanup)
         self.assertIn("$emptyScans -ge 5", cleanup)
         self.assertIn("Test-OwnedRuntimeFilesUnlocked", cleanup)
+        self.assertNotIn("@(Get-ChildItem", cleanup)
         self.assertIn("installer-process-cleanup.log", cleanup)
         self.assertNotIn("Get-Process -Name", cleanup)
         self.assertNotIn("/IM python.exe", cleanup)

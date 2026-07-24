@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { accountApi, agentApi, matrixApi, parseErrorText } from '../../services/api';
 import { openRealtimeStream } from '../../services/realtimeStream';
+import { APP_NATIVE_AGENT_NAME } from '../../version';
 import type {
   AgentBootstrapResponse,
   AgentMessage,
@@ -590,7 +591,7 @@ export function AgentWorkbenchPage() {
     try {
       const nativeProfile = bootstrap?.runtimeProfiles.find((profile) => profile.runtimeProfileId === 'loom-native');
       if (!nativeProfile?.available) {
-        throw new Error(nativeProfile?.error?.message || '麓鸣原生智能体尚未就绪，请先登录模型账号');
+        throw new Error(nativeProfile?.error?.message || `${APP_NATIVE_AGENT_NAME}尚未就绪，请先登录模型账号`);
       }
       const realSessionId = await ensureRemoteSession(currentSessionId);
       submissionCoordinator.rebindSession(submissionSessionId, realSessionId);

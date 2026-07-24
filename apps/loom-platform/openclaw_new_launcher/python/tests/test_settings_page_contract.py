@@ -25,7 +25,8 @@ class SettingsPageContractTests(unittest.TestCase):
         with open(SETTINGS_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn("LOOM 应用更新", source)
+        self.assertIn("APP_DISPLAY_NAME", source)
+        self.assertIn("应用更新", source)
         self.assertIn("当前版本", source)
         self.assertIn("最新版本", source)
         self.assertIn("SHA256", source)

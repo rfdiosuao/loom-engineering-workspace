@@ -3,7 +3,7 @@ import overviewHero from '../../assets/overview-hero-openclaw-4k.webp';
 import { componentApi, parseErrorText, type ComponentSnapshot, type ComponentSummary } from '../../services/api';
 import { loadCachedComponentSnapshot } from '../../services/componentStatusCache';
 import { useAppStore } from '../../stores/appStore';
-import { APP_DISPLAY_NAME, APP_VERSION } from '../../version';
+import { APP_DISPLAY_NAME, APP_HOME_TITLE, APP_VERSION } from '../../version';
 import { BusyOverlay } from '../common';
 
 const REQUIRED_AGENT_IDS = ['codex-desktop', 'claude-code', 'opencode', 'openclaw-companion', 'hermes'];
@@ -129,7 +129,7 @@ export const DashboardPage: React.FC = () => {
             <header className="mb-5 flex flex-wrap items-end justify-between gap-4 border-b border-border/70 pb-5">
               <div>
                 <div className="text-[11px] font-bold tracking-[0.18em] text-accent">配置入口</div>
-                <h1 className="mt-2 text-[30px] font-black leading-tight text-text">开始使用麓鸣</h1>
+                <h1 className="mt-2 text-[30px] font-black leading-tight text-text">{APP_HOME_TITLE}</h1>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-text-muted">
                   完成智能体安装与手机连接后，即可进入任务编排和矩阵执行。
                 </p>

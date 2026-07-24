@@ -3,6 +3,12 @@
     [string]$PackageName = "",
     [string]$SeedPortableDir = "",
     [string]$BrandProfile = "loom",
+    [string]$ProductName = "LOOM",
+    [string]$PackagePrefix = "LOOM-Portable",
+    [string]$LauncherExeName = "LOOM.exe",
+    [string]$BrandThemeDir = "",
+    [string]$BrandProfilePath = "",
+    [string]$DesktopUpdateBrandPath = "",
     [string]$PhoneAgentVerifiedVersion = "",
     [int]$PhoneAgentVerifiedVersionCode = 0,
     [switch]$SkipBuild,
@@ -21,9 +27,6 @@ $VerifyScript = Join-Path $PSScriptRoot "verify-release.ps1"
 $SmokeVerifyScript = Join-Path $PSScriptRoot "verify-portable-smoke.ps1"
 $VerifySourceTextScript = Join-Path $PSScriptRoot "verify-source-text.ps1"
 $OpenClawRuntimeVersion = "2026.6.5"
-$ProductName = "LOOM"
-$PackagePrefix = "LOOM-Portable"
-$LauncherExeName = "LOOM.exe"
 $PrimaryPayloadDirName = "LOOMFiles"
 $LegacyPayloadDirName = "OpenClawFiles"
 
@@ -111,7 +114,8 @@ function Assert-PackageNameVersionConsistency {
         throw "PackageName is empty"
     }
 
-    if ($ResolvedPackageName -notmatch '^LOOM-Portable-v(?<version>\d+(?:\.\d+){1,3})-') {
+    $escapedPrefix = [Regex]::Escape($PackagePrefix)
+    if ($ResolvedPackageName -notmatch "^$escapedPrefix-v(?<version>\d+(?:\.\d+){1,3})-") {
         throw "PackageName must encode the launcher version: $ResolvedPackageName"
     }
 
@@ -565,15 +569,28 @@ function Write-CleanRuntimeConfig {
     }
     $openclawConfig | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $stateDir "openclaw.json") -Encoding UTF8
 
-    $brandProfile = [ordered]@{
-        profile = $ProfileName
-        themeId = $ThemeId
-        edition = $Edition
+    $brandProfileDestination = Join-Path $dataDir "brand_profile.json"
+    if (-not [string]::IsNullOrWhiteSpace($BrandProfilePath)) {
+        Copy-Item -LiteralPath $BrandProfilePath -Destination $brandProfileDestination -Force
+    } else {
+        $brandProfile = [ordered]@{
+            profile = $ProfileName
+            themeId = $ThemeId
+            edition = $Edition
+        }
+        $brandProfile | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $brandProfileDestination -Encoding UTF8
     }
-    $brandProfile | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $dataDir "brand_profile.json") -Encoding UTF8
+
+    $bundledDataDir = Join-Path $PackageDir "_up_\data"
+    New-Item -ItemType Directory -Path $bundledDataDir -Force | Out-Null
+    Copy-Item -LiteralPath $brandProfileDestination -Destination (Join-Path $bundledDataDir "brand_profile.json") -Force
+    if (-not [string]::IsNullOrWhiteSpace($DesktopUpdateBrandPath)) {
+        Copy-Item -LiteralPath $DesktopUpdateBrandPath -Destination (Join-Path $dataDir "desktop-update-brand.json") -Force
+        Copy-Item -LiteralPath $DesktopUpdateBrandPath -Destination (Join-Path $bundledDataDir "desktop-update-brand.json") -Force
+    }
 
     $launcherRuntime = [ordered]@{
-        name = "LOOM Portable"
+        name = "$ProductName Portable"
         version = $Version
         packageName = $PackageName
     }
@@ -589,7 +606,7 @@ function Write-CleanRuntimeConfig {
         schema = "openclaw.launcher.runtime-context.v1"
         updatedAt = $null
         launcher = [ordered]@{
-            name = "LOOM Portable"
+            name = "$ProductName Portable"
             version = $Version
             mode = "usb-portable"
             root = "."
@@ -703,7 +720,8 @@ function Resolve-BrandProfile {
 function Copy-ThemeBundle {
     param(
         [string]$PackageDir,
-        [string]$ThemeId
+        [string]$ThemeId,
+        [string]$CustomThemeDir = ""
     )
 
     $themeRoot = Join-Path $LauncherDir "data\themes"
@@ -722,7 +740,14 @@ function Copy-ThemeBundle {
     foreach ($destinationRoot in $destinations) {
         New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
         foreach ($themeId in $themeIds) {
-            $sourceTheme = Join-Path $themeRoot $themeId
+            $sourceTheme = if (
+                $themeId -eq $normalizedThemeId -and
+                -not [string]::IsNullOrWhiteSpace($CustomThemeDir)
+            ) {
+                $CustomThemeDir
+            } else {
+                Join-Path $themeRoot $themeId
+            }
             if (-not (Test-Path -LiteralPath $sourceTheme)) {
                 throw "Theme not found: $sourceTheme"
             }
@@ -1111,10 +1136,10 @@ function Write-PortableReadme {
     }
 
     $content = @"
-LOOM offline portable package
+$ProductName offline portable package
 
 1. Copy this whole folder to a USB drive or local disk.
-2. Run LOOM.exe.
+2. Run $LauncherExeName.
 3. Sign in or activate with a valid license code on first use.
 4. Sync models from your account before using agent, image, video, phone, or desktop capabilities.
 $phoneAgentLine
@@ -1234,9 +1259,18 @@ New-Item -ItemType Directory -Path $ReleaseDir -Force | Out-Null
 
 $seedDir = Find-SeedPortableDir
 $brand = Resolve-BrandProfile -Profile $BrandProfile
-$brandThemeDir = Join-Path $LauncherDir "data\themes\$($brand.ThemeId)"
+$brandThemeDir = if ([string]::IsNullOrWhiteSpace($BrandThemeDir)) {
+    Join-Path $LauncherDir "data\themes\$($brand.ThemeId)"
+} else {
+    (Resolve-Path -LiteralPath $BrandThemeDir).Path
+}
 if (-not (Test-Path -LiteralPath (Join-Path $brandThemeDir "theme.json"))) {
     throw "Brand profile theme not found: $($brand.ThemeId) ($brandThemeDir)"
+}
+foreach ($configPath in @($BrandProfilePath, $DesktopUpdateBrandPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($configPath) -and -not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        throw "Brand runtime config not found: $configPath"
+    }
 }
 $packageDir = Join-Path $ReleaseDir $PackageName
 $zipPath = Join-Path $ReleaseDir "$PackageName.zip"
@@ -1319,7 +1353,7 @@ Invoke-Step "Create portable directory" {
     Install-PythonBridgeDependencies -PackageDir $packageDir
     Remove-MemoryToolArtifacts -PackageDir $packageDir
 
-    Copy-ThemeBundle -PackageDir $packageDir -ThemeId $brand.ThemeId
+    Copy-ThemeBundle -PackageDir $packageDir -ThemeId $brand.ThemeId -CustomThemeDir $brandThemeDir
 
     Copy-Directory `
         -Source (Join-Path $LauncherDir "openclaw-workspace") `
@@ -1362,14 +1396,14 @@ Invoke-Step "Verify portable directory" {
     $oldAllowPhoneAgentApk = $env:OPENCLAW_ALLOW_PHONE_AGENT_APK
     try {
         $env:OPENCLAW_ALLOW_PHONE_AGENT_APK = if ($IncludePhoneAgentApk) { "1" } else { "" }
-        & powershell -ExecutionPolicy Bypass -File $VerifyScript -Path $packageDir
+        & powershell -ExecutionPolicy Bypass -File $VerifyScript -Path $packageDir -LauncherExeName $LauncherExeName
     } finally {
         $env:OPENCLAW_ALLOW_PHONE_AGENT_APK = $oldAllowPhoneAgentApk
     }
 }
 
 Invoke-Step "Smoke verify portable runtime" {
-    & powershell -ExecutionPolicy Bypass -File $SmokeVerifyScript -Path $packageDir
+    & powershell -ExecutionPolicy Bypass -File $SmokeVerifyScript -Path $packageDir -LauncherExeName $LauncherExeName
 }
 
 Invoke-Step "Clean runtime cache after smoke" {
@@ -1387,7 +1421,7 @@ Invoke-Step "Verify portable directory after smoke cleanup" {
     $oldAllowPhoneAgentApk = $env:OPENCLAW_ALLOW_PHONE_AGENT_APK
     try {
         $env:OPENCLAW_ALLOW_PHONE_AGENT_APK = if ($IncludePhoneAgentApk) { "1" } else { "" }
-        & powershell -ExecutionPolicy Bypass -File $VerifyScript -Path $packageDir
+        & powershell -ExecutionPolicy Bypass -File $VerifyScript -Path $packageDir -LauncherExeName $LauncherExeName
     } finally {
         $env:OPENCLAW_ALLOW_PHONE_AGENT_APK = $oldAllowPhoneAgentApk
     }
@@ -1402,7 +1436,7 @@ if (-not $NoZip) {
         $oldAllowPhoneAgentApk = $env:OPENCLAW_ALLOW_PHONE_AGENT_APK
         try {
             $env:OPENCLAW_ALLOW_PHONE_AGENT_APK = if ($IncludePhoneAgentApk) { "1" } else { "" }
-            & powershell -ExecutionPolicy Bypass -File $VerifyScript -Path $zipPath
+            & powershell -ExecutionPolicy Bypass -File $VerifyScript -Path $zipPath -LauncherExeName $LauncherExeName
         } finally {
             $env:OPENCLAW_ALLOW_PHONE_AGENT_APK = $oldAllowPhoneAgentApk
         }

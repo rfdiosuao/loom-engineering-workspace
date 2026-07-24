@@ -1,4 +1,5 @@
 import type { NavItem } from '../types/theme';
+import { APP_HIDDEN_MODULES } from '../version';
 
 export type FeatureAction =
   | { type: 'page' }
@@ -19,6 +20,21 @@ export interface FeatureDefinition {
 
 const GROUP_CORE = 'LOOM';
 const HIDDEN = false;
+const MODULE_FEATURES: Record<string, string[]> = {
+  'agent-orchestration': ['agent', 'agents', 'agentAccess'],
+  'phone-matrix': ['phone', 'workbench', 'acquisition'],
+  'media-creation': ['creative'],
+  'model-accounts': ['license'],
+  diagnostics: ['diagnostics', 'terminal'],
+};
+const BRAND_HIDDEN_FEATURES = new Set<string>(APP_HIDDEN_MODULES);
+for (const moduleId of APP_HIDDEN_MODULES) {
+  for (const featureId of MODULE_FEATURES[moduleId] ?? []) BRAND_HIDDEN_FEATURES.add(featureId);
+}
+
+function isBrandVisible(key: string): boolean {
+  return !BRAND_HIDDEN_FEATURES.has(key);
+}
 
 export const FEATURE_DEFINITIONS: FeatureDefinition[] = [
   { key: 'dashboard', label: '总览', desc: '状态 / 演示', icon: 'HOME', group: GROUP_CORE, action: { type: 'page' } },
@@ -40,11 +56,11 @@ export const FEATURE_DEFINITIONS: FeatureDefinition[] = [
 const FEATURE_BY_KEY = new Map(FEATURE_DEFINITIONS.map((feature) => [feature.key, feature]));
 
 export const DEFAULT_FEATURE_NAV_ITEMS: NavItem[] = FEATURE_DEFINITIONS
-  .filter((feature) => feature.visible !== false)
+  .filter((feature) => feature.visible !== false && isBrandVisible(feature.key))
   .map(({ key, label, desc, icon, group, accent }) => ({ key, label, desc, icon, group, accent }));
 
 export function getFeatureDefinition(key: string): FeatureDefinition | undefined {
-  return FEATURE_BY_KEY.get(key);
+  return isBrandVisible(key) ? FEATURE_BY_KEY.get(key) : undefined;
 }
 
 export function isLicenseProtectedFeature(key: string): boolean {
@@ -57,7 +73,7 @@ export function normalizeFeatureNavItems(items?: NavItem[]): NavItem[] {
     .map((item) => {
       if (!item?.key) return null;
       const known = FEATURE_BY_KEY.get(item.key);
-      if (!known || known.visible === false) return null;
+      if (!known || known.visible === false || !isBrandVisible(known.key)) return null;
       return {
         key: known.key,
         label: known.label,

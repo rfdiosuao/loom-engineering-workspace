@@ -1,7 +1,12 @@
 import React from 'react';
-import { APP_DISPLAY_NAME } from '../../version';
+import {
+  APP_BRAND_LOGO_DATA_URL,
+  APP_BRAND_LOGO_URL,
+  APP_DISPLAY_NAME,
+} from '../../version';
+import { useTheme } from '../../hooks/useTheme';
 
-const LOGO_SRC = new URL('../../assets/luming-logo.svg', import.meta.url).href;
+const DEFAULT_LOGO_SRC = new URL('../../assets/luming-logo.svg', import.meta.url).href;
 
 const LoomBrandFallbackGlyph: React.FC<{ className?: string }> = ({ className = '' }) => (
   <svg viewBox="0 0 64 64" className={className} focusable="false" aria-hidden="true">
@@ -13,13 +18,19 @@ const LoomBrandFallbackGlyph: React.FC<{ className?: string }> = ({ className = 
 );
 
 const LoomBrandImage: React.FC<{ className?: string }> = ({ className = '' }) => {
+  const { logoUrl } = useTheme();
   const [failed, setFailed] = React.useState(false);
+  const logoSrc = logoUrl || APP_BRAND_LOGO_URL || APP_BRAND_LOGO_DATA_URL || DEFAULT_LOGO_SRC;
+
+  React.useEffect(() => {
+    setFailed(false);
+  }, [logoSrc]);
 
   if (failed) return <LoomBrandFallbackGlyph className={className} />;
 
   return (
     <img
-      src={LOGO_SRC}
+      src={logoSrc}
       alt=""
       className={className}
       draggable={false}

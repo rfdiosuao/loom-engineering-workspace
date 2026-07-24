@@ -11,46 +11,10 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from desktop_update_signing import load_private_key, read_private_key
 
 
-PRIVATE_KEY_ENV = "LOOM_DESKTOP_UPDATE_PRIVATE_KEY"
-PRIVATE_KEY_PATH_ENV = "LOOM_DESKTOP_UPDATE_PRIVATE_KEY_PATH"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
-
-
-def _read_private_key() -> str:
-    value = str(os.environ.get(PRIVATE_KEY_ENV) or "").strip()
-    if value:
-        return value
-    path = str(os.environ.get(PRIVATE_KEY_PATH_ENV) or "").strip()
-    if path and os.path.isfile(path):
-        with open(path, "r", encoding="utf-8-sig") as handle:
-            value = handle.read().strip()
-    if not value:
-        raise ValueError(
-            f"{PRIVATE_KEY_ENV} or {PRIVATE_KEY_PATH_ENV} is required to sign desktop updates"
-        )
-    return value
-
-
-def _load_private_key(value: str) -> Ed25519PrivateKey:
-    text = value.strip()
-    if text.startswith("-----BEGIN"):
-        loaded = serialization.load_pem_private_key(text.encode("utf-8"), password=None)
-        if not isinstance(loaded, Ed25519PrivateKey):
-            raise ValueError("desktop update private key must use Ed25519")
-        return loaded
-    if text.lower().startswith("ed25519:"):
-        text = text.split(":", 1)[1].strip()
-    try:
-        raw = base64.b64decode(text, validate=True)
-    except Exception as error:
-        raise ValueError("desktop update private key must be base64 or PEM") from error
-    if len(raw) != 32:
-        raise ValueError("desktop update private key must contain 32 raw Ed25519 bytes")
-    return Ed25519PrivateKey.from_private_bytes(raw)
 
 
 def _sha256(path: str) -> str:
@@ -78,6 +42,11 @@ def main() -> int:
     parser.add_argument("--installer", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--product", default="LOOM")
+    parser.add_argument("--channel", default="stable")
+    parser.add_argument("--channel-id", default="loom-stable")
+    parser.add_argument("--file-prefix", default="LOOM")
+    parser.add_argument("--download-url", default="")
     args = parser.parse_args()
 
     version = str(args.version).strip()
@@ -87,21 +56,35 @@ def main() -> int:
     if not os.path.isfile(installer):
         raise ValueError(f"installer does not exist: {installer}")
     filename = os.path.basename(installer)
-    expected_filename = f"LOOM-{version}-setup.exe"
+    product = str(args.product).strip()
+    channel = str(args.channel).strip()
+    channel_id = str(args.channel_id).strip()
+    file_prefix = str(args.file_prefix).strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{2,63}", file_prefix):
+        raise ValueError(f"file prefix is invalid: {file_prefix}")
+    if not product or not channel or not channel_id:
+        raise ValueError("product, channel, and channel-id are required")
+    expected_filename = f"{file_prefix}-{version}-setup.exe"
     if filename != expected_filename:
         raise ValueError(f"installer filename must be {expected_filename}")
 
     manifest: dict[str, object] = {
         "schemaVersion": 1,
-        "product": "LOOM",
-        "channel": "stable",
+        "product": product,
+        "channel": channel,
+        "channelId": channel_id,
         "version": version,
         "filename": filename,
         "size": os.path.getsize(installer),
         "sha256": _sha256(installer),
         "publishedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    private_key = _load_private_key(_read_private_key())
+    download_url = str(args.download_url).strip()
+    if download_url:
+        if not download_url.startswith("https://"):
+            raise ValueError("download-url must use HTTPS")
+        manifest["downloadUrl"] = download_url
+    private_key = load_private_key(read_private_key())
     manifest["signature"] = {
         "algorithm": "ed25519",
         "value": base64.b64encode(private_key.sign(_canonical_payload(manifest))).decode("ascii"),

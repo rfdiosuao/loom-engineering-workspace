@@ -261,12 +261,21 @@ class ThemeManager:
         return None
 
     def _load_from_brand_profile(self) -> dict[str, Any] | None:
-        profile = read_json(self.paths.brand_profile, None)
+        profile_path = self.paths.brand_profile
+        profile = read_json(profile_path, None)
         if not isinstance(profile, dict):
             return None
         theme_id = _safe_theme_id(profile.get("themeId") or profile.get("profile"))
         if not theme_id:
             return None
+        packaged_theme = os.path.join(
+            os.path.dirname(profile_path),
+            "themes",
+            theme_id,
+            "theme.json",
+        )
+        if os.path.isfile(packaged_theme):
+            return self._load_from_theme_file(packaged_theme, theme_id)
         return self._load_from_local_package(theme_id)
 
     @staticmethod

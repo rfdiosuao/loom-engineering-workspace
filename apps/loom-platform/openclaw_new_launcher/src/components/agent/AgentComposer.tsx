@@ -4,6 +4,7 @@ import type { AgentBootstrapResponse, AgentSession } from '../../types/agent';
 import type { AgentAttachmentMetadata, AgentDraft } from '../../stores/agentStore';
 import { AgentModelMenu } from './AgentModelMenu';
 import { AgentScopeMenu } from './AgentScopeMenu';
+import { APP_TASK_PLACEHOLDER } from '../../version';
 
 interface AgentComposerProps {
   draft: AgentDraft;
@@ -135,7 +136,7 @@ export function AgentComposer({
               if (canSend) onSubmit();
             }
           }}
-          placeholder="输入任务或问题"
+          placeholder={APP_TASK_PLACEHOLDER}
           aria-label="消息内容"
           rows={3}
           className="max-h-44 min-h-[86px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 text-text outline-none placeholder:text-text-subtle disabled:opacity-60"
