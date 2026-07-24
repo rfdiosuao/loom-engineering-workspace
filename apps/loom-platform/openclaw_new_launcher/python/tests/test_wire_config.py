@@ -1538,7 +1538,7 @@ class WireServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)
             service = WireService(paths)
-            secret = "sk-candidate-secret-not-real"
+            secret = "candidate-secret-not-real"
 
             with mock.patch.object(
                 wire_config_module,
@@ -1575,7 +1575,7 @@ class WireServiceTests(unittest.TestCase):
                     service.verify_candidate(
                         provider="Example",
                         base_url="https://api.example.invalid/v1",
-                        api_key="sk-candidate-secret-not-real",
+                        api_key="candidate-secret-not-real",
                         text_model="gpt-missing",
                     )
 
