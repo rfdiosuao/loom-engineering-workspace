@@ -76,6 +76,15 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
             release.index("- name: Check Rust"),
         )
 
+    def test_windows_release_downloads_webview2_before_portable_build(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+
+        download_step = "- name: Download WebView2 runtime for portable package"
+        portable_step = "- name: Build portable package"
+        self.assertIn(download_step, release)
+        self.assertIn(r".\scripts\download-webview2-runtime.ps1", release)
+        self.assertLess(release.index(download_step), release.index(portable_step))
+
     def test_windows_release_uses_loom_signatures_when_authenticode_secrets_are_absent(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
 
