@@ -1011,6 +1011,25 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             self.assertEqual(state.version, component.version)
             self.assertEqual(state.job_id, "job_detect")
 
+    def test_detect_refuses_launchable_component_when_version_probe_fails(self) -> None:
+        component = make_component(component_id="hermes")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = os.path.join(temp_dir, "agents", component.component_id)
+            os.makedirs(install_dir)
+            with open(os.path.join(install_dir, "Codex-Installer.exe"), "wb") as handle:
+                handle.write(b"broken hermes runtime")
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(base_path=temp_dir, state_store=store)
+
+            with mock.patch.object(installer, "_detect_installed_version", return_value=None):
+                with self.assertRaisesRegex(ComponentInstallError, "启动前自检失败"):
+                    installer.detect(component, job_id="job_detect_broken_runtime")
+
+            failed = store.load()[component.component_id]
+            self.assertEqual(failed.status, "health_failed")
+            self.assertEqual(failed.error_code, "detect_preflight_failed")
+
     def test_detect_missing_component_returns_not_installed_instead_of_failure(self) -> None:
         component = make_component(component_id="missing-agent")
         progress: list[tuple[str, str]] = []
@@ -1057,7 +1076,12 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             installer = ComponentInstaller(base_path=temp_dir, state_store=store)
 
             try:
-                state = installer.detect(component, job_id="job_detect_external")
+                with mock.patch.object(
+                    installer,
+                    "_detect_installed_version",
+                    return_value=component.version,
+                ):
+                    state = installer.detect(component, job_id="job_detect_external")
             except Exception as exc:
                 self.fail(f"external component path should be detected as ready: {exc}")
 

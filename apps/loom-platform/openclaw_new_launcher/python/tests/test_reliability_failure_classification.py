@@ -27,6 +27,7 @@ class ReliabilityFailureClassificationTests(unittest.TestCase):
             ("ImageApiError: HTTP 524", "provider_timeout"),
             ("model provider HTTP 503", "provider_unavailable"),
             ("model gateway HTTP 401", "provider_auth_failed"),
+            ("AI 服务调用失败: LLM HTTP 401: invalid access token or token expired", "provider_auth_failed"),
         )
         for message, expected in cases:
             with self.subTest(message=message):

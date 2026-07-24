@@ -127,7 +127,7 @@ def _provider_failure(value: Any, text: str, folded: str) -> dict[str, Any] | No
     status = _http_status(text)
     provider_context = any(
         marker in folded
-        for marker in ("provider", "model", "gateway", "imageapierror", "videoapierror", "模型", "供应商", "生图", "视频")
+        for marker in ("provider", "model", "gateway", "llm", "imageapierror", "videoapierror", "模型", "供应商", "生图", "视频")
     )
     if status == 429 or code in {"RATE_LIMIT", "PROVIDER_RATE_LIMITED"}:
         return _classified_failure(

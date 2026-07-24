@@ -274,6 +274,29 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
         self.assertEqual(_phone_cli_failure_code(message, ""), "auth_failed")
 
+    def test_round_budget_failure_requires_inspection_and_preserves_partial_result(self) -> None:
+        stdout = (
+            "Reached round budget of 12. Return a bounded follow-up task if more work is needed. "
+            "Partial result: Tapped at (405, 2350)"
+        )
+
+        result = _phone_failure_result(
+            "phone.task",
+            code=1,
+            reason="placeholder",
+            stdout=stdout,
+            stderr="",
+            execution={},
+            started_at=time.monotonic(),
+        )
+
+        self.assertEqual(result["errorCode"], "phone_round_budget_exhausted")
+        self.assertTrue(result["outcomeIndeterminate"])
+        self.assertTrue(result["partialResult"])
+        self.assertEqual(result["currentStep"], "inspection_required")
+        self.assertIn("执行上限", result["error"])
+        self.assertIn("Tapped at (405, 2350)", result["stdout"])
+
     def test_legacy_phone_events_are_translated_to_compatible_progress_log(self) -> None:
         progress_log = _phone_progress_log(
             [

@@ -431,6 +431,50 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             self.assertEqual(response.status_code, 403)
             self.assertIn("安装组件需要确认", response.json()["error"])
 
+    def test_real_install_route_preserves_manual_install_required_job_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            job_mgr = JobManager(logs.append)
+            app = FastAPI()
+            ctx = _test_context(temp_dir, job_mgr, logs)
+            register_component_routes(app, ctx)
+            register_job_routes(app, ctx)
+            client = TestClient(app)
+            component = SIMULATION_COMPONENTS["codex-desktop"]
+            simulate_values: list[bool] = []
+
+            class ManualInstaller:
+                def install(self, _component, *, simulate=False, job_id=None, on_progress=None):
+                    simulate_values.append(simulate)
+                    return ComponentState(
+                        component.component_id,
+                        "manual_install_required",
+                        version=component.version,
+                        job_id=job_id,
+                        error_code="waiting_for_microsoft_store",
+                        error_message="请在 Microsoft Store 完成安装",
+                    )
+
+            with (
+                patch(
+                    "api.routes_components._resolve_component_for_action",
+                    return_value=(component, None),
+                ),
+                patch("api.routes_components._component_installer", return_value=ManualInstaller()),
+            ):
+                response = client.post(
+                    "/api/components/install",
+                    json={"componentId": component.component_id, "confirmed": True},
+                )
+                job = _wait_for_job(client, response.json()["jobId"])
+
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(simulate_values, [False])
+            self.assertEqual(job["status"], "needs_manual")
+            self.assertTrue(job["result"]["manualRequired"])
+            self.assertEqual(job["result"]["state"]["status"], "manual_install_required")
+            self.assertNotIn("succeeded", "".join(logs).lower())
+
     def test_detect_route_passes_force_to_external_probe_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []
@@ -963,7 +1007,7 @@ def _wait_for_job(client: TestClient, job_id: str, timeout: float = 2.0) -> dict
         if response.status_code == 200:
             job = response.json()["job"]
             last_job = job
-            if job.get("status") in {"succeeded", "failed"}:
+            if job.get("status") in {"succeeded", "failed", "needs_manual"}:
                 return job
         time.sleep(0.02)
     raise AssertionError(f"job did not finish: {job_id}; last={last_job}")

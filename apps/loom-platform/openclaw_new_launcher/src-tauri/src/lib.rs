@@ -957,6 +957,8 @@ async fn export_log(app: tauri::AppHandle, content: String) -> Result<String, St
     let timestamp = chrono_like_timestamp();
     let path = log_dir.join(format!("openclaw-log-{}.txt", timestamp));
     let mut file = std::fs::File::create(&path).map_err(|e| format!("创建日志文件失败: {}", e))?;
+    file.write_all(&[0xEF, 0xBB, 0xBF])
+        .map_err(|e| format!("写入日志编码标记失败: {}", e))?;
     file.write_all(content.as_bytes())
         .map_err(|e| format!("写入日志失败: {}", e))?;
     Ok(path.to_string_lossy().to_string())
