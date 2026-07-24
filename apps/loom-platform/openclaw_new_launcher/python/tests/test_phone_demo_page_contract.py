@@ -76,6 +76,15 @@ class PhoneDemoPageContractTests(unittest.TestCase):
         )[0]
         self.assertIn('"DELETE" => reqwest::Method::DELETE', proxy_source)
 
+    def test_exported_logs_include_utf8_bom_for_windows_viewers(self) -> None:
+        with open(TAURI_LIB, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        export_source = source.split("async fn export_log", 1)[1].split(
+            "async fn open_path", 1
+        )[0]
+        self.assertIn("file.write_all(&[0xEF, 0xBB, 0xBF])", export_source)
+
     def test_renderer_cannot_proxy_raw_phone_tokens(self) -> None:
         with open(TAURI_LIB, "r", encoding="utf-8") as handle:
             source = handle.read()

@@ -897,7 +897,7 @@ export interface BridgeJob<T = unknown> {
 }
 
 function isJobDone(status: string): boolean {
-  return ['succeeded', 'success', 'completed', 'complete'].includes(status.toLowerCase());
+  return ['succeeded', 'success', 'completed', 'complete', 'needs_manual'].includes(status.toLowerCase());
 }
 
 function isJobFailed(status: string): boolean {

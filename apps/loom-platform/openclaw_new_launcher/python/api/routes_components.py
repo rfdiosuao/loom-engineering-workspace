@@ -359,6 +359,14 @@ def register_component_routes(app, ctx) -> None:
 
                 installer = _component_installer(ctx)
                 state = installer.install(component, simulate=simulate, job_id=job_id, on_progress=on_progress)
+                if state.status == "manual_install_required":
+                    return {
+                        "success": False,
+                        "manualRequired": True,
+                        "message": state.error_message or f"请完成 {component.name} 的外部安装步骤",
+                        "state": state.to_json(),
+                        "catalog": _component_catalog(ctx).status(),
+                    }
                 return {
                     "success": True,
                     "state": state.to_json(),

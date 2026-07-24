@@ -599,6 +599,19 @@ class ComponentInstaller:
             if on_progress:
                 on_progress(f"检测失败：{message}", "danger")
             raise ComponentInstallError(f"detect failed for {component.component_id}: {message}")
+        if self._requires_launch_version_probe(component) and not installed_version:
+            message = "启动前自检失败：组件入口无法正常执行，请重新安装后再启动"
+            self.state_store.mark(
+                component.component_id,
+                "health_failed",
+                version=component.version,
+                job_id=job_id,
+                error_code="detect_preflight_failed",
+                error_message=message,
+            )
+            if on_progress:
+                on_progress(f"检测失败：{message}", "danger")
+            raise ComponentInstallError(message)
         is_codex_desktop_app = component.component_id == "codex-desktop" and _is_codex_desktop_executable(entry_path)
         if installed_version and not is_codex_desktop_app and not _versions_match(component.version, installed_version):
             state = self.state_store.mark(component.component_id, "upgrade_available", version=installed_version, job_id=job_id)
@@ -625,12 +638,7 @@ class ComponentInstaller:
         launch_version = state.version or component.version
         if is_official_codex_component(component):
             launch_version = _codex_desktop_version_from_path(entry_path) or launch_version
-        elif not self._custom_launcher and component.component_id in {
-            "claude-code",
-            "opencode",
-            "openclaw-companion",
-            "hermes",
-        }:
+        elif self._requires_launch_version_probe(component):
             detected_version = self._detect_installed_version(component, install_path, entry_path=entry_path)
             if not detected_version:
                 message = "启动前自检失败：组件入口无法正常执行，请重新安装后再启动"
@@ -728,6 +736,14 @@ class ComponentInstaller:
             error_message=message,
         )
         raise ComponentInstallError(message)
+
+    def _requires_launch_version_probe(self, component: ReleaseComponent) -> bool:
+        return not self._custom_launcher and component.component_id in {
+            "claude-code",
+            "opencode",
+            "openclaw-companion",
+            "hermes",
+        }
 
     def _simulate_install(
         self,

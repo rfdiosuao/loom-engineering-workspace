@@ -2949,6 +2949,8 @@ def _redact_cli_secrets(text: str) -> str:
 
 def _phone_cli_failure_message(stdout: str, stderr: str) -> str:
     text = f"{stdout}\n{stderr}".lower()
+    if "reached round budget" in text or "round budget" in text:
+        return "手机任务已达到本轮执行上限，当前进度已保留。请先查看手机结果，再决定是否继续。"
     if "accessibility_stale" in text or "stale_enabled_not_bound" in text:
         return "手机无障碍开关已开启，但 APKClaw 服务未重新绑定。请打开 APKClaw 到前台，必要时重新开关一次无障碍。"
     if "agent_not_initialized" in text:
@@ -2972,6 +2974,8 @@ def _phone_cli_failure_code(stdout: str, stderr: str, code: object = "") -> str:
     if str(code or "").lower() == "timeout":
         return "timeout"
     text = f"{stdout}\n{stderr}".lower()
+    if "reached round budget" in text or "round budget" in text:
+        return "phone_round_budget_exhausted"
     if "accessibility_stale" in text or "stale_enabled_not_bound" in text:
         return "accessibility_stale"
     if "agent_not_initialized" in text:
@@ -3004,6 +3008,8 @@ def _phone_failure_result(
     elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
     metrics = _phone_result_metrics(kind, stdout, started_at, execution)
     error_code = _phone_cli_failure_code(stdout, stderr, code)
+    if error_code == "phone_round_budget_exhausted":
+        reason = _phone_cli_failure_message(stdout, stderr)
     if not metrics:
         metrics = {
             "mode": _phone_metrics_mode(kind, execution),
@@ -3027,6 +3033,14 @@ def _phone_failure_result(
         "currentStep": "failed",
         "agentReport": _phone_failure_agent_report(error_code, reason),
     }
+    if error_code == "phone_round_budget_exhausted":
+        result.update(
+            {
+                "outcomeIndeterminate": True,
+                "partialResult": True,
+                "currentStep": "inspection_required",
+            }
+        )
     _phone_promote_metrics_fields(result, metrics)
     return _with_phone_execution(result, execution)
 
@@ -3061,6 +3075,7 @@ def _phone_failure_repair_target(error_code: str) -> str:
         "task_busy": "phone_task_queue",
         "timeout": "phone_task_timeout",
         "fallback_timeout": "phone_task_timeout",
+        "phone_round_budget_exhausted": "phone_task_budget",
         "phone_locked": "phone_lock_state",
         "auth_failed": "lumi_pairing",
         "device_offline": "phone_network",
@@ -3074,6 +3089,7 @@ def _phone_failure_codex_instruction(repair_target: str) -> str:
         "phone_model_config": "Check LOOM phone model sync and APKClaw LLM configuration.",
         "phone_task_queue": "Inspect running task, queue depth, cancellation, and retry policy.",
         "phone_task_timeout": "Inspect slow step, blocked screen, Agent loop budget, and timeout settings.",
+        "phone_task_budget": "Inspect the preserved partial result and continue with a bounded follow-up task only after confirming the phone state.",
         "phone_lock_state": "Ask user to unlock the phone; do not bypass secure lock screens.",
         "lumi_pairing": "Repair Lumi pairing/signature headers without changing token semantics.",
         "phone_network": "Check phone URL, LAN reachability, server keep-alive, and process survival.",

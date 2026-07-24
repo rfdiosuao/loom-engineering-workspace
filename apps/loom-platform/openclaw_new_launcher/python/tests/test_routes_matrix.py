@@ -304,6 +304,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             stored_task = status["campaigns"][0]["missions"][0]["deviceTasks"][0]
             self.assertEqual(stored_task.get("taskId"), "remote-task-42")
             self.assertTrue(stored_task.get("outcomeIndeterminate"))
+            self.assertEqual(stored_task.get("status"), "needs_human")
 
     def test_matrix_status_can_query_campaign_older_than_default_window(self) -> None:
         from core.phone_matrix import MatrixControlPlane
