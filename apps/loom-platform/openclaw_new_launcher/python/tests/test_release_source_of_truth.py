@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -15,6 +16,8 @@ RELEASE_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "platform
 CI_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "ci-check.ps1")
 SMOKE_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "smoke-test-tauri-nsis.ps1")
 PROTECTED_TAURI_CONFIG = os.path.join(LAUNCHER_ROOT, "src-tauri", "tauri.protected.conf.json")
+TAURI_CONFIG = os.path.join(LAUNCHER_ROOT, "src-tauri", "tauri.conf.json")
+DESKTOP_UPDATE_PUBLIC_KEY = os.path.join(LAUNCHER_ROOT, "desktop-update-public-key.txt")
 MAC_ONLINE_PACKAGER = os.path.join(LAUNCHER_ROOT, "scripts", "package-mac-online.mjs")
 
 
@@ -56,6 +59,26 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertNotIn("CODEX_PACKAGE_PATH", release)
         self.assertNotIn("CodexPackagePath", release)
         self.assertNotIn("Get-ChildItem -LiteralPath $bundleDir -Recurse -File", release)
+
+    def test_windows_release_uses_loom_signatures_when_authenticode_secrets_are_absent(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+
+        self.assertIn("LOOM_DESKTOP_UPDATE_PRIVATE_KEY", release)
+        self.assertIn(r"scripts\prepare-desktop-update-release.ps1", release)
+        self.assertIn("*.update.json", release)
+        self.assertNotIn("-AllowUnsigned", release)
+        self.assertNotIn(
+            "Stable Windows releases require WINDOWS_PFX_BASE64 and WINDOWS_PFX_PASSWORD.",
+            release,
+        )
+
+    def test_windows_release_exposes_update_private_key_only_to_manifest_signing(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+        build_step = release.split("- name: Build protected NSIS", 1)[1].split("- name:", 1)[0]
+        signing_step = release.split("- name: Sign desktop update manifest", 1)[1].split("- name:", 1)[0]
+
+        self.assertNotIn("LOOM_DESKTOP_UPDATE_PRIVATE_KEY", build_step)
+        self.assertIn("LOOM_DESKTOP_UPDATE_PRIVATE_KEY", signing_step)
 
     def test_release_smoke_preserves_ascii_and_chinese_path_array(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
@@ -102,6 +125,22 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertEqual(resources["../python-runtime/"], "_up_/python-runtime/")
         self.assertEqual(resources["../node-runtime/"], "_up_/node-runtime/")
         self.assertEqual(resources["../build/protected-resources/scripts/"], "_up_/scripts/")
+
+    def test_desktop_update_public_key_is_bundled_in_standard_and_protected_installers(self) -> None:
+        with open(DESKTOP_UPDATE_PUBLIC_KEY, "r", encoding="utf-8") as handle:
+            public_key = handle.read().strip()
+        self.assertEqual(len(base64.b64decode(public_key, validate=True)), 32)
+
+        with open(TAURI_CONFIG, "r", encoding="utf-8") as handle:
+            standard = json.load(handle)
+        with open(PROTECTED_TAURI_CONFIG, "r", encoding="utf-8") as handle:
+            protected = json.load(handle)
+
+        self.assertIn("../desktop-update-public-key.txt", standard["bundle"]["resources"])
+        self.assertEqual(
+            protected["bundle"]["resources"]["../desktop-update-public-key.txt"],
+            "_up_/desktop-update-public-key.txt",
+        )
 
     def test_ci_script_runs_complete_launcher_python_tests(self) -> None:
         source = read_text(CI_SCRIPT)

@@ -2,8 +2,7 @@ param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$OutputDirectory = "",
-    [string]$ReleaseNotesPath = "",
-    [switch]$AllowUnsigned
+    [string]$ReleaseNotesPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,10 +22,7 @@ $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 
 $signature = Get-AuthenticodeSignature -LiteralPath $installer
-if (-not $AllowUnsigned -and $signature.Status -eq "NotSigned") {
-    throw "Installer is NotSigned. Production auto-update assets must have a valid Authenticode signature."
-}
-if (-not $AllowUnsigned -and $signature.Status -ne "Valid") {
+if ($signature.Status -ne "Valid" -and $signature.Status -ne "NotSigned") {
     throw "Installer signature is not valid: $($signature.Status) $($signature.StatusMessage)"
 }
 
@@ -38,6 +34,29 @@ $hash = (Get-FileHash -LiteralPath $canonicalInstaller -Algorithm SHA256).Hash.T
 $sidecar = "$canonicalInstaller.sha256.txt"
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText($sidecar, "$hash *$canonicalName`n", $utf8NoBom)
+
+$updateManifest = "$canonicalInstaller.update.json"
+$signerScript = Join-Path $PSScriptRoot "sign-desktop-update.py"
+if (-not (Test-Path -LiteralPath $signerScript -PathType Leaf)) {
+    throw "Desktop update signer is missing: $signerScript"
+}
+if (
+    [string]::IsNullOrWhiteSpace($env:LOOM_DESKTOP_UPDATE_PRIVATE_KEY) -and
+    [string]::IsNullOrWhiteSpace($env:LOOM_DESKTOP_UPDATE_PRIVATE_KEY_PATH)
+) {
+    throw "LOOM_DESKTOP_UPDATE_PRIVATE_KEY or LOOM_DESKTOP_UPDATE_PRIVATE_KEY_PATH is required."
+}
+$python = (Get-Command python -ErrorAction Stop).Source
+& $python $signerScript `
+    --installer $canonicalInstaller `
+    --version $Version `
+    --output $updateManifest
+if ($LASTEXITCODE -ne 0) {
+    throw "Desktop update signing failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path -LiteralPath $updateManifest -PathType Leaf)) {
+    throw "Desktop update signature manifest was not created: $updateManifest"
+}
 
 $releaseNotesOutput = ""
 if (-not [string]::IsNullOrWhiteSpace($ReleaseNotesPath)) {
@@ -54,6 +73,7 @@ if (-not [string]::IsNullOrWhiteSpace($ReleaseNotesPath)) {
     installer = $canonicalInstaller
     sha256 = $hash
     sha256File = $sidecar
+    updateManifest = $updateManifest
     releaseNotes = $releaseNotesOutput
     signatureStatus = [string]$signature.Status
     signer = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { "" }
