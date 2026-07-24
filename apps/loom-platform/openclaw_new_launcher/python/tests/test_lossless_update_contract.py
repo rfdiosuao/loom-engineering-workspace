@@ -25,6 +25,7 @@ UPDATE_SIGNER_SCRIPT = os.path.join(ROOT, "scripts", "sign-desktop-update.py")
 UPDATE_BRAND_CONFIG_SCRIPT = os.path.join(
     ROOT, "scripts", "prepare-brand-update-config.py"
 )
+POWERSHELL_HOST = shutil.which("pwsh") or shutil.which("powershell")
 
 
 class LosslessUpdateContractTests(unittest.TestCase):
@@ -50,8 +51,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("updateManifest", source)
 
     @unittest.skipUnless(
-        os.name == "nt" and shutil.which("powershell"),
-        "Windows PowerShell is required",
+        os.name == "nt" and POWERSHELL_HOST,
+        "PowerShell is required",
     )
     def test_update_release_preparation_allows_an_empty_download_url(self) -> None:
         private_key = Ed25519PrivateKey.generate()
@@ -78,7 +79,7 @@ class LosslessUpdateContractTests(unittest.TestCase):
 
             result = subprocess.run(
                 [
-                    "powershell",
+                    POWERSHELL_HOST,
                     "-NoProfile",
                     "-ExecutionPolicy",
                     "Bypass",
