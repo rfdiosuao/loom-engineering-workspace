@@ -262,6 +262,30 @@ jobs:
 
           "PORTABLE_SEED_DIR=$($seedDir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Download WebView2 runtime for portable package
+        working-directory: apps/loom-platform
+        run: |
+          $runtimePath = Join-Path $PWD "openclaw_new_launcher\redist\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+          $maxAttempts = 3
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+              & .\scripts\download-webview2-runtime.ps1
+              if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+                throw "WebView2 runtime download did not create $runtimePath"
+              }
+              if ((Get-Item -LiteralPath $runtimePath).Length -lt 1MB) {
+                throw "Downloaded WebView2 runtime is smaller than 1 MB."
+              }
+              break
+            } catch {
+              if ($attempt -eq $maxAttempts) {
+                throw
+              }
+              Write-Warning "WebView2 runtime download attempt $attempt failed. Retrying..."
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+
       - name: Build portable package
         working-directory: apps/loom-platform
         env:
