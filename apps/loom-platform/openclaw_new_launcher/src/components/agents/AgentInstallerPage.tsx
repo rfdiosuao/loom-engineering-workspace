@@ -78,6 +78,8 @@ type ModelConfigFailurePrompt = {
   componentName: string;
   message: string;
   requiresLogin: boolean;
+  chooseCompatibleModel: boolean;
+  reviewApiKey: boolean;
 };
 
 function providerOptionById(id: string): CustomProviderOption {
@@ -975,7 +977,7 @@ const AgentModelConfigPanel: React.FC<{
             ? '当前使用 OpenAI 官方渠道；ChatGPT 登录状态由官方应用管理'
             : status?.remoteVerified
             ? `模型连通性已验证${status.remoteValidation?.model ? `：${status.remoteValidation.model}` : ''}`
-            : '尚未完成真实模型验证；点击“写入配置”后才会设为可用'}
+            : '尚未完成真实模型验证；Codex 要求模型站同时支持 Responses API 与原生工具调用'}
         </div>
       ) : null}
     </section>
@@ -1501,12 +1503,16 @@ export const AgentInstallerPage: React.FC = () => {
     const requiresLogin = normalized.code === 'account_relogin_required'
       || normalized.action === 'open_model_account'
       || normalized.message.includes('重新登录模型账号');
+    const chooseCompatibleModel = normalized.action === 'choose_compatible_model';
+    const reviewApiKey = normalized.action === 'review_api_key';
     setModelRestartPrompt(null);
     setModelConfigFailurePrompt({
       componentId: component.id,
       componentName: component.name,
       message: normalized.message,
       requiresLogin,
+      chooseCompatibleModel,
+      reviewApiKey,
     });
     return normalized.message;
   };
@@ -2148,7 +2154,9 @@ export const AgentInstallerPage: React.FC = () => {
       >
         <div data-agent-model-write-failure-dialog>
           <div className="border-y border-status-danger/30 bg-status-danger/10 px-4 py-4">
-            <div className="text-sm font-black text-status-danger">Codex 当前配置没有被修改</div>
+            <div className="text-sm font-black text-status-danger">
+              {modelConfigFailurePrompt?.componentName || '当前智能体'}的当前配置没有被修改
+            </div>
             <p className="mt-2 text-sm leading-6 text-text-muted">
               {modelConfigFailurePrompt?.message || '模型配置写入失败，请检查后重试。'}
             </p>
@@ -2171,6 +2179,24 @@ export const AgentInstallerPage: React.FC = () => {
                 disabled={Boolean(modelConfigBusy)}
               >
                 重新登录模型账号
+              </Button>
+            ) : null}
+            {modelConfigFailurePrompt?.chooseCompatibleModel ? (
+              <Button
+                variant="primary"
+                onClick={() => setModelConfigFailurePrompt(null)}
+                disabled={Boolean(modelConfigBusy)}
+              >
+                重新选择模型
+              </Button>
+            ) : null}
+            {modelConfigFailurePrompt?.reviewApiKey ? (
+              <Button
+                variant="primary"
+                onClick={() => setModelConfigFailurePrompt(null)}
+                disabled={Boolean(modelConfigBusy)}
+              >
+                检查 API Key
               </Button>
             ) : null}
           </div>

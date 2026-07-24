@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from api.routes_components import (
     SIMULATION_COMPONENTS,
+    _model_config_error_payload,
     _model_config_error_text,
     _resolve_component_for_action,
     register_component_routes,
@@ -50,6 +51,31 @@ class ComponentRouteResolutionTests(unittest.TestCase):
 
         self.assertIn("工具调用", message)
         self.assertIn("没有写入", message)
+
+    def test_responses_unsupported_failure_has_structured_model_selection_action(self) -> None:
+        payload = _model_config_error_payload(
+            WireConfigError(
+                'codex_model_responses_unsupported: '
+                'https://api.heang.top/v1/responses: http_404: {"error":"openai_error"}'
+            )
+        )
+
+        self.assertEqual(payload["code"], "codex_model_responses_unsupported")
+        self.assertEqual(payload["action"], "choose_compatible_model")
+        self.assertIn("Responses API", payload["error"])
+        self.assertIn("配置未写入", payload["error"])
+        self.assertNotIn("http_404", payload["error"])
+        self.assertNotIn("openai_error", payload["error"])
+
+    def test_custom_provider_auth_failure_keeps_user_on_api_key_form(self) -> None:
+        payload = _model_config_error_payload(
+            WireConfigError("codex_responses_auth_failed: http_401"),
+            custom_provider=True,
+        )
+
+        self.assertEqual(payload["code"], "codex_responses_auth_failed")
+        self.assertEqual(payload["action"], "review_api_key")
+        self.assertIn("API Key", payload["error"])
 
     def test_session_preservation_failure_has_actionable_chinese_message(self) -> None:
         message = _model_config_error_text(
@@ -261,6 +287,48 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertIn("模型连接验证失败", response.json()["error"])
         self.assertIn("没有写入", response.json()["error"])
         self.assertEqual(response.json()["status"]["status"], "failed")
+
+    def test_model_config_apply_returns_compatible_model_action_without_raw_provider_body(self) -> None:
+        logs: list[str] = []
+
+        class FakeWireService:
+            def sync_agent_model_config(self, _component_id, *, model="", validate_remote=False):
+                raise WireConfigError(
+                    'codex_model_responses_unsupported: '
+                    'https://api.heang.top/v1/responses: http_404: {"error":"openai_error"}'
+                )
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_newapi_account_mgr=lambda: SimpleNamespace(current=lambda: None),
+            get_wire_svc=lambda: FakeWireService(),
+            append_log=logs.append,
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+        client = TestClient(app)
+
+        with patch(
+            "api.routes_components._model_config_status",
+            return_value={"installed": True, "componentStatus": "ready"},
+        ):
+            response = client.post(
+                "/api/components/model-config/apply",
+                json={"componentId": "codex-desktop", "model": "chat-only-model", "confirmed": True},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["code"], "codex_model_responses_unsupported")
+        self.assertEqual(payload["action"], "choose_compatible_model")
+        self.assertNotIn("http_404", payload["error"])
+        self.assertNotIn("openai_error", payload["error"])
+        self.assertTrue(any("http_404" in line for line in logs))
 
     def test_model_config_disable_requires_confirmation(self) -> None:
         calls: list[str] = []
