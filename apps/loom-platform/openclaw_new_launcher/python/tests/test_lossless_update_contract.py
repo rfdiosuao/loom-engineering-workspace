@@ -25,6 +25,7 @@ UPDATE_SIGNER_SCRIPT = os.path.join(ROOT, "scripts", "sign-desktop-update.py")
 UPDATE_BRAND_CONFIG_SCRIPT = os.path.join(
     ROOT, "scripts", "prepare-brand-update-config.py"
 )
+POWERSHELL_HOST = shutil.which("pwsh") or shutil.which("powershell")
 
 
 class LosslessUpdateContractTests(unittest.TestCase):
@@ -50,8 +51,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("updateManifest", source)
 
     @unittest.skipUnless(
-        os.name == "nt" and shutil.which("powershell"),
-        "Windows PowerShell is required",
+        os.name == "nt" and POWERSHELL_HOST,
+        "PowerShell is required",
     )
     def test_update_release_preparation_allows_an_empty_download_url(self) -> None:
         private_key = Ed25519PrivateKey.generate()
@@ -66,13 +67,19 @@ class LosslessUpdateContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_installer = os.path.join(temp_dir, "source-installer.exe")
             output_dir = os.path.join(temp_dir, "release")
-            shutil.copyfile(shutil.which("powershell"), source_installer)
+            system_root = os.environ.get("SystemRoot", r"C:\Windows")
+            fixture_executable = os.path.join(system_root, "System32", "where.exe")
+            self.assertTrue(os.path.isfile(fixture_executable), fixture_executable)
+            shutil.copyfile(fixture_executable, source_installer)
             env = os.environ.copy()
+            # PowerShell 7 module paths can prevent Windows PowerShell 5.1 from
+            # loading its built-in Microsoft.PowerShell.Security module.
+            env.pop("PSModulePath", None)
             env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
 
             result = subprocess.run(
                 [
-                    "powershell",
+                    POWERSHELL_HOST,
                     "-NoProfile",
                     "-ExecutionPolicy",
                     "Bypass",
