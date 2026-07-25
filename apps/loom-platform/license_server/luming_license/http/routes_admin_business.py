@@ -436,6 +436,41 @@ def post_admin_api_public_settings(handler, parsed):
         handler.send_json(400, {"error": str(error)})
 
 
+def post_admin_api_oem_brands(handler, parsed):
+    api = handler.facade
+    if not handler.require_admin():
+        return
+    try:
+        body = handler.read_json()
+        brand_id = str(body.get("brandId") or "").strip()
+        before = next(
+            (
+                item
+                for item in api.list_oem_brands(handler.admin_context())
+                if item.get("brandId") == brand_id
+            ),
+            None,
+        )
+        backup_path = api.make_audited_backup("oem-brand-upsert")
+        brand = api.upsert_oem_brand(body, handler.admin_context())
+        handler.audit_admin_change(
+            "oem_brand.upsert",
+            target_type="oem_brand",
+            target_id=brand["brandId"],
+            before=before,
+            after=brand,
+            backup_path=backup_path,
+        )
+        handler.send_json(200, {"ok": True, "brand": brand})
+    except api.ActivationError as error:
+        handler.send_json(
+            error.status,
+            {"ok": False, "error": str(error), "code": error.code},
+        )
+    except Exception as error:
+        handler.send_json(400, {"ok": False, "error": str(error)})
+
+
 __all__ = [
     "post_admin_api_codes",
     "post_admin_api_codes_update",
@@ -448,4 +483,5 @@ __all__ = [
     "post_admin_api_codes_delete",
     "post_admin_api_activations_delete",
     "post_admin_api_public_settings",
+    "post_admin_api_oem_brands",
 ]

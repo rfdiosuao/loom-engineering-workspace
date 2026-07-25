@@ -46,7 +46,14 @@ def get_logo_ico(handler, parsed):
 
 def get_api_client_config(handler, parsed):
     api = handler.facade
-    handler.send_json(200, api.client_public_config())
+    brand_id = str(api.parse_qs(parsed.query).get("brandId", [""])[0]).strip()
+    try:
+        handler.send_json(200, api.client_public_config(brand_id))
+    except api.ActivationError as error:
+        handler.send_json(
+            error.status,
+            {"ok": False, "error": str(error), "code": error.code},
+        )
 
 
 def post_api_beta_claim(handler, parsed):
@@ -151,7 +158,19 @@ def head_logo_ico(handler, parsed):
 
 def head_api_client_config(handler, parsed):
     api = handler.facade
-    handler.send_json(200, api.client_public_config(), write_body=False)
+    brand_id = str(api.parse_qs(parsed.query).get("brandId", [""])[0]).strip()
+    try:
+        handler.send_json(
+            200,
+            api.client_public_config(brand_id),
+            write_body=False,
+        )
+    except api.ActivationError as error:
+        handler.send_json(
+            error.status,
+            {"ok": False, "error": str(error), "code": error.code},
+            write_body=False,
+        )
 
 
 def head_public_key(handler, parsed):

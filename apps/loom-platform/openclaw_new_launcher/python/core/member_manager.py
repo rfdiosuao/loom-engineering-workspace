@@ -11,6 +11,7 @@ from typing import Any
 
 from core.constants import LICENSE_SERVER_URL
 from core.license_manager import LicenseManager
+from core.oem_brand import load_oem_brand_config
 from core.paths import AppPaths
 from core.storage import read_json, write_json
 
@@ -25,7 +26,10 @@ class MemberManager:
     def __init__(self, paths: AppPaths):
         self.paths = paths
         self.license_mgr = LicenseManager(paths)
-        self.service_base_url = LICENSE_SERVER_URL.rstrip("/")
+        self.oem_brand = load_oem_brand_config(paths)
+        self.service_base_url = str(
+            (self.oem_brand or {}).get("licenseServer") or LICENSE_SERVER_URL
+        ).rstrip("/")
 
     @property
     def session_path(self) -> str:
@@ -63,6 +67,9 @@ class MemberManager:
         return f"HTTP {error.code}"
 
     def _request_json(self, action: str, payload: dict[str, Any] | None = None, *, method: str = "POST", timeout: int = 20) -> dict[str, Any]:
+        if payload is not None and self.oem_brand:
+            payload = dict(payload)
+            payload.setdefault("brandId", self.oem_brand["brandId"])
         errors: list[str] = []
         for url in self._endpoint_candidates(action):
             request = urllib.request.Request(
@@ -443,6 +450,8 @@ class MemberManager:
             "deviceId": self.license_mgr.device_id(),
             "appVersion": "desktop",
         }
+        if self.oem_brand:
+            payload["brandId"] = self.oem_brand["brandId"]
         data = self._request_json("activate", payload)
         session = self._normalize_session(data)
         if isinstance(data.get("theme"), dict) and data["theme"].get("colors"):

@@ -13,6 +13,7 @@ from .routes_admin_business import (
     post_admin_api_codes_update,
     post_admin_api_plans_delete,
     post_admin_api_plans_update,
+    post_admin_api_oem_brands,
     post_admin_api_public_settings,
 )
 from .routes_admin_mutations import (
@@ -37,6 +38,7 @@ from .routes_admin_read import (
     get_admin_api_codes_activations,
     get_admin_api_invites,
     get_admin_api_plans,
+    get_admin_api_oem_brands,
     get_admin_api_public_settings,
     get_admin_api_templates,
 )
@@ -57,6 +59,7 @@ GET_ROUTES: dict[str, Route] = {
     "/admin/api/codes/activations": get_admin_api_codes_activations,
     "/admin/api/audit-logs": get_admin_api_audit_logs,
     "/admin/api/public-settings": get_admin_api_public_settings,
+    "/admin/api/oem-brands": get_admin_api_oem_brands,
 }
 
 
@@ -82,6 +85,7 @@ POST_ROUTES: dict[str, Route] = {
     "/admin/api/codes/delete": post_admin_api_codes_delete,
     "/admin/api/activations/delete": post_admin_api_activations_delete,
     "/admin/api/public-settings": post_admin_api_public_settings,
+    "/admin/api/oem-brands": post_admin_api_oem_brands,
 }
 
 

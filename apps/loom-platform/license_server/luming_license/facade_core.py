@@ -36,6 +36,7 @@ from luming_license.domains import (
     accounts,
     activations,
     licenses,
+    oem_brands,
     plans,
     relay,
     sessions,

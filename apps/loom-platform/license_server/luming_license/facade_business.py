@@ -166,7 +166,38 @@ def public_settings() -> dict[str, Any]:
     )
 
 
-def client_public_config() -> dict[str, Any]:
+def list_oem_brands(
+    current_account: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    return oem_brands.list_rows(
+        owner_account_id=context_account_id(current_account),
+        include_all=is_super_admin_context(current_account),
+        connect_fn=connect,
+    )
+
+
+def upsert_oem_brand(
+    body: dict[str, Any],
+    current_account: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return oem_brands.upsert(
+        body,
+        actor_account_id=context_account_id(current_account),
+        is_super_admin=is_super_admin_context(current_account),
+        connect_fn=connect,
+        get_account_by_id_fn=get_account_by_id,
+        utc_now_fn=utc_now,
+    )
+
+
+def get_oem_brand_config(brand_id: str) -> dict[str, Any]:
+    return oem_brands.public_config(brand_id, connect_fn=connect)
+
+
+def client_public_config(brand_id: str = "") -> dict[str, Any]:
+    normalized_brand_id = str(brand_id or "").strip()
+    if normalized_brand_id:
+        return get_oem_brand_config(normalized_brand_id)
     return plans.client_public_config(
         public_settings_fn=public_settings,
         public_commercial_url=PUBLIC_COMMERCIAL_URL,
@@ -507,6 +538,9 @@ def find_member_license(body: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def activate_code(body: dict[str, Any]) -> dict[str, Any]:
+    brand_id = str(body.get("brandId") or "").strip()
+    if brand_id:
+        get_oem_brand_config(brand_id)
     return activations.activate_code(
         body,
         connect_fn=connect,
@@ -536,6 +570,9 @@ __all__ = [
     "get_plan_rows",
     "get_plan_row",
     "public_settings",
+    "list_oem_brands",
+    "upsert_oem_brand",
+    "get_oem_brand_config",
     "client_public_config",
     "validate_gateway_url",
     "update_public_settings",

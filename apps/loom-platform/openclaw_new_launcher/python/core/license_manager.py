@@ -10,6 +10,7 @@ import json
 import os
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date
 from typing import Any
@@ -18,6 +19,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from core.constants import LICENSE_SERVER_URL
+from core.oem_brand import bundled_fallback, load_oem_brand_config
 from core.paths import AppPaths
 from core.secret_store import unprotect_secret
 from core.storage import read_json, write_json
@@ -34,6 +36,10 @@ class LicenseError(RuntimeError):
 class LicenseManager:
     def __init__(self, paths: AppPaths):
         self.paths = paths
+        self.oem_brand = load_oem_brand_config(paths)
+        self.server_base_url = str(
+            (self.oem_brand or {}).get("licenseServer") or LICENSE_SERVER_URL
+        ).rstrip("/")
         self.public_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(LICENSE_PUBLIC_KEY_B64))
 
     @property
@@ -563,12 +569,14 @@ class LicenseManager:
             "deviceId": self.device_id(),
             "appVersion": "desktop",
         }
+        if self.oem_brand:
+            payload["brandId"] = self.oem_brand["brandId"]
         request_body = json.dumps(payload).encode("utf-8")
         data: dict[str, Any] | None = None
         last_error: Exception | None = None
         for endpoint in ("/api/member/activate", "/activate"):
             request = urllib.request.Request(
-                f"{LICENSE_SERVER_URL.rstrip('/')}{endpoint}",
+                f"{self.server_base_url}{endpoint}",
                 data=request_body,
                 headers={
                     "Content-Type": "application/json",
@@ -607,8 +615,11 @@ class LicenseManager:
         return self._with_license_meta(license_data)
 
     def client_config(self) -> dict[str, Any]:
+        query = ""
+        if self.oem_brand:
+            query = "?" + urllib.parse.urlencode({"brandId": self.oem_brand["brandId"]})
         request = urllib.request.Request(
-            f"{LICENSE_SERVER_URL.rstrip('/')}/api/client/config",
+            f"{self.server_base_url}/api/client/config{query}",
             headers={"User-Agent": "LOOM-Desktop/2.0"},
             method="GET",
         )
@@ -616,8 +627,20 @@ class LicenseManager:
             with urllib.request.urlopen(request, timeout=8) as response:
                 data = json.loads(response.read().decode("utf-8"))
             return data if isinstance(data, dict) else {}
+        except urllib.error.HTTPError as error:
+            try:
+                data = json.loads(error.read().decode("utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "code": "OEM_CONFIG_REJECTED",
+                "error": f"HTTP {error.code}",
+            }
         except Exception:
-            return {}
+            return bundled_fallback(self.oem_brand)
 
     def get_brand_config(self) -> dict[str, Any] | None:
         license_data = self.current_license()

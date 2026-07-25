@@ -108,6 +108,16 @@ def get_admin_api_public_settings(handler, parsed):
     )
 
 
+def get_admin_api_oem_brands(handler, parsed):
+    api = handler.facade
+    if not handler.require_admin():
+        return
+    handler.send_json(
+        200,
+        {"brands": api.list_oem_brands(handler.admin_context())},
+    )
+
+
 __all__ = [
     "get_admin_api_beta_config",
     "get_admin_api_templates",
@@ -120,4 +130,5 @@ __all__ = [
     "get_admin_api_codes_activations",
     "get_admin_api_audit_logs",
     "get_admin_api_public_settings",
+    "get_admin_api_oem_brands",
 ]

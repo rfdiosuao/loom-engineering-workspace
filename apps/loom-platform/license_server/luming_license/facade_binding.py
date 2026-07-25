@@ -43,6 +43,7 @@ _VALUE_NAMES = (
     "accounts",
     "activations",
     "licenses",
+    "oem_brands",
     "plans",
     "relay",
     "sessions",
@@ -251,6 +252,9 @@ _BUSINESS_FUNCTION_NAMES = (
     "get_plan_rows",
     "get_plan_row",
     "public_settings",
+    "list_oem_brands",
+    "upsert_oem_brand",
+    "get_oem_brand_config",
     "client_public_config",
     "validate_gateway_url",
     "update_public_settings",
@@ -309,6 +313,9 @@ class FacadeBindings:
     get_code_secret_rows: Callable[..., Any]
     get_activation_rows: Callable[..., Any]
     get_plan_rows: Callable[..., Any]
+    list_oem_brands: Callable[..., Any]
+    upsert_oem_brand: Callable[..., Any]
+    get_oem_brand_config: Callable[..., Any]
     client_public_config: Callable[..., Any]
     update_public_settings: Callable[..., Any]
     activate_code: Callable[..., Any]
@@ -424,6 +431,9 @@ def bind_facade(target: ModuleType) -> FacadeBindings:
         get_code_secret_rows=namespace["get_code_secret_rows"],
         get_activation_rows=namespace["get_activation_rows"],
         get_plan_rows=namespace["get_plan_rows"],
+        list_oem_brands=namespace["list_oem_brands"],
+        upsert_oem_brand=namespace["upsert_oem_brand"],
+        get_oem_brand_config=namespace["get_oem_brand_config"],
         client_public_config=namespace["client_public_config"],
         update_public_settings=namespace["update_public_settings"],
         activate_code=namespace["activate_code"],

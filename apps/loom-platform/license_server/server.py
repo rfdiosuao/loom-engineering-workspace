@@ -35,6 +35,9 @@ get_code_rows = _BINDINGS.get_code_rows
 get_code_secret_rows = _BINDINGS.get_code_secret_rows
 get_activation_rows = _BINDINGS.get_activation_rows
 get_plan_rows = _BINDINGS.get_plan_rows
+list_oem_brands = _BINDINGS.list_oem_brands
+upsert_oem_brand = _BINDINGS.upsert_oem_brand
+get_oem_brand_config = _BINDINGS.get_oem_brand_config
 client_public_config = _BINDINGS.client_public_config
 update_public_settings = _BINDINGS.update_public_settings
 activate_code = _BINDINGS.activate_code
@@ -92,6 +95,9 @@ __all__ = [
     "get_code_rows",
     "get_code_secret_rows",
     "get_plan_rows",
+    "list_oem_brands",
+    "upsert_oem_brand",
+    "get_oem_brand_config",
     "init_db",
     "list_codes",
     "main",

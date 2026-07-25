@@ -150,7 +150,12 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
             gateway_token text not null default '', gateway_image_token text not null default '',
             gateway_video_token text not null default '', gateway_default_model text not null default '',
             gateway_image_model text not null default '', gateway_video_model text not null default '',
-            gateway_models_json text not null default '[]', created_at text not null, updated_at text not null)""",
+             gateway_models_json text not null default '[]', created_at text not null, updated_at text not null)""",
+        """create table if not exists oem_brands (
+            brand_id text primary key, display_name text not null,
+            owner_account_id integer not null, status text not null default 'active',
+            purchase_url text not null, support_url text not null,
+            created_at text not null, updated_at text not null)""",
         """create table if not exists publish_relay_packets (
             seq integer primary key autoincrement, packet_id text not null unique, channel_id text not null,
             packet_json text not null, status text not null default 'pending', attempts integer not null default 0,
@@ -162,6 +167,7 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
     for statement in statements:
         conn.execute(statement)
     conn.execute("create index if not exists idx_publish_relay_channel_status on publish_relay_packets (channel_id, status, seq)")
+    conn.execute("create index if not exists idx_oem_brands_owner on oem_brands (owner_account_id, brand_id)")
     for table, name, definition in (
         ("codes", "owner_account_id", "integer not null default 0"),
         ("codes", "full_code", "text not null default ''"),

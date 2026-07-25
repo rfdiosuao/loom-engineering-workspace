@@ -50,6 +50,7 @@ EXPECTED_ROUTE_MARKERS = {
     "/admin/api/codes/update",
     "/admin/api/invites",
     "/admin/api/invites/toggle",
+    "/admin/api/oem-brands",
     "/admin/api/me",
     "/admin/api/plans",
     "/admin/api/plans/delete",
@@ -104,6 +105,7 @@ EXPECTED_ADMIN_ROUTE_CALLABLES = {
         "/admin/api/codes/activations": "get_admin_api_codes_activations",
         "/admin/api/audit-logs": "get_admin_api_audit_logs",
         "/admin/api/public-settings": "get_admin_api_public_settings",
+        "/admin/api/oem-brands": "get_admin_api_oem_brands",
     },
     "POST": {
         "/admin/api/beta/config": "post_admin_api_beta_config",
@@ -127,6 +129,7 @@ EXPECTED_ADMIN_ROUTE_CALLABLES = {
         "/admin/api/codes/delete": "post_admin_api_codes_delete",
         "/admin/api/activations/delete": "post_admin_api_activations_delete",
         "/admin/api/public-settings": "post_admin_api_public_settings",
+        "/admin/api/oem-brands": "post_admin_api_oem_brands",
     },
 }
 

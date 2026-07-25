@@ -5,12 +5,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 LAUNCHER_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_ROOT = LAUNCHER_ROOT / "python"
 PLATFORM_ROOT = LAUNCHER_ROOT.parent
 APPS_ROOT = PLATFORM_ROOT.parent
 BRAND_BUILD_MODULE = PLATFORM_ROOT / "scripts" / "brand_build.py"
@@ -20,6 +22,9 @@ ANDROID_MANIFEST = (
     APPS_ROOT / "loom-phone-agent" / "app" / "src" / "main" / "AndroidManifest.xml"
 )
 PORTABLE_BUILD = PLATFORM_ROOT / "scripts" / "build-portable.ps1"
+
+if str(PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(PYTHON_ROOT))
 
 
 def _load_brand_build_module():
@@ -38,7 +43,7 @@ def _write_json(path: Path, value: object) -> None:
 
 def _active_brand() -> dict[str, object]:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "brandId": "northstar",
         "status": "active",
         "product": {
@@ -63,6 +68,8 @@ def _active_brand() -> dict[str, object]:
         "urls": {
             "website": "https://northstar.cn",
             "apiBase": "https://api.northstar.cn",
+            "licenseServer": "https://license.northstar.cn",
+            "purchase": "https://northstar.cn/buy",
             "docs": "https://docs.northstar.cn",
             "support": "https://support.northstar.cn",
             "manifest": "https://download.northstar.cn/internal/latest.json",
@@ -141,6 +148,7 @@ class BrandBuildContractTests(unittest.TestCase):
             self.assertEqual(tauri["app"]["windows"][0]["title"], "Northstar AI Matrix")
             self.assertIn("_up_/data/brand_profile.json", tauri["bundle"]["resources"].values())
             self.assertIn("_up_/data/desktop-update-brand.json", tauri["bundle"]["resources"].values())
+            self.assertIn("_up_/data/oem-brand.json", tauri["bundle"]["resources"].values())
 
             profile = json.loads(
                 (output / "runtime" / "brand_profile.json").read_text(encoding="utf-8")
@@ -165,6 +173,20 @@ class BrandBuildContractTests(unittest.TestCase):
             self.assertEqual(update["channel"], "internal")
             self.assertEqual(update["manifestUrl"], "https://download.northstar.cn/internal/latest.json")
             self.assertEqual(update["filePrefix"], "northstar")
+
+            oem_runtime = json.loads(
+                (output / "runtime" / "oem-brand.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                oem_runtime,
+                {
+                    "schemaVersion": 1,
+                    "brandId": "northstar",
+                    "licenseServer": "https://license.northstar.cn",
+                    "purchaseFallback": "https://northstar.cn/buy",
+                    "supportFallback": "https://support.northstar.cn",
+                },
+            )
 
             environment = json.loads((output / "environment.json").read_text(encoding="utf-8"))
             self.assertEqual(

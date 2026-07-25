@@ -126,6 +126,10 @@ def _validate_https_url(value: str, context: str, release_ready: bool) -> str:
     parsed = urlparse(value)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError(f"{context} must use an absolute HTTPS URL")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{context} must not include credentials")
+    if len(value) > 2048:
+        raise ValueError(f"{context} must not exceed 2048 characters")
     host = parsed.hostname.lower()
     if release_ready and any(marker in host for marker in PLACEHOLDER_HOST_MARKERS):
         raise ValueError(f"{context} uses a placeholder or local domain: {host}")
@@ -144,8 +148,8 @@ def _validate_brand(
     missing = sorted(REQUIRED_TOP_LEVEL - set(brand))
     if missing:
         raise ValueError(f"brand.json is missing required fields: {', '.join(missing)}")
-    if brand.get("schemaVersion") != 1:
-        raise ValueError("brand.schemaVersion must be 1")
+    if brand.get("schemaVersion") != 2:
+        raise ValueError("brand.schemaVersion must be 2")
 
     brand_id = _require_string(brand, "brandId", "brand")
     if not BRAND_ID_RE.fullmatch(brand_id):
@@ -161,7 +165,15 @@ def _validate_brand(
         "positioning": ("category", "promise"),
         "desktop": ("productName", "binaryName", "identifier", "windowTitle"),
         "phone": ("appName", "applicationId"),
-        "urls": ("website", "apiBase", "docs", "support", "manifest"),
+        "urls": (
+            "website",
+            "apiBase",
+            "licenseServer",
+            "purchase",
+            "docs",
+            "support",
+            "manifest",
+        ),
         "release": ("channel", "filePrefix", "updateChannelId"),
     }.items():
         value = brand.get(section)
@@ -334,6 +346,15 @@ def compile_brand_pack(
     }
     _write_json(runtime_root / "desktop-update-brand.json", update_config)
 
+    oem_runtime = {
+        "schemaVersion": 1,
+        "brandId": brand_id,
+        "licenseServer": brand["urls"]["licenseServer"],
+        "purchaseFallback": brand["urls"]["purchase"],
+        "supportFallback": brand["urls"]["support"],
+    }
+    _write_json(runtime_root / "oem-brand.json", oem_runtime)
+
     icons_root = output_root / "icons"
     installer_root = output_root / "installer"
     android_res_root = output_root / "android-res"
@@ -344,6 +365,7 @@ def compile_brand_pack(
     resources = {
         str((runtime_root / "brand_profile.json").resolve()): "_up_/data/brand_profile.json",
         str((runtime_root / "desktop-update-brand.json").resolve()): "_up_/data/desktop-update-brand.json",
+        str((runtime_root / "oem-brand.json").resolve()): "_up_/data/oem-brand.json",
         str(theme_root.resolve()): f"_up_/data/themes/{brand_id}/",
     }
     tauri_config = {
@@ -442,6 +464,7 @@ def compile_brand_pack(
             "filePrefix": brand["release"]["filePrefix"],
             "manifestUrl": brand["urls"]["manifest"],
         },
+        "commerce": oem_runtime,
         "frontend": {
             "displayName": display_name,
             "subtitle": brand["positioning"]["promise"],
