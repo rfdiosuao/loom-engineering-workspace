@@ -81,7 +81,12 @@ function Invoke-GiteeApi {
     if ($Method -eq "GET" -or $Method -eq "DELETE") {
         $separator = if ($uri.Contains("?")) { "&" } else { "?" }
         $uri = "$uri${separator}access_token=$Token"
-        return Invoke-RestMethod -Method $Method -Uri $uri
+        $response = Invoke-RestMethod -Method $Method -Uri $uri
+        if ($response -is [array]) {
+            $response | ForEach-Object { Write-Output -NoEnumerate $_ }
+            return
+        }
+        return $response
     }
 
     $payload = @{}
@@ -210,6 +215,29 @@ function Publish-Asset {
     Write-Host "Uploaded asset: $fileName"
 }
 
+function Remove-StaleDesktopReleases {
+    param([string]$CurrentTag)
+
+    $items = @(Invoke-GiteeApi -Method "GET" -Path "/repos/$Owner/$Repo/releases?page=1&per_page=100")
+    $staleItems = @(
+        foreach ($item in $items) {
+            $tag = [string]$item.tag_name
+            if ($tag -ne $CurrentTag -and $tag -match '^v\d+\.\d+\.\d+$') {
+                $item
+            }
+        }
+    )
+    Write-Host "Gitee mirror pruning: found $($items.Count) releases, removing $($staleItems.Count) stale desktop releases."
+    foreach ($item in $staleItems) {
+        $tag = [string]$item.tag_name
+        if (-not $item.id) {
+            throw "Gitee release is missing its id: $tag"
+        }
+        Invoke-GiteeApi -Method "DELETE" -Path "/repos/$Owner/$Repo/releases/$($item.id)" | Out-Null
+        Write-Host "Removed stale Gitee desktop mirror release: $tag"
+    }
+}
+
 $release = Get-ReleaseByTag -Tag $TagName
 
 if ($release) {
@@ -217,6 +245,10 @@ if ($release) {
 } else {
     Write-Host "Creating Gitee release: $TagName"
     $release = New-GiteeRelease
+}
+
+if ($PruneDesktopReleases) {
+    Remove-StaleDesktopReleases -CurrentTag $TagName
 }
 
 if (-not $VerifyOnly) {
@@ -264,27 +296,6 @@ if ($VerifyOnly) {
         throw "VerifyOnly requires at least one expected asset."
     }
     Confirm-GiteeAssets -ReleaseId ([int]$release.id) -ExpectedAssets $Assets
-}
-
-function Remove-StaleDesktopReleases {
-    param([string]$CurrentTag)
-
-    $items = @(Invoke-GiteeApi -Method "GET" -Path "/repos/$Owner/$Repo/releases?page=1&per_page=100")
-    foreach ($item in $items) {
-        $tag = [string]$item.tag_name
-        if ($tag -eq $CurrentTag -or $tag -notmatch '^v\d+\.\d+\.\d+$') {
-            continue
-        }
-        if (-not $item.id) {
-            throw "Gitee release is missing its id: $tag"
-        }
-        Invoke-GiteeApi -Method "DELETE" -Path "/repos/$Owner/$Repo/releases/$($item.id)" | Out-Null
-        Write-Host "Removed stale Gitee desktop mirror release: $tag"
-    }
-}
-
-if ($PruneDesktopReleases) {
-    Remove-StaleDesktopReleases -CurrentTag $TagName
 }
 
 Write-Host "Gitee release ready: $TagName"
