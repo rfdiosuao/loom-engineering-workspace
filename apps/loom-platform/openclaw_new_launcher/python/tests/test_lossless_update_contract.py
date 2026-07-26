@@ -207,6 +207,9 @@ class LosslessUpdateContractTests(unittest.TestCase):
         part = {
             "index": 1,
             "url": "https://gitee.com/example/LOOM-2.3.24-setup.part001",
+            "fallbackUrls": [
+                "https://github.com/example/LOOM-2.3.24-setup.part001",
+            ],
             "size": len(installer),
             "sha256": hashlib.sha256(installer).hexdigest(),
         }

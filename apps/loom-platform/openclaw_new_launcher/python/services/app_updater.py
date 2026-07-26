@@ -41,6 +41,7 @@ class UpdateDownloadPart:
     url: str
     size: int
     sha256: str
+    fallback_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,16 @@ def _parse_download_parts(
         if url in seen_urls:
             raise ValueError("更新清单 downloadParts URL 不能重复")
         seen_urls.add(url)
+        raw_fallback_urls = raw_part.get("fallbackUrls") or []
+        if not isinstance(raw_fallback_urls, list) or len(raw_fallback_urls) > 3:
+            raise ValueError("更新清单分片 fallbackUrls 必须是最多包含 3 项的数组")
+        fallback_urls: list[str] = []
+        for raw_fallback_url in raw_fallback_urls:
+            fallback_url = _safe_https_url(raw_fallback_url)
+            if fallback_url in seen_urls:
+                raise ValueError("更新清单 downloadParts URL 不能重复")
+            seen_urls.add(fallback_url)
+            fallback_urls.append(fallback_url)
         size = int(raw_part.get("size") or 0)
         if size <= 0 or size > 100 * 1024 * 1024:
             raise ValueError("更新清单分片大小必须大于 0 且不超过 100 MiB")
@@ -245,6 +256,7 @@ def _parse_download_parts(
                 url=url,
                 size=size,
                 sha256=sha256,
+                fallback_urls=tuple(fallback_urls),
             )
         )
 
@@ -1054,6 +1066,7 @@ class LoomAppUpdater:
                     size=part.size,
                     sha256=part.sha256,
                     source=urlparse(part.url).hostname or part.url,
+                    fallback_urls=part.fallback_urls,
                 )
 
                 def report_part(state: dict[str, Any], *, offset: int = completed_size) -> None:

@@ -116,18 +116,31 @@ def main() -> int:
             if url in seen_urls:
                 raise ValueError("download part URLs must be unique")
             seen_urls.add(url)
+            raw_fallback_urls = raw_part.get("fallbackUrls") or []
+            if not isinstance(raw_fallback_urls, list) or len(raw_fallback_urls) > 3:
+                raise ValueError("download part fallbackUrls must contain at most 3 URLs")
+            fallback_urls: list[str] = []
+            for raw_fallback_url in raw_fallback_urls:
+                fallback_url = str(raw_fallback_url or "").strip()
+                if not fallback_url.startswith("https://"):
+                    raise ValueError("download part fallback URLs must use HTTPS")
+                if fallback_url in seen_urls:
+                    raise ValueError("download part URLs must be unique")
+                seen_urls.add(fallback_url)
+                fallback_urls.append(fallback_url)
             if size <= 0 or size > 100 * 1024 * 1024:
                 raise ValueError("download part size must be between 1 byte and 100 MiB")
             if not SHA256_RE.fullmatch(sha256):
                 raise ValueError("download part sha256 is invalid")
-            download_parts.append(
-                {
-                    "index": index,
-                    "url": url,
-                    "size": size,
-                    "sha256": sha256,
-                }
-            )
+            descriptor: dict[str, object] = {
+                "index": index,
+                "url": url,
+                "size": size,
+                "sha256": sha256,
+            }
+            if fallback_urls:
+                descriptor["fallbackUrls"] = fallback_urls
+            download_parts.append(descriptor)
         if sum(int(part["size"]) for part in download_parts) != manifest["size"]:
             raise ValueError("download parts do not add up to the installer size")
         manifest["downloadParts"] = download_parts

@@ -97,7 +97,7 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
             release,
         )
 
-    def test_windows_release_publishes_signed_domestic_parts_before_github_release(self) -> None:
+    def test_windows_release_publishes_signed_github_parts_before_best_effort_domestic_mirror(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
 
         mirror_step = "- name: Publish signed domestic update mirror"
@@ -107,9 +107,11 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn("LOOM-*-setup.part*", release)
         self.assertIn("publish-gitee-release.ps1", release)
         self.assertIn("-PruneDesktopReleases", release)
-        self.assertLess(release.index(mirror_step), release.index(github_step))
+        self.assertIn("MirrorFallbackBaseUrl", release)
+        self.assertIn("*.part???", release)
+        self.assertLess(release.index(github_step), release.index(mirror_step))
 
-    def test_windows_release_uploads_domestic_parts_in_parallel_with_a_deadline(self) -> None:
+    def test_windows_release_uploads_domestic_parts_in_parallel_without_blocking_main_release(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
         mirror_step = release.split(
             "- name: Publish signed domestic update mirror",
@@ -118,9 +120,11 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
 
         self.assertIn("Start-Job", mirror_step)
         self.assertIn("Wait-Job", mirror_step)
-        self.assertIn("-Timeout 2100", mirror_step)
+        self.assertIn("-Timeout 600", mirror_step)
         self.assertIn("Stop-Job", mirror_step)
         self.assertNotIn("$LASTEXITCODE", mirror_step)
+        self.assertIn("continue-on-error: true", mirror_step)
+        self.assertIn("timeout-minutes: 12", mirror_step)
         self.assertLess(
             mirror_step.index("Wait-Job"),
             mirror_step.index("-PruneDesktopReleases"),
