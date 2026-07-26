@@ -7,7 +7,8 @@ param(
     [string]$Channel = "stable",
     [string]$ChannelId = "loom-stable",
     [string]$FilePrefix = "LOOM",
-    [string]$DownloadUrl = ""
+    [string]$DownloadUrl = "",
+    [string]$PublicKeyPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,13 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
 if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
     throw "Installer does not exist: $InstallerPath"
 }
+if ([string]::IsNullOrWhiteSpace($PublicKeyPath)) {
+    $PublicKeyPath = Join-Path (Split-Path -Parent $PSScriptRoot) "desktop-update-public-key.txt"
+}
+if (-not (Test-Path -LiteralPath $PublicKeyPath -PathType Leaf)) {
+    throw "Desktop update public key does not exist: $PublicKeyPath"
+}
+$PublicKeyPath = (Resolve-Path -LiteralPath $PublicKeyPath).Path
 
 $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
@@ -60,7 +68,8 @@ $signerArguments = @(
     "--product", $Product,
     "--channel", $Channel,
     "--channel-id", $ChannelId,
-    "--file-prefix", $FilePrefix
+    "--file-prefix", $FilePrefix,
+    "--public-key", $PublicKeyPath
 )
 if (-not [string]::IsNullOrWhiteSpace($DownloadUrl)) {
     $signerArguments += @("--download-url", $DownloadUrl)

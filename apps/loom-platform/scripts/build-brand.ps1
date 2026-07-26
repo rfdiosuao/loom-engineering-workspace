@@ -441,7 +441,8 @@ try {
             -Channel $plan.update.channel `
             -ChannelId $plan.update.channelId `
             -FilePrefix $plan.update.filePrefix `
-            -DownloadUrl $downloadUrl
+            -DownloadUrl $downloadUrl `
+            -PublicKeyPath (Join-Path $plan.paths.runtime "desktop-update-brand.json")
     }
     $signedManifest = Join-Path $updateOutput "$canonicalInstallerName.update.json"
     if (-not (Test-Path -LiteralPath $signedManifest -PathType Leaf)) {

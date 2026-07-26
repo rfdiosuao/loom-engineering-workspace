@@ -46,6 +46,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
             source = handle.read()
 
         self.assertIn("LOOM_DESKTOP_UPDATE_PRIVATE_KEY", source)
+        self.assertIn('[string]$PublicKeyPath', source)
+        self.assertIn('"--public-key"', source)
         self.assertIn(".update.json", source)
         self.assertIn("sign-desktop-update.py", source)
         self.assertIn("updateManifest", source)
@@ -63,14 +65,23 @@ class LosslessUpdateContractTests(unittest.TestCase):
                 encryption_algorithm=serialization.NoEncryption(),
             )
         ).decode("ascii")
+        public_key_value = base64.b64encode(
+            private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             source_installer = os.path.join(temp_dir, "source-installer.exe")
+            public_key_path = os.path.join(temp_dir, "desktop-update-public-key.txt")
             output_dir = os.path.join(temp_dir, "release")
             system_root = os.environ.get("SystemRoot", r"C:\Windows")
             fixture_executable = os.path.join(system_root, "System32", "where.exe")
             self.assertTrue(os.path.isfile(fixture_executable), fixture_executable)
             shutil.copyfile(fixture_executable, source_installer)
+            with open(public_key_path, "w", encoding="utf-8") as handle:
+                handle.write(public_key_value)
             env = os.environ.copy()
             # PowerShell 7 module paths can prevent Windows PowerShell 5.1 from
             # loading its built-in Microsoft.PowerShell.Security module.
@@ -91,6 +102,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
                     "2.3.19",
                     "-OutputDirectory",
                     output_dir,
+                    "-PublicKeyPath",
+                    public_key_path,
                 ],
                 capture_output=True,
                 text=True,
@@ -120,12 +133,21 @@ class LosslessUpdateContractTests(unittest.TestCase):
                 encryption_algorithm=serialization.NoEncryption(),
             )
         ).decode("ascii")
+        public_key_value = base64.b64encode(
+            private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             installer_path = os.path.join(temp_dir, "LOOM-2.3.19-setup.exe")
             manifest_path = installer_path + ".update.json"
+            public_key_path = os.path.join(temp_dir, "desktop-update-public-key.txt")
             with open(installer_path, "wb") as handle:
                 handle.write(installer)
+            with open(public_key_path, "w", encoding="utf-8") as handle:
+                handle.write(public_key_value)
             env = os.environ.copy()
             env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
             result = subprocess.run(
@@ -138,6 +160,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
                     "2.3.19",
                     "--output",
                     manifest_path,
+                    "--public-key",
+                    public_key_path,
                 ],
                 capture_output=True,
                 text=True,
@@ -163,6 +187,59 @@ class LosslessUpdateContractTests(unittest.TestCase):
             ensure_ascii=False,
         ).encode("utf-8")
         private_key.public_key().verify(signature, payload)
+
+    def test_desktop_update_signer_rejects_a_private_key_that_does_not_match_the_client_key(
+        self,
+    ) -> None:
+        signing_key = Ed25519PrivateKey.generate()
+        different_key = Ed25519PrivateKey.generate()
+        private_key_value = base64.b64encode(
+            signing_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+        different_public_key = base64.b64encode(
+            different_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer_path = os.path.join(temp_dir, "LOOM-2.3.19-setup.exe")
+            manifest_path = installer_path + ".update.json"
+            public_key_path = os.path.join(temp_dir, "desktop-update-public-key.txt")
+            with open(installer_path, "wb") as handle:
+                handle.write(b"installer")
+            with open(public_key_path, "w", encoding="utf-8") as handle:
+                handle.write(different_public_key)
+            env = os.environ.copy()
+            env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    UPDATE_SIGNER_SCRIPT,
+                    "--installer",
+                    installer_path,
+                    "--version",
+                    "2.3.19",
+                    "--output",
+                    manifest_path,
+                    "--public-key",
+                    public_key_path,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not match", result.stderr)
+            self.assertFalse(os.path.exists(manifest_path))
 
     def test_oem_update_config_contains_only_the_derived_public_key(self) -> None:
         private_key = Ed25519PrivateKey.generate()

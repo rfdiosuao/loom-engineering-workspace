@@ -14,9 +14,11 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { open } from '@tauri-apps/plugin-shell';
 
 import { Button, showToast } from '../common';
 import {
+  parseApiErrorPayload,
   parseErrorText,
   shouldPresentUpdate,
   updateApi,
@@ -30,6 +32,7 @@ const UPDATE_CENTER_OPEN_EVENT = 'loom:update-center:open';
 const SKIPPED_VERSION_KEY = 'loom.update.skippedVersion';
 const LAST_CHECK_KEY = 'loom.update.lastAutomaticCheckAt';
 const AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const OFFICIAL_RELEASES_URL = 'https://github.com/rfdiosuao/loom-engineering-workspace/releases/latest';
 
 type UpdatePhase =
   | 'idle'
@@ -46,6 +49,20 @@ type UpdatePhase =
 
 export function shouldReuseUpdateSession(phase: string): boolean {
   return ['available', 'downloading', 'verifying', 'ready', 'restarting', 'success', 'cancelled'].includes(phase);
+}
+
+export function shouldOfferManualUpdateBridge(errorCode: string): boolean {
+  return errorCode.trim() === 'signature_invalid';
+}
+
+export function manualUpdateBridgeUrl(releaseUrl = ''): string {
+  try {
+    const parsed = new URL(releaseUrl);
+    if (parsed.protocol === 'https:') return parsed.toString();
+  } catch {
+    // Use the canonical release page below.
+  }
+  return OFFICIAL_RELEASES_URL;
 }
 
 interface OpenUpdateCenterDetail {
@@ -90,6 +107,7 @@ export const UpdateCenter: React.FC = () => {
   const [receipt, setReceipt] = React.useState<UpdateResultReceipt | null>(null);
   const [installerPath, setInstallerPath] = React.useState('');
   const [errorMessage, setErrorMessage] = React.useState('');
+  const [errorCode, setErrorCode] = React.useState('');
   const [remediation, setRemediation] = React.useState<string[]>([]);
   const [cancelPending, setCancelPending] = React.useState(false);
   const requestSequence = React.useRef(0);
@@ -110,6 +128,7 @@ export const UpdateCenter: React.FC = () => {
     if (manual) setVisible(true);
     setPhase('checking');
     setErrorMessage('');
+    setErrorCode('');
     setRemediation([]);
     try {
       const nextRelease = await updateApi.check();
@@ -135,6 +154,7 @@ export const UpdateCenter: React.FC = () => {
         return;
       }
       setErrorMessage(parseErrorText(error) || '暂时无法连接更新服务器。');
+      setErrorCode(String(parseApiErrorPayload(error)?.errorCode || ''));
       setPhase('failed');
       setVisible(true);
     }
@@ -212,6 +232,7 @@ export const UpdateCenter: React.FC = () => {
       remediation: [],
     });
     setErrorMessage('');
+    setErrorCode('');
     setRemediation([]);
     setCancelPending(false);
 
@@ -242,10 +263,11 @@ export const UpdateCenter: React.FC = () => {
         showToast(`${APP_DISPLAY_NAME} ${response.current_version} 已下载完成，等待重启安装`, 'success');
       }
     } catch (error) {
-      const detail = error && typeof error === 'object'
-        ? error as { remediation?: string[] }
-        : {};
+      const detail = parseApiErrorPayload(error) || (
+        error && typeof error === 'object' ? error as Record<string, unknown> : {}
+      );
       setErrorMessage(parseErrorText(error) || '更新下载失败，当前版本没有受到影响。');
+      setErrorCode(String(detail.errorCode || ''));
       setRemediation(Array.isArray(detail.remediation) ? detail.remediation : []);
       setPhase('failed');
       setVisible(true);
@@ -283,6 +305,16 @@ export const UpdateCenter: React.FC = () => {
   const skipVersion = () => {
     if (release?.latest) window.localStorage.setItem(SKIPPED_VERSION_KEY, release.latest);
     setVisible(false);
+  };
+
+  const openManualUpdateBridge = async () => {
+    const url = manualUpdateBridgeUrl(release?.releaseUrl);
+    try {
+      await open(url);
+    } catch (error) {
+      const opened = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!opened) showToast(parseErrorText(error) || '无法打开官方发布页，请检查系统默认浏览器。', 'error');
+    }
   };
 
   if (!visible) return null;
@@ -503,6 +535,11 @@ export const UpdateCenter: React.FC = () => {
           {phase === 'failed' ? (
             <>
               <Button variant="quiet" onClick={() => setVisible(false)}>关闭</Button>
+              {shouldOfferManualUpdateBridge(errorCode) ? (
+                <Button variant="quiet" onClick={() => void openManualUpdateBridge()}>
+                  <Download size={16} className="mr-2 inline" />手动安装一次最新版
+                </Button>
+              ) : null}
               {!receipt ? <Button variant="primary" onClick={() => void checkForUpdate(true)}><RefreshCw size={16} className="mr-2 inline" />重新检查</Button> : null}
             </>
           ) : null}

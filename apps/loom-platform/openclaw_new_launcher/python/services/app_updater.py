@@ -138,7 +138,10 @@ def _classify_update_failure(
             "signature_invalid",
             "更新包官方发布签名无效，已拒绝安装。",
             False,
-            (f"请只使用 {display_name} 官方发布的更新包。",),
+            (
+                f"当前版本可能尚未内置最新更新公钥，请从 {display_name} 官方发布页手动安装一次最新版；之后可继续自动更新。",
+                f"请只使用 {display_name} 官方发布的更新包。",
+            ),
         )
     if "sha256" in lowered or "安装包大小不一致" in lowered:
         return UpdateFailure(
