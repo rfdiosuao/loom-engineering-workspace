@@ -7,6 +7,7 @@ param(
     [string[]]$Assets = @(),
     [string]$Token = $env:GITEE_ACCESS_TOKEN,
     [string]$TokenFile = "",
+    [switch]$VerifyOnly,
     [switch]$PruneDesktopReleases
 )
 
@@ -218,8 +219,51 @@ if ($release) {
     $release = New-GiteeRelease
 }
 
-foreach ($asset in $Assets) {
-    Publish-Asset -ReleaseId ([int]$release.id) -AssetPath $asset
+if (-not $VerifyOnly) {
+    foreach ($asset in $Assets) {
+        Publish-Asset -ReleaseId ([int]$release.id) -AssetPath $asset
+    }
+}
+
+function Confirm-GiteeAssets {
+    param(
+        [int]$ReleaseId,
+        [string[]]$ExpectedAssets
+    )
+
+    $published = @(
+        Invoke-GiteeApi -Method "GET" -Path "/repos/$Owner/$Repo/releases/$ReleaseId/attach_files"
+    )
+    $publishedNames = @{}
+    foreach ($item in $published) {
+        $publishedName = [string]$item.name
+        if ([string]::IsNullOrWhiteSpace($publishedName)) {
+            $publishedName = [string]$item.filename
+        }
+        if (-not [string]::IsNullOrWhiteSpace($publishedName)) {
+            $publishedNames[$publishedName] = $true
+        }
+    }
+
+    $missing = @(
+        foreach ($asset in $ExpectedAssets) {
+            $expectedName = Split-Path -Leaf $asset
+            if (-not $publishedNames.ContainsKey($expectedName)) {
+                $expectedName
+            }
+        }
+    )
+    if ($missing.Count -gt 0) {
+        throw "Gitee release is missing expected assets: $($missing -join ', ')"
+    }
+    Write-Host "Verified $($ExpectedAssets.Count) Gitee release assets."
+}
+
+if ($VerifyOnly) {
+    if ($Assets.Count -eq 0) {
+        throw "VerifyOnly requires at least one expected asset."
+    }
+    Confirm-GiteeAssets -ReleaseId ([int]$release.id) -ExpectedAssets $Assets
 }
 
 function Remove-StaleDesktopReleases {

@@ -32,6 +32,8 @@ def _signed_update_manifest(
     size: int,
     sha256: str,
     download_parts: list[dict[str, object]] | None = None,
+    download_url: str = "",
+    fallback_urls: list[str] | None = None,
 ) -> tuple[dict[str, object], str]:
     manifest: dict[str, object] = {
         "schemaVersion": 1,
@@ -45,6 +47,10 @@ def _signed_update_manifest(
     }
     if download_parts:
         manifest["downloadParts"] = download_parts
+    if download_url:
+        manifest["downloadUrl"] = download_url
+    if fallback_urls:
+        manifest["fallbackUrls"] = fallback_urls
     payload = json.dumps(
         manifest,
         sort_keys=True,
@@ -116,11 +122,166 @@ class _BarrierResponse(_Response):
 
 
 class LoomAppUpdaterTests(unittest.TestCase):
-    def test_default_release_source_is_the_public_monorepo(self) -> None:
+    def test_default_release_sources_prefer_domestic_discovery_with_github_fallbacks(self) -> None:
         self.assertEqual(
             DEFAULT_RELEASE_API_URLS,
-            ("https://api.github.com/repos/rfdiosuao/loom-engineering-workspace/releases/latest",),
+            (
+                "https://gitee.com/api/v5/repos/rfdiosuao/lumi/releases/latest",
+                "https://github.com/rfdiosuao/loom-engineering-workspace/releases/latest/download/LOOM-stable.update.json",
+                "https://api.github.com/repos/rfdiosuao/loom-engineering-workspace/releases/latest",
+            ),
         )
+
+    def test_release_discovery_retries_a_transient_connection_reset(self) -> None:
+        installer = b"retry-discovery-installer"
+        digest = hashlib.sha256(installer).hexdigest()
+        release = {
+            "assets": [
+                {
+                    "name": "LOOM-2.3.25-setup.exe",
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": "https://downloads.example/LOOM-2.3.25-setup.exe",
+                }
+            ]
+        }
+        attempts = 0
+
+        def opener(request, timeout=0):
+            nonlocal attempts
+            del timeout
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionResetError("remote end closed connection")
+            return _Response(json.dumps(release).encode("utf-8"), url=request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(temp_dir),
+                current_version="2.3.24",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+            )
+            latest, error = updater.latest_version()
+
+        self.assertIsNone(error)
+        self.assertEqual(latest, "2.3.25")
+        self.assertEqual(attempts, 2)
+
+    def test_manifest_only_gitee_release_is_a_complete_signed_discovery_source(self) -> None:
+        installer = b"signed-segmented-installer"
+        digest = hashlib.sha256(installer).hexdigest()
+        private_key = Ed25519PrivateKey.generate()
+        manifest, public_key = _signed_update_manifest(
+            private_key,
+            version="2.3.25",
+            filename="LOOM-2.3.25-setup.exe",
+            size=len(installer),
+            sha256=digest,
+            download_url=(
+                "https://github.com/rfdiosuao/loom-engineering-workspace/"
+                "releases/download/v2.3.25/LOOM-2.3.25-setup.exe"
+            ),
+            download_parts=[
+                {
+                    "index": 1,
+                    "url": "https://gitee.com/rfdiosuao/lumi/releases/download/v2.3.25/LOOM-2.3.25-setup.part001",
+                    "size": len(installer),
+                    "sha256": digest,
+                    "fallbackUrls": [
+                        "https://github.com/rfdiosuao/loom-engineering-workspace/"
+                        "releases/download/v2.3.25/LOOM-2.3.25-setup.part001"
+                    ],
+                }
+            ],
+        )
+        manifest_name = "LOOM-2.3.25-setup.exe.update.json"
+        manifest_url = f"https://gitee.example/{manifest_name}"
+        release = {
+            "tag_name": "v2.3.25",
+            "assets": [
+                {
+                    "name": manifest_name,
+                    "browser_download_url": manifest_url,
+                },
+                {
+                    "name": "LOOM-2.3.25-setup.part001",
+                    "browser_download_url": (
+                        "https://gitee.example/LOOM-2.3.25-setup.part001"
+                    ),
+                },
+            ],
+        }
+
+        def opener(request, timeout=0):
+            del timeout
+            if request.full_url.endswith("/releases/latest"):
+                payload = release
+            elif request.full_url == manifest_url:
+                payload = manifest
+            else:
+                raise AssertionError(request.full_url)
+            return _Response(json.dumps(payload).encode("utf-8"), url=request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(temp_dir),
+                current_version="2.3.24",
+                release_api_urls=("https://gitee.example/releases/latest",),
+                opener=opener,
+                update_public_key=public_key,
+            )
+            latest, error = updater.latest_release()
+
+        self.assertIsNone(error)
+        self.assertEqual(latest.version, "2.3.25")
+        self.assertEqual(latest.sha256, digest)
+        self.assertEqual(len(latest.download_parts), 1)
+        self.assertEqual(latest.source, "gitee.example")
+
+    def test_release_sources_are_discovered_concurrently_without_losing_highest_version(self) -> None:
+        barrier = threading.Barrier(3)
+        versions = {
+            "gitee.example": "2.3.24",
+            "github-direct.example": "2.3.25",
+            "api.github.example": "2.3.23",
+        }
+
+        def opener(request, timeout=0):
+            del timeout
+            host = request.full_url.split("/", 3)[2]
+            barrier.wait(timeout=2)
+            version = versions[host]
+            installer = f"installer-{version}".encode("ascii")
+            payload = {
+                "assets": [
+                    {
+                        "name": f"LOOM-{version}-setup.exe",
+                        "size": len(installer),
+                        "digest": f"sha256:{hashlib.sha256(installer).hexdigest()}",
+                        "browser_download_url": (
+                            f"https://downloads.example/LOOM-{version}-setup.exe"
+                        ),
+                    }
+                ]
+            }
+            return _Response(json.dumps(payload).encode("utf-8"), url=request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(temp_dir),
+                current_version="2.3.22",
+                release_api_urls=tuple(
+                    f"https://{host}/releases/latest"
+                    for host in versions
+                ),
+                opener=opener,
+            )
+            latest, error = updater.latest_release()
+
+        self.assertIsNone(error)
+        self.assertEqual(latest.version, "2.3.25")
+        self.assertEqual(latest.source, "github-direct.example")
 
     def test_oem_runtime_uses_its_independent_signed_update_channel(self) -> None:
         installer = b"northstar-oem-installer"
