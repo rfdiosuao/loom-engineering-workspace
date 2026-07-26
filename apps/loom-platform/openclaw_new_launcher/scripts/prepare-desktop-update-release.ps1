@@ -9,6 +9,7 @@ param(
     [string]$FilePrefix = "LOOM",
     [string]$DownloadUrl = "",
     [string]$MirrorBaseUrl = "",
+    [string]$MirrorFallbackBaseUrl = "",
     [long]$MirrorPartSizeBytes = 67108864,
     [string]$PublicKeyPath = ""
 )
@@ -60,6 +61,13 @@ if (-not [string]::IsNullOrWhiteSpace($MirrorBaseUrl)) {
         throw "MirrorPartSizeBytes must be between 1 byte and 100 MiB."
     }
     $normalizedMirrorBaseUrl = $MirrorBaseUrl.TrimEnd("/") + "/"
+    $normalizedMirrorFallbackBaseUrl = ""
+    if (-not [string]::IsNullOrWhiteSpace($MirrorFallbackBaseUrl)) {
+        if (-not $MirrorFallbackBaseUrl.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "MirrorFallbackBaseUrl must use HTTPS."
+        }
+        $normalizedMirrorFallbackBaseUrl = $MirrorFallbackBaseUrl.TrimEnd("/") + "/"
+    }
     $mirrorPartsRoot = Join-Path $outputRoot "mirror-parts"
     New-Item -ItemType Directory -Force -Path $mirrorPartsRoot | Out-Null
     Get-ChildItem -LiteralPath $mirrorPartsRoot -File -Filter "$FilePrefix-$Version-setup.part*" -ErrorAction SilentlyContinue |
@@ -97,13 +105,19 @@ if (-not [string]::IsNullOrWhiteSpace($MirrorBaseUrl)) {
             if ($partInfo.Length -le 0) {
                 throw "Mirror part is empty: $partPath"
             }
-            $mirrorParts += [pscustomobject][ordered]@{
+            $descriptor = [ordered]@{
                 index = $partIndex
                 url = $normalizedMirrorBaseUrl + [Uri]::EscapeDataString($partName)
                 size = [long]$partInfo.Length
                 sha256 = (Get-FileHash -LiteralPath $partPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 path = $partPath
             }
+            if (-not [string]::IsNullOrWhiteSpace($normalizedMirrorFallbackBaseUrl)) {
+                $descriptor["fallbackUrls"] = @(
+                    $normalizedMirrorFallbackBaseUrl + [Uri]::EscapeDataString($partName)
+                )
+            }
+            $mirrorParts += [pscustomobject]$descriptor
             $partIndex++
         }
     } finally {
@@ -119,12 +133,16 @@ if (-not [string]::IsNullOrWhiteSpace($MirrorBaseUrl)) {
     $mirrorPartsJson = Join-Path $outputRoot "$FilePrefix-$Version-setup.parts.json"
     $signedPartDescriptors = @(
         $mirrorParts | ForEach-Object {
-            [ordered]@{
+            $descriptor = [ordered]@{
                 index = $_.index
                 url = $_.url
                 size = $_.size
                 sha256 = $_.sha256
             }
+            if ($_.PSObject.Properties.Name -contains "fallbackUrls") {
+                $descriptor["fallbackUrls"] = @($_.fallbackUrls)
+            }
+            $descriptor
         }
     )
     [System.IO.File]::WriteAllText(
