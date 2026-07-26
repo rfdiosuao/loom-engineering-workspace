@@ -47,6 +47,7 @@ class LoomRelease:
     published_at: str = ""
     release_url: str = ""
     update_manifest: dict[str, Any] | None = None
+    fallback_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -173,6 +174,32 @@ def _safe_https_url(value: Any) -> str:
     if parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
         raise ValueError("更新地址不能指向本机")
     return text
+
+
+def _is_github_asset_api_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    return (
+        parsed.scheme == "https"
+        and str(parsed.hostname or "").casefold() == "api.github.com"
+        and re.search(r"/releases/assets/\d+/?$", parsed.path, re.IGNORECASE) is not None
+    )
+
+
+def _asset_download_candidates(asset: dict[str, Any]) -> tuple[str, ...]:
+    candidates: list[str] = []
+    api_url = str(asset.get("url") or "").strip()
+    if _is_github_asset_api_url(api_url):
+        candidates.append(_safe_https_url(api_url))
+    for key in ("browser_download_url", "download_url"):
+        raw_url = str(asset.get(key) or "").strip()
+        if not raw_url:
+            continue
+        url = _safe_https_url(raw_url)
+        if url not in candidates:
+            candidates.append(url)
+    if not candidates:
+        raise ValueError("更新附件缺少 HTTPS 下载地址")
+    return tuple(candidates)
 
 
 def _load_update_brand(paths: AppPaths) -> UpdateBrand:
@@ -831,23 +858,40 @@ class LoomAppUpdater:
         digest,
         progress_callback: Callable[[dict[str, Any]], None] | None,
     ) -> tuple[int, Any]:
-        headers = {
-            "User-Agent": f"{self.brand.brand_id}-Updater/2",
-            "Accept-Encoding": "identity",
-        }
-        if written > 0:
-            headers["Range"] = f"bytes={written}-"
-        request = urllib.request.Request(release.url, headers=headers)
-        try:
-            response_context = self.opener(request, timeout=120)
-        except urllib.error.HTTPError as error:
-            if int(getattr(error, "code", 0) or 0) == 416 and written > 0:
-                try:
-                    os.remove(partial_path)
-                except FileNotFoundError:
-                    pass
-                raise ConnectionError("服务器拒绝断点续传（HTTP 416），已清除旧分段，请重试。") from error
-            raise
+        response_context = None
+        connection_errors: list[str] = []
+        download_urls = (release.url, *release.fallback_urls)
+        for index, download_url in enumerate(download_urls):
+            headers = {
+                "User-Agent": f"{self.brand.brand_id}-Updater/2",
+                "Accept-Encoding": "identity",
+            }
+            if _is_github_asset_api_url(download_url):
+                headers["Accept"] = "application/octet-stream"
+            if written > 0:
+                headers["Range"] = f"bytes={written}-"
+            request = urllib.request.Request(download_url, headers=headers)
+            try:
+                response_context = self.opener(request, timeout=120)
+                break
+            except urllib.error.HTTPError as error:
+                if int(getattr(error, "code", 0) or 0) == 416 and written > 0:
+                    try:
+                        os.remove(partial_path)
+                    except FileNotFoundError:
+                        pass
+                    raise ConnectionError(
+                        "服务器拒绝断点续传（HTTP 416），已清除旧分段，请重试。"
+                    ) from error
+                connection_errors.append(f"{urlparse(download_url).hostname}: HTTP {error.code}")
+                if index + 1 >= len(download_urls):
+                    raise
+            except (ConnectionError, TimeoutError, urllib.error.URLError) as error:
+                connection_errors.append(f"{urlparse(download_url).hostname}: {error}")
+                if index + 1 >= len(download_urls):
+                    raise ConnectionError("；".join(connection_errors)) from error
+        if response_context is None:
+            raise ConnectionError("；".join(connection_errors) or "更新包下载连接失败")
         with response_context as response:
             status = int(getattr(response, "status", 200) or 200)
             if written > 0 and status == 206:
@@ -936,7 +980,8 @@ class LoomAppUpdater:
             )
 
         filename = str(setup.get("name") or setup.get("filename") or "").strip()
-        url = _safe_https_url(setup.get("browser_download_url") or setup.get("download_url"))
+        download_urls = _asset_download_candidates(setup)
+        url = download_urls[0]
         size = int(setup.get("size") or 0)
         if size < 0:
             raise ValueError("安装包大小无效")
@@ -957,6 +1002,7 @@ class LoomAppUpdater:
             published_at=str(payload.get("published_at") or payload.get("created_at") or "").strip(),
             release_url=str(payload.get("html_url") or payload.get("url") or "").strip(),
             update_manifest=self._fetch_update_manifest(assets, filename),
+            fallback_urls=download_urls[1:],
         )
         if release.update_manifest is not None and self.update_public_key:
             signature_ok, signature_detail = _verify_loom_update_signature(
@@ -1021,15 +1067,23 @@ class LoomAppUpdater:
             name = str(asset.get("name") or asset.get("filename") or "").strip()
             if name.lower() != expected_name.lower():
                 continue
-            url = _safe_https_url(asset.get("browser_download_url") or asset.get("download_url"))
-            request = urllib.request.Request(
-                url,
-                headers={"User-Agent": f"{self.brand.brand_id}-Updater/2"},
-            )
-            with self.opener(request, timeout=15) as response:
-                text = response.read(4096).decode("ascii", errors="replace")
-            match = SHA256_RE.search(text)
-            return match.group(1).lower() if match else ""
+            last_error: Exception | None = None
+            for url in _asset_download_candidates(asset):
+                headers = {"User-Agent": f"{self.brand.brand_id}-Updater/2"}
+                if _is_github_asset_api_url(url):
+                    headers["Accept"] = "application/octet-stream"
+                request = urllib.request.Request(url, headers=headers)
+                try:
+                    with self.opener(request, timeout=15) as response:
+                        text = response.read(4096).decode("ascii", errors="replace")
+                    match = SHA256_RE.search(text)
+                    if match:
+                        return match.group(1).lower()
+                    last_error = ValueError("SHA256 旁车文件内容无效")
+                except Exception as error:
+                    last_error = error
+            if last_error is not None:
+                raise last_error
         return ""
 
     def _fetch_update_manifest(self, assets: list[Any], filename: str) -> dict[str, Any] | None:
@@ -1040,20 +1094,30 @@ class LoomAppUpdater:
             name = str(asset.get("name") or asset.get("filename") or "").strip()
             if name.lower() != expected_name.lower():
                 continue
-            url = _safe_https_url(asset.get("browser_download_url") or asset.get("download_url"))
-            request = urllib.request.Request(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": f"{self.brand.brand_id}-Updater/2",
-                },
-            )
-            with self.opener(request, timeout=15) as response:
-                raw = response.read(64 * 1024)
-            payload = json.loads(raw.decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("LOOM 更新签名文件必须是 JSON 对象")
-            return payload
+            last_error: Exception | None = None
+            for url in _asset_download_candidates(asset):
+                request = urllib.request.Request(
+                    url,
+                    headers={
+                        "Accept": (
+                            "application/octet-stream"
+                            if _is_github_asset_api_url(url)
+                            else "application/json"
+                        ),
+                        "User-Agent": f"{self.brand.brand_id}-Updater/2",
+                    },
+                )
+                try:
+                    with self.opener(request, timeout=15) as response:
+                        raw = response.read(64 * 1024)
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
+                        raise ValueError("LOOM 更新签名文件必须是 schemaVersion 1 的 JSON 对象")
+                    return payload
+                except Exception as error:
+                    last_error = error
+            if last_error is not None:
+                raise last_error
         return None
 
     @staticmethod
