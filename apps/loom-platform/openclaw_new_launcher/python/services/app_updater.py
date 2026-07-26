@@ -36,6 +36,14 @@ UPDATE_PUBLIC_KEY_PATH_ENV = "LOOM_DESKTOP_UPDATE_PUBLIC_KEY_PATH"
 
 
 @dataclass(frozen=True)
+class UpdateDownloadPart:
+    index: int
+    url: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class LoomRelease:
     version: str
     filename: str
@@ -48,6 +56,7 @@ class LoomRelease:
     release_url: str = ""
     update_manifest: dict[str, Any] | None = None
     fallback_urls: tuple[str, ...] = ()
+    download_parts: tuple[UpdateDownloadPart, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -200,6 +209,48 @@ def _asset_download_candidates(asset: dict[str, Any]) -> tuple[str, ...]:
     if not candidates:
         raise ValueError("更新附件缺少 HTTPS 下载地址")
     return tuple(candidates)
+
+
+def _parse_download_parts(
+    payload: dict[str, Any],
+    expected_size: int,
+) -> tuple[UpdateDownloadPart, ...]:
+    raw_parts = payload.get("downloadParts")
+    if raw_parts is None:
+        return ()
+    if not isinstance(raw_parts, list) or not 1 <= len(raw_parts) <= 32:
+        raise ValueError("更新清单 downloadParts 必须包含 1 到 32 个分片")
+
+    parts: list[UpdateDownloadPart] = []
+    seen_urls: set[str] = set()
+    for expected_index, raw_part in enumerate(raw_parts, start=1):
+        if not isinstance(raw_part, dict):
+            raise ValueError("更新清单 downloadParts 项必须是对象")
+        index = int(raw_part.get("index") or 0)
+        if index != expected_index:
+            raise ValueError("更新清单 downloadParts index 必须从 1 连续递增")
+        url = _safe_https_url(raw_part.get("url"))
+        if url in seen_urls:
+            raise ValueError("更新清单 downloadParts URL 不能重复")
+        seen_urls.add(url)
+        size = int(raw_part.get("size") or 0)
+        if size <= 0 or size > 100 * 1024 * 1024:
+            raise ValueError("更新清单分片大小必须大于 0 且不超过 100 MiB")
+        sha256 = str(raw_part.get("sha256") or "").strip().lower()
+        if not SHA256_RE.fullmatch(sha256):
+            raise ValueError("更新清单分片 sha256 无效")
+        parts.append(
+            UpdateDownloadPart(
+                index=index,
+                url=url,
+                size=size,
+                sha256=sha256,
+            )
+        )
+
+    if expected_size <= 0 or sum(part.size for part in parts) != expected_size:
+        raise ValueError("更新清单分片总大小与完整安装包不一致")
+    return tuple(parts)
 
 
 def _load_update_brand(paths: AppPaths) -> UpdateBrand:
@@ -730,23 +781,51 @@ class LoomAppUpdater:
                             f"已验证 {signer}",
                             f"{self.brand.display_name} {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
                         ]
-                written, digest = self._prepare_partial(partial_path, release.size)
-                self._report(
-                    "downloading",
-                    downloaded=written,
-                    total=release.size,
-                    version=release.version,
-                    message="正在断点续传更新包" if written else "正在下载更新包",
-                    callback=progress_callback,
-                )
-                if release.size <= 0 or written < release.size:
-                    written, digest = self._download_release(
-                        release,
-                        partial_path,
-                        written,
-                        digest,
-                        progress_callback,
+                if release.download_parts:
+                    try:
+                        written, digest = self._download_segmented_release(
+                            release,
+                            partial_path,
+                            progress_callback,
+                        )
+                    except UpdateCancelled:
+                        raise
+                    except Exception as mirror_error:
+                        written, digest = self._prepare_partial(partial_path, release.size)
+                        self._report(
+                            "downloading",
+                            downloaded=written,
+                            total=release.size,
+                            version=release.version,
+                            message=f"国内镜像不可用，正在切换官方源：{mirror_error}",
+                            callback=progress_callback,
+                        )
+                        if release.size <= 0 or written < release.size:
+                            written, digest = self._download_release(
+                                release,
+                                partial_path,
+                                written,
+                                digest,
+                                progress_callback,
+                            )
+                else:
+                    written, digest = self._prepare_partial(partial_path, release.size)
+                    self._report(
+                        "downloading",
+                        downloaded=written,
+                        total=release.size,
+                        version=release.version,
+                        message="正在断点续传更新包" if written else "正在下载更新包",
+                        callback=progress_callback,
                     )
+                    if release.size <= 0 or written < release.size:
+                        written, digest = self._download_release(
+                            release,
+                            partial_path,
+                            written,
+                            digest,
+                            progress_callback,
+                        )
                 if release.size > 0 and written != release.size:
                     raise ValueError(f"安装包大小不一致：应为 {release.size}，实际 {written}")
                 actual_sha = digest.hexdigest().lower()
@@ -934,6 +1013,118 @@ class LoomAppUpdater:
                         raise UpdateCancelled()
         return written, digest
 
+    def _download_segmented_release(
+        self,
+        release: LoomRelease,
+        partial_path: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+    ) -> tuple[int, Any]:
+        parts_root = partial_path + ".parts"
+        os.makedirs(parts_root, exist_ok=True)
+        completed_size = 0
+        part_paths: list[str] = []
+
+        for part in release.download_parts:
+            part_path = os.path.join(
+                parts_root,
+                f"{release.filename}.part{part.index:03d}",
+            )
+            written, digest = self._prepare_partial(part_path, part.size)
+            if written == part.size and digest.hexdigest().lower() != part.sha256:
+                os.remove(part_path)
+                written, digest = 0, hashlib.sha256()
+
+            self._report(
+                "downloading",
+                downloaded=completed_size + written,
+                total=release.size,
+                version=release.version,
+                message=(
+                    f"正在断点续传国内镜像分片 {part.index}/{len(release.download_parts)}"
+                    if written
+                    else f"正在下载国内镜像分片 {part.index}/{len(release.download_parts)}"
+                ),
+                callback=progress_callback,
+            )
+            if written < part.size:
+                part_release = LoomRelease(
+                    version=release.version,
+                    filename=os.path.basename(part_path),
+                    url=part.url,
+                    size=part.size,
+                    sha256=part.sha256,
+                    source=urlparse(part.url).hostname or part.url,
+                )
+
+                def report_part(state: dict[str, Any], *, offset: int = completed_size) -> None:
+                    self._report(
+                        "downloading",
+                        downloaded=offset + int(state.get("downloaded") or 0),
+                        total=release.size,
+                        version=release.version,
+                        message=f"正在下载国内镜像分片 {part.index}/{len(release.download_parts)}",
+                        callback=progress_callback,
+                    )
+
+                written, digest = self._download_release(
+                    part_release,
+                    part_path,
+                    written,
+                    digest,
+                    report_part,
+                )
+            actual_sha = digest.hexdigest().lower()
+            if written != part.size or actual_sha != part.sha256:
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+                raise ValueError(
+                    f"国内镜像分片 {part.index} 校验失败"
+                )
+            part_paths.append(part_path)
+            completed_size += written
+
+        combined_digest = hashlib.sha256()
+        combined_size = 0
+        try:
+            with open(partial_path, "wb") as output:
+                for part_path in part_paths:
+                    with open(part_path, "rb") as source:
+                        while True:
+                            if self._cancel_event.is_set():
+                                raise UpdateCancelled()
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            output.write(chunk)
+                            combined_digest.update(chunk)
+                            combined_size += len(chunk)
+        except Exception:
+            try:
+                os.remove(partial_path)
+            except OSError:
+                pass
+            raise
+
+        if combined_size != release.size or combined_digest.hexdigest().lower() != release.sha256:
+            try:
+                os.remove(partial_path)
+            except OSError:
+                pass
+            raise ValueError("国内镜像合并后的完整安装包校验失败")
+
+        for part_path in part_paths:
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+        try:
+            os.rmdir(parts_root)
+        except OSError:
+            pass
+        return combined_size, combined_digest
+
     def _fetch_release(self, source_url: str) -> LoomRelease:
         source_url = _safe_https_url(source_url)
         request = urllib.request.Request(
@@ -985,12 +1176,26 @@ class LoomAppUpdater:
         size = int(setup.get("size") or 0)
         if size < 0:
             raise ValueError("安装包大小无效")
+        update_manifest = self._fetch_update_manifest(assets, filename)
+        if update_manifest is not None:
+            manifest_size = int(update_manifest.get("size") or 0)
+            if size <= 0:
+                size = manifest_size
+            elif manifest_size > 0 and manifest_size != size:
+                raise ValueError("更新签名文件大小与发布资产不一致")
         digest = str(setup.get("digest") or "").strip().lower()
         sha256 = digest.split(":", 1)[1] if digest.startswith("sha256:") else ""
+        if not SHA256_RE.fullmatch(sha256) and update_manifest is not None:
+            sha256 = str(update_manifest.get("sha256") or "").strip().lower()
         if not SHA256_RE.fullmatch(sha256):
             sha256 = self._fetch_sidecar_sha(assets, filename)
         if not SHA256_RE.fullmatch(sha256):
             raise ValueError("正式发布缺少可验证的 SHA256")
+        download_parts = (
+            _parse_download_parts(update_manifest, size)
+            if update_manifest is not None
+            else ()
+        )
         release = LoomRelease(
             version=version,
             filename=filename,
@@ -1001,8 +1206,9 @@ class LoomAppUpdater:
             notes=str(payload.get("body") or payload.get("description") or "").strip()[:20000],
             published_at=str(payload.get("published_at") or payload.get("created_at") or "").strip(),
             release_url=str(payload.get("html_url") or payload.get("url") or "").strip(),
-            update_manifest=self._fetch_update_manifest(assets, filename),
+            update_manifest=update_manifest,
             fallback_urls=download_urls[1:],
+            download_parts=download_parts,
         )
         if release.update_manifest is not None and self.update_public_key:
             signature_ok, signature_detail = _verify_loom_update_signature(
@@ -1029,13 +1235,14 @@ class LoomAppUpdater:
             raise ValueError(
                 f"更新清单 filename 必须匹配 {self.brand.file_prefix}-<version>-setup.exe"
             )
-        download_url = _safe_https_url(payload.get("downloadUrl"))
         size = int(payload.get("size") or 0)
         sha256 = str(payload.get("sha256") or "").strip().lower()
         if size <= 0:
             raise ValueError("更新清单 size 必须大于 0")
         if not SHA256_RE.fullmatch(sha256):
             raise ValueError("更新清单 sha256 无效")
+        download_parts = _parse_download_parts(payload, size)
+        download_url = _safe_https_url(payload.get("downloadUrl"))
         release = LoomRelease(
             version=match.group("version"),
             filename=filename,
@@ -1047,6 +1254,7 @@ class LoomAppUpdater:
             published_at=str(payload.get("publishedAt") or "").strip(),
             release_url=source_url,
             update_manifest=payload,
+            download_parts=download_parts,
         )
         if not self.update_public_key:
             raise ValueError(f"{self.brand.display_name} 更新公钥缺失")

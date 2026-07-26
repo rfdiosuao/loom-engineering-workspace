@@ -358,6 +358,17 @@ class ReleaseScriptsContractTests(unittest.TestCase):
         self.assertIn("curl.exe", publish_source)
         self.assertIn("releases?page=1&per_page=100", publish_source)
 
+    def test_gitee_publish_prunes_old_exact_desktop_releases_after_upload(self) -> None:
+        publish_source = read_script("publish-gitee-release.ps1")
+
+        self.assertIn("[switch]$PruneDesktopReleases", publish_source)
+        self.assertIn("Remove-StaleDesktopReleases", publish_source)
+        self.assertIn('^v\\d+\\.\\d+\\.\\d+$', publish_source)
+        self.assertLess(
+            publish_source.index("foreach ($asset in $Assets)"),
+            publish_source.index("Remove-StaleDesktopReleases"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

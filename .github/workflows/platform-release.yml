@@ -37,7 +37,7 @@ jobs:
   windows:
     name: Windows release build
     runs-on: windows-latest
-    timeout-minutes: 70
+    timeout-minutes: 90
 
     defaults:
       run:
@@ -175,16 +175,19 @@ jobs:
         working-directory: apps/loom-platform/openclaw_new_launcher
         env:
           LOOM_DESKTOP_UPDATE_PRIVATE_KEY: ${{ secrets.LOOM_DESKTOP_UPDATE_PRIVATE_KEY }}
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:LOOM_DESKTOP_UPDATE_PRIVATE_KEY)) {
             throw "LOOM_DESKTOP_UPDATE_PRIVATE_KEY is required for desktop auto-update releases."
           }
           $outputRoot = Join-Path (Split-Path -Parent $PWD) "ci_release_nsis"
+          $mirrorBaseUrl = "https://gitee.com/rfdiosuao/lumi/releases/download/$env:RELEASE_TAG"
           & powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts\prepare-desktop-update-release.ps1 `
             -InstallerPath $env:LOOM_BUILT_INSTALLER `
             -Version $env:LOOM_RELEASE_VERSION `
-            -OutputDirectory $outputRoot
+            -OutputDirectory $outputRoot `
+            -MirrorBaseUrl $mirrorBaseUrl
           if ($LASTEXITCODE -ne 0) {
             throw "Desktop update release preparation failed with exit code $LASTEXITCODE"
           }
@@ -365,6 +368,39 @@ jobs:
             "# LOOM $version 更新说明`n`n本次版本包含稳定性、兼容性与使用体验改进。"
           }
           [IO.File]::WriteAllText($bodyPath, "$body`n", [Text.UTF8Encoding]::new($false))
+
+      - name: Publish signed domestic update mirror
+        working-directory: apps/loom-platform
+        env:
+          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GITEE_ACCESS_TOKEN)) {
+            throw "GITEE_ACCESS_TOKEN is required for the signed domestic update mirror."
+          }
+          $partsRoot = Join-Path $PWD "ci_release_nsis\mirror-parts"
+          $parts = @(
+            Get-ChildItem -LiteralPath $partsRoot -File -Filter "LOOM-*-setup.part*" |
+              Sort-Object Name |
+              Select-Object -ExpandProperty FullName
+          )
+          if ($parts.Count -eq 0) {
+            throw "No signed domestic update parts were generated."
+          }
+          foreach ($part in $parts) {
+            if ((Get-Item -LiteralPath $part).Length -gt 100MB) {
+              throw "Domestic update part exceeds the Gitee 100 MiB attachment limit: $part"
+            }
+          }
+          & .\scripts\publish-gitee-release.ps1 `
+            -TagName $env:RELEASE_TAG `
+            -Name "LOOM $env:RELEASE_TAG 国内更新镜像" `
+            -Body "LOOM 桌面自动更新签名分片。请通过 LOOM 更新中心安装，勿单独运行分片。" `
+            -Assets $parts `
+            -PruneDesktopReleases
+          if ($LASTEXITCODE -ne 0) {
+            throw "Signed domestic update mirror publication failed with exit code $LASTEXITCODE"
+          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
