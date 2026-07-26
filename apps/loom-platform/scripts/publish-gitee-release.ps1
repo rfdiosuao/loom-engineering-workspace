@@ -121,6 +121,11 @@ function Invoke-GiteeFormPost {
     $responsePath = Join-Path $env:TEMP ("gitee-api-" + [guid]::NewGuid().ToString("N") + ".json")
     $curlArgs = @(
         "-sS",
+        "--connect-timeout", "30",
+        "--max-time", "1800",
+        "--retry", "1",
+        "--retry-delay", "5",
+        "--retry-all-errors",
         "-o", $responsePath,
         "-w", "%{http_code}",
         "-X", "POST"

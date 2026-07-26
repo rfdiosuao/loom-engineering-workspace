@@ -109,6 +109,22 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn("-PruneDesktopReleases", release)
         self.assertLess(release.index(mirror_step), release.index(github_step))
 
+    def test_windows_release_uploads_domestic_parts_in_parallel_with_a_deadline(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+        mirror_step = release.split(
+            "- name: Publish signed domestic update mirror",
+            1,
+        )[1].split("- name:", 1)[0]
+
+        self.assertIn("Start-Job", mirror_step)
+        self.assertIn("Wait-Job", mirror_step)
+        self.assertIn("-Timeout 2100", mirror_step)
+        self.assertIn("Stop-Job", mirror_step)
+        self.assertLess(
+            mirror_step.index("Wait-Job"),
+            mirror_step.index("-PruneDesktopReleases"),
+        )
+
     def test_windows_release_exposes_update_private_key_only_to_manifest_signing(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
         build_step = release.split("- name: Build protected NSIS", 1)[1].split("- name:", 1)[0]
