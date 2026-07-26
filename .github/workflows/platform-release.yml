@@ -432,7 +432,8 @@ jobs:
             -TagName $env:RELEASE_TAG `
             -Name $releaseName `
             -Body $releaseBody `
-            -Assets @($manifestPath)
+            -Assets @($manifestPath) `
+            -PruneDesktopReleases
 
           $jobs = @(
             foreach ($part in $parts) {
@@ -471,5 +472,4 @@ jobs:
             -Name $releaseName `
             -Body $releaseBody `
             -Assets $expectedAssets `
-            -VerifyOnly `
-            -PruneDesktopReleases
+            -VerifyOnly
