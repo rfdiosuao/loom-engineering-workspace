@@ -1,6 +1,7 @@
 package com.apk.claw.android.server
 
 import android.util.Base64
+import com.apk.claw.android.BuildConfig
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
 import com.google.gson.JsonElement
@@ -26,6 +27,82 @@ object LumiSecurityController {
 
     private val random = SecureRandom()
     private val nonceCache = LinkedHashMap<String, Long>()
+
+    fun handleIdentityChallenge(
+        session: NanoHTTPD.IHTTPSession,
+        listeningPort: Int
+    ): NanoHTTPD.Response {
+        if (!UsbIdentityChallenge.isLoopbackPeer(session.remoteIpAddress)) {
+            return jsonElementResponse(
+                NanoHTTPD.Response.Status.FORBIDDEN,
+                false,
+                null,
+                "USB identity challenge is only available on device loopback"
+            )
+        }
+        val rawContentLength = session.headers["content-length"]
+            ?: session.headers["Content-Length"]
+        val contentLength = rawContentLength?.toLongOrNull()
+        if (
+            (rawContentLength != null && contentLength == null) ||
+            !UsbIdentityChallenge.isAllowedBodyLength(contentLength ?: 0L)
+        ) {
+            return jsonElementResponse(
+                NanoHTTPD.Response.Status.BAD_REQUEST,
+                false,
+                null,
+                "USB identity challenge body is too large"
+            )
+        }
+        val json = ToolApiController.parseJsonBody(session)
+            ?: return jsonElementResponse(
+                NanoHTTPD.Response.Status.BAD_REQUEST,
+                false,
+                null,
+                "Invalid JSON body"
+            )
+        val protocol = json.stringOrEmpty("protocol")
+        val nonce = json.stringOrEmpty("nonce")
+        if (protocol != UsbIdentityChallenge.PROTOCOL || !UsbIdentityChallenge.isValidNonce(nonce)) {
+            return jsonElementResponse(
+                NanoHTTPD.Response.Status.BAD_REQUEST,
+                false,
+                null,
+                "Invalid USB identity challenge"
+            )
+        }
+        val token = KVUtils.getApiToken()
+        if (token.isBlank()) {
+            return jsonElementResponse(
+                NanoHTTPD.Response.Status.FORBIDDEN,
+                false,
+                null,
+                "Phone token is not configured"
+            )
+        }
+        val deviceInstanceId = KVUtils.ensureLumiDeviceInstanceId()
+        val data = JsonObject().apply {
+            addProperty("protocol", UsbIdentityChallenge.PROTOCOL)
+            addProperty("nonce", nonce)
+            addProperty("packageName", BuildConfig.APPLICATION_ID)
+            addProperty("version", BuildConfig.VERSION_NAME)
+            addProperty("versionCode", BuildConfig.VERSION_CODE)
+            addProperty("deviceInstanceId", deviceInstanceId)
+            addProperty("listeningPort", listeningPort)
+            addProperty(
+                "proof",
+                UsbIdentityChallenge.proof(
+                    token = token,
+                    nonce = nonce,
+                    packageName = BuildConfig.APPLICATION_ID,
+                    versionCode = BuildConfig.VERSION_CODE.toLong(),
+                    deviceInstanceId = deviceInstanceId,
+                    listeningPort = listeningPort
+                )
+            )
+        }
+        return jsonElementResponse(NanoHTTPD.Response.Status.OK, true, data, null)
+    }
 
     fun handlePair(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         val authError = ToolApiController.checkAuth(session)

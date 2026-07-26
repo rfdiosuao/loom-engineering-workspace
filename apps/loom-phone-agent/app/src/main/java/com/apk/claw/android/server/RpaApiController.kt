@@ -16,7 +16,7 @@ object RpaApiController {
         val authError = checkAuthIfNeeded(session, requireToken)
         if (authError != null) return authError
 
-        val json = ToolApiController.parseJsonBody(session)
+        val rawBody = ToolApiController.readJsonBodyUtf8(session).takeIf { it.isNotBlank() }
             ?: return response(
                 NanoHTTPD.Response.Status.BAD_REQUEST,
                 false,
@@ -25,7 +25,7 @@ object RpaApiController {
             )
 
         return try {
-            val parsed = RpaWorkflowParser.parseRunRequest(json)
+            val parsed = RpaWorkflowParser.parseRunRequest(rawBody)
             val validationErrors = RpaWorkflowParser.validate(parsed.workflow)
             if (validationErrors.isNotEmpty()) {
                 return response(
@@ -65,7 +65,7 @@ object RpaApiController {
             }
             response(NanoHTTPD.Response.Status.OK, true, data, null)
         } catch (e: Exception) {
-            XLog.e(TAG, "RPA run request failed: ${e.message}")
+            runCatching { XLog.e(TAG, "RPA run request failed: ${e.message}") }
             response(
                 NanoHTTPD.Response.Status.OK,
                 false,
@@ -85,7 +85,7 @@ object RpaApiController {
         val authError = checkAuthIfNeeded(session, requireToken)
         if (authError != null) return authError
 
-        val json = ToolApiController.parseJsonBody(session)
+        val rawBody = ToolApiController.readJsonBodyUtf8(session).takeIf { it.isNotBlank() }
             ?: return response(
                 NanoHTTPD.Response.Status.BAD_REQUEST,
                 false,
@@ -94,12 +94,21 @@ object RpaApiController {
             )
 
         return try {
-            val parsed = RpaWorkflowParser.parseRunRequest(json)
+            val parsed = RpaWorkflowParser.parseRunRequest(rawBody)
             val errors = RpaWorkflowParser.validate(parsed.workflow)
             val data = JsonObject().apply {
                 addProperty("valid", errors.isEmpty())
                 add("workflow", RpaRunJson.workflowSummary(parsed.workflow))
                 add("errors", JsonArray().apply { errors.forEach { add(it) } })
+                if (errors.isNotEmpty()) {
+                    val message = errors.joinToString("; ")
+                    addProperty("success", false)
+                    addProperty("errorCode", "invalid_workflow")
+                    addProperty("message", message)
+                    addProperty("currentStep", "validate")
+                    addProperty("mode", "rpa")
+                    addProperty("retryable", false)
+                }
             }
             response(NanoHTTPD.Response.Status.OK, errors.isEmpty(), data, errors.firstOrNull())
         } catch (e: Exception) {
@@ -167,8 +176,23 @@ object RpaApiController {
         val authError = checkAuthIfNeeded(session, requireToken)
         if (authError != null) return authError
 
+        val engineInstalled = RpaWorkflowRunner.isHybridEngineInstalled()
+        val accessibilityReady = RpaWorkflowRunner.isAccessibilityReady()
+        val hybridRuntimeReady = engineInstalled && accessibilityReady
         val data = JsonObject().apply {
             addProperty("schema", "apkclaw.rpa.v1")
+            addProperty("hybridSchema", "apkclaw.hybrid-rpa.v2")
+            addProperty("engineInstalled", engineInstalled)
+            addProperty("accessibilityReady", accessibilityReady)
+            addProperty("hybridRuntimeReady", hybridRuntimeReady)
+            addProperty(
+                "hybridRuntimeState",
+                when {
+                    !engineInstalled -> "hybrid_engine_unavailable"
+                    !accessibilityReady -> "accessibility_reenable_required"
+                    else -> "ready"
+                }
+            )
             addProperty("mode", "rpa")
             addProperty("llmRequired", false)
             addProperty("statefulRuns", true)

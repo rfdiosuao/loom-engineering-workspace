@@ -1,14 +1,14 @@
 package com.apk.claw.android.workflow
 
 import com.apk.claw.android.ClawApplication
+import com.apk.claw.android.rpa.HYBRID_EXECUTION_MODE
+import com.apk.claw.android.rpa.RpaRunStatus
+import com.apk.claw.android.rpa.RpaStep
+import com.apk.claw.android.rpa.RpaWorkflow
+import com.apk.claw.android.rpa.RpaWorkflowRunner
 import com.apk.claw.android.tool.ToolRegistry
 import com.apk.claw.android.tool.ToolResult
 import com.apk.claw.android.utils.XLog
-import com.google.gson.Gson
-import com.google.gson.GsonBuilder
-import com.google.gson.JsonElement
-import com.google.gson.JsonObject
-import com.google.gson.JsonParser
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -21,9 +21,9 @@ object WorkflowTemplateManager {
 
     private const val TAG = "WorkflowTemplateManager"
     private const val TEMPLATE_DIR = "workflow_templates"
-    private const val INDEX_FILE = "template_index.json"
-
-    private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
+    private const val HYBRID_STEP_BUDGET_MS = 120_000L
+    private const val MAX_HYBRID_TEMPLATE_WAIT_MS = 600_000L
+    private const val HYBRID_POLL_INTERVAL_MS = 25L
     private val placeholderRegex = Regex("\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}")
     private val learnedPromptRegex = Regex("从任务\\s*\"(.+)\"\\s*学习生成")
 
@@ -97,6 +97,8 @@ object WorkflowTemplateManager {
 
     // 模板缓存
     private val templates = ConcurrentHashMap<String, WorkflowTemplate>()
+    private val lifecycleLock = Any()
+    private val promotionCoordinator = TemplatePromotionCoordinator()
 
     // 是否已初始化
     private var initialized = false
@@ -118,19 +120,13 @@ object WorkflowTemplateManager {
             templateDir.mkdirs()
         }
 
-        // 加载索引文件
-        val indexFile = File(templateDir, INDEX_FILE)
-        if (indexFile.exists()) {
-            try {
-                val indexJson = indexFile.readText()
-                val templateList = parseTemplateIndex(indexJson)
-                templateList.forEach { t ->
-                    templates[t.id] = t
-                }
-                XLog.i(TAG, "Loaded ${templates.size} workflow templates")
-            } catch (e: Exception) {
-                XLog.e(TAG, "Failed to load template index", e)
+        try {
+            WorkflowTemplateStore(templateDir).load().forEach { template ->
+                templates[template.id] = template
             }
+            XLog.i(TAG, "Loaded ${templates.size} workflow templates")
+        } catch (e: Exception) {
+            XLog.e(TAG, "Failed to load template index", e)
         }
 
         initialized = true
@@ -146,11 +142,9 @@ object WorkflowTemplateManager {
             templateDir.mkdirs()
         }
 
-        val indexFile = File(templateDir, INDEX_FILE)
         try {
-            val templateList = templates.values.toList()
-            indexFile.writeText(gson.toJson(templateList))
-            XLog.d(TAG, "Saved ${templateList.size} templates to disk")
+            WorkflowTemplateStore(templateDir).save(templates.values)
+            XLog.d(TAG, "Saved ${templates.size} templates to disk")
         } catch (e: Exception) {
             XLog.e(TAG, "Failed to save templates", e)
         }
@@ -158,186 +152,34 @@ object WorkflowTemplateManager {
 
     // ==================== 模板匹配 ====================
 
-    /**
-     * 为任务匹配最适合的模板
-     * @param userPrompt 用户任务描述
-     * @return 匹配的模板，或 null 如果没有匹配
-     */
-    private fun parseTemplateIndex(indexJson: String): List<WorkflowTemplate> {
-        val root = JsonParser.parseString(indexJson) ?: return emptyList()
-        val array = when {
-            root.isJsonArray -> root.asJsonArray
-            root.isJsonObject -> root.asJsonObject.arrayValue("templates") ?: return emptyList()
-            else -> return emptyList()
-        }
+    fun matchTemplate(userPrompt: String): WorkflowTemplate? = null
 
-        return array.mapNotNull { element ->
-            runCatching {
-                parseWorkflowTemplate(element.asJsonObject)
-            }.onFailure { error ->
-                XLog.w(TAG, "Skipped invalid workflow template: ${error.message}")
-            }.getOrNull()
-        }
-    }
-
-    private fun parseWorkflowTemplate(obj: JsonObject): WorkflowTemplate {
-        val id = obj.stringValue("id")
-        if (id.isBlank()) {
-            throw IllegalArgumentException("missing template id")
-        }
-
-        return WorkflowTemplate(
-            id = id,
-            name = obj.stringValue("name"),
-            description = obj.stringValue("description"),
-            taskPattern = obj.stringValue("taskPattern"),
-            keywords = obj.stringListValue("keywords"),
-            appName = obj.stringOrNull("appName"),
-            steps = obj.arrayValue("steps")?.mapNotNull { element ->
-                runCatching { parseWorkflowStep(element.asJsonObject) }.getOrNull()
-            } ?: emptyList(),
-            createdAt = obj.longValue("createdAt"),
-            lastUsedAt = obj.longValue("lastUsedAt"),
-            successCount = obj.intValue("successCount"),
-            failCount = obj.intValue("failCount")
-        )
-    }
-
-    private fun parseWorkflowStep(obj: JsonObject): WorkflowTemplate.WorkflowStep {
-        val toolName = obj.stringValue("toolName")
-        if (toolName.isBlank()) {
-            throw IllegalArgumentException("missing step toolName")
-        }
-
-        val paramsTemplate = obj.objectValue("paramsTemplate")
-            ?.entrySet()
-            ?.mapNotNull { (key, value) -> jsonToTemplateParam(value)?.let { key to it } }
-            ?.toMap()
-            ?: emptyMap()
-
-        return WorkflowTemplate.WorkflowStep(
-            toolName = toolName,
-            paramsTemplate = paramsTemplate,
-            description = obj.stringValue("description", toolName),
-            waitFor = obj.intValue("waitFor", 500),
-            isVerification = obj.booleanValue("isVerification"),
-            failureHandling = obj.objectValue("failureHandling")?.let { parseFailureHandling(it) }
-        )
-    }
-
-    private fun parseFailureHandling(obj: JsonObject): WorkflowTemplate.FailureHandling {
-        return WorkflowTemplate.FailureHandling(
-            maxRetries = obj.intValue("maxRetries", 3),
-            retryDelay = obj.intValue("retryDelay", 1000),
-            fallbackSteps = obj.arrayValue("fallbackSteps")?.mapNotNull { element ->
-                runCatching { parseWorkflowStep(element.asJsonObject) }.getOrNull()
-            }
-        )
-    }
-
-    private fun jsonToTemplateParam(value: JsonElement): Any? {
-        if (value.isJsonNull) return null
-        if (value.isJsonPrimitive) {
-            val primitive = value.asJsonPrimitive
-            return when {
-                primitive.isBoolean -> primitive.asBoolean
-                primitive.isNumber -> jsonNumberParam(value)
-                else -> primitive.asString
-            }
-        }
-        if (value.isJsonArray) {
-            return value.asJsonArray.mapNotNull { jsonToTemplateParam(it) }
-        }
-        if (value.isJsonObject) {
-            return value.asJsonObject.entrySet()
-                .mapNotNull { (key, item) -> jsonToTemplateParam(item)?.let { key to it } }
-                .toMap()
-        }
-        return null
-    }
-
-    private fun jsonNumberParam(value: JsonElement): Number {
-        val text = runCatching { value.asString }.getOrNull().orEmpty()
-        val longValue = text.toLongOrNull()
-        if (longValue != null) {
-            return if (longValue in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
-                longValue.toInt()
-            } else {
-                longValue
-            }
-        }
-        return text.toDoubleOrNull() ?: value.asNumber
-    }
-
-    private fun JsonObject.stringValue(name: String, default: String = ""): String {
-        return get(name)?.takeIf { it.isJsonPrimitive }?.let {
-            runCatching { it.asString }.getOrDefault(default)
-        } ?: default
-    }
-
-    private fun JsonObject.stringOrNull(name: String): String? {
-        val value = stringValue(name)
-        return value.ifBlank { null }
-    }
-
-    private fun JsonObject.intValue(name: String, default: Int = 0): Int {
-        return get(name)?.takeIf { it.isJsonPrimitive }?.let {
-            runCatching { it.asInt }.getOrDefault(default)
-        } ?: default
-    }
-
-    private fun JsonObject.longValue(name: String, default: Long = 0L): Long {
-        return get(name)?.takeIf { it.isJsonPrimitive }?.let {
-            runCatching { it.asLong }.getOrDefault(default)
-        } ?: default
-    }
-
-    private fun JsonObject.booleanValue(name: String, default: Boolean = false): Boolean {
-        return get(name)?.takeIf { it.isJsonPrimitive }?.let {
-            runCatching { it.asBoolean }.getOrDefault(default)
-        } ?: default
-    }
-
-    private fun JsonObject.stringListValue(name: String): List<String> {
-        return arrayValue(name)
-            ?.mapNotNull { item ->
-                item.takeIf { it.isJsonPrimitive }?.let {
-                    runCatching { it.asString }.getOrNull()
-                }
-            }
-            ?: emptyList()
-    }
-
-    private fun JsonObject.objectValue(name: String): JsonObject? {
-        return get(name)?.takeIf { it.isJsonObject }?.asJsonObject
-    }
-
-    private fun JsonObject.arrayValue(name: String) = get(name)?.takeIf { it.isJsonArray }?.asJsonArray
-
-    fun matchTemplate(userPrompt: String): WorkflowTemplate? {
+    fun matchTemplate(userPrompt: String, profileId: String): WorkflowTemplate? {
         initialize()
+        return selectActiveTemplateForPrompt(templates.values, userPrompt, profileId)?.let { template ->
+            ensureTemplateParameterized(template).also {
+                XLog.i(TAG, "Template matched: ${it.name}")
+            }
+        }
+    }
 
-        if (templates.isEmpty()) return null
-
-        // 关键词匹配（不使用lowercase，直接匹配中文）
-        val scoredTemplates = templates.values.mapNotNull { template ->
+    internal fun selectActiveTemplateForPrompt(
+        candidates: Collection<WorkflowTemplate>,
+        userPrompt: String,
+        profileId: String
+    ): WorkflowTemplate? {
+        if (profileId.isBlank()) return null
+        val activeCandidates = candidates.filter {
+            promotionCoordinator.match(it, profileId) == MatchDecision.MATCH
+        }
+        return activeCandidates.mapNotNull { template ->
             val score = calculateMatchScore(template, userPrompt)
             if (score > 0.5f) {
-                Pair(template, score)
+                template to score
             } else {
                 null
             }
-        }.sortedByDescending { it.second }
-
-        // 返回得分最高的模板（且成功率 > 50%）
-        val bestMatch = scoredTemplates.firstOrNull()
-        if (bestMatch != null && bestMatch.first.successRate() >= 0.5f) {
-            val template = ensureTemplateParameterized(bestMatch.first)
-            XLog.i(TAG, "Template matched: ${template.name}, score=${bestMatch.second}")
-            return template
-        }
-
-        return null
+        }.maxByOrNull { it.second }?.first
     }
 
     /**
@@ -384,8 +226,18 @@ object WorkflowTemplateManager {
      */
     fun executeTemplate(
         template: WorkflowTemplate,
-        params: Map<String, String> = emptyMap()
+        params: Map<String, String> = emptyMap(),
+        freshProfileProvider: () -> String = DeviceProfileProvider::current
     ): TemplateExecutionResult {
+        if (template.executionMode == HYBRID_EXECUTION_MODE) {
+            hybridExecutionPrecondition(
+                template,
+                runCatching { freshProfileProvider() }.getOrDefault("")
+            )?.let { return it }
+            initialize()
+            return executeHybridTemplate(template, params)
+        }
+
         initialize()
 
         val startTime = System.currentTimeMillis()
@@ -490,6 +342,169 @@ object WorkflowTemplateManager {
                 executionTimeMs = System.currentTimeMillis() - startTime
             )
         }
+    }
+
+    internal fun hybridExecutionPrecondition(
+        template: WorkflowTemplate,
+        freshProfileId: String
+    ): TemplateExecutionResult? {
+        val decision = promotionCoordinator.match(template, freshProfileId)
+        if (decision == MatchDecision.MATCH) return null
+        val errorCode = when (decision) {
+            MatchDecision.NOT_ACTIVE -> "template_status_invalid"
+            MatchDecision.PROFILE_MISMATCH -> "profile_mismatch"
+            MatchDecision.MATCH -> return null
+        }
+        val message = when (decision) {
+            MatchDecision.NOT_ACTIVE -> "Hybrid template is not active with current revision evidence"
+            MatchDecision.PROFILE_MISMATCH -> "Fresh foreground profile does not match the hybrid template"
+            MatchDecision.MATCH -> return null
+        }
+        return TemplateExecutionResult(
+            success = false,
+            templateId = template.id,
+            stepsExecuted = 0,
+            stepsTotal = template.steps.size,
+            errorMessage = message,
+            errorCode = errorCode,
+            mode = HYBRID_EXECUTION_MODE,
+            outcomeState = "blocked"
+        )
+    }
+
+    private fun executeHybridTemplate(
+        template: WorkflowTemplate,
+        params: Map<String, String>
+    ): TemplateExecutionResult {
+        val startedAt = System.currentTimeMillis()
+        val expandedParams = expandParamAliases(params)
+        val missingParams = getMissingTemplateParams(template, expandedParams)
+        if (missingParams.isNotEmpty()) {
+            return TemplateExecutionResult(
+                success = false,
+                templateId = template.id,
+                stepsExecuted = 0,
+                stepsTotal = template.steps.size,
+                errorMessage = "Missing template params: ${missingParams.joinToString(", ")}",
+                executionTimeMs = System.currentTimeMillis() - startedAt,
+                errorCode = "missing_template_params",
+                mode = HYBRID_EXECUTION_MODE,
+                outcomeState = "blocked"
+            )
+        }
+        val workflow = toHybridWorkflow(template, expandedParams)
+        val start = RpaWorkflowRunner.start(workflow)
+        if (!start.accepted) {
+            return TemplateExecutionResult(
+                success = false,
+                templateId = template.id,
+                stepsExecuted = 0,
+                stepsTotal = template.steps.size,
+                errorMessage = start.message,
+                executionTimeMs = System.currentTimeMillis() - startedAt,
+                errorCode = start.errorCode,
+                mode = HYBRID_EXECUTION_MODE,
+                outcomeState = "blocked"
+            )
+        }
+
+        val runId = start.snapshot?.runId.orEmpty()
+        val deadline = startedAt + template.steps.sumOf { step ->
+            step.waitFor.coerceAtLeast(0).toLong() + HYBRID_STEP_BUDGET_MS
+        }.coerceAtMost(MAX_HYBRID_TEMPLATE_WAIT_MS)
+        var snapshot = start.snapshot
+        while (snapshot != null && snapshot.status in setOf(RpaRunStatus.QUEUED, RpaRunStatus.RUNNING) &&
+            System.currentTimeMillis() < deadline
+        ) {
+            Thread.sleep(HYBRID_POLL_INTERVAL_MS)
+            snapshot = RpaWorkflowRunner.get(runId)
+        }
+        val terminal = snapshot
+        if (terminal == null || terminal.status in setOf(RpaRunStatus.QUEUED, RpaRunStatus.RUNNING)) {
+            RpaWorkflowRunner.cancel(runId)
+            return TemplateExecutionResult(
+                success = false,
+                templateId = template.id,
+                stepsExecuted = terminal?.steps?.size ?: 0,
+                stepsTotal = template.steps.size,
+                errorMessage = "Hybrid template execution timed out",
+                executionTimeMs = System.currentTimeMillis() - startedAt,
+                errorCode = "hybrid_timeout",
+                mode = HYBRID_EXECUTION_MODE,
+                outcomeState = "timeout",
+                handoffContext = RpaWorkflowRunner.getAgentHandoff(runId)
+            )
+        }
+        val success = terminal.status == RpaRunStatus.SUCCEEDED
+        updateTemplateStats(template.id, success)
+        if (!success) {
+            recordTemplateRuntimeFailure(
+                templateId = template.id,
+                revision = template.revision,
+                profileId = DeviceProfileProvider.current(),
+                errorCode = terminal.errorCode
+            )
+        }
+        return TemplateExecutionResult(
+            success = success,
+            templateId = template.id,
+            stepsExecuted = terminal.steps.count { it.status == "succeeded" },
+            stepsTotal = template.steps.size,
+            errorMessage = terminal.message.takeIf { !success },
+            executionTimeMs = System.currentTimeMillis() - startedAt,
+            errorCode = terminal.errorCode,
+            mode = HYBRID_EXECUTION_MODE,
+            outcomeState = terminal.outcomeState,
+            handoffContext = RpaWorkflowRunner.getAgentHandoff(runId)
+        )
+    }
+
+    internal fun toHybridWorkflow(
+        template: WorkflowTemplate,
+        params: Map<String, String> = emptyMap()
+    ): RpaWorkflow {
+        val expandedParams = expandParamAliases(params)
+        return RpaWorkflow(
+            id = template.id,
+            name = template.name,
+            version = template.revision,
+            steps = template.steps.mapIndexed { index, step ->
+                RpaStep(
+                    id = "step_${index + 1}",
+                    action = hybridAction(step),
+                    params = resolveParams(step.paramsTemplate, expandedParams),
+                    description = step.description,
+                    waitAfterMs = step.waitFor.coerceAtLeast(0).toLong(),
+                    resolverPolicy = step.resolverPolicy,
+                    allowedResolvers = step.allowedResolvers,
+                    validatedResolvers = step.validatedResolvers,
+                    semanticSelector = step.semanticSelector,
+                    visualAnchor = step.visualAnchor,
+                    preCheckpoint = step.preCheckpoint,
+                    postCheckpoint = step.postCheckpoint,
+                    resolverPolicyExplicit = true
+                )
+            },
+            params = expandedParams,
+            schemaVersion = 2,
+            executionMode = HYBRID_EXECUTION_MODE,
+            templateId = template.id,
+            templateRevision = template.revision,
+            targetProfileId = template.targetProfileId.ifBlank { template.validationState.profileId },
+            templateStatus = template.status.name.lowercase(),
+            validationProgress = validationProgress(template.validationState),
+            promotionEligible = template.status == TemplateStatus.ACTIVE,
+            promotionIneligibleReason = if (template.status == TemplateStatus.ACTIVE) "" else template.status.name.lowercase()
+        )
+    }
+
+    private fun hybridAction(step: WorkflowTemplate.WorkflowStep): String = when (normalizeToolName(step.toolName)) {
+        "system_key" -> step.paramsTemplate["key"]?.toString()?.lowercase().orEmpty()
+        "tap" -> if (step.semanticSelector != null) "tap_semantic" else if (step.visualAnchor != null) "tap_anchor" else "tap_normalized"
+        "swipe" -> "swipe_normalized"
+        "drag" -> "drag_normalized"
+        "long_press" -> "long_press_anchor"
+        else -> normalizeToolName(step.toolName)
     }
 
     /**
@@ -610,6 +625,130 @@ object WorkflowTemplateManager {
         return templates[templateId]
     }
 
+    fun saveDraft(template: WorkflowTemplate): WorkflowTemplate? {
+        if (template.status != TemplateStatus.DRAFT || template.executionMode != HYBRID_EXECUTION_MODE ||
+            template.id.isBlank() || template.revision <= 0 || template.targetPackage.isBlank() ||
+            !DeviceProfileProvider.isTrustedProfileId(template.targetProfileId)
+        ) return null
+        val draft = template.copy(
+            status = TemplateStatus.DRAFT,
+            successCount = 0,
+            failCount = 0,
+            lastUsedAt = 0L,
+            activatedAt = 0L,
+            degradedAt = 0L,
+            degradedReason = "",
+            steps = template.steps.map { it.copy(validatedResolvers = emptySet()) },
+            validationState = ValidationState(
+                profileId = template.targetProfileId,
+                validatedRevision = template.revision
+            )
+        )
+        initialize()
+        synchronized(lifecycleLock) {
+            if (templates.containsKey(draft.id)) return null
+            templates[draft.id] = draft
+            saveTemplates()
+        }
+        return draft
+    }
+
+    fun canRunHybridFastPath(template: WorkflowTemplate, freshProfileId: String): Boolean =
+        template.executionMode == HYBRID_EXECUTION_MODE &&
+            promotionCoordinator.match(template, freshProfileId) == MatchDecision.MATCH
+
+    fun recordTemplateValidation(templateId: String, result: ValidationResult): WorkflowTemplate? =
+        updateTemplateLifecycle(templateId, result.templateRevision) { template ->
+            promotionCoordinator.recordValidation(template, result)
+        }
+
+    fun recordTemplateRuntimeFailure(
+        templateId: String,
+        revision: Int,
+        profileId: String,
+        errorCode: String
+    ): WorkflowTemplate? = updateTemplateLifecycle(templateId, revision) { template ->
+        promotionCoordinator.recordRuntimeFailure(template, profileId, revision, errorCode)
+    }
+
+    sealed interface DisableResult {
+        data class Disabled(val template: WorkflowTemplate, val changed: Boolean) : DisableResult
+        data object NotFound : DisableResult
+        data class RevisionConflict(val currentRevision: Int) : DisableResult
+    }
+
+    fun disableTemplate(templateId: String, expectedRevision: Int? = null): DisableResult {
+        initialize()
+        synchronized(lifecycleLock) {
+            val current = templates[templateId] ?: return DisableResult.NotFound
+            if (current.status == TemplateStatus.DISABLED) return DisableResult.Disabled(current, changed = false)
+            if (expectedRevision != null && (expectedRevision <= 0 || expectedRevision != current.revision)) {
+                return DisableResult.RevisionConflict(current.revision)
+            }
+            val updated = applyRevisionBoundDisable(current, current.revision)
+            templates[templateId] = updated
+            saveTemplates()
+            return DisableResult.Disabled(updated, changed = true)
+        }
+    }
+
+    fun persistValidationRevision(template: WorkflowTemplate): Boolean {
+        initialize()
+        synchronized(lifecycleLock) {
+            val current = templates[template.id] ?: return false
+            if (current.revision != template.revision || current.status == TemplateStatus.DISABLED) return false
+            templates[template.id] = template
+            saveTemplates()
+            return true
+        }
+    }
+
+    private fun updateTemplateLifecycle(
+        templateId: String,
+        expectedRevision: Int,
+        update: (WorkflowTemplate) -> WorkflowTemplate
+    ): WorkflowTemplate? {
+        initialize()
+        synchronized(lifecycleLock) {
+            val current = templates[templateId] ?: return null
+            val updated = applyRevisionBoundLifecycleUpdate(current, expectedRevision, update)
+            if (updated === current || updated == current) return current
+            templates[templateId] = updated
+            saveTemplates()
+            return updated
+        }
+    }
+
+    internal fun applyRevisionBoundLifecycleUpdate(
+        current: WorkflowTemplate,
+        expectedRevision: Int,
+        update: (WorkflowTemplate) -> WorkflowTemplate
+    ): WorkflowTemplate {
+        if (expectedRevision <= 0 || current.revision != expectedRevision) return current
+        return update(current)
+    }
+
+    internal fun applyRevisionBoundDisable(
+        current: WorkflowTemplate,
+        expectedRevision: Int
+    ): WorkflowTemplate {
+        if (current.status == TemplateStatus.DISABLED) return current
+        if (expectedRevision <= 0 || current.revision != expectedRevision) return current
+        return current.copy(
+            status = TemplateStatus.DISABLED,
+            validationState = current.validationState.copy(
+                consecutiveSuccesses = 0,
+                validatedResolvers = emptySet(),
+                validatedResetIds = emptySet()
+            )
+        )
+    }
+
+    private fun validationProgress(state: ValidationState): String {
+        val target = state.target.coerceAtLeast(1)
+        return "${state.consecutiveSuccesses.coerceIn(0, target)}/$target"
+    }
+
     /**
      * 清空所有模板
      */
@@ -678,9 +817,6 @@ object WorkflowTemplateManager {
             appName = appName,
             steps = steps
         )
-
-        // 标记首次成功
-        updateTemplateStats(template.id, true)
 
         XLog.i(TAG, "Learned template from execution: $name")
         return template

@@ -38,16 +38,11 @@ object ConfigServerManager {
     }
 
     /**
-     * 启动配置服务，必须有 WiFi 连接
+     * 启动配置服务。即使没有局域网地址也保持 loopback 可用，供 ADB USB 转发访问。
      */
     fun start(context: Context): Boolean {
         val ctx = context.applicationContext
         appContext = ctx
-
-        if (!hasLanAddress(ctx)) {
-            XLog.e(TAG, "Cannot start ConfigServer: no LAN or hotspot IPv4 address")
-            return false
-        }
 
         if (isRunning()) return true
 
@@ -189,7 +184,7 @@ object ConfigServerManager {
     }
 
     /**
-     * 注册网络变化监听，WiFi 断开时停止服务，重连时自动重启（IP 可能变化）
+     * 注册网络变化监听。网络变化只刷新地址状态，不中断 ADB USB loopback 通道。
      */
     private fun registerNetworkCallback(context: Context) {
         unregisterNetworkCallback()
@@ -198,16 +193,7 @@ object ConfigServerManager {
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onLost(network: Network) {
-                val ctx = appContext
-                if (ctx != null && hasLanAddress(ctx)) {
-                    XLog.i(TAG, "Network lost but LAN/hotspot address remains; keeping ConfigServer")
-                    _configChanged.tryEmit(Unit)
-                    return
-                }
-                XLog.i(TAG, "LAN network lost, stopping ConfigServer")
-                try { server?.stop() } catch (_: Exception) {}
-                server = null
-                // 不清除 enabled 状态，WiFi 恢复后自动重启
+                XLog.i(TAG, "Network lost; keeping ConfigServer available for USB loopback")
                 _configChanged.tryEmit(Unit)
             }
 
@@ -216,7 +202,6 @@ object ConfigServerManager {
                 // WiFi 重连后 IP 可能变化，重新启动
                 if (KVUtils.isConfigServerEnabled() && !isRunning()) {
                     val ctx = appContext ?: return
-                    if (!hasLanAddress(ctx)) return
                     for (port in ConfigServer.PORT until ConfigServer.PORT + MAX_PORT_RETRY) {
                         try {
                             val s = ConfigServer(ctx, port)

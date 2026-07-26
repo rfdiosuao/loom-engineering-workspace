@@ -3,7 +3,9 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 
 const sourceUrl = new URL('./PhoneDemoPage.tsx', import.meta.url);
+const recoveryUrl = new URL('./PhoneUsbRecovery.tsx', import.meta.url);
 const apiUrl = new URL('../../services/api.ts', import.meta.url);
+const appUrl = new URL('../../App.tsx', import.meta.url);
 
 test('phone status targets the selected device and requires an explicit online result', async () => {
   const source = await readFile(sourceUrl, 'utf8');
@@ -34,12 +36,76 @@ test('phone status API accepts a device id', async () => {
 test('unsaved address and token edits require saving before phone actions', async () => {
   const source = await readFile(sourceUrl, 'utf8');
 
+  assert.match(source, /device\?\.connectionMode === 'usb'/);
+  assert.match(source, /return device\.lanBaseUrl \|\| ''/);
   assert.match(
     source,
-    /const hasUnsavedPhoneConfig = isAddingDevice\s+\|\| Boolean\(phoneToken\.trim\(\)\)\s+\|\| displayPhoneAddress\(phoneAddress\) !== displayPhoneAddress\(selectedConfiguredPhone\?\.baseUrl \|\| ''\);/,
+    /const hasUnsavedPhoneConfig = isAddingDevice\s+\|\| Boolean\(phoneToken\.trim\(\)\)\s+\|\| displayPhoneAddress\(phoneAddress\) !== displayPhoneAddress\(editablePhoneAddress\(selectedConfiguredPhone\)\);/,
   );
   assert.match(source, /手机 IP 或连接令牌有未保存修改，请先点击“保存并检测”，再继续操作。/);
   assert.match(source, /请先填写手机 IP 和连接令牌，然后点击“保存并检测”。/);
+});
+
+test('USB transport is explicit, reversible, and scoped to the selected device', async () => {
+  const source = await readFile(sourceUrl, 'utf8');
+  const apiSource = await readFile(apiUrl, 'utf8');
+
+  assert.match(apiSource, /usbConnect: .*deviceId: string; serial\?: string; confirmed: boolean/);
+  assert.match(apiSource, /usbReconcile:[\s\S]*?api\('\/api\/phone\/usb\/reconcile', 'POST'\)/);
+  assert.match(apiSource, /usbDevices: \(\).*api\('\/api\/phone\/usb\/devices'\)/);
+  assert.match(apiSource, /api\('\/api\/phone\/usb\/connect', 'POST', params\)/);
+  assert.match(apiSource, /usbDisconnect: .*deviceId: string; confirmed: boolean/);
+  assert.match(apiSource, /api\('\/api\/phone\/usb\/disconnect', 'POST', params\)/);
+  assert.match(source, /await phoneApi\.usbConnect\(\{\s*deviceId: selectedDeviceId,\s*serial,\s*confirmed: true,/);
+  assert.match(source, /const readyDevices = .*filter\(\(device\) => device\.state === 'device'\)/);
+  assert.match(source, /setUsbDevicePickerOpen\(true\)/);
+  assert.match(source, /await phoneApi\.usbDisconnect\(\{ deviceId: selectedDeviceId, confirmed: true \}\)/);
+  assert.match(source, /const usbConfigured = Boolean/);
+  assert.match(source, /selectedConfiguredPhone\?\.lanBaseUrl \? '切回局域网' : '断开 USB'/);
+  assert.match(source, /disabled=\{Boolean\(busy\) \|\| !usbConfigured\}/);
+});
+
+test('selecting a USB-configured phone preserves its LAN fallback address', async () => {
+  const source = await readFile(sourceUrl, 'utf8');
+  const selectBlock = source.slice(
+    source.indexOf('const selectConfiguredPhone ='),
+    source.indexOf('const loadPhoneConfig ='),
+  );
+
+  assert.match(selectBlock, /baseUrl: editablePhoneAddress\(device\)/);
+  assert.doesNotMatch(selectBlock, /baseUrl: device\.baseUrl/);
+});
+
+test('saved USB transport is verified and restored when the phone page starts', async () => {
+  const source = await readFile(sourceUrl, 'utf8');
+  const loadBlock = source.slice(
+    source.indexOf('const loadPhoneConfig ='),
+    source.indexOf('const loadAccountStatus ='),
+  );
+
+  assert.match(loadBlock, /selected\?\.connectionMode === 'usb'/);
+  assert.match(loadBlock, /await phoneApi\.usbConnect\(\{\s*deviceId: selected\.id,\s*confirmed: true,/);
+  assert.match(loadBlock, /USB 连接当前不可用/);
+});
+
+test('application startup restores every saved USB phone before Matrix use', async () => {
+  const recoverySource = await readFile(recoveryUrl, 'utf8');
+  const appSource = await readFile(appUrl, 'utf8');
+
+  assert.match(appSource, /<PhoneUsbRecovery \/>/);
+  assert.match(
+    recoverySource,
+    /snapshot\.devices\.filter\(\(device\) => device\.connectionMode === 'usb'\)/,
+  );
+  assert.match(recoverySource, /for \(const device of usbDevices\)/);
+  assert.match(
+    recoverySource,
+    /await phoneApi\.usbReconcile\(\)/,
+  );
+  assert.match(
+    recoverySource,
+    /await phoneApi\.usbConnect\(\{\s*deviceId: device\.id,\s*confirmed: true,/,
+  );
 });
 
 test('connection checks, screen reads, and task submissions guard before using saved config', async () => {
@@ -61,4 +127,6 @@ test('connection checks, screen reads, and task submissions guard before using s
 
   const saveBlock = actionBlock('const saveDeviceAndDetect =', 'const checkConnection =');
   assert.match(saveBlock, /await checkConnection\(deviceId, true\)/);
+  assert.doesNotMatch(saveBlock, /if \(!cleanAddress\)/);
+  assert.match(saveBlock, /配置已保存，现在可以通过 USB 连接手机/);
 });

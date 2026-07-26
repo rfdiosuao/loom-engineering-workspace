@@ -1,14 +1,16 @@
 package com.apk.claw.android.server
 
 import java.io.File
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentApiControllerSourceContractTest {
+    private val controllerSource = File("src/main/java/com/apk/claw/android/server/AgentApiController.kt").readText()
+    private val appViewModelSource = File("src/main/java/com/apk/claw/android/AppViewModel.kt").readText()
+
     @Test
     fun execute_task_has_unhandled_exception_guard_that_releases_busy_state() {
-        val source = File("src/main/java/com/apk/claw/android/server/AgentApiController.kt").readText()
+        val source = controllerSource
 
         assertTrue(source.contains("catch (t: Throwable)"))
         assertTrue(source.contains("agent_unhandled_exception"))
@@ -18,7 +20,7 @@ class AgentApiControllerSourceContractTest {
 
     @Test
     fun action_fast_reports_observable_verify_fields() {
-        val source = File("src/main/java/com/apk/claw/android/server/AgentApiController.kt").readText()
+        val source = controllerSource
 
         assertTrue(source.contains("addProperty(\"actionMs\""))
         assertTrue(source.contains("addProperty(\"verifyMs\""))
@@ -29,7 +31,7 @@ class AgentApiControllerSourceContractTest {
 
     @Test
     fun async_worker_claims_global_task_slot_before_marking_task_running() {
-        val source = File("src/main/java/com/apk/claw/android/server/AgentApiController.kt").readText()
+        val source = controllerSource
 
         assertTrue(source.contains("claimTaskSlotLocked()"))
         assertTrue(source.contains("releaseTaskSlotLocked()"))
@@ -38,17 +40,35 @@ class AgentApiControllerSourceContractTest {
 
     @Test
     fun async_task_and_event_endpoints_expose_compatible_progress_log() {
-        val source = File("src/main/java/com/apk/claw/android/server/AgentApiController.kt").readText()
-        val eventsHandler = source
-            .substringAfter("fun handleGetAsyncTaskEvents")
-            .substringBefore("fun handleCancelAsyncTask")
-        val taskState = source
-            .substringAfter("private class AsyncTaskState")
-            .substringBefore("private class ApiMetrics")
+        val source = controllerSource
 
-        assertEquals(2, Regex("AgentProgressLogBuilder\\.attachTo\\(this, eventArray\\)").findAll(source).count())
-        assertTrue(eventsHandler.contains("add(\"events\", eventArray)"))
-        assertTrue(eventsHandler.contains("AgentProgressLogBuilder.attachTo(this, eventArray)"))
-        assertTrue(taskState.contains("AgentProgressLogBuilder.attachTo(this, eventArray)"))
+        assertTrue(source.contains("add(\"progressLog\", AgentProgressLogBuilder.fromEvents"))
+    }
+
+    @Test
+    fun learning_is_opt_in_sanitized_completion_only_and_draft_only() {
+        val source = controllerSource
+
+        assertTrue(source.contains("if (learnTemplate) AgentTrajectoryRecorder() else null"))
+        assertTrue(source.contains("trajectoryRecorder?.beforeAction"))
+        assertTrue(source.contains("trajectoryRecorder?.afterAction"))
+        assertTrue(source.contains("HybridTemplateCompiler.compile"))
+        assertTrue(source.contains("WorkflowTemplateManager.saveDraft"))
+        assertTrue(source.contains("DeviceProfileProvider.current()"))
+        assertTrue(source.contains("riskDeclaration = null"))
+        assertTrue(!source.contains("riskDeclaration = TemplateRiskLevel.READ_ONLY"))
+        assertTrue(source.contains("override fun onTerminal"))
+        assertTrue(source.contains("if (terminal.shouldCompile && learnTemplate)"))
+        assertTrue(source.contains("allowReplayFailedStep = false"))
+        assertTrue(source.indexOf("HybridTemplateCompiler.compile") > source.indexOf("override fun onComplete"))
+        assertTrue(!source.contains("learnFromExecution("))
+    }
+
+    @Test
+    fun production_agent_configs_use_policy_absolute_round_cap() {
+        assertTrue(controllerSource.contains(".maxIterations(AgentExecutionPolicy.absoluteMaxRounds())"))
+        assertTrue(!controllerSource.contains(".maxIterations(AgentExecutionPolicy.defaultMaxRounds(AgentExecutionMode.FULL))"))
+        assertTrue(appViewModelSource.contains(".maxIterations(AgentExecutionPolicy.absoluteMaxRounds())"))
+        assertTrue(!appViewModelSource.contains(".maxIterations(60)"))
     }
 }

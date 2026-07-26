@@ -5,35 +5,6 @@ import com.google.gson.JsonObject
 
 /** Builds a small, privacy-safe progress summary from the raw agent event stream. */
 object AgentProgressLogBuilder {
-    const val CONTRACT_VERSION = 1
-    const val SCHEMA = "apkclaw.progress_log.v1"
-
-    private val SAFE_TOOL_ID = Regex("[a-z0-9_.-]+")
-    private val TOOL_LABELS = mapOf(
-        "open_app" to "打开应用",
-        "get_screen_info" to "读取当前页面",
-        "tap" to "点击页面元素",
-        "click" to "点击页面元素",
-        "input_text" to "输入文本",
-        "type_text" to "输入文本",
-        "swipe" to "滚动查找内容",
-        "scroll_to_find" to "滚动查找内容",
-        "system_key" to "执行系统按键",
-        "press_key" to "执行系统按键",
-        "screenshot" to "截取当前页面",
-        "take_screenshot" to "截取当前页面",
-        "finish" to "整理执行结果",
-        "collect_list_items" to "收集页面列表",
-        "wait_element" to "等待页面元素"
-    )
-
-    fun attachTo(target: JsonObject, events: JsonArray): JsonObject {
-        target.addProperty("contractVersion", CONTRACT_VERSION)
-        target.addProperty("progressLogSchema", SCHEMA)
-        target.add("progressLog", fromEvents(events))
-        return target
-    }
-
     fun fromEvents(events: JsonArray, limit: Int = 3): JsonArray {
         val items = mutableListOf<JsonObject>()
         events.forEach { element ->
@@ -54,9 +25,9 @@ object AgentProgressLogBuilder {
 
     private fun eventToProgress(event: JsonObject): JsonObject? {
         val eventType = event.stringValue("type")?.lowercase() ?: return null
-        val round = (event.intValue("round") ?: 0).coerceAtLeast(0)
+        val round = event.intValue("round") ?: 0
         val toolId = safeToolId(event.stringValue("toolId"))
-        val time = event.longValue("time")?.takeIf { it >= 0L }
+        val time = event.longValue("time")
         val (type, text) = when (eventType) {
             "loop_start" -> "thinking" to stageText(round, "分析下一步")
             "tool_call" -> "tool" to stageText(round, toolLabel(toolId))
@@ -91,11 +62,23 @@ object AgentProgressLogBuilder {
         return if (round > 0) "第 $round 阶段：$action" else action
     }
 
-    private fun toolLabel(toolId: String?): String = TOOL_LABELS[toolId] ?: "执行手机操作"
+    private fun toolLabel(toolId: String?): String = when (toolId) {
+        "open_app" -> "打开应用"
+        "get_screen_info" -> "读取当前页面"
+        "tap", "click" -> "点击页面元素"
+        "input_text", "type_text" -> "输入文本"
+        "swipe", "scroll_to_find" -> "滚动查找内容"
+        "system_key", "press_key" -> "执行系统按键"
+        "screenshot", "take_screenshot" -> "截取当前页面"
+        "finish" -> "整理执行结果"
+        "collect_list_items" -> "收集页面列表"
+        "wait_element" -> "等待页面元素"
+        else -> "执行手机操作"
+    }
 
     private fun safeToolId(value: String?): String? {
         val normalized = value?.trim()?.lowercase()?.take(80) ?: return null
-        return normalized.takeIf { it.matches(SAFE_TOOL_ID) && TOOL_LABELS.containsKey(it) }
+        return normalized.takeIf { it.matches(Regex("[a-z0-9_.-]+")) }
     }
 
     private fun progressKey(item: JsonObject): String {

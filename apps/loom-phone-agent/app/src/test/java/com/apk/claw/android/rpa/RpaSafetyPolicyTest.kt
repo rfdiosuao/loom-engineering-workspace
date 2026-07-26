@@ -1,5 +1,6 @@
 package com.apk.claw.android.rpa
 
+import com.apk.claw.android.workflow.SemanticSelector
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,5 +46,27 @@ class RpaSafetyPolicyTest {
 
         assertFalse(decision.allowed)
         assertEquals("safety_blocked", decision.errorCode)
+    }
+
+    @Test
+    fun blocks_sensitive_semantic_selector_fields() {
+        val selectors = listOf(
+            SemanticSelector(text = "Delete account"),
+            SemanticSelector(contentDescription = "Authorize payment"),
+            SemanticSelector(resourceId = "demo:id/privacy_permission")
+        )
+
+        selectors.forEachIndexed { index, selector ->
+            val decision = RpaSafetyPolicy.inspect(
+                RpaStep(
+                    id = "semantic-$index",
+                    action = "tap_semantic",
+                    semanticSelector = selector
+                )
+            )
+
+            assertFalse("selector=$selector", decision.allowed)
+            assertEquals("safety_blocked", decision.errorCode)
+        }
     }
 }

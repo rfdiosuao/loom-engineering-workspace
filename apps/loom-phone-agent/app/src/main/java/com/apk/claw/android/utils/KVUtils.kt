@@ -250,6 +250,18 @@ object KVUtils {
     fun getApiToken(): String = getString(KEY_API_TOKEN, "")
     fun setApiToken(value: String) = putString(KEY_API_TOKEN, value)
 
+    // ==================== Stable phone installation identity ====================
+    private const val KEY_LUMI_DEVICE_INSTANCE_ID = "KEY_LUMI_DEVICE_INSTANCE_ID"
+
+    fun ensureLumiDeviceInstanceId(): String {
+        val current = getString(KEY_LUMI_DEVICE_INSTANCE_ID, "").trim()
+        if (current.isNotEmpty()) return current
+        val generated = "lumi-${UUID.randomUUID()}"
+        putString(KEY_LUMI_DEVICE_INSTANCE_ID, generated)
+        sync()
+        return generated
+    }
+
     // ==================== Publish Relay ====================
     private const val KEY_PUBLISH_RELAY_BASE_URL = "KEY_PUBLISH_RELAY_BASE_URL"
     private const val KEY_PUBLISH_RELAY_CHANNEL_ID = "KEY_PUBLISH_RELAY_CHANNEL_ID"

@@ -20,8 +20,23 @@ enum class AgentToolPolicy(val wireName: String) {
 data class AgentRunOptions(
     val readOnly: Boolean = false,
     val toolPolicy: AgentToolPolicy = AgentToolPolicy.FULL_ACCESS,
-    val maxRounds: Int? = null
+    val maxRounds: Int? = null,
+    val allowReplayFailedStep: Boolean = true,
+    val oldPostconditionAbsent: () -> Boolean = { false }
 )
+
+object AgentReplaySafetyPolicy {
+    private val actionTools = setOf(
+        "open_app", "tap", "swipe", "drag", "long_press", "input_text", "system_key",
+        "clipboard", "send_file", "repeat_actions", "scroll_to_find", "search_app_in_store"
+    )
+
+    fun mayDispatchAction(
+        allowReplayFailedStep: Boolean,
+        oldPostconditionAbsent: Boolean,
+        toolName: String
+    ): Boolean = toolName !in actionTools || allowReplayFailedStep || oldPostconditionAbsent
+}
 
 interface AgentService {
     fun initialize(config: AgentConfig)

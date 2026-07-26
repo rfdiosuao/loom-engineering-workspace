@@ -114,3 +114,24 @@ test('camelCase selector actions use the same safety normalization as routing', 
   assert.equal(blocked.allowed, false);
   assert.equal(blocked.category, 'sensitive_target');
 });
+
+test('system key actions use the phone compatibility endpoint', () => {
+  const action = minimalActionForPhone({
+    action: 'systemKey',
+    key: 'recent',
+    targetLabel: 'system recent apps navigation',
+    reason: 'user selected recent apps',
+  });
+
+  assert.equal(action.action, 'system_key');
+  assert.equal(action.key, 'recent');
+  assert.equal(visionActionEndpointForBody(action, 'action_fast'), '/api/tool/system_key');
+  assert.equal(inspectVisionActionPlan(action).allowed, true);
+});
+
+test('system key actions without explicit target metadata stay blocked', () => {
+  const result = inspectVisionActionPlan({ action: 'systemKey', key: 'recent' });
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.category, 'unknown_target');
+});

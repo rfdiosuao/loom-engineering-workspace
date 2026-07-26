@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import ast
+import base64
+import hashlib
+import hmac
 import os
 import json
 import shutil
@@ -37,6 +40,8 @@ from api.routes_phone import (
     _phone_progress_log,
     _phone_progress_result_fields_from_stdout,
     _phone_payload_failure,
+    _phone_runtime_config_json,
+    _probe_phone_tunnel,
     _public_store,
     _run_phone_process_with_matrix_stream,
     _sanitize_cli_output,
@@ -49,6 +54,223 @@ from services.jobs import JobManager
 
 
 class PhoneRouteSnapshotTests(unittest.TestCase):
+    def test_phone_usb_identity_probe_never_sends_token_before_challenge_verification(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, request):
+                body = json.loads(request.data.decode("utf-8"))
+                nonce = body["nonce"]
+                device_instance_id = "lumi-phone-a"
+                signature_input = "\n".join(
+                    (
+                        "loom-usb-bind-v3",
+                        nonce,
+                        "com.apk.claw.android",
+                        "922",
+                        device_instance_id,
+                        "9527",
+                    )
+                ).encode("utf-8")
+                proof = base64.urlsafe_b64encode(
+                    hmac.new(b"secret", signature_input, hashlib.sha256).digest()
+                ).decode("ascii").rstrip("=")
+                self.payload = {
+                    "success": True,
+                    "data": {
+                        "protocol": "loom-usb-bind-v3",
+                        "nonce": nonce,
+                        "packageName": "com.apk.claw.android",
+                        "version": "6.60-stability",
+                        "versionCode": 922,
+                        "deviceInstanceId": device_instance_id,
+                        "listeningPort": 9527,
+                        "proof": proof,
+                    },
+                }
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, amount: int = -1) -> bytes:
+                payload = json.dumps(self.payload).encode("utf-8")
+                return payload if amount < 0 else payload[:amount]
+
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return FakeResponse(request)
+
+        with patch("api.routes_phone.urlopen", side_effect=fake_urlopen):
+            apkclaw = _probe_phone_tunnel("http://127.0.0.1:19527", "secret")
+
+        request = captured["request"]
+        serialized_headers = json.dumps(dict(request.headers)).lower()
+        self.assertNotIn("secret", serialized_headers)
+        self.assertNotIn("agent-phone-token", serialized_headers)
+        self.assertNotIn("apkclaw-token", serialized_headers)
+        self.assertEqual(request.method, "POST")
+        self.assertTrue(apkclaw["ok"])
+        self.assertEqual(apkclaw["status"], "verified")
+        self.assertEqual(apkclaw["deviceInstanceId"], "lumi-phone-a")
+
+    def test_phone_usb_identity_probe_rejects_forged_challenge_proof(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, request):
+                nonce = json.loads(request.data.decode("utf-8"))["nonce"]
+                self.payload = {
+                    "success": True,
+                    "data": {
+                        "protocol": "loom-usb-bind-v3",
+                        "nonce": nonce,
+                        "packageName": "com.apk.claw.android",
+                        "versionCode": 922,
+                        "deviceInstanceId": "lumi-phone-b",
+                        "listeningPort": 9527,
+                        "proof": "forged",
+                    },
+                }
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, amount: int = -1) -> bytes:
+                payload = json.dumps(self.payload).encode("utf-8")
+                return payload if amount < 0 else payload[:amount]
+
+        with patch("api.routes_phone.urlopen", side_effect=lambda request, timeout: FakeResponse(request)):
+            result = _probe_phone_tunnel("http://127.0.0.1:19527", "secret")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "auth_failed")
+
+    def test_phone_usb_identity_probe_rejects_a_different_bound_phone_instance(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, request):
+                nonce = json.loads(request.data.decode("utf-8"))["nonce"]
+                device_instance_id = "lumi-phone-b"
+                signature_input = "\n".join((
+                    "loom-usb-bind-v3",
+                    nonce,
+                    "com.apk.claw.android",
+                    "931",
+                    device_instance_id,
+                    "9527",
+                )).encode("utf-8")
+                proof = base64.urlsafe_b64encode(
+                    hmac.new(b"shared-token", signature_input, hashlib.sha256).digest()
+                ).decode("ascii").rstrip("=")
+                self.payload = {
+                    "success": True,
+                    "data": {
+                        "protocol": "loom-usb-bind-v3",
+                        "nonce": nonce,
+                        "packageName": "com.apk.claw.android",
+                        "versionCode": 931,
+                        "deviceInstanceId": device_instance_id,
+                        "listeningPort": 9527,
+                        "proof": proof,
+                    },
+                }
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, amount: int = -1) -> bytes:
+                payload = json.dumps(self.payload).encode("utf-8")
+                return payload if amount < 0 else payload[:amount]
+
+        with patch("api.routes_phone.urlopen", side_effect=lambda request, timeout: FakeResponse(request)):
+            result = _probe_phone_tunnel(
+                "http://127.0.0.1:19527",
+                "shared-token",
+                expected_device_instance_id="lumi-phone-a",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "device_identity_mismatch")
+
+    def test_phone_usb_identity_probe_rejects_a_signed_nonstandard_listening_port(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, request):
+                nonce = json.loads(request.data.decode("utf-8"))["nonce"]
+                device_instance_id = "lumi-phone-a"
+                signature_input = "\n".join((
+                    "loom-usb-bind-v3",
+                    nonce,
+                    "com.apk.claw.android",
+                    "931",
+                    device_instance_id,
+                    "9528",
+                )).encode("utf-8")
+                proof = base64.urlsafe_b64encode(
+                    hmac.new(b"shared-token", signature_input, hashlib.sha256).digest()
+                ).decode("ascii").rstrip("=")
+                self.payload = {
+                    "success": True,
+                    "data": {
+                        "protocol": "loom-usb-bind-v3",
+                        "nonce": nonce,
+                        "packageName": "com.apk.claw.android",
+                        "versionCode": 931,
+                        "deviceInstanceId": device_instance_id,
+                        "listeningPort": 9528,
+                        "proof": proof,
+                    },
+                }
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, amount: int = -1) -> bytes:
+                payload = json.dumps(self.payload).encode("utf-8")
+                return payload if amount < 0 else payload[:amount]
+
+        with patch("api.routes_phone.urlopen", side_effect=lambda request, timeout: FakeResponse(request)):
+            result = _probe_phone_tunnel("http://127.0.0.1:19527", "shared-token")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "phone_port_mismatch")
+
+    def test_phone_usb_identity_probe_rejects_an_oversized_response(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, amount: int = -1) -> bytes:
+                return b"x" * amount
+
+        with patch("api.routes_phone.urlopen", return_value=FakeResponse()):
+            result = _probe_phone_tunnel("http://127.0.0.1:19527", "shared-token")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "identity_response_too_large")
+
     def test_phone_model_sync_has_one_canonical_implementation(self) -> None:
         import api.routes_phone as routes_phone
 
@@ -757,6 +979,990 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertNotIn("plain-phone-token", serialized)
             self.assertEqual(stored["devices"][0]["token"]["__loomSecret"], "dpapi")
 
+    def test_phone_usb_connect_preserves_lan_address_and_switches_public_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            process = SimpleNamespace(
+                phone_adb_forward=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "connected",
+                    "adbPath": "D:/private/adb.exe",
+                    "serial": "adb-phone-a",
+                    "localPort": 19527,
+                    "remotePort": 9527,
+                    "baseUrl": "http://127.0.0.1:19527",
+                    "devices": [{"serial": "adb-phone-a", "state": "device", "detail": "model:Pixel"}],
+                    "actions": [{"stdout": "19527"}],
+                },
+                phone_adb_forward_remove=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "disconnected",
+                },
+            )
+            ctx.get_process_svc = lambda: process
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            saved = client.post(
+                "/api/phone/config/device",
+                json={
+                    "deviceId": "phone-a",
+                    "name": "Phone A",
+                    "baseUrl": "192.168.1.88",
+                    "token": "plain-phone-token",
+                },
+            )
+            with patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={"ok": True, "status": "verified", "version": "6.60"},
+            ):
+                connected = client.post(
+                    "/api/phone/usb/connect",
+                    json={"deviceId": "phone-a", "serial": "adb-phone-a", "confirmed": True},
+                )
+
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(connected.status_code, 200)
+            device = connected.json()["config"]["devices"][0]
+            self.assertEqual(device["connectionMode"], "usb")
+            self.assertEqual(device["baseUrl"], "http://127.0.0.1:19527")
+            self.assertEqual(device["lanBaseUrl"], "http://192.168.1.88:9527")
+            self.assertNotIn("adbSerial", device)
+            self.assertNotIn("adbLocalPort", device)
+            self.assertEqual(connected.json()["connection"]["serial"], "adb-phone-a")
+            self.assertEqual(connected.json()["connection"]["localPort"], 19527)
+            serialized = json.dumps(connected.json(), ensure_ascii=False)
+            self.assertNotIn("plain-phone-token", serialized)
+            self.assertNotIn("adbPath", connected.json()["connection"])
+            self.assertNotIn("actions", connected.json()["connection"])
+
+    def test_phone_usb_connect_supports_first_time_setup_without_lan_address(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward=lambda **kwargs: {
+                    "ok": True,
+                    "status": "connected",
+                    "serial": "adb-phone-a",
+                    "localPort": kwargs["local_port"],
+                    "remotePort": kwargs["remote_port"],
+                    "baseUrl": f"http://127.0.0.1:{kwargs['local_port']}",
+                },
+                phone_adb_forward_remove=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "disconnected",
+                },
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            saved = client.post(
+                "/api/phone/config/device",
+                json={
+                    "deviceId": "phone-a",
+                    "name": "USB Phone",
+                    "token": "plain-phone-token",
+                },
+            )
+            with patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={"ok": True, "status": "verified", "deviceInstanceId": "lumi-phone-a"},
+            ):
+                connected = client.post(
+                    "/api/phone/usb/connect",
+                    json={"deviceId": "phone-a", "serial": "adb-phone-a", "confirmed": True},
+                )
+            disconnected = client.post(
+                "/api/phone/usb/disconnect",
+                json={"deviceId": "phone-a", "confirmed": True},
+            )
+
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(saved.json()["devices"][0]["baseUrl"], "")
+            self.assertEqual(connected.status_code, 200)
+            self.assertNotIn("lanBaseUrl", connected.json()["config"]["devices"][0])
+            self.assertEqual(disconnected.status_code, 200)
+            disconnected_device = disconnected.json()["config"]["devices"][0]
+            self.assertEqual(disconnected_device["connectionMode"], "lan")
+            self.assertEqual(disconnected_device["baseUrl"], "")
+
+    def test_phone_usb_connect_discovers_signed_fallback_phone_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            forward_ports: list[int] = []
+            cleanup_calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+
+            def forward(**kwargs):
+                forward_ports.append(kwargs["remote_port"])
+                return {
+                    "ok": True,
+                    "status": "connected",
+                    "serial": "adb-phone-a",
+                    "localPort": kwargs["local_port"],
+                    "remotePort": kwargs["remote_port"],
+                    "baseUrl": f"http://127.0.0.1:{kwargs['local_port']}",
+                }
+
+            def probe(_base_url, _token, _timeout, _device_instance_id, expected_port):
+                if expected_port == 9527:
+                    return {
+                        "ok": False,
+                        "status": "secure_identity_unsupported",
+                        "message": "unrelated HTTP service",
+                    }
+                return {
+                    "ok": True,
+                    "status": "verified",
+                    "deviceInstanceId": "lumi-phone-a",
+                    "listeningPort": expected_port,
+                }
+
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward=forward,
+                phone_adb_forward_remove=lambda **kwargs: (
+                    cleanup_calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+            self.assertEqual(
+                client.post(
+                    "/api/phone/config/device",
+                    json={
+                        "deviceId": "phone-a",
+                        "baseUrl": "192.168.1.88",
+                        "token": "phone-a-token",
+                    },
+                ).status_code,
+                200,
+            )
+
+            with patch("api.routes_phone._probe_phone_tunnel", side_effect=probe):
+                response = client.post(
+                    "/api/phone/usb/connect",
+                    json={"deviceId": "phone-a", "serial": "adb-phone-a", "confirmed": True},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(forward_ports, [9527, 9528])
+            self.assertEqual(response.json()["connection"]["remotePort"], 9528)
+            self.assertEqual(cleanup_calls, [{"serial": "adb-phone-a", "local_port": response.json()["connection"]["localPort"]}])
+            stored = next(value for key, value in storage.items() if key.endswith("phone-agents.json"))
+            self.assertEqual(stored["devices"][0]["adbRemotePort"], 9528)
+
+    def test_phone_config_edit_during_usb_connection_preserves_active_tunnel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "name": "Phone A",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            updated = client.post(
+                "/api/phone/config/device",
+                json={
+                    "deviceId": "phone-a",
+                    "name": "Front Desk",
+                    "baseUrl": "192.168.1.99",
+                },
+            )
+
+            self.assertEqual(updated.status_code, 200)
+            public_device = updated.json()["devices"][0]
+            self.assertEqual(public_device["name"], "Front Desk")
+            self.assertEqual(public_device["baseUrl"], "http://127.0.0.1:19527")
+            self.assertEqual(public_device["lanBaseUrl"], "http://192.168.1.99:9527")
+            stored_device = storage[path]["devices"][0]
+            self.assertEqual(stored_device["baseUrl"], "http://127.0.0.1:19527")
+            self.assertEqual(stored_device["lanBaseUrl"], "http://192.168.1.99:9527")
+
+    def test_phone_usb_disconnect_removes_forward_and_restores_lan_address(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "name": "Phone A",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **kwargs: (
+                    calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected", "serial": kwargs["serial"], "localPort": kwargs["local_port"]}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            disconnected = client.post(
+                "/api/phone/usb/disconnect",
+                json={"deviceId": "phone-a", "confirmed": True},
+            )
+
+            self.assertEqual(disconnected.status_code, 200)
+            device = disconnected.json()["config"]["devices"][0]
+            self.assertEqual(device["connectionMode"], "lan")
+            self.assertEqual(device["baseUrl"], "http://192.168.1.88:9527")
+            self.assertNotIn("adbSerial", device)
+            self.assertEqual(calls, [{"serial": "adb-phone-a", "local_port": 19527}])
+
+    def test_phone_usb_connect_is_idempotent_for_an_active_tunnel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "name": "Phone A",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_status=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "connected",
+                    "serial": "adb-phone-a",
+                    "localPort": 19527,
+                    "remotePort": 9527,
+                    "baseUrl": "http://127.0.0.1:19527",
+                },
+                phone_adb_forward=lambda **_kwargs: self.fail("active USB tunnel must not be duplicated"),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            with patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={"ok": True, "status": "verified"},
+            ):
+                connected = client.post(
+                    "/api/phone/usb/connect",
+                    json={"deviceId": "phone-a", "confirmed": True},
+                )
+
+            self.assertEqual(connected.status_code, 200)
+            self.assertEqual(connected.json()["connection"]["status"], "already_usb")
+            self.assertEqual(connected.json()["connection"]["localPort"], 19527)
+
+    def test_phone_usb_connect_rebuilds_a_stale_persisted_tunnel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "name": "Phone A",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            cleanup_calls: list[dict] = []
+            forward_calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_status=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "forward_missing",
+                    "message": "USB 转发已经失效，需要重新建立。",
+                },
+                phone_adb_forward_remove=lambda **kwargs: (
+                    cleanup_calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+                phone_adb_forward=lambda **kwargs: (
+                    forward_calls.append(kwargs)
+                    or {
+                        "ok": True,
+                        "status": "connected",
+                        "serial": "adb-phone-a",
+                        "localPort": 20527,
+                        "remotePort": 9527,
+                        "baseUrl": "http://127.0.0.1:20527",
+                    }
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            with patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={"ok": True, "status": "verified"},
+            ):
+                response = client.post(
+                    "/api/phone/usb/connect",
+                    json={"deviceId": "phone-a", "confirmed": True},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(cleanup_calls, [{"serial": "adb-phone-a", "local_port": 19527}])
+            self.assertEqual(forward_calls[0]["serial"], "adb-phone-a")
+            self.assertGreater(forward_calls[0]["local_port"], 0)
+            device = response.json()["config"]["devices"][0]
+            self.assertEqual(device["connectionMode"], "usb")
+            self.assertEqual(device["baseUrl"], "http://127.0.0.1:20527")
+            self.assertEqual(device["lanBaseUrl"], "http://192.168.1.88:9527")
+
+    def test_phone_usb_rebuild_failure_keeps_previous_tunnel_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            cleanup_calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_status=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "forward_missing",
+                },
+                phone_adb_forward=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "forward_failed",
+                    "message": "ADB 无法建立手机端口转发。",
+                },
+                phone_adb_forward_remove=lambda **kwargs: cleanup_calls.append(kwargs),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/phone/usb/connect",
+                json={"deviceId": "phone-a", "confirmed": True},
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(cleanup_calls, [])
+            current = client.get("/api/phone/config").json()["devices"][0]
+            self.assertEqual(current["connectionMode"], "usb")
+            self.assertEqual(current["baseUrl"], "http://127.0.0.1:19527")
+            self.assertEqual(current["lanBaseUrl"], "http://192.168.1.88:9527")
+            self.assertFalse(storage[path]["devices"][0]["usbIdentityVerified"])
+
+    def test_phone_usb_rebuild_reports_old_tunnel_cleanup_pending_after_new_config_is_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_status=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "forward_missing",
+                },
+                phone_adb_forward=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "connected",
+                    "serial": "adb-phone-a",
+                    "localPort": 20527,
+                    "remotePort": 9527,
+                    "baseUrl": "http://127.0.0.1:20527",
+                },
+                phone_adb_forward_remove=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "disconnect_failed",
+                    "message": "旧转发暂时无法清理。",
+                },
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            with patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={"ok": True, "status": "verified"},
+            ):
+                response = client.post(
+                    "/api/phone/usb/connect",
+                    json={"deviceId": "phone-a", "confirmed": True},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["cleanupPending"])
+            current = response.json()["config"]["devices"][0]
+            self.assertEqual(current["baseUrl"], "http://127.0.0.1:20527")
+
+    def test_phone_usb_devices_returns_selectable_devices_without_private_adb_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_devices=lambda: {
+                    "ok": True,
+                    "status": "ready",
+                    "adbPath": "D:/private/platform-tools/adb.exe",
+                    "actions": [{"stdout": "secret diagnostics"}],
+                    "devices": [
+                        {
+                            "serial": "adb-phone-a",
+                            "state": "device",
+                            "label": "Pixel 9",
+                            "detail": "product:private model:Pixel_9",
+                        },
+                    ],
+                },
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.get("/api/phone/usb/devices")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json()["devices"],
+                [{"serial": "adb-phone-a", "state": "device", "label": "Pixel 9"}],
+            )
+            serialized = json.dumps(response.json(), ensure_ascii=False)
+            self.assertNotIn("adbPath", serialized)
+            self.assertNotIn("actions", serialized)
+            self.assertNotIn("product:private", serialized)
+
+    def test_phone_transport_mutations_share_one_async_serialization_lock(self) -> None:
+        import inspect
+        import api.routes_phone as routes_phone
+
+        source = inspect.getsource(routes_phone.register_phone_routes)
+
+        self.assertIn("phone_transport_write_lock = asyncio.Lock()", source)
+        self.assertIn("async with phone_transport_write_lock", source)
+        self.assertIn('path.startswith("/api/phone/usb/")', source)
+        self.assertIn('path == "/api/phone/adb-doctor"', source)
+        self.assertIn('path == "/api/phone/config/device"', source)
+
+    def test_phone_adb_doctor_response_hides_paths_commands_and_device_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_doctor=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "ready",
+                    "message": "ADB ready",
+                    "adbPath": "D:/private/platform-tools/adb.exe",
+                    "actions": [{"command": ["adb", "devices"], "stdout": "private"}],
+                    "devices": [{
+                        "serial": "phone-a",
+                        "state": "device",
+                        "label": "Pixel 9",
+                        "detail": "product:private transport_id:9",
+                    }],
+                    "launchedPackage": "com.apk.claw",
+                    "instructions": ["继续检测手机连接"],
+                },
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post("/api/phone/adb-doctor", json={"confirmed": True})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["devices"][0], {
+                "serial": "phone-a",
+                "state": "device",
+                "label": "Pixel 9",
+            })
+            serialized = json.dumps(response.json(), ensure_ascii=False)
+            self.assertNotIn("adbPath", serialized)
+            self.assertNotIn("actions", serialized)
+            self.assertNotIn("product:private", serialized)
+
+    def test_phone_usb_connect_rejects_wrong_phone_identity_and_removes_new_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            cleanup_calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "connected",
+                    "serial": "adb-phone-b",
+                    "localPort": 29527,
+                    "remotePort": 9527,
+                    "baseUrl": "http://127.0.0.1:29527",
+                },
+                phone_adb_forward_remove=lambda **kwargs: (
+                    cleanup_calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+            saved = client.post(
+                "/api/phone/config/device",
+                json={
+                    "deviceId": "phone-a",
+                    "name": "Phone A",
+                    "baseUrl": "192.168.1.88",
+                    "token": "phone-a-token",
+                },
+            )
+            self.assertEqual(saved.status_code, 200)
+
+            with patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={
+                    "ok": False,
+                    "status": "auth_failed",
+                    "message": "USB 手机与当前配置不匹配，连接令牌验证失败。",
+                },
+            ):
+                response = client.post(
+                    "/api/phone/usb/connect",
+                    json={"deviceId": "phone-a", "serial": "adb-phone-b", "confirmed": True},
+                )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["code"], "auth_failed")
+            self.assertEqual(cleanup_calls, [{"serial": "adb-phone-b", "local_port": 29527}])
+            current = client.get("/api/phone/config").json()["devices"][0]
+            self.assertEqual(current.get("connectionMode", "lan"), "lan")
+            self.assertEqual(current["baseUrl"], "http://192.168.1.88:9527")
+
+    def test_phone_usb_connect_rolls_back_forward_when_config_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            cleanup_calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "connected",
+                    "serial": "adb-phone-a",
+                    "localPort": 19527,
+                    "remotePort": 9527,
+                    "baseUrl": "http://127.0.0.1:19527",
+                },
+                phone_adb_forward_remove=lambda **kwargs: (
+                    cleanup_calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+            saved = client.post(
+                "/api/phone/config/device",
+                json={
+                    "deviceId": "phone-a",
+                    "baseUrl": "192.168.1.88",
+                    "token": "phone-a-token",
+                },
+            )
+            self.assertEqual(saved.status_code, 200)
+
+            with patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={"ok": True, "status": "verified"},
+            ), patch(
+                "api.routes_phone._write_phone_store",
+                side_effect=[None, None, OSError("disk full"), None],
+            ):
+                response = client.post(
+                    "/api/phone/usb/connect",
+                    json={"deviceId": "phone-a", "serial": "adb-phone-a", "confirmed": True},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.json()["code"], "usb_config_write_failed")
+            self.assertEqual(cleanup_calls, [{"serial": "adb-phone-a", "local_port": 19527}])
+            current = client.get("/api/phone/config").json()["devices"][0]
+            self.assertEqual(current.get("connectionMode", "lan"), "lan")
+            self.assertEqual(current["baseUrl"], "http://192.168.1.88:9527")
+
+    def test_phone_usb_connect_persists_recovery_record_before_adb_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            observed: dict = {}
+
+            def forward(**kwargs):
+                stored = next(value for key, value in storage.items() if key.endswith("phone-agents.json"))
+                observed["transactions"] = stored.get("usbTransportTransactions")
+                return {
+                    "ok": False,
+                    "status": "forward_failed",
+                    "message": "simulated",
+                    "serial": "adb-phone-a",
+                    "localPort": kwargs["local_port"],
+                }
+
+            ctx.get_process_svc = lambda: SimpleNamespace(phone_adb_forward=forward)
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+            self.assertEqual(
+                client.post(
+                    "/api/phone/config/device",
+                    json={
+                        "deviceId": "phone-a",
+                        "baseUrl": "192.168.1.88",
+                        "token": "phone-a-token",
+                    },
+                ).status_code,
+                200,
+            )
+
+            response = client.post(
+                "/api/phone/usb/connect",
+                json={"deviceId": "phone-a", "serial": "adb-phone-a", "confirmed": True},
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(observed["transactions"][0]["operation"], "connect")
+            self.assertGreater(observed["transactions"][0]["localPort"], 0)
+            stored = next(value for key, value in storage.items() if key.endswith("phone-agents.json"))
+            self.assertEqual(len(stored["usbTransportTransactions"]), 1)
+            self.assertEqual(stored["usbTransportTransactions"][0]["serial"], "adb-phone-a")
+            self.assertTrue(response.json()["cleanupPending"])
+
+    def test_phone_usb_reconcile_cleans_abandoned_tunnel_and_clears_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "",
+                    "devices": [],
+                    "usbTransportTransactions": [{
+                        "id": "usb-abandoned",
+                        "deviceId": "phone-a",
+                        "operation": "delete",
+                        "serial": "",
+                        "localPort": 19527,
+                    }],
+                },
+            }
+            calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **kwargs: (
+                    calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post("/api/phone/usb/reconcile")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["recovered"], 1)
+            self.assertEqual(calls, [{"serial": "", "local_port": 19527}])
+            self.assertNotIn("usbTransportTransactions", storage[path])
+
+    def test_phone_usb_reconciliation_is_registered_for_bridge_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            app = FastAPI()
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs)
+            register_phone_routes(app, ctx)
+
+            startup_handlers = list(app.router.on_startup)
+            self.assertTrue(
+                any(handler.__name__ == "reconcile_usb_transport_on_startup" for handler in startup_handlers)
+            )
+            self.assertTrue(
+                any(handler.__name__ == "start_saved_usb_transport_restore" for handler in startup_handlers)
+            )
+
+    def test_phone_runtime_config_excludes_unverified_usb_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "usb-phone",
+                    "devices": [
+                        {
+                            "id": "usb-phone",
+                            "baseUrl": "http://127.0.0.1:19527",
+                            "token": "usb-secret",
+                            "connectionMode": "usb",
+                            "usbIdentityVerified": False,
+                        },
+                        {
+                            "id": "lan-phone",
+                            "baseUrl": "http://192.168.1.88:9527",
+                            "token": "lan-secret",
+                            "connectionMode": "lan",
+                        },
+                    ],
+                },
+            }
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+
+            runtime = json.loads(_phone_runtime_config_json(ctx))
+
+            self.assertEqual([item["id"] for item in runtime["devices"]], ["lan-phone"])
+            self.assertNotIn("usb-secret", json.dumps(runtime))
+
+    def test_bridge_startup_rebuilds_and_verifies_saved_usb_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                        "adbRemotePort": 9528,
+                    }],
+                },
+            }
+            forward_calls: list[dict] = []
+            runtime_during_restore: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+
+            def forward(**kwargs):
+                forward_calls.append(kwargs)
+                runtime_during_restore.append(json.loads(_phone_runtime_config_json(ctx)))
+                return {
+                    "ok": True,
+                    "status": "connected",
+                    "serial": kwargs["serial"],
+                    "localPort": kwargs["local_port"],
+                    "remotePort": kwargs["remote_port"],
+                    "baseUrl": f"http://127.0.0.1:{kwargs['local_port']}",
+                }
+
+            def probe(_base_url, _token, _timeout, _device_instance_id, expected_port):
+                if expected_port == 9528:
+                    return {"ok": False, "status": "identity_check_failed"}
+                return {
+                    "ok": True,
+                    "status": "verified",
+                    "deviceInstanceId": "lumi-phone-a",
+                    "listeningPort": expected_port,
+                }
+
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_status=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "forward_missing",
+                },
+                phone_adb_forward=forward,
+                phone_adb_forward_remove=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "disconnected",
+                },
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+
+            with patch("api.routes_phone._probe_phone_tunnel", side_effect=probe):
+                with TestClient(app) as client:
+                    self.assertEqual(client.get("/api/phone/config").status_code, 200)
+                    time.sleep(0.05)
+
+            self.assertEqual([item["remote_port"] for item in forward_calls], [9528, 9527])
+            self.assertTrue(all(not runtime["devices"] for runtime in runtime_during_restore))
+            self.assertEqual(storage[path]["devices"][0]["deviceInstanceId"], "lumi-phone-a")
+            self.assertEqual(storage[path]["devices"][0]["adbRemotePort"], 9527)
+            self.assertTrue(storage[path]["devices"][0]["usbIdentityVerified"])
+
+    def test_bridge_startup_blocks_usb_restore_when_previous_daemon_survives(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "usbIdentityVerified": True,
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                        "adbRemotePort": 9527,
+                    }],
+                },
+            }
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_status=lambda **_kwargs: self.fail(
+                    "USB restore must remain blocked while the previous daemon is alive"
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+
+            with (
+                patch(
+                    "api.routes_phone.phone_daemon_status",
+                    return_value={"ok": True, "running": True, "pid": 123, "state": "running"},
+                ),
+                patch(
+                    "api.routes_phone.stop_phone_daemon",
+                    return_value={
+                        "ok": False,
+                        "running": True,
+                        "stopped": False,
+                        "reason": "kill_timeout",
+                    },
+                ),
+                TestClient(app) as client,
+            ):
+                self.assertEqual(client.get("/api/phone/config").status_code, 200)
+                time.sleep(0.05)
+
+            self.assertFalse(storage[path]["devices"][0]["usbIdentityVerified"])
+            self.assertTrue(app.state.phone_usb_restore_blocked)
+            self.assertTrue(any("previous phone daemon did not exit" in line for line in logs))
+
+    def test_phone_usb_disconnect_restores_usb_config_when_forward_removal_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "name": "Phone A",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "disconnect_failed",
+                    "message": "ADB 无法移除 USB 手机连接。",
+                },
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/phone/usb/disconnect",
+                json={"deviceId": "phone-a", "confirmed": True},
+            )
+
+            self.assertEqual(response.status_code, 409)
+            current = client.get("/api/phone/config").json()["devices"][0]
+            self.assertEqual(current["connectionMode"], "usb")
+            self.assertEqual(current["baseUrl"], "http://127.0.0.1:19527")
+            self.assertEqual(current["lanBaseUrl"], "http://192.168.1.88:9527")
+
+    def test_phone_usb_connect_requires_explicit_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs)
+            ctx.get_process_svc = lambda: SimpleNamespace()
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/phone/usb/connect",
+                json={"deviceId": "phone-a", "serial": "adb-phone-a"},
+            )
+
+            self.assertEqual(response.status_code, 403)
+
     def test_phone_config_migrates_legacy_plaintext_credentials_on_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []
@@ -825,6 +2031,126 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertNotIn("phone-a", repr(stored))
             self.assertNotIn("phone-a", [item["deviceId"] for item in matrix.status()["devices"]])
             self.assertEqual(matrix.watch()["events"][-1]["message"], "historical result")
+
+    def test_phone_config_delete_removes_active_usb_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "name": "Phone A",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **kwargs: (
+                    calls.append(kwargs)
+                    or {
+                        "ok": True,
+                        "status": "disconnected",
+                        "adbPath": "D:/private/adb.exe",
+                        "serial": kwargs["serial"],
+                        "localPort": kwargs["local_port"],
+                    }
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            deleted = client.delete("/api/phone/config/device/phone-a")
+
+            self.assertEqual(deleted.status_code, 200)
+            self.assertEqual(calls, [{"serial": "adb-phone-a", "local_port": 19527}])
+            self.assertEqual(deleted.json()["usbCleanup"]["status"], "disconnected")
+            self.assertNotIn("adbPath", deleted.json()["usbCleanup"])
+
+    def test_phone_config_delete_keeps_usb_device_when_forward_cleanup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "disconnect_failed",
+                    "message": "ADB 无法移除 USB 手机连接。",
+                },
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.delete("/api/phone/config/device/phone-a")
+
+            self.assertEqual(response.status_code, 409)
+            current = client.get("/api/phone/config").json()
+            self.assertEqual(current["selectedDeviceId"], "phone-a")
+            self.assertEqual(len(current["devices"]), 1)
+            self.assertEqual(current["devices"][0]["connectionMode"], "usb")
+
+    def test_phone_config_delete_write_failure_keeps_usb_tunnel_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [{
+                        "id": "phone-a",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "lanBaseUrl": "http://192.168.1.88:9527",
+                        "token": "plain-phone-token",
+                        "connectionMode": "usb",
+                        "adbSerial": "adb-phone-a",
+                        "adbLocalPort": 19527,
+                    }],
+                },
+            }
+            cleanup_calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **kwargs: cleanup_calls.append(kwargs),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            self.assertEqual(client.get("/api/phone/config").status_code, 200)
+            with patch("api.routes_phone._write_phone_store", side_effect=OSError("disk full")):
+                response = client.delete("/api/phone/config/device/phone-a")
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.json()["code"], "phone_config_delete_write_failed")
+            self.assertEqual(cleanup_calls, [])
+            current = client.get("/api/phone/config").json()
+            self.assertEqual(current["selectedDeviceId"], "phone-a")
+            self.assertEqual(current["devices"][0]["connectionMode"], "usb")
 
     def test_repeated_phone_snapshot_updates_device_without_duplicate_ledger_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

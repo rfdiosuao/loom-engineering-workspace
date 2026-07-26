@@ -73,7 +73,7 @@ object ToolApiController {
         }
     }
 
-    private fun readJsonBodyUtf8(session: NanoHTTPD.IHTTPSession): String {
+    internal fun readJsonBodyUtf8(session: NanoHTTPD.IHTTPSession): String {
         val contentLength = session.headers["content-length"]?.toIntOrNull()
             ?: session.headers["Content-Length"]?.toIntOrNull()
             ?: 0

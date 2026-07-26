@@ -20,6 +20,7 @@
 | 并行开发 | [Parallel Development](runbooks/parallel-development.md) |
 | 清理与归档 | [Repository Hygiene](runbooks/repository-hygiene.md) |
 | Agent/Matrix 生产设计 | [Production Design](superpowers/specs/2026-07-15-loom-agent-matrix-production-design.md) |
+| 当前完成度与剩余验收 | [2.3.20 Comprehensive Audit](reviews/2026-07-26-loom-2.3.20-comprehensive-audit.md) |
 | 单仓库迁移 | [Monorepo Cutover](migration/MONOREPO_CUTOVER_20260722.md) |
 
 ## 日常命令

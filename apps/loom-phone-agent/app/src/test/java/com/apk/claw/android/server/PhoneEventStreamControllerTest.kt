@@ -1,6 +1,5 @@
 package com.apk.claw.android.server
 
-import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -30,27 +29,11 @@ class PhoneEventStreamControllerTest {
     fun snapshot_event_contains_status_metrics_and_tasks_slots() {
         val status = JsonObject().apply { addProperty("accessibilityRunning", true) }
         val metrics = JsonObject().apply { addProperty("totalMs", 12) }
-        val rawTask = JsonObject().apply {
-            addProperty("taskId", "task-1")
-            addProperty("status", "running")
-            addProperty("prompt", "private task content")
-        }
-        val task = AgentTaskPublicSnapshot.sanitize(
-            AgentProgressLogBuilder.attachTo(rawTask, JsonArray().apply {
-                add(JsonObject().apply {
-                    addProperty("type", "tool_call")
-                    addProperty("round", 1)
-                    addProperty("time", 100L)
-                    addProperty("toolId", "get_screen_info")
-                    addProperty("message", "private screen content")
-                })
-            })
-        )
 
         val snapshot = PhoneEventStreamController.snapshotEvent(
             status = status,
             metrics = metrics,
-            tasks = listOf(task),
+            tasks = emptyList(),
             nowMs = 1234L
         )
 
@@ -58,12 +41,6 @@ class PhoneEventStreamControllerTest {
         assertEquals(1234L, snapshot["timestampMs"].asLong)
         assertTrue(snapshot["status"].asJsonObject["accessibilityRunning"].asBoolean)
         assertEquals(12, snapshot["metrics"].asJsonObject["totalMs"].asInt)
-        assertEquals(1, snapshot["tasks"].asJsonArray.size())
-        val streamedTask = snapshot["tasks"].asJsonArray[0].asJsonObject
-        assertEquals(1, streamedTask["contractVersion"].asInt)
-        assertEquals("apkclaw.progress_log.v1", streamedTask["progressLogSchema"].asString)
-        assertEquals("第 1 阶段：读取当前页面", streamedTask["progressLog"].asJsonArray[0].asJsonObject["text"].asString)
-        assertTrue(!streamedTask.has("prompt"))
-        assertTrue(!streamedTask.toString().contains("private screen content"))
+        assertEquals(0, snapshot["tasks"].asJsonArray.size())
     }
 }

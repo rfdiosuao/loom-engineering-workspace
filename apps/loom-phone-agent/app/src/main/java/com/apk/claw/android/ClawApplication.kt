@@ -4,6 +4,7 @@ import com.apk.claw.android.agent.DefaultAgentService
 import com.apk.claw.android.base.BaseApp
 import com.apk.claw.android.channel.ChannelManager
 import com.apk.claw.android.publish.PublishRelayManager
+import com.apk.claw.android.rpa.HybridRuntimeInstaller
 import com.apk.claw.android.server.ConfigServerManager
 import com.apk.claw.android.tool.ToolRegistry
 import com.apk.claw.android.utils.CrashReportStore
@@ -33,6 +34,7 @@ class ClawApplication : BaseApp() {
         appViewModelInstance = getAppViewModelProvider()[AppViewModel::class.java]
         KVUtils.init(this)
         ToolRegistry.getInstance().registerAllTools(ToolRegistry.DeviceType.MOBILE)
+        HybridRuntimeInstaller.install(this)
         XLog.e(TAG, "ClawApplication initialized, tools registered: ${ToolRegistry.getInstance().getAllTools().size}")
 
         // 网络日志输出到文件（调试时设为 true）

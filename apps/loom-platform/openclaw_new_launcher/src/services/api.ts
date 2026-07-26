@@ -1204,12 +1204,41 @@ export interface PhoneDeviceSummary {
   paired?: boolean;
   album?: string;
   lastSeenAt?: string;
+  connectionMode?: 'lan' | 'usb';
+  lanBaseUrl?: string;
 }
 
 export interface PhoneConfigSnapshot {
   selectedDeviceId: string;
   configured: boolean;
   devices: PhoneDeviceSummary[];
+}
+
+export interface PhoneUsbConnectionResponse {
+  ok: boolean;
+  connection: {
+    ok?: boolean;
+    status?: string;
+    message?: string;
+    serial?: string;
+    localPort?: number;
+    remotePort?: number;
+    baseUrl?: string;
+  };
+  config: PhoneConfigSnapshot;
+}
+
+export interface PhoneAdbDevice {
+  serial: string;
+  state: string;
+  label: string;
+}
+
+export interface PhoneAdbDevicesResponse {
+  ok: boolean;
+  status: string;
+  message?: string;
+  devices: PhoneAdbDevice[];
 }
 
 export type PhoneTaskMode = 'observe' | 'safe' | 'full';
@@ -1227,6 +1256,13 @@ export const phoneApi = {
   }): Promise<PhoneConfigSnapshot> => api('/api/phone/config/device', 'POST', params),
   deleteDevice: (deviceId: string): Promise<PhoneConfigSnapshot> =>
     api(`/api/phone/config/device/${encodeURIComponent(deviceId)}`, 'DELETE'),
+  usbDevices: (): Promise<PhoneAdbDevicesResponse> => api('/api/phone/usb/devices'),
+  usbReconcile: (): Promise<{ ok: boolean; recovered: number; pending: unknown[] }> =>
+    api('/api/phone/usb/reconcile', 'POST'),
+  usbConnect: (params: { deviceId: string; serial?: string; confirmed: boolean }): Promise<PhoneUsbConnectionResponse> =>
+    api('/api/phone/usb/connect', 'POST', params),
+  usbDisconnect: (params: { deviceId: string; confirmed: boolean }): Promise<PhoneUsbConnectionResponse> =>
+    api('/api/phone/usb/disconnect', 'POST', params),
   syncModel: (): Promise<{ jobId: string; job: BridgeJob }> => api('/api/phone/sync-model', 'POST'),
   devices: (): Promise<{ jobId: string; job: BridgeJob }> => api('/api/phone/devices', 'POST'),
   status: (params: { deviceId?: string } = {}): Promise<{ jobId: string; job: BridgeJob }> =>

@@ -1018,11 +1018,11 @@ def _execute_matrix_manual_action(ctx, device_id: str, command: dict) -> dict:
     elif action in {"back", "home"}:
         action_body = {"action": action}
     elif action == "recent":
-        return {
-            "status": "failed",
-            "commandId": command_id,
-            "code": "matrix_control_unsupported",
-            "error": "当前手机控制协议暂不支持最近任务，请直接在手机界面操作。",
+        action_body = {
+            "action": "system_key",
+            "key": "recent",
+            "targetLabel": "system recent apps navigation",
+            "reason": "User requested the recent-apps control from Matrix",
         }
     elif action == "input_text":
         action_body = {"action": "input_text", "text": command["text"]}

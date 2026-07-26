@@ -1,5 +1,20 @@
 # 更新日志
 
+## v6.62 - 2026-07-26
+
+### Secure USB Binding
+- Added a nonce-based HMAC identity challenge before LOOM sends any phone token through a new ADB USB tunnel.
+- Kept the challenge unauthenticated but bound its proof to the configured phone token, APK package, version code, and one-time nonce.
+- Rejects outdated or forged phone endpoints before credentials are exposed.
+
+### Source Synchronization
+- Synchronized the committed APKClaw phone source through upstream commit `a7526e1e1608c9057dfff0946ba6e7bf84e051b3`.
+- Brought the deterministic hybrid RPA engine, durable action ledger, template lifecycle, trajectory compilation, production evidence channels, resumable comment campaigns, and the related regression suites into the LOOM monorepo.
+- Excluded all uncommitted upstream worktree changes and retained LOOM's reproducible OEM build interface.
+
+### Changes
+- Android version updated to `6.62-stability`, versionCode updated to `931`.
+
 ## v6.53 - 2026-07-14
 
 ### Node-aware Agent Taps

@@ -6,18 +6,27 @@ never return phone tokens to the frontend.
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import hashlib
+import hmac
 import os
 import re
 import json
+import secrets
+import signal
+import socket
 import subprocess
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Request
+from starlette.concurrency import run_in_threadpool
 
 from core.secret_store import DPAPI_PROVIDER, SECRET_MARKER, protect_secret, unprotect_secret
 
@@ -72,6 +81,8 @@ _PHONE_SCREENSHOT_CACHE: dict[str, dict] = {}
 _PHONE_EVENT_SYNC_LOCK = threading.Lock()
 _PHONE_EVENT_SYNC_STATE: dict[str, dict] = {}
 _PHONE_EVENT_SYNC_DISABLED_DEVICE_IDS: set[str] = set()
+_USB_IDENTITY_PROTOCOL = "loom-usb-bind-v3"
+_USB_IDENTITY_RESPONSE_MAX_BYTES = 16 * 1024
 _PHONE_ACTIVE_TASK_STATUSES = frozenset(
     {"queued", "pending", "submitted", "accepted", "running", "executing", "in_progress", "in-progress"}
 )
@@ -116,6 +127,14 @@ _SYNC_SECRET_KEYS = {
 }
 _PHONE_STORE_SECRET_FIELDS = ("token", "launcherSecret")
 _PHONE_RUNTIME_CONFIG_ENV = "LOOM_PHONE_RUNTIME_CONFIG_JSON"
+_PHONE_USB_TRANSACTIONS_KEY = "usbTransportTransactions"
+_PHONE_USB_REMOTE_PORTS = tuple(range(_DEFAULT_PHONE_PORT, _DEFAULT_PHONE_PORT + 10))
+_PHONE_USB_PORT_SCAN_RETRYABLE_STATUSES = {
+    "identity_check_failed",
+    "identity_response_too_large",
+    "phone_port_mismatch",
+    "secure_identity_unsupported",
+}
 
 OPENCLAW_ROOT = Path(__file__).resolve().parents[2]
 
@@ -166,6 +185,56 @@ def _encode_phone_store_secrets(store: dict) -> dict:
 
 def _write_phone_store(ctx, store: dict) -> None:
     ctx.write_json(_phone_store_path(ctx), _encode_phone_store_secrets(store))
+
+
+def _usb_cleanup_transaction(
+    *,
+    device_id: str,
+    operation: str,
+    serial: object,
+    local_port: object,
+    remote_port: object = _DEFAULT_PHONE_PORT,
+) -> dict:
+    return {
+        "id": f"usb-{secrets.token_hex(12)}",
+        "deviceId": _normalize_device_id(device_id),
+        "operation": _clip(operation, 40),
+        "serial": _clip(serial, 120),
+        "localPort": int(local_port or 0),
+        "remotePort": int(remote_port or _DEFAULT_PHONE_PORT),
+        "createdAt": int(time.time() * 1000),
+    }
+
+
+def _store_with_usb_transaction(store: dict, transaction: dict) -> dict:
+    transactions = [
+        item
+        for item in store.get(_PHONE_USB_TRANSACTIONS_KEY, [])
+        if isinstance(item, dict) and _clip(item.get("id"), 80) != _clip(transaction.get("id"), 80)
+    ]
+    transactions.append(dict(transaction))
+    return {**store, _PHONE_USB_TRANSACTIONS_KEY: transactions}
+
+
+def _store_without_usb_transaction(store: dict, transaction_id: object) -> dict:
+    safe_id = _clip(transaction_id, 80)
+    transactions = [
+        item
+        for item in store.get(_PHONE_USB_TRANSACTIONS_KEY, [])
+        if isinstance(item, dict) and _clip(item.get("id"), 80) != safe_id
+    ]
+    next_store = {**store}
+    if transactions:
+        next_store[_PHONE_USB_TRANSACTIONS_KEY] = transactions
+    else:
+        next_store.pop(_PHONE_USB_TRANSACTIONS_KEY, None)
+    return next_store
+
+
+def _reserve_usb_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
 
 
 def _clip(value: object, limit: int = 256) -> str:
@@ -220,7 +289,7 @@ def _public_device(device: dict) -> dict:
     token = str(device.get("token") or "").strip()
     launcher_id = str(device.get("launcherId") or "").strip()
     launcher_secret = str(device.get("launcherSecret") or "").strip()
-    return {
+    public = {
         "id": str(device.get("id") or "").strip(),
         "name": str(device.get("name") or "").strip(),
         "baseUrl": str(device.get("baseUrl") or "").strip().rstrip("/"),
@@ -229,6 +298,13 @@ def _public_device(device: dict) -> dict:
         "album": str(device.get("album") or "").strip(),
         "lastSeenAt": str(device.get("lastSeenAt") or "").strip(),
     }
+    connection_mode = str(device.get("connectionMode") or "").strip().lower()
+    if connection_mode in {"lan", "usb"}:
+        public["connectionMode"] = connection_mode
+    lan_base_url = str(device.get("lanBaseUrl") or "").strip().rstrip("/")
+    if lan_base_url:
+        public["lanBaseUrl"] = lan_base_url
+    return public
 
 
 def _public_store(store: dict) -> dict:
@@ -240,6 +316,169 @@ def _public_store(store: dict) -> dict:
         "selectedDeviceId": selected,
         "devices": [_public_device(item) for item in devices],
         "configured": any(str(item.get("baseUrl") or "").strip() and str(item.get("token") or "").strip() for item in devices),
+    }
+
+
+def _public_adb_connection(result: dict) -> dict:
+    public: dict = {}
+    for key in ("schema", "ok", "status", "serial", "localPort", "remotePort", "baseUrl", "message"):
+        if key in result:
+            public[key] = result[key]
+    devices = result.get("devices")
+    if isinstance(devices, list):
+        public["devices"] = [
+            {
+                key: device[key]
+                for key in ("serial", "state", "label")
+                if key in device
+            }
+            for device in devices
+            if isinstance(device, dict)
+        ]
+    return public
+
+
+def _public_adb_doctor(result: dict) -> dict:
+    public = _public_adb_connection(result)
+    for key in ("launchedPackage", "instructions"):
+        if key in result:
+            public[key] = result[key]
+    return public
+
+
+def _probe_phone_tunnel(
+    base_url: str,
+    token: str,
+    timeout_sec: int = 8,
+    expected_device_instance_id: str | None = None,
+    expected_listening_port: int = _DEFAULT_PHONE_PORT,
+) -> dict:
+    nonce = secrets.token_urlsafe(32)
+    request_body = json.dumps(
+        {"protocol": _USB_IDENTITY_PROTOCOL, "nonce": nonce},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    url = f"{_normalize_url(base_url)}/api/lumi/security/identity-challenge"
+    request = UrlRequest(
+        url,
+        data=request_body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_sec) as response:
+            payload_bytes = response.read(_USB_IDENTITY_RESPONSE_MAX_BYTES + 1)
+            status_code = int(getattr(response, "status", 200) or 200)
+    except HTTPError as exc:
+        status_code = int(getattr(exc, "code", 0) or 0)
+        if status_code in {404, 405}:
+            return {
+                "ok": False,
+                "status": "secure_identity_unsupported",
+                "message": "手机端版本不支持安全 USB 身份验证，请升级 APKClaw 后重试。",
+            }
+        return {
+            "ok": False,
+            "status": "identity_check_failed",
+            "message": f"USB 手机身份验证失败（HTTP {status_code or 'error'}）。",
+        }
+    except (URLError, TimeoutError, OSError):
+        return {
+            "ok": False,
+            "status": "identity_check_failed",
+            "message": "USB 转发已建立，但手机端 APKClaw 未返回安全身份挑战。",
+        }
+    if len(payload_bytes) > _USB_IDENTITY_RESPONSE_MAX_BYTES:
+        return {
+            "ok": False,
+            "status": "identity_response_too_large",
+            "message": "USB 端口返回的身份数据异常过大，已拒绝连接。",
+        }
+    payload_text = payload_bytes.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(payload_text) if payload_text.strip() else {}
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "status": "identity_check_failed",
+            "message": "USB 端口返回的不是 APKClaw 状态数据。",
+        }
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if status_code >= 400 or payload.get("success") is not True or not isinstance(data, dict):
+        return {
+            "ok": False,
+            "status": "identity_check_failed",
+            "message": "USB 端口未返回有效的 APKClaw 安全身份挑战。",
+        }
+    response_protocol = str(data.get("protocol") or "")
+    response_nonce = str(data.get("nonce") or "")
+    package_name = str(data.get("packageName") or "")
+    version_code = str(data.get("versionCode") or "")
+    device_instance_id = str(data.get("deviceInstanceId") or "").strip()
+    try:
+        listening_port = int(data.get("listeningPort"))
+    except (TypeError, ValueError):
+        listening_port = 0
+    proof = str(data.get("proof") or "")
+    if (
+        response_protocol != _USB_IDENTITY_PROTOCOL
+        or response_nonce != nonce
+        or not package_name
+        or not version_code
+        or not device_instance_id
+        or listening_port <= 0
+        or not proof
+    ):
+        return {
+            "ok": False,
+            "status": "identity_check_failed",
+            "message": "USB 端口返回的 APKClaw 身份挑战字段不完整。",
+        }
+    signature_input = "\n".join((
+        _USB_IDENTITY_PROTOCOL,
+        nonce,
+        package_name,
+        version_code,
+        device_instance_id,
+        str(listening_port),
+    )).encode("utf-8")
+    expected_proof = base64.urlsafe_b64encode(
+        hmac.new(
+            str(token or "").encode("utf-8"),
+            signature_input,
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii").rstrip("=")
+    if not token or not hmac.compare_digest(proof, expected_proof):
+        return {
+            "ok": False,
+            "status": "auth_failed",
+            "message": "USB 手机与当前配置不匹配，安全身份验证失败。",
+        }
+    if listening_port != int(expected_listening_port):
+        return {
+            "ok": False,
+            "status": "phone_port_mismatch",
+            "message": "USB 端口连接到了非标准手机服务，请关闭占用 9527 端口的应用后重试。",
+        }
+    expected_instance = str(expected_device_instance_id or "").strip()
+    if expected_instance and not hmac.compare_digest(device_instance_id, expected_instance):
+        return {
+            "ok": False,
+            "status": "device_identity_mismatch",
+            "message": "USB 连接的是另一台手机，请重新选择与当前配置匹配的设备。",
+        }
+    return {
+        "ok": True,
+        "status": "verified",
+        "version": str(data.get("version") or ""),
+        "versionCode": data.get("versionCode"),
+        "deviceInstanceId": device_instance_id,
+        "listeningPort": listening_port,
+        "message": "USB 手机身份验证通过。",
     }
 
 
@@ -412,35 +651,159 @@ def phone_daemon_status(*, base_root: str | os.PathLike[str] | None = None) -> d
     }
 
 
+def _stop_phone_daemon_pid(
+    pid: int,
+    *,
+    timeout_sec: float = 8.0,
+    allow_terminate: bool = False,
+) -> dict:
+    if pid <= 0:
+        return {"exited": False, "forced": False, "reason": "invalid_pid"}
+
+    timeout_ms = max(0, int(timeout_sec * 1000))
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        process_synchronize = 0x00100000
+        process_terminate = 0x0001
+        wait_object_0 = 0x00000000
+        wait_timeout = 0x00000102
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(process_synchronize | process_terminate, False, pid)
+        if not handle:
+            error_code = ctypes.get_last_error()
+            return {
+                "exited": error_code in {87, 1168},
+                "forced": False,
+                "reason": "not_running" if error_code in {87, 1168} else f"open_process_failed_{error_code}",
+            }
+        try:
+            result = kernel32.WaitForSingleObject(handle, timeout_ms)
+            if result == wait_object_0:
+                return {"exited": True, "forced": False, "reason": "graceful"}
+            if result != wait_timeout:
+                return {"exited": False, "forced": False, "reason": f"wait_failed_{result}"}
+            if not allow_terminate:
+                return {"exited": False, "forced": False, "reason": "process_identity_unverified"}
+            if not kernel32.TerminateProcess(handle, 1):
+                return {
+                    "exited": False,
+                    "forced": False,
+                    "reason": f"terminate_failed_{ctypes.get_last_error()}",
+                }
+            forced_result = kernel32.WaitForSingleObject(handle, 5_000)
+            return {
+                "exited": forced_result == wait_object_0,
+                "forced": True,
+                "reason": "forced" if forced_result == wait_object_0 else f"forced_wait_failed_{forced_result}",
+            }
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def process_exists() -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    deadline = time.monotonic() + timeout_sec
+    while process_exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if not process_exists():
+        return {"exited": True, "forced": False, "reason": "graceful"}
+    if not allow_terminate:
+        return {"exited": False, "forced": False, "reason": "process_identity_unverified"}
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return {"exited": True, "forced": False, "reason": "not_running"}
+    deadline = time.monotonic() + 5.0
+    while process_exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if not process_exists():
+        return {"exited": True, "forced": True, "reason": "terminated"}
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return {"exited": True, "forced": True, "reason": "not_running"}
+    deadline = time.monotonic() + 5.0
+    while process_exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return {
+        "exited": not process_exists(),
+        "forced": True,
+        "reason": "killed" if not process_exists() else "kill_timeout",
+    }
+
+
 def stop_phone_daemon(*, base_root: str | os.PathLike[str] | None = None) -> dict:
     try:
         runtime = read_phone_daemon_runtime(base_root=base_root)
     except FileNotFoundError:
         return {"ok": True, "running": False, "state": "stopped", "stopped": False, "reason": "not_running"}
     port = runtime.get("port")
-    if not isinstance(port, int) or port <= 0:
-        return {"ok": True, "running": False, "state": "stopped", "stopped": False, "reason": "invalid_runtime"}
-    request = UrlRequest(
-        f"http://127.0.0.1:{port}/shutdown",
-        data=b"{}",
-        method="POST",
-        headers={
-            "X-LOOM-PHONE-DAEMON-TOKEN": str(runtime.get("token") or ""),
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "application/json",
-        },
+    pid = int(runtime.get("pid") or 0)
+    payload: dict = {}
+    shutdown_requested = False
+    health = _phone_daemon_health(runtime)
+    identity_verified = bool(
+        health
+        and pid > 0
+        and int(health.get("pid") or 0) == pid
     )
-    try:
-        with urlopen(request, timeout=5) as response:
-            text = response.read().decode("utf-8", errors="replace")
-        payload = json.loads(text) if text else {}
-    except (HTTPError, URLError, OSError, TimeoutError, ValueError):
-        return {"ok": True, "running": False, "state": "stopped", "stopped": False, "reason": "not_running"}
+    if isinstance(port, int) and port > 0:
+        request = UrlRequest(
+            f"http://127.0.0.1:{port}/shutdown",
+            data=b"{}",
+            method="POST",
+            headers={
+                "X-LOOM-PHONE-DAEMON-TOKEN": str(runtime.get("token") or ""),
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urlopen(request, timeout=5) as response:
+                text = response.read().decode("utf-8", errors="replace")
+            payload = json.loads(text) if text else {}
+            shutdown_requested = bool(payload.get("ok", True))
+            response_pid = int(payload.get("pid") or 0)
+            if shutdown_requested and pid > 0 and response_pid == pid:
+                identity_verified = True
+        except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+            shutdown_requested = False
+
+    process_result = _stop_phone_daemon_pid(
+        pid,
+        allow_terminate=identity_verified,
+    ) if pid > 0 else {
+        "exited": not bool(health),
+        "forced": False,
+        "reason": "health_stopped" if not bool(health) else "missing_pid",
+    }
+    stopped = bool(process_result.get("exited"))
     return {
-        "ok": True,
-        "running": False,
-        "state": "stopped",
-        "stopped": bool(payload.get("ok", True)),
+        "ok": stopped,
+        "running": not stopped,
+        "state": "stopped" if stopped else "running",
+        "stopped": stopped,
+        "shutdownRequested": shutdown_requested,
+        "identityVerified": identity_verified,
+        "forced": bool(process_result.get("forced")),
+        "reason": str(process_result.get("reason") or ""),
     }
 
 
@@ -3205,6 +3568,11 @@ def _phone_runtime_config_json(ctx) -> str:
     for item in store.get("devices", []):
         if not isinstance(item, dict):
             continue
+        if (
+            str(item.get("connectionMode") or "").strip().lower() == "usb"
+            and item.get("usbIdentityVerified") is not True
+        ):
+            continue
         devices.append({
             key: item.get(key)
             for key in ("id", "name", "baseUrl", "token", "launcherId", "launcherSecret", "album", "tags", "priority")
@@ -3861,10 +4229,9 @@ def _upsert_device(store: dict, body: dict) -> dict:
     raw_id = body.get("id") or body.get("deviceId") or body.get("name") or "phone-1"
     device_id = _normalize_device_id(raw_id)
     existing = next((item for item in devices if str(item.get("id") or "").strip() == device_id), {})
-    base_url = _normalize_url(body.get("baseUrl") or body.get("phoneUrl") or existing.get("baseUrl") or "")
+    requested_base_url = body.get("baseUrl") or body.get("phoneUrl")
+    base_url = _normalize_url(requested_base_url or existing.get("baseUrl") or "")
     token = _clip(body.get("token"), 4096) or str(existing.get("token") or "").strip()
-    if not base_url:
-        raise ValueError("请输入手机 IP，例如 192.168.1.78")
     if not token:
         raise ValueError("请输入 APKClaw 连接令牌")
     next_device = {
@@ -3875,6 +4242,13 @@ def _upsert_device(store: dict, body: dict) -> dict:
         "token": token,
         "album": _clip(body.get("album") or existing.get("album") or "LOOM", 80),
     }
+    if str(existing.get("connectionMode") or "").strip().lower() == "usb":
+        active_base_url = _normalize_url(existing.get("baseUrl") or "")
+        if requested_base_url:
+            next_device["lanBaseUrl"] = base_url
+        next_device["baseUrl"] = active_base_url
+        if body.get("token") and token != str(existing.get("token") or "").strip():
+            next_device["usbIdentityVerified"] = False
     replaced = False
     next_devices: list[dict] = []
     for item in devices:
@@ -3943,6 +4317,247 @@ def _phone_sync_model_result(ctx) -> dict:
 
 
 def register_phone_routes(app, ctx) -> None:
+    phone_transport_write_lock = asyncio.Lock()
+
+    async def reconcile_usb_transport_transactions() -> dict:
+        store = _load_store(ctx)
+        transactions = [
+            item
+            for item in store.get(_PHONE_USB_TRANSACTIONS_KEY, [])
+            if isinstance(item, dict)
+        ]
+        completed_ids: list[str] = []
+        pending: list[dict] = []
+        for transaction in transactions:
+            local_port = int(transaction.get("localPort") or 0)
+            if local_port <= 0:
+                completed_ids.append(_clip(transaction.get("id"), 80))
+                continue
+            try:
+                cleanup = await run_in_threadpool(
+                    ctx.get_process_svc().phone_adb_forward_remove,
+                    serial=_clip(transaction.get("serial"), 120),
+                    local_port=local_port,
+                )
+            except Exception:
+                cleanup = {
+                    "ok": False,
+                    "status": "cleanup_failed",
+                    "message": "ADB 无法恢复未完成的 USB 连接事务。",
+                }
+            if cleanup.get("ok"):
+                completed_ids.append(_clip(transaction.get("id"), 80))
+            else:
+                pending.append({
+                    "deviceId": _normalize_device_id(transaction.get("deviceId")),
+                    "operation": _clip(transaction.get("operation"), 40),
+                    "connection": _public_adb_connection(cleanup),
+                })
+        next_store = store
+        for transaction_id in completed_ids:
+            next_store = _store_without_usb_transaction(next_store, transaction_id)
+        if completed_ids:
+            _write_phone_store(ctx, next_store)
+        return {
+            "ok": not pending,
+            "recovered": len(completed_ids),
+            "pending": pending,
+        }
+
+    async def reconcile_usb_transport_on_startup() -> None:
+        app.state.phone_usb_restore_blocked = True
+        try:
+            async with phone_transport_write_lock:
+                store = _load_store(ctx)
+                devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
+                usb_devices = [
+                    item
+                    for item in devices
+                    if str(item.get("connectionMode") or "").strip().lower() == "usb"
+                ]
+                if usb_devices:
+                    invalidated_devices = [
+                        {**item, "usbIdentityVerified": False}
+                        if str(item.get("connectionMode") or "").strip().lower() == "usb"
+                        else item
+                        for item in devices
+                    ]
+                    _write_phone_store(ctx, {**store, "devices": invalidated_devices})
+                    daemon = phone_daemon_status(base_root=ctx.paths.base_path)
+                    app.state.phone_usb_restart_daemon = bool(daemon.get("running"))
+                    if daemon.get("running") or daemon.get("pid"):
+                        stopped = await run_in_threadpool(stop_phone_daemon, base_root=ctx.paths.base_path)
+                        if not stopped.get("ok") or stopped.get("running"):
+                            app.state.phone_usb_restore_blocked = True
+                            ctx.append_log(
+                                "[phone-usb] startup restore blocked because the previous phone daemon did not exit"
+                            )
+                            return
+                result = await reconcile_usb_transport_transactions()
+            if result.get("pending"):
+                ctx.append_log(
+                    f"[phone-usb] startup reconciliation still has {len(result['pending'])} pending transaction(s)"
+                )
+            app.state.phone_usb_restore_blocked = False
+        except Exception as exc:
+            ctx.append_log(f"[phone-usb] startup reconciliation failed: {exc}")
+
+    async def restart_phone_daemon_after_usb_restore() -> None:
+        if not bool(getattr(app.state, "phone_usb_restart_daemon", False)):
+            return
+        app.state.phone_usb_restart_daemon = False
+        try:
+            await run_in_threadpool(
+                start_phone_daemon,
+                base_root=ctx.paths.base_path,
+                node_path=ctx.paths.node_exe,
+                runtime_config_json=_phone_runtime_config_json(ctx),
+            )
+        except OSError as exc:
+            ctx.append_log(f"[phone-usb] phone daemon restart failed after USB restore: {exc}")
+
+    async def restore_saved_usb_transports() -> None:
+        pending_device_ids: list[str] = []
+        for attempt in range(1, 4):
+            pending_device_ids = []
+            async with phone_transport_write_lock:
+                store = _load_store(ctx)
+                devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
+                next_devices = list(devices)
+                changed = False
+                for index, device in enumerate(devices):
+                    if str(device.get("connectionMode") or "").strip().lower() != "usb":
+                        continue
+                    device_id = _normalize_device_id(device.get("id"))
+                    serial = _clip(device.get("adbSerial"), 120)
+                    local_port = int(device.get("adbLocalPort") or 0)
+                    saved_remote_port = int(device.get("adbRemotePort") or _DEFAULT_PHONE_PORT)
+                    token = str(device.get("token") or "")
+                    if not serial or local_port <= 0 or not token:
+                        pending_device_ids.append(device_id)
+                        continue
+
+                    candidate_ports = [
+                        saved_remote_port,
+                        *(port for port in _PHONE_USB_REMOTE_PORTS if port != saved_remote_port),
+                    ]
+                    restored_device = None
+                    for candidate_index, remote_port in enumerate(candidate_ports):
+                        verification = (
+                            await run_in_threadpool(
+                                ctx.get_process_svc().phone_adb_forward_status,
+                                serial=serial,
+                                local_port=local_port,
+                                remote_port=remote_port,
+                            )
+                            if candidate_index == 0
+                            else {"ok": False, "status": "not_checked"}
+                        )
+                        connection = verification
+                        if not verification.get("ok"):
+                            connection = await run_in_threadpool(
+                                ctx.get_process_svc().phone_adb_forward,
+                                serial=serial,
+                                local_port=local_port,
+                                remote_port=remote_port,
+                            )
+                        if not connection.get("ok"):
+                            break
+
+                        identity = await run_in_threadpool(
+                            _probe_phone_tunnel,
+                            str(connection.get("baseUrl") or device.get("baseUrl") or ""),
+                            token,
+                            8,
+                            str(device.get("deviceInstanceId") or ""),
+                            remote_port,
+                        )
+                        if identity.get("ok"):
+                            restored_device = {
+                                **device,
+                                "baseUrl": _normalize_url(connection.get("baseUrl")),
+                                "adbRemotePort": remote_port,
+                                "usbIdentityVerified": True,
+                            }
+                            identity_id = _clip(identity.get("deviceInstanceId"), 120)
+                            if identity_id:
+                                restored_device["deviceInstanceId"] = identity_id
+                            break
+
+                        cleanup = await run_in_threadpool(
+                            ctx.get_process_svc().phone_adb_forward_remove,
+                            serial=serial,
+                            local_port=local_port,
+                        )
+                        if not cleanup.get("ok"):
+                            ctx.append_log(
+                                f"[phone-usb] rejected unverified tunnel cleanup failed for {device_id}"
+                            )
+                            break
+                        if str(identity.get("status") or "") not in _PHONE_USB_PORT_SCAN_RETRYABLE_STATUSES:
+                            break
+
+                    if restored_device is None:
+                        pending_device_ids.append(device_id)
+                        if device.get("usbIdentityVerified") is not False:
+                            next_devices[index] = {**device, "usbIdentityVerified": False}
+                            changed = True
+                        continue
+
+                    if restored_device != device:
+                        next_devices[index] = restored_device
+                        changed = True
+                if changed:
+                    _write_phone_store(ctx, {**store, "devices": next_devices})
+            if not pending_device_ids:
+                ctx.append_log("[phone-usb] restored all saved USB phone transports")
+                await restart_phone_daemon_after_usb_restore()
+                return
+            if attempt < 3:
+                await asyncio.sleep(attempt)
+        if pending_device_ids:
+            ctx.append_log(
+                "[phone-usb] saved USB transport restore remains pending for: "
+                + ", ".join(sorted(set(pending_device_ids)))
+            )
+        await restart_phone_daemon_after_usb_restore()
+
+    async def start_saved_usb_transport_restore() -> None:
+        if bool(getattr(app.state, "phone_usb_restore_blocked", False)):
+            return
+        app.state.phone_usb_restore_task = asyncio.create_task(restore_saved_usb_transports())
+
+    async def stop_saved_usb_transport_restore() -> None:
+        task = getattr(app.state, "phone_usb_restore_task", None)
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    app.router.on_startup.append(reconcile_usb_transport_on_startup)
+    app.router.on_startup.append(start_saved_usb_transport_restore)
+    app.router.on_shutdown.append(stop_saved_usb_transport_restore)
+
+    @app.middleware("http")
+    async def serialize_phone_transport_writes(request: Request, call_next):
+        path = request.url.path.rstrip("/")
+        serializes_transport = (
+            path.startswith("/api/phone/usb/")
+            or path == "/api/phone/config"
+            or path == "/api/phone/adb-doctor"
+            or (
+                request.method in {"POST", "DELETE"}
+                and (
+                    path == "/api/phone/config/device"
+                    or path.startswith("/api/phone/config/device/")
+                )
+            )
+        )
+        if serializes_transport:
+            async with phone_transport_write_lock:
+                return await call_next(request)
+        return await call_next(request)
+
     @app.api_route("/api/phone/config", methods=["GET", "POST"])
     async def phone_config(request: Request):
         if error := ctx.auth_error(request):
@@ -3974,23 +4589,76 @@ def register_phone_routes(app, ctx) -> None:
         safe_id = _normalize_device_id(device_id)
         store = _load_store(ctx)
         devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
-        if not any(_normalize_device_id(item.get("id")) == safe_id for item in devices):
+        deleted_device = next(
+            (item for item in devices if _normalize_device_id(item.get("id")) == safe_id),
+            None,
+        )
+        if not deleted_device:
             return ctx.fastapi_json({"error": "phone device not found", "deviceId": safe_id}, 404)
-
-        # Block late process output before terminating the stream, so deleted
-        # credentials cannot be re-registered by an in-flight heartbeat.
-        with _PHONE_EVENT_SYNC_LOCK:
-            _PHONE_EVENT_SYNC_DISABLED_DEVICE_IDS.add(safe_id)
-        sync_status = _stop_phone_event_sync(safe_id)
-        with _PHONE_EVENT_SYNC_LOCK:
-            _PHONE_EVENT_SYNC_STATE.pop(_phone_event_sync_key(safe_id), None)
 
         remaining = [item for item in devices if _normalize_device_id(item.get("id")) != safe_id]
         selected_id = _normalize_device_id(store.get("selectedDeviceId") or "", "")
         if selected_id == safe_id or not any(_normalize_device_id(item.get("id")) == selected_id for item in remaining):
             selected_id = _normalize_device_id(remaining[0].get("id"), "") if remaining else ""
         next_store = {**store, "selectedDeviceId": selected_id, "devices": remaining}
-        _write_phone_store(ctx, next_store)
+        delete_transaction = None
+        if str(deleted_device.get("connectionMode") or "").strip().lower() == "usb":
+            delete_transaction = _usb_cleanup_transaction(
+                device_id=safe_id,
+                operation="delete",
+                serial=deleted_device.get("adbSerial"),
+                local_port=deleted_device.get("adbLocalPort"),
+            )
+            next_store = _store_with_usb_transaction(next_store, delete_transaction)
+        try:
+            _write_phone_store(ctx, next_store)
+        except Exception:
+            return ctx.fastapi_json({
+                "error": "手机配置删除失败，原连接和 USB 转发均已保留。",
+                "code": "phone_config_delete_write_failed",
+            }, 500)
+
+        usb_cleanup = None
+        if delete_transaction:
+            try:
+                usb_cleanup = await run_in_threadpool(
+                    ctx.get_process_svc().phone_adb_forward_remove,
+                    serial=_clip(deleted_device.get("adbSerial"), 120),
+                    local_port=int(deleted_device.get("adbLocalPort") or 0),
+                )
+            except Exception:
+                usb_cleanup = {
+                    "ok": False,
+                    "status": "cleanup_failed",
+                    "message": "ADB 无法清理当前 USB 手机连接。",
+                }
+            if not usb_cleanup.get("ok"):
+                try:
+                    _write_phone_store(ctx, store)
+                except Exception:
+                    return ctx.fastapi_json({
+                        "error": "USB 转发清理失败，且手机配置回滚失败；请立即运行环境诊断。",
+                        "code": "phone_config_delete_rollback_failed",
+                        "connection": _public_adb_connection(usb_cleanup),
+                    }, 500)
+                return ctx.fastapi_json({
+                    "error": str(usb_cleanup.get("message") or "无法清理当前 USB 手机连接"),
+                    "code": str(usb_cleanup.get("status") or "usb_cleanup_failed"),
+                    "connection": _public_adb_connection(usb_cleanup),
+                }, 409)
+            next_store = _store_without_usb_transaction(next_store, delete_transaction["id"])
+            try:
+                _write_phone_store(ctx, next_store)
+            except Exception:
+                ctx.append_log("[phone-usb] deleted tunnel; recovery record remains for idempotent retry")
+
+        # Block late process output only after durable deletion and transport
+        # cleanup both succeed.
+        with _PHONE_EVENT_SYNC_LOCK:
+            _PHONE_EVENT_SYNC_DISABLED_DEVICE_IDS.add(safe_id)
+        sync_status = _stop_phone_event_sync(safe_id)
+        with _PHONE_EVENT_SYNC_LOCK:
+            _PHONE_EVENT_SYNC_STATE.pop(_phone_event_sync_key(safe_id), None)
 
         try:
             from core.phone_matrix import MatrixControlPlane
@@ -4002,6 +4670,8 @@ def register_phone_routes(app, ctx) -> None:
         public = _public_store(next_store)
         public["deletedDeviceId"] = safe_id
         public["eventSync"] = {**sync_status, "running": False}
+        if isinstance(usb_cleanup, dict):
+            public["usbCleanup"] = _public_adb_connection(usb_cleanup)
         return ctx.fastapi_json(public)
 
     @app.post("/api/phone/sync-model")
@@ -4090,13 +4760,404 @@ def register_phone_routes(app, ctx) -> None:
         restart_server = True if "restartServer" not in body and "restart_server" not in body else _phone_bool(
             body.get("restartServer", body.get("restart_server"))
         )
-        result = ctx.get_process_svc().phone_adb_doctor(
+        result = await run_in_threadpool(
+            ctx.get_process_svc().phone_adb_doctor,
             serial=_clip(body.get("serial") or body.get("deviceId") or body.get("device_id"), 120),
             wake=wake,
             launch=launch,
             restart_server=restart_server,
         )
-        return ctx.fastapi_json(result)
+        return ctx.fastapi_json(_public_adb_doctor(result))
+
+    @app.get("/api/phone/usb/devices")
+    async def phone_usb_devices(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        result = await run_in_threadpool(ctx.get_process_svc().phone_adb_devices)
+        status_code = 200 if result.get("ok") else 409
+        return ctx.fastapi_json(_public_adb_connection(result), status_code)
+
+    @app.post("/api/phone/usb/reconcile")
+    async def phone_usb_reconcile(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        result = await reconcile_usb_transport_transactions()
+        return ctx.fastapi_json(result, 200 if result.get("ok") else 409)
+
+    @app.post("/api/phone/usb/connect")
+    async def phone_usb_connect(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        if not _phone_bool(body.get("confirmed")):
+            return ctx.fastapi_json({"error": "USB 手机连接需要明确确认"}, 403)
+
+        device_id = _normalize_device_id(body.get("deviceId") or body.get("device_id"))
+        store = _load_store(ctx)
+        devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
+        device = next((item for item in devices if _normalize_device_id(item.get("id")) == device_id), None)
+        if not device:
+            return ctx.fastapi_json({"error": "phone device not found", "deviceId": device_id}, 404)
+
+        existing_usb = str(device.get("connectionMode") or "").strip().lower() == "usb"
+        previous_usb: dict | None = None
+        if existing_usb:
+            device = {**device, "usbIdentityVerified": False}
+            devices = [
+                device if _normalize_device_id(item.get("id")) == device_id else item
+                for item in devices
+            ]
+            store = {**store, "devices": devices}
+            try:
+                _write_phone_store(ctx, store)
+            except Exception:
+                return ctx.fastapi_json({
+                    "error": "无法撤销旧 USB 身份状态，连接未重新验证。",
+                    "code": "usb_identity_invalidation_failed",
+                }, 500)
+            previous_usb = {
+                "serial": _clip(device.get("adbSerial"), 120),
+                "localPort": int(device.get("adbLocalPort") or 0),
+                "remotePort": int(device.get("adbRemotePort") or _DEFAULT_PHONE_PORT),
+            }
+            verification = await run_in_threadpool(
+                ctx.get_process_svc().phone_adb_forward_status,
+                serial=previous_usb["serial"],
+                local_port=previous_usb["localPort"],
+                remote_port=previous_usb["remotePort"],
+            )
+            if verification.get("ok"):
+                identity = await run_in_threadpool(
+                    _probe_phone_tunnel,
+                    str(device.get("baseUrl") or verification.get("baseUrl") or ""),
+                    str(device.get("token") or ""),
+                    8,
+                    str(device.get("deviceInstanceId") or ""),
+                    previous_usb["remotePort"],
+                )
+                if identity.get("ok"):
+                    identity_id = _clip(identity.get("deviceInstanceId"), 120)
+                    if (
+                        device.get("usbIdentityVerified") is not True
+                        or int(device.get("adbRemotePort") or _DEFAULT_PHONE_PORT) != previous_usb["remotePort"]
+                        or (identity_id and not str(device.get("deviceInstanceId") or "").strip())
+                    ):
+                        bound_device = {
+                            **device,
+                            "usbIdentityVerified": True,
+                            "adbRemotePort": previous_usb["remotePort"],
+                        }
+                        if identity_id:
+                            bound_device["deviceInstanceId"] = identity_id
+                        store = {
+                            **store,
+                            "devices": [
+                                bound_device
+                                if _normalize_device_id(item.get("id")) == device_id
+                                else item
+                                for item in devices
+                            ],
+                        }
+                        _write_phone_store(ctx, store)
+                    return ctx.fastapi_json({
+                        "ok": True,
+                        "connection": {
+                            **_public_adb_connection(verification),
+                            "status": "already_usb",
+                        },
+                        "config": _public_store(store),
+                    })
+
+        lan_base_url = str(
+            (device.get("lanBaseUrl") if existing_usb else device.get("baseUrl")) or ""
+        ).strip()
+
+        requested_serial = _clip(body.get("serial"), 120) or (
+            _clip(device.get("adbSerial"), 120) if existing_usb else None
+        )
+        reserved_local_port = _reserve_usb_local_port()
+        connect_transaction = _usb_cleanup_transaction(
+            device_id=device_id,
+            operation="connect",
+            serial=requested_serial,
+            local_port=reserved_local_port,
+        )
+        prepared_store = _store_with_usb_transaction(store, connect_transaction)
+        try:
+            _write_phone_store(ctx, prepared_store)
+        except Exception:
+            return ctx.fastapi_json({
+                "error": "无法保存 USB 连接恢复记录，尚未建立端口转发。",
+                "code": "usb_transaction_prepare_failed",
+            }, 500)
+        result: dict = {}
+        identity: dict = {}
+        for remote_port in _PHONE_USB_REMOTE_PORTS:
+            result = await run_in_threadpool(
+                ctx.get_process_svc().phone_adb_forward,
+                serial=requested_serial,
+                local_port=reserved_local_port,
+                remote_port=remote_port,
+            )
+            connect_transaction = {
+                **connect_transaction,
+                "serial": _clip(result.get("serial") or requested_serial, 120),
+                "localPort": int(result.get("localPort") or reserved_local_port),
+                "remotePort": remote_port,
+            }
+            prepared_store = _store_with_usb_transaction(prepared_store, connect_transaction)
+            try:
+                _write_phone_store(ctx, prepared_store)
+            except Exception:
+                cleanup = (
+                    await run_in_threadpool(
+                        ctx.get_process_svc().phone_adb_forward_remove,
+                        serial=connect_transaction["serial"],
+                        local_port=connect_transaction["localPort"],
+                    )
+                    if result.get("ok")
+                    else {"ok": True, "status": "not_connected"}
+                )
+                return ctx.fastapi_json({
+                    "error": (
+                        "USB 转发已撤销，但恢复记录更新失败，请重试。"
+                        if cleanup.get("ok")
+                        else "USB 恢复记录更新失败，且新建转发未能撤销；请运行环境诊断。"
+                    ),
+                    "code": (
+                        "usb_transaction_update_failed"
+                        if cleanup.get("ok")
+                        else "usb_transaction_update_and_cleanup_failed"
+                    ),
+                    "cleanup": _public_adb_connection(cleanup),
+                }, 500)
+            if not result.get("ok"):
+                return ctx.fastapi_json({
+                    "error": str(result.get("message") or "USB 手机连接失败"),
+                    "code": str(result.get("status") or "usb_connect_failed"),
+                    "connection": _public_adb_connection(result),
+                    "cleanupPending": True,
+                }, 409)
+
+            identity = await run_in_threadpool(
+                _probe_phone_tunnel,
+                str(result.get("baseUrl") or ""),
+                str(device.get("token") or ""),
+                8,
+                str(device.get("deviceInstanceId") or ""),
+                remote_port,
+            )
+            if identity.get("ok"):
+                break
+
+            cleanup = await run_in_threadpool(
+                ctx.get_process_svc().phone_adb_forward_remove,
+                serial=_clip(result.get("serial"), 120),
+                local_port=int(result.get("localPort") or 0),
+            )
+            if not cleanup.get("ok"):
+                return ctx.fastapi_json({
+                    "error": "USB 手机身份验证失败，且新建转发未能自动撤销；请运行环境诊断。",
+                    "code": "usb_identity_cleanup_failed",
+                    "connection": _public_adb_connection({**result, "ok": False}),
+                    "cleanup": _public_adb_connection(cleanup),
+                }, 500)
+            if (
+                str(identity.get("status") or "") in _PHONE_USB_PORT_SCAN_RETRYABLE_STATUSES
+                and remote_port != _PHONE_USB_REMOTE_PORTS[-1]
+            ):
+                continue
+            try:
+                _write_phone_store(
+                    ctx,
+                    _store_without_usb_transaction(prepared_store, connect_transaction["id"]),
+                )
+            except Exception:
+                ctx.append_log("[phone-usb] verified failed tunnel cleanup; recovery record remains")
+            return ctx.fastapi_json({
+                "error": str(identity.get("message") or "USB 手机身份验证失败"),
+                "code": str(identity.get("status") or "usb_identity_failed"),
+                "connection": _public_adb_connection({**result, "ok": False}),
+                "cleanup": _public_adb_connection(cleanup),
+            }, 409)
+
+        next_device = {
+            **device,
+            "baseUrl": _normalize_url(result.get("baseUrl")),
+            "lanBaseUrl": _normalize_url(lan_base_url),
+            "connectionMode": "usb",
+            "adbSerial": _clip(result.get("serial"), 120),
+            "adbLocalPort": int(result.get("localPort") or 0),
+            "adbRemotePort": int(result.get("remotePort") or _DEFAULT_PHONE_PORT),
+            "usbIdentityVerified": True,
+        }
+        identity_id = _clip(identity.get("deviceInstanceId"), 120)
+        if identity_id:
+            next_device["deviceInstanceId"] = identity_id
+        next_store = {
+            **_store_without_usb_transaction(prepared_store, connect_transaction["id"]),
+            "selectedDeviceId": device_id,
+            "devices": [next_device if _normalize_device_id(item.get("id")) == device_id else item for item in devices],
+        }
+        previous_cleanup_transaction = None
+        if (
+            previous_usb
+            and previous_usb.get("serial")
+            and previous_usb.get("localPort")
+            and (
+                previous_usb["serial"] != _clip(result.get("serial"), 120)
+                or previous_usb["localPort"] != int(result.get("localPort") or 0)
+            )
+        ):
+            previous_cleanup_transaction = _usb_cleanup_transaction(
+                device_id=device_id,
+                operation="replace_previous",
+                serial=previous_usb["serial"],
+                local_port=previous_usb["localPort"],
+            )
+            next_store = _store_with_usb_transaction(next_store, previous_cleanup_transaction)
+        try:
+            _write_phone_store(ctx, next_store)
+        except Exception:
+            cleanup = await run_in_threadpool(
+                ctx.get_process_svc().phone_adb_forward_remove,
+                serial=_clip(result.get("serial"), 120),
+                local_port=int(result.get("localPort") or 0),
+            )
+            if not cleanup.get("ok"):
+                return ctx.fastapi_json({
+                    "error": "手机配置保存失败，且新建 USB 转发未能自动撤销；请运行环境诊断。",
+                    "code": "usb_config_write_and_cleanup_failed",
+                    "cleanup": _public_adb_connection(cleanup),
+                }, 500)
+            try:
+                _write_phone_store(
+                    ctx,
+                    _store_without_usb_transaction(prepared_store, connect_transaction["id"]),
+                )
+            except Exception:
+                ctx.append_log("[phone-usb] cleanup succeeded; recovery record remains for idempotent retry")
+            return ctx.fastapi_json({
+                "error": "USB 转发已撤销，但手机配置保存失败，请重试。",
+                "code": "usb_config_write_failed",
+            }, 500)
+        previous_cleanup = None
+        if previous_cleanup_transaction:
+            previous_cleanup = await run_in_threadpool(
+                ctx.get_process_svc().phone_adb_forward_remove,
+                serial=previous_usb["serial"],
+                local_port=previous_usb["localPort"],
+            )
+            if previous_cleanup.get("ok"):
+                next_store = _store_without_usb_transaction(
+                    next_store,
+                    previous_cleanup_transaction["id"],
+                )
+                try:
+                    _write_phone_store(ctx, next_store)
+                except Exception:
+                    ctx.append_log("[phone-usb] previous tunnel removed; recovery record remains")
+            else:
+                ctx.append_log(
+                    "[phone-usb] new tunnel saved, but previous tunnel cleanup is pending: "
+                    f"{previous_usb['serial']}:{previous_usb['localPort']}"
+                )
+        _stop_phone_event_sync(device_id)
+        public = _public_store(next_store)
+        public["eventSync"] = _ensure_phone_event_syncs_for_saved_devices(ctx, device_ids=[device_id])
+        return ctx.fastapi_json({
+            "ok": True,
+            "connection": _public_adb_connection({**result, "identity": identity}),
+            "config": public,
+            **(
+                {
+                    "cleanupPending": True,
+                    "warning": "新的 USB 连接已生效，但旧转发未能清理；请运行环境诊断。",
+                    "previousCleanup": _public_adb_connection(previous_cleanup),
+                }
+                if previous_cleanup and not previous_cleanup.get("ok")
+                else {}
+            ),
+        })
+
+    @app.post("/api/phone/usb/disconnect")
+    async def phone_usb_disconnect(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        if not _phone_bool(body.get("confirmed")):
+            return ctx.fastapi_json({"error": "断开 USB 手机连接需要明确确认"}, 403)
+
+        device_id = _normalize_device_id(body.get("deviceId") or body.get("device_id"))
+        store = _load_store(ctx)
+        devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
+        device = next((item for item in devices if _normalize_device_id(item.get("id")) == device_id), None)
+        if not device:
+            return ctx.fastapi_json({"error": "phone device not found", "deviceId": device_id}, 404)
+
+        lan_base_url = str(device.get("lanBaseUrl") or "").strip()
+        if str(device.get("connectionMode") or "").lower() != "usb":
+            return ctx.fastapi_json({
+                "ok": True,
+                "connection": {"ok": True, "status": "already_lan", "message": "当前已使用局域网连接。"},
+                "config": _public_store(store),
+            })
+        next_device = {
+            **device,
+            "baseUrl": _normalize_url(lan_base_url),
+            "connectionMode": "lan",
+        }
+        next_device.pop("lanBaseUrl", None)
+        next_device.pop("adbSerial", None)
+        next_device.pop("adbLocalPort", None)
+        next_device.pop("adbRemotePort", None)
+        next_device.pop("usbIdentityVerified", None)
+        next_store = {
+            **store,
+            "selectedDeviceId": device_id,
+            "devices": [next_device if _normalize_device_id(item.get("id")) == device_id else item for item in devices],
+        }
+        disconnect_transaction = _usb_cleanup_transaction(
+            device_id=device_id,
+            operation="disconnect",
+            serial=device.get("adbSerial"),
+            local_port=device.get("adbLocalPort"),
+        )
+        next_store = _store_with_usb_transaction(next_store, disconnect_transaction)
+        _write_phone_store(ctx, next_store)
+        result = await run_in_threadpool(
+            ctx.get_process_svc().phone_adb_forward_remove,
+            serial=_clip(device.get("adbSerial"), 120),
+            local_port=int(device.get("adbLocalPort") or 0),
+        )
+        if not result.get("ok"):
+            try:
+                _write_phone_store(ctx, store)
+            except Exception:
+                return ctx.fastapi_json({
+                    "error": "USB 连接断开失败，且原手机配置回滚失败；请立即运行环境诊断。",
+                    "code": "usb_disconnect_rollback_failed",
+                    "connection": _public_adb_connection(result),
+                }, 500)
+            return ctx.fastapi_json({
+                "error": str(result.get("message") or "USB 手机连接断开失败"),
+                "code": str(result.get("status") or "usb_disconnect_failed"),
+                "connection": _public_adb_connection(result),
+            }, 409)
+
+        next_store = _store_without_usb_transaction(next_store, disconnect_transaction["id"])
+        try:
+            _write_phone_store(ctx, next_store)
+        except Exception:
+            ctx.append_log("[phone-usb] disconnected tunnel; recovery record remains for idempotent retry")
+        _stop_phone_event_sync(device_id)
+        public = _public_store(next_store)
+        public["eventSync"] = _ensure_phone_event_syncs_for_saved_devices(ctx, device_ids=[device_id])
+        return ctx.fastapi_json({
+            "ok": True,
+            "connection": _public_adb_connection(result),
+            "config": public,
+        })
 
     @app.post("/api/phone/events/start")
     async def phone_events_start(request: Request):

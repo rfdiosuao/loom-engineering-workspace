@@ -12,15 +12,50 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+
+internal class RpaExecutionLease internal constructor(
+    private val release: () -> Unit
+) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) release()
+    }
+}
 
 object RpaWorkflowRunner {
     private const val TAG = "RpaWorkflowRunner"
     private val gson = GsonBuilder().setPrettyPrinting().create()
     private val executor = Executors.newSingleThreadExecutor()
-    private val active = AtomicBoolean(false)
+    private val activeOwner = AtomicReference<Any?>(null)
     private val runs = ConcurrentHashMap<String, MutableRun>()
+    private val handoffs = ConcurrentHashMap<String, AgentHandoffContext>()
+    @Volatile
+    private var hybridEngine: HybridWorkflowExecutor? = null
 
-    fun start(workflow: RpaWorkflow): RpaStartResult {
+    fun installHybridEngine(engine: HybridWorkflowExecutor?) {
+        hybridEngine = engine
+    }
+
+    fun isHybridEngineInstalled(): Boolean = hybridEngine != null
+
+    fun isAccessibilityReady(): Boolean = ClawAccessibilityService.getInstance() != null
+
+    fun runHybridValidation(workflow: RpaWorkflow): HybridRunResult? {
+        val engine = hybridEngine ?: return null
+        val errors = RpaWorkflowParser.validate(workflow)
+        if (errors.isNotEmpty()) return null
+        return engine.runValidation(
+            workflow = workflow,
+            runId = "validation_${UUID.randomUUID().toString().take(12)}"
+        )
+    }
+
+    fun start(workflow: RpaWorkflow): RpaStartResult =
+        if (workflow.executionMode == HYBRID_EXECUTION_MODE) startHybrid(workflow) else startLegacy(workflow)
+
+    private fun startLegacy(workflow: RpaWorkflow): RpaStartResult {
         val validationErrors = RpaWorkflowParser.validate(workflow)
         if (validationErrors.isNotEmpty()) {
             return RpaStartResult(
@@ -38,7 +73,8 @@ object RpaWorkflowRunner {
                 retryable = true
             )
         }
-        if (!active.compareAndSet(false, true)) {
+        val executionLease = tryAcquireExecutionLease()
+        if (executionLease == null) {
             return RpaStartResult(
                 accepted = false,
                 errorCode = "rpa_busy",
@@ -47,38 +83,133 @@ object RpaWorkflowRunner {
             )
         }
 
-        val now = System.currentTimeMillis()
-        val runId = "rpa_${UUID.randomUUID().toString().take(8)}"
-        val run = MutableRun(
-            workflow = workflow,
-            snapshot = RpaRunSnapshot(
-                runId = runId,
-                workflowId = workflow.id,
-                workflowName = workflow.name,
-                status = RpaRunStatus.QUEUED,
-                currentStep = 0,
-                totalSteps = workflow.steps.size,
-                message = "queued",
-                startedAt = now,
-                updatedAt = now
+        try {
+            val now = System.currentTimeMillis()
+            val runId = "rpa_${UUID.randomUUID().toString().take(8)}"
+            val run = MutableRun(
+                workflow = workflow,
+                snapshot = RpaRunSnapshot(
+                    runId = runId,
+                    workflowId = workflow.id,
+                    workflowName = workflow.name,
+                    status = RpaRunStatus.QUEUED,
+                    currentStep = 0,
+                    totalSteps = workflow.steps.size,
+                    message = "queued",
+                    startedAt = now,
+                    updatedAt = now
+                )
             )
-        )
-        runs[runId] = run
-        persist(run.snapshot())
+            runs[runId] = run
+            persist(run.snapshot())
 
-        executor.submit {
-            try {
+            submitWithLease(executionLease) {
                 execute(run)
-            } finally {
-                active.set(false)
             }
+            return RpaStartResult(accepted = true, snapshot = run.snapshot())
+        } catch (error: Throwable) {
+            executionLease.close()
+            throw error
         }
-        return RpaStartResult(accepted = true, snapshot = run.snapshot())
+    }
+
+    private fun startHybrid(workflow: RpaWorkflow): RpaStartResult {
+        val validationErrors = RpaWorkflowParser.validate(workflow)
+        if (validationErrors.isNotEmpty()) {
+            return RpaStartResult(
+                accepted = false,
+                errorCode = "invalid_workflow",
+                message = validationErrors.joinToString("; "),
+                retryable = false
+            )
+        }
+        val engine = hybridEngine ?: return RpaStartResult(
+            accepted = false,
+            errorCode = "hybrid_engine_unavailable",
+            message = "Hybrid RPA engine is not configured",
+            retryable = false
+        )
+        if (ClawAccessibilityService.getInstance() == null) {
+            return RpaStartResult(
+                accepted = false,
+                errorCode = "accessibility_reenable_required",
+                message = "Accessibility service is not running",
+                retryable = true
+            )
+        }
+        val executionLease = tryAcquireExecutionLease()
+        if (executionLease == null) {
+            return RpaStartResult(
+                accepted = false,
+                errorCode = "rpa_busy",
+                message = "An RPA workflow is already running",
+                retryable = true
+            )
+        }
+
+        try {
+            val now = System.currentTimeMillis()
+            val runId = "rpa_${UUID.randomUUID().toString().take(8)}"
+            val run = MutableRun(
+                workflow = workflow,
+                snapshot = RpaRunSnapshot(
+                    runId = runId,
+                    workflowId = workflow.id,
+                    workflowName = workflow.name,
+                    status = RpaRunStatus.QUEUED,
+                    currentStep = 0,
+                    totalSteps = workflow.steps.size,
+                    message = "queued",
+                    startedAt = now,
+                    updatedAt = now,
+                    mode = HYBRID_EXECUTION_MODE
+                )
+            )
+            runs[runId] = run
+            persist(run.snapshot())
+
+            submitWithLease(executionLease) {
+                executeHybrid(run, engine)
+            }
+            return RpaStartResult(accepted = true, snapshot = run.snapshot())
+        } catch (error: Throwable) {
+            executionLease.close()
+            throw error
+        }
     }
 
     fun get(runId: String): RpaRunSnapshot? = runs[runId]?.snapshot()
 
+    fun getAgentHandoff(runId: String): AgentHandoffContext? = handoffs[runId]
+
     fun list(): List<RpaRunSnapshot> = runs.values.map { it.snapshot() }.sortedByDescending { it.updatedAt }
+
+    fun isIdle(): Boolean = activeOwner.get() == null
+
+    internal fun tryAcquireExecutionLease(): RpaExecutionLease? = tryAcquireLease()
+
+    internal fun tryAcquireValidationLease(): RpaExecutionLease? = tryAcquireLease()
+
+    private fun tryAcquireLease(): RpaExecutionLease? {
+        val owner = Any()
+        if (!activeOwner.compareAndSet(null, owner)) return null
+        return RpaExecutionLease { activeOwner.compareAndSet(owner, null) }
+    }
+
+    private fun submitWithLease(lease: RpaExecutionLease, action: () -> Unit) {
+        try {
+            executor.submit {
+                try {
+                    action()
+                } finally {
+                    lease.close()
+                }
+            }
+        } catch (error: Throwable) {
+            lease.close()
+            throw error
+        }
+    }
 
     fun cancel(runId: String): RpaRunSnapshot? {
         val run = runs[runId] ?: return null
@@ -202,6 +333,99 @@ object RpaWorkflowRunner {
             retryable = false,
             finishedAt = System.currentTimeMillis()
         )
+    }
+
+    private fun executeHybrid(run: MutableRun, engine: HybridWorkflowExecutor) {
+        val initial = run.snapshot()
+        run.update(status = RpaRunStatus.RUNNING, message = "running")
+        try {
+            val deadlineAt = if (run.workflow.maxDurationMs <= 0L ||
+                initial.startedAt > Long.MAX_VALUE - run.workflow.maxDurationMs
+            ) Long.MAX_VALUE else initial.startedAt + run.workflow.maxDurationMs
+            val result = engine.run(
+                workflow = run.workflow,
+                runId = initial.runId,
+                cancelled = { run.cancelRequested.get() },
+                deadlineAt = deadlineAt
+            )
+            result.handoffContext?.let { handoffs[initial.runId] = it } ?: handoffs.remove(initial.runId)
+            result.steps.forEach(run::addStep)
+            val status = when {
+                result.success -> RpaRunStatus.SUCCEEDED
+                result.errorCode == "cancelled" -> RpaRunStatus.CANCELLED
+                else -> RpaRunStatus.FAILED
+            }
+            val stoppedIndex = when {
+                result.success -> run.workflow.steps.size
+                result.stoppedStepIndex > 0 -> result.stoppedStepIndex
+                else -> result.steps.size
+            }
+            val stoppedStep = run.workflow.steps.getOrNull((stoppedIndex - 1).coerceAtLeast(0))
+            run.update(
+                status = status,
+                currentStep = stoppedIndex,
+                currentStepId = stoppedStep?.id.orEmpty(),
+                currentAction = stoppedStep?.action.orEmpty(),
+                message = if (result.success) "Hybrid RPA workflow completed" else result.errorCode,
+                errorCode = result.errorCode,
+                retryable = false,
+                finishedAt = System.currentTimeMillis(),
+                dispatchCount = result.dispatchCount,
+                rounds = result.rounds,
+                outcomeState = result.outcomeState,
+                fallbackStepIndex = if (result.success) 0 else stoppedIndex,
+                compactTreeReads = saturatedIntSum(result.steps.map { it.compactTreeReads }),
+                fullTreeReads = saturatedIntSum(result.steps.map { it.fullTreeReads }),
+                templateStatus = if (result.templateAuthorized) run.workflow.templateStatus else null,
+                templateRevision = if (result.templateAuthorized) run.workflow.templateRevision else null,
+                validationProgress = if (result.templateAuthorized) run.workflow.validationProgress else null,
+                promotionEligible = if (result.templateAuthorized) run.workflow.promotionEligible else null,
+                promotionIneligibleReason = if (result.templateAuthorized) run.workflow.promotionIneligibleReason else null
+            )
+        } catch (_: Throwable) {
+            run.update(
+                status = RpaRunStatus.FAILED,
+                message = "hybrid_engine_failure",
+                errorCode = "hybrid_engine_failure",
+                retryable = false,
+                finishedAt = System.currentTimeMillis(),
+                outcomeState = "blocked"
+            )
+        } finally {
+            if (run.snapshot().status == RpaRunStatus.RUNNING) {
+                run.update(
+                    status = RpaRunStatus.FAILED,
+                    message = "hybrid_engine_failure",
+                    errorCode = "hybrid_engine_failure",
+                    retryable = false,
+                    finishedAt = System.currentTimeMillis(),
+                    outcomeState = "blocked"
+                )
+            }
+        }
+    }
+
+    internal fun executeHybridForTest(
+        workflow: RpaWorkflow,
+        engine: HybridWorkflowExecutor
+    ): RpaRunSnapshot {
+        val now = System.currentTimeMillis()
+        val run = MutableRun(
+            workflow = workflow,
+            snapshot = RpaRunSnapshot(
+                runId = "rpa_test_runner",
+                workflowId = workflow.id,
+                workflowName = workflow.name,
+                status = RpaRunStatus.QUEUED,
+                currentStep = 0,
+                totalSteps = workflow.steps.size,
+                startedAt = now,
+                updatedAt = now,
+                mode = HYBRID_EXECUTION_MODE
+            )
+        )
+        executeHybrid(run, engine)
+        return run.snapshot()
     }
 
     private fun executeWithRetries(
@@ -491,7 +715,7 @@ object RpaWorkflowRunner {
             if (!dir.exists()) dir.mkdirs()
             File(dir, "${snapshot.runId}.json").writeText(gson.toJson(RpaRunJson.snapshot(snapshot)))
         }.onFailure { error ->
-            XLog.w(TAG, "Failed to persist RPA run: ${error.message}")
+            runCatching { XLog.w(TAG, "Failed to persist RPA run: ${error.message}") }
         }
     }
 
@@ -523,7 +747,18 @@ object RpaWorkflowRunner {
             message: String? = null,
             errorCode: String? = null,
             retryable: Boolean? = null,
-            finishedAt: Long? = null
+            finishedAt: Long? = null,
+            dispatchCount: Int? = null,
+            rounds: Int? = null,
+            outcomeState: String? = null,
+            fallbackStepIndex: Int? = null,
+            compactTreeReads: Int? = null,
+            fullTreeReads: Int? = null,
+            templateStatus: String? = null,
+            templateRevision: Int? = null,
+            validationProgress: String? = null,
+            promotionEligible: Boolean? = null,
+            promotionIneligibleReason: String? = null
         ) {
             synchronized(lock) {
                 val now = System.currentTimeMillis()
@@ -539,10 +774,29 @@ object RpaWorkflowRunner {
                     updatedAt = now,
                     finishedAt = doneAt,
                     totalMs = (if (doneAt > 0L) doneAt else now) - current.startedAt,
-                    steps = records.toList()
+                    steps = records.toList(),
+                    dispatchCount = dispatchCount ?: current.dispatchCount,
+                    rounds = rounds ?: current.rounds,
+                    outcomeState = outcomeState ?: current.outcomeState,
+                    fallbackStepIndex = fallbackStepIndex ?: current.fallbackStepIndex,
+                    compactTreeReads = compactTreeReads ?: current.compactTreeReads,
+                    fullTreeReads = fullTreeReads ?: current.fullTreeReads,
+                    templateStatus = templateStatus ?: current.templateStatus,
+                    templateRevision = templateRevision ?: current.templateRevision,
+                    validationProgress = validationProgress ?: current.validationProgress,
+                    promotionEligible = promotionEligible ?: current.promotionEligible,
+                    promotionIneligibleReason = promotionIneligibleReason ?: current.promotionIneligibleReason
                 )
             }
             persist(snapshot())
         }
+    }
+
+    private fun saturatedIntSum(values: Iterable<Int>): Int {
+        var total = 0L
+        for (value in values) {
+            total = (total + value.coerceAtLeast(0).toLong()).coerceAtMost(Int.MAX_VALUE.toLong())
+        }
+        return total.toInt()
     }
 }

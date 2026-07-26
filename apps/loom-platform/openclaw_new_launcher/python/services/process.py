@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import re
 import shutil
 import socket
 import subprocess
@@ -1506,8 +1507,315 @@ class OpenClawProcessService:
         })
         return result
 
+    def phone_adb_forward(
+        self,
+        *,
+        serial: str | None = None,
+        remote_port: int = 9527,
+        local_port: int | None = None,
+    ) -> dict:
+        """Expose one APKClaw ConfigServer through an ADB loopback tunnel."""
+        adb_path = self._find_adb_path()
+        try:
+            safe_remote_port = int(remote_port)
+        except (TypeError, ValueError):
+            safe_remote_port = 0
+        result = {
+            "schema": "loom.phone.adb_forward.v1",
+            "ok": False,
+            "status": "unknown",
+            "adbPath": adb_path,
+            "serial": "",
+            "localPort": 0,
+            "remotePort": safe_remote_port,
+            "baseUrl": "",
+            "devices": [],
+            "actions": [],
+            "message": "",
+        }
+        if not adb_path:
+            result.update({
+                "status": "missing_adb",
+                "message": "未找到 ADB，无法建立 USB 手机连接。",
+            })
+            return result
+        if not 1 <= safe_remote_port <= 65535:
+            result.update({
+                "status": "invalid_remote_port",
+                "message": "手机端口必须在 1 到 65535 之间。",
+            })
+            return result
+
+        devices = self._adb_devices(adb_path)
+        result["devices"] = devices
+        requested_serial = (serial or "").strip()
+        if requested_serial and not any(str(device.get("serial") or "") == requested_serial for device in devices):
+            result.update({
+                "status": "device_not_found",
+                "message": f"没有找到指定手机：{requested_serial}。",
+            })
+            return result
+        if not requested_serial and len(devices) > 1:
+            result.update({
+                "status": "multiple_devices",
+                "message": "检测到多台 USB 手机，请先选择要连接的设备。",
+            })
+            return result
+        if not devices:
+            result.update({
+                "status": "no_device",
+                "message": "ADB 已找到，但没有检测到已授权的手机。",
+            })
+            return result
+
+        selected = self._select_adb_device(devices, requested_serial)
+        selected_serial = str(selected.get("serial") or "").strip()
+        state = str(selected.get("state") or "").strip().lower()
+        result["serial"] = selected_serial
+        if state != "device":
+            result.update({
+                "status": state or "bad_state",
+                "message": (
+                    "手机尚未授权本电脑的 USB 调试。"
+                    if state == "unauthorized"
+                    else f"手机 ADB 状态异常：{state or 'unknown'}。"
+                ),
+            })
+            return result
+
+        try:
+            selected_local_port = int(local_port) if local_port is not None else self._allocate_loopback_port()
+        except (TypeError, ValueError):
+            selected_local_port = 0
+        if not 1 <= selected_local_port <= 65535:
+            result.update({
+                "status": "invalid_local_port",
+                "message": "电脑端 USB 转发端口无效。",
+            })
+            return result
+        result["localPort"] = selected_local_port
+        forward = self._run_adb(
+            adb_path,
+            ["-s", selected_serial, "forward", f"tcp:{selected_local_port}", f"tcp:{safe_remote_port}"],
+            timeout_sec=15,
+            label="forward.create",
+        )
+        result["actions"].append(forward)
+        if not forward.get("ok"):
+            result.update({
+                "status": "forward_failed",
+                "message": "ADB 无法建立手机端口转发。",
+            })
+            return result
+
+        verify = self._run_adb(
+            adb_path,
+            ["-s", selected_serial, "forward", "--list"],
+            timeout_sec=15,
+            label="forward.verify",
+        )
+        result["actions"].append(verify)
+        expected = f"{selected_serial} tcp:{selected_local_port} tcp:{safe_remote_port}"
+        verified = bool(verify.get("ok")) and any(
+            line.strip() == expected for line in str(verify.get("stdout") or "").splitlines()
+        )
+        if not verified:
+            cleanup = self._run_adb(
+                adb_path,
+                ["-s", selected_serial, "forward", "--remove", f"tcp:{selected_local_port}"],
+                timeout_sec=10,
+                label="forward.cleanup",
+            )
+            result["actions"].append(cleanup)
+            result.update({
+                "status": (
+                    "forward_verify_failed"
+                    if cleanup.get("ok")
+                    else "forward_verify_and_cleanup_failed"
+                ),
+                "message": (
+                    "ADB 转发隧道校验失败，已撤销临时端口。"
+                    if cleanup.get("ok")
+                    else "ADB 转发隧道校验失败，且临时端口未能自动撤销。"
+                ),
+            })
+            return result
+
+        result.update({
+            "ok": True,
+            "status": "connected",
+            "localPort": selected_local_port,
+            "baseUrl": f"http://127.0.0.1:{selected_local_port}",
+            "message": "USB 手机连接已建立。",
+        })
+        return result
+
+    def phone_adb_devices(self) -> dict:
+        """List USB-debug devices without exposing local executable paths."""
+        adb_path = self._find_adb_path()
+        if not adb_path:
+            return {
+                "ok": False,
+                "status": "missing_adb",
+                "devices": [],
+                "message": "未找到内置 ADB，无法读取 USB 手机。",
+            }
+        devices = self._adb_devices(adb_path)
+        return {
+            "ok": True,
+            "status": "ready",
+            "devices": [
+                {
+                    "serial": str(device.get("serial") or "").strip(),
+                    "state": str(device.get("state") or "").strip(),
+                    "label": self._adb_device_label(device),
+                }
+                for device in devices
+            ],
+            "message": f"检测到 {len(devices)} 台 USB 手机。",
+        }
+
+    def phone_adb_forward_status(
+        self,
+        *,
+        serial: str,
+        local_port: int,
+        remote_port: int = 9527,
+    ) -> dict:
+        """Verify that one persisted ADB tunnel still exists and targets a ready device."""
+        adb_path = self._find_adb_path()
+        safe_serial = str(serial or "").strip()
+        try:
+            safe_local_port = int(local_port)
+            safe_remote_port = int(remote_port)
+        except (TypeError, ValueError):
+            safe_local_port = 0
+            safe_remote_port = 0
+        result = {
+            "ok": False,
+            "status": "invalid_target",
+            "serial": safe_serial,
+            "localPort": safe_local_port,
+            "remotePort": safe_remote_port,
+            "message": "USB 手机连接记录无效。",
+        }
+        if not adb_path:
+            result.update({"status": "missing_adb", "message": "未找到 ADB，无法校验 USB 手机连接。"})
+            return result
+        if not safe_serial or not 1 <= safe_local_port <= 65535 or not 1 <= safe_remote_port <= 65535:
+            return result
+
+        devices = self._adb_devices(adb_path)
+        device = next(
+            (item for item in devices if str(item.get("serial") or "").strip() == safe_serial),
+            None,
+        )
+        if not device:
+            result.update({"status": "device_not_found", "message": "原 USB 手机当前未连接。"})
+            return result
+        state = str(device.get("state") or "").strip().lower()
+        if state != "device":
+            result.update({
+                "status": state or "bad_state",
+                "message": "原 USB 手机当前未授权或状态异常。",
+            })
+            return result
+
+        entries = self._adb_forward_entries(adb_path, safe_serial)
+        if entries is None:
+            result.update({
+                "status": "forward_list_failed",
+                "message": "ADB 无法读取当前 USB 转发表，请稍后重试。",
+            })
+            return result
+        expected = (safe_serial, f"tcp:{safe_local_port}", f"tcp:{safe_remote_port}")
+        if expected not in entries:
+            result.update({"status": "forward_missing", "message": "USB 转发已经失效，需要重新建立。"})
+            return result
+        result.update({
+            "ok": True,
+            "status": "connected",
+            "baseUrl": f"http://127.0.0.1:{safe_local_port}",
+            "message": "USB 手机连接有效。",
+        })
+        return result
+
+    def phone_adb_forward_remove(self, *, serial: str, local_port: int) -> dict:
+        """Remove one ADB tunnel; a missing listener is already disconnected."""
+        adb_path = self._find_adb_path()
+        safe_serial = str(serial or "").strip()
+        try:
+            safe_port = int(local_port)
+        except (TypeError, ValueError):
+            safe_port = 0
+        result = {
+            "schema": "loom.phone.adb_forward.v1",
+            "ok": False,
+            "status": "unknown",
+            "adbPath": adb_path,
+            "serial": safe_serial,
+            "localPort": safe_port,
+            "message": "",
+        }
+        if not adb_path:
+            result.update({"status": "missing_adb", "message": "未找到 ADB，无法移除 USB 手机连接。"})
+            return result
+        if not 1 <= safe_port <= 65535:
+            result.update({"status": "invalid_target", "message": "USB 手机连接目标无效。"})
+            return result
+        if not safe_serial:
+            entries = self._adb_forward_entries(adb_path, "")
+            if entries is None:
+                result.update({
+                    "status": "forward_list_failed",
+                    "message": "ADB 无法读取当前 USB 转发表，未执行清理。",
+                })
+                return result
+            matches = [
+                entry
+                for entry in entries
+                if entry[1] == f"tcp:{safe_port}"
+            ]
+            if not matches:
+                result.update({
+                    "ok": True,
+                    "status": "disconnected",
+                    "message": "USB 手机连接已断开。",
+                })
+                return result
+            safe_serial = matches[0][0]
+            result["serial"] = safe_serial
+
+        action = self._run_adb(
+            adb_path,
+            ["-s", safe_serial, "forward", "--remove", f"tcp:{safe_port}"],
+            timeout_sec=15,
+            label="forward.remove",
+        )
+        combined = f"{action.get('stdout', '')}\n{action.get('stderr', '')}".lower()
+        already_absent = "listener not found" in combined or "cannot remove listener" in combined
+        if action.get("ok") or already_absent:
+            result.update({
+                "ok": True,
+                "status": "disconnected",
+                "message": "USB 手机连接已断开。",
+            })
+            return result
+        result.update({
+            "status": "disconnect_failed",
+            "message": "ADB 无法移除 USB 手机连接。",
+            "action": action,
+        })
+        return result
+
     def _find_adb_path(self) -> str:
         return self.paths.adb_exe
+
+    @staticmethod
+    def _allocate_loopback_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            return int(listener.getsockname()[1])
 
     def _adb_devices(self, adb_path: str) -> list[dict]:
         action = self._run_adb(adb_path, ["devices", "-l"], timeout_sec=15, label="devices")
@@ -1536,6 +1844,31 @@ class OpenClawProcessService:
             if str(device.get("state") or "").lower() == "device":
                 return device
         return devices[0] if devices else {}
+
+    def _adb_forward_entries(self, adb_path: str, serial: str) -> set[tuple[str, str, str]] | None:
+        prefix = ["-s", serial] if serial else []
+        action = self._run_adb(
+            adb_path,
+            [*prefix, "forward", "--list"],
+            timeout_sec=15,
+            label="forward.list",
+        )
+        if not action.get("ok"):
+            return None
+        entries: set[tuple[str, str, str]] = set()
+        for line in str(action.get("stdout") or "").splitlines():
+            parts = line.strip().split()
+            if len(parts) == 3:
+                entries.add((parts[0], parts[1], parts[2]))
+        return entries
+
+    @staticmethod
+    def _adb_device_label(device: dict) -> str:
+        detail = str(device.get("detail") or "")
+        model_match = re.search(r"(?:^|\s)model:([^\s]+)", detail)
+        model = model_match.group(1).replace("_", " ") if model_match else ""
+        serial = str(device.get("serial") or "").strip()
+        return model or serial or "Android USB device"
 
     def _run_adb(self, adb_path: str, args: list[str], *, timeout_sec: int, label: str) -> dict:
         command = [adb_path, *args]

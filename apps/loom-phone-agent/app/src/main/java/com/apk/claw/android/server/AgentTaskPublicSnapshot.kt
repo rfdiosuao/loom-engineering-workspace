@@ -109,10 +109,14 @@ object AgentTaskPublicSnapshot {
         "cancelRequested",
         "mode",
         "screenHash",
-        "contractVersion",
-        "progressLogSchema",
         "error",
-        "queue"
+        "queue",
+        "templateStatus",
+        "templateRevision",
+        "validationProgress",
+        "promotionEligible",
+        "promotionIneligibleReason",
+        "fallbackStepIndex"
     )
 
     private val QUEUE_FIELDS = setOf(
@@ -136,7 +140,26 @@ object AgentTaskPublicSnapshot {
         "agentFallback",
         "fallbackReason",
         "rounds",
-        "mode"
+        "mode",
+        "templateStatus",
+        "templateRevision",
+        "validationProgress",
+        "promotionEligible",
+        "promotionIneligibleReason",
+        "resolverPolicy",
+        "resolverUsed",
+        "uiGeneration",
+        "frameId",
+        "frameSource",
+        "frameAgeMs",
+        "outcomeState",
+        "fallbackStepIndex",
+        "treeSnapshotMs",
+        "treeLookupMs",
+        "treeCacheHit",
+        "nodesVisited",
+        "compactTreeReads",
+        "fullTreeReads"
     )
 
     private val PROGRESS_FIELDS = setOf(

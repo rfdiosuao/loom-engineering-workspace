@@ -456,6 +456,72 @@ test('vision action supports PowerShell-safe action body file', async () => {
   }
 });
 
+test('vision system key action uses the compatible phone endpoint', async () => {
+  let actionBody = null;
+  let actionPath = '';
+  const server = http.createServer(async (request, response) => {
+    const body = await readBody(request);
+    if (request.method === 'POST' && request.url === '/api/lumi/security/pair') {
+      const parsed = JSON.parse(body || '{}');
+      return sendJson(response, {
+        success: true,
+        data: { launcherId: parsed.launcherId, launcherSecret: 'vision-secret' },
+      });
+    }
+    if (request.method === 'POST' && request.url === '/api/tool/system_key') {
+      actionPath = request.url;
+      actionBody = JSON.parse(body || '{}');
+      return sendJson(response, {
+        success: true,
+        data: {
+          action: actionBody.action,
+          key: actionBody.key,
+          currentStep: 'complete',
+        },
+      });
+    }
+    return sendJson(response, { success: false, error: `unexpected ${request.method} ${request.url}` }, 404);
+  });
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loom-vision-system-key-'));
+  await listen(server);
+  try {
+    const bodyPath = path.join(tmpDir, 'action.json');
+    await fs.writeFile(bodyPath, JSON.stringify({
+      action: 'system_key',
+      key: 'recent',
+      targetLabel: 'system recent apps navigation',
+      reason: 'User requested the recent-apps control from Matrix',
+    }), 'utf8');
+    const port = server.address().port;
+    const result = await runVisionCli([
+      'action',
+      '--force-action',
+      '--fast-path',
+      'action_fast',
+      '--phone-url',
+      `http://127.0.0.1:${port}`,
+      '--phone-token',
+      'test-token',
+      '--action-body-file',
+      bodyPath,
+      '--json',
+    ]);
+
+    assert.equal(result.code, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.success, true);
+    assert.equal(actionPath, '/api/tool/system_key');
+    assert.equal(actionBody.action, 'system_key');
+    assert.equal(actionBody.key, 'recent');
+    assert.equal(actionBody.visualize, true);
+    assert.match(actionBody.traceId, /^vision_/);
+  } finally {
+    await close(server);
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('vision frame accepts a configurable timeout budget for slow phone screenshots', async () => {
   const server = http.createServer(async (request, response) => {
     const body = await readBody(request);

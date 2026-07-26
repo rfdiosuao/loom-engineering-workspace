@@ -16,6 +16,9 @@ import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
+import com.apk.claw.android.rpa.AccessibilitySemanticClickPolicy;
+import com.apk.claw.android.rpa.GenerationSnapshot;
+import com.apk.claw.android.rpa.UiGenerationTracker;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
@@ -23,9 +26,13 @@ import com.google.gson.JsonObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -41,7 +48,20 @@ public class ClawAccessibilityService extends AccessibilityService {
     private static volatile ClawAccessibilityService instance;
     private volatile String lastForegroundPackageName;
     private volatile long lastForegroundPackageAt;
-    private final Object screenshotLock = new Object();
+    private final Object screenshotCaptureLock = new Object();
+    private final Object screenshotCacheLock = new Object();
+    private final ExecutorService screenshotCallbackExecutor =
+            Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "apkclaw-screenshot-callback");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private final AtomicBoolean screenshotDestroyed = new AtomicBoolean(false);
+    private final AtomicReference<ScreenshotCaptureState<CapturedBitmap>> activeScreenshotCapture =
+            new AtomicReference<>(null);
+    private final UiGenerationTracker generationTracker =
+            new UiGenerationTracker(UUID.randomUUID().toString());
+    private final AtomicLong frameSequence = new AtomicLong(0L);
     private Bitmap lastScreenshotBitmap;
     private long lastScreenshotAt;
 
@@ -65,9 +85,58 @@ public class ClawAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event != null && event.getPackageName() != null) {
-            lastForegroundPackageName = event.getPackageName().toString();
+        if (event == null) {
+            return;
+        }
+        String packageName = event.getPackageName() == null
+                ? null
+                : event.getPackageName().toString();
+        boolean packageChanged = packageName != null
+                && !packageName.equals(lastForegroundPackageName);
+        if (packageName != null) {
+            lastForegroundPackageName = packageName;
             lastForegroundPackageAt = System.currentTimeMillis();
+        }
+        if (packageChanged || invalidatesUiGeneration(event.getEventType())) {
+            generationTracker.markUiChanged();
+        }
+    }
+
+    private boolean invalidatesUiGeneration(int eventType) {
+        switch (eventType) {
+            case AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED:
+            case AccessibilityEvent.TYPE_WINDOWS_CHANGED:
+            case AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED:
+            case AccessibilityEvent.TYPE_VIEW_SCROLLED:
+            case AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED:
+            case AccessibilityEvent.TYPE_VIEW_FOCUSED:
+            case AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED:
+            case AccessibilityEvent.TYPE_VIEW_SELECTED:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        generationTracker.markUiChanged();
+    }
+
+    public GenerationSnapshot getGenerationSnapshot() {
+        return generationTracker.snapshot();
+    }
+
+    public int getCurrentWindowId() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) {
+            return -1;
+        }
+        try {
+            return root.getWindowId();
+        } finally {
+            root.recycle();
         }
     }
 
@@ -78,9 +147,15 @@ public class ClawAccessibilityService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
-        super.onDestroy();
+        screenshotDestroyed.set(true);
+        ScreenshotCaptureState<CapturedBitmap> active = activeScreenshotCapture.getAndSet(null);
+        if (active != null) {
+            active.cancel();
+        }
+        screenshotCallbackExecutor.shutdownNow();
         instance = null;
         recycleLastScreenshot();
+        super.onDestroy();
         XLog.i(TAG, "Accessibility service destroyed");
     }
 
@@ -124,6 +199,7 @@ public class ClawAccessibilityService extends AccessibilityService {
             int selectedIndex = NodeAwareTapSelector.selectIndex(candidates, x, y, rootArea);
             if (selectedIndex >= 0 && selectedIndex < clickableNodes.size()) {
                 AccessibilityNodeInfo selected = clickableNodes.get(selectedIndex);
+                generationTracker.markActionDispatched();
                 if (selected.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                     XLog.d(TAG, "Node-aware tap resolved (" + x + "," + y + ") to "
                             + selected.getClassName());
@@ -250,6 +326,7 @@ public class ClawAccessibilityService extends AccessibilityService {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicBoolean result = new AtomicBoolean(false);
 
+        generationTracker.markActionDispatched();
         boolean dispatched = dispatchGesture(gesture, new GestureResultCallback() {
             @Override
             public void onCompleted(GestureDescription gestureDescription) {
@@ -267,7 +344,6 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (!dispatched) {
             return false;
         }
-
         try {
             latch.await(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
@@ -287,8 +363,12 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (root == null) {
             return new ArrayList<>();
         }
-        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
-        return nodes != null ? nodes : new ArrayList<>();
+        try {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
+            return nodes != null ? nodes : new ArrayList<>();
+        } finally {
+            root.recycle();
+        }
     }
 
     /**
@@ -299,8 +379,12 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (root == null) {
             return new ArrayList<>();
         }
-        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(viewId);
-        return nodes != null ? nodes : new ArrayList<>();
+        try {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(viewId);
+            return nodes != null ? nodes : new ArrayList<>();
+        } finally {
+            root.recycle();
+        }
     }
 
     /**
@@ -356,12 +440,14 @@ public class ClawAccessibilityService extends AccessibilityService {
             return false;
         }
         if (node.isClickable()) {
+            generationTracker.markActionDispatched();
             return node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
         }
         // Try clicking the parent if the node itself is not clickable
         AccessibilityNodeInfo parent = node.getParent();
         while (parent != null) {
             if (parent.isClickable()) {
+                generationTracker.markActionDispatched();
                 return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK);
             }
             parent = parent.getParent();
@@ -373,6 +459,14 @@ public class ClawAccessibilityService extends AccessibilityService {
     }
 
     /**
+     * Clicks a node or clickable ancestor without falling back to coordinates.
+     */
+    public boolean clickNodeSemantically(AccessibilityNodeInfo node) {
+        return AccessibilitySemanticClickPolicy.click(
+                node, () -> generationTracker.markActionDispatched());
+    }
+
+    /**
      * Sets text on a node (for EditText fields).
      */
     public boolean setNodeText(AccessibilityNodeInfo node, String text) {
@@ -381,6 +475,7 @@ public class ClawAccessibilityService extends AccessibilityService {
         }
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+        generationTracker.markActionDispatched();
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
     }
 
@@ -423,6 +518,7 @@ public class ClawAccessibilityService extends AccessibilityService {
             return null;
         }
 
+        try {
         DisplayMetrics metrics = getResources().getDisplayMetrics();
         JsonObject screen = new JsonObject();
         screen.addProperty("width", metrics.widthPixels);
@@ -454,6 +550,9 @@ public class ClawAccessibilityService extends AccessibilityService {
         data.add("screen", screen);
         data.add("nodes", nodes);
         return data;
+        } finally {
+            root.recycle();
+        }
     }
 
     /** 包名 -> 用户可读的 App 名称（取不到就返回 null）。 */
@@ -845,27 +944,33 @@ public class ClawAccessibilityService extends AccessibilityService {
     // ======================== Global Actions ========================
 
     public boolean pressBack() {
+        generationTracker.markActionDispatched();
         return performGlobalAction(GLOBAL_ACTION_BACK);
     }
 
     public boolean pressHome() {
+        generationTracker.markActionDispatched();
         return performGlobalAction(GLOBAL_ACTION_HOME);
     }
 
     public boolean openRecentApps() {
+        generationTracker.markActionDispatched();
         return performGlobalAction(GLOBAL_ACTION_RECENTS);
     }
 
     public boolean expandNotifications() {
+        generationTracker.markActionDispatched();
         return performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS);
     }
 
     public boolean collapseNotifications() {
+        generationTracker.markActionDispatched();
         return performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS);
     }
 
     public boolean lockScreen() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            generationTracker.markActionDispatched();
             return performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN);
         }
         return false;
@@ -886,6 +991,7 @@ public class ClawAccessibilityService extends AccessibilityService {
                         android.os.PowerManager.SCREEN_DIM_WAKE_LOCK | android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
                         "AgentPhone:unlock"
                 );
+                generationTracker.markActionDispatched();
                 wl.acquire(3000);
                 wl.release();
                 // 等屏幕亮起
@@ -911,82 +1017,282 @@ public class ClawAccessibilityService extends AccessibilityService {
      * Returns the bitmap or null on failure.
      */
     public Bitmap takeScreenshot(long timeoutMs) {
+        ScreenshotFrame frame = takeScreenshotFrameInternal(timeoutMs, 0L, true, true);
+        if (frame == null) {
+            return null;
+        }
+        try {
+            return frame.detachBitmap();
+        } finally {
+            frame.close();
+        }
+    }
+
+    public ScreenshotFrame takeScreenshotFrame(
+            long timeoutMs,
+            long freshAfterMs,
+            boolean allowCachedReadOnly
+    ) {
+        return takeScreenshotFrameInternal(
+                timeoutMs, freshAfterMs, allowCachedReadOnly, false);
+    }
+
+    private ScreenshotFrame takeScreenshotFrameInternal(
+            long timeoutMs,
+            long freshAfterMs,
+            boolean allowCachedReadOnly,
+            boolean allowLegacyRetry
+    ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return null;
         }
-        synchronized (screenshotLock) {
+        synchronized (screenshotCaptureLock) {
+            if (screenshotDestroyed.get()) {
+                return null;
+            }
             long now = System.currentTimeMillis();
-            Bitmap cached = copyCachedScreenshot(now, SCREENSHOT_CACHE_TTL_MS);
-            if (cached != null) {
-                return cached;
+            if (allowCachedReadOnly) {
+                CachedBitmap cached = copyCachedScreenshot(now, SCREENSHOT_CACHE_TTL_MS);
+                if (cached != null) {
+                    try {
+                        return ScreenshotFrame.cached(
+                                nextFrameId(false), cached.bitmap, cached.capturedAt, now);
+                    } finally {
+                        cached.bitmap.recycle();
+                    }
+                }
             }
 
             waitForScreenshotCooldown(now);
-
-            Bitmap bitmap = captureScreenshotOnce(timeoutMs);
-            if (bitmap == null) {
-                waitForScreenshotCooldown(System.currentTimeMillis());
-                bitmap = captureScreenshotOnce(Math.max(timeoutMs, 5000L));
-            }
-
-            now = System.currentTimeMillis();
-            if (bitmap == null) {
-                lastScreenshotAt = now;
-                Bitmap stale = copyCachedScreenshot(now, SCREENSHOT_STALE_FALLBACK_MS);
-                if (stale != null) {
-                    XLog.w(TAG, "Screenshot capture failed; returning recent cached frame");
+            CapturedBitmap captured = ScreenshotAttemptPolicy.capture(
+                    timeoutMs,
+                    allowLegacyRetry,
+                    this::captureScreenshotOnceWithTimestamp,
+                    () -> waitForScreenshotCooldown(System.currentTimeMillis())
+            );
+            if (captured != null) {
+                try {
+                    if (screenshotDestroyed.get()) {
+                        return null;
+                    }
+                    if (captured.capturedAt > freshAfterMs) {
+                        rememberScreenshot(captured.bitmap, captured.capturedAt);
+                        return ScreenshotFrame.fresh(
+                                nextFrameId(true),
+                                captured.bitmap,
+                                captured.capturedAt,
+                                System.currentTimeMillis()
+                        );
+                    }
+                } finally {
+                    captured.bitmap.recycle();
                 }
-                return stale;
             }
 
-            Bitmap ownedBitmap = copyBitmap(bitmap);
-            if (ownedBitmap != null) {
-                bitmap.recycle();
-            } else {
-                ownedBitmap = bitmap;
+            if (!allowCachedReadOnly) {
+                return null;
             }
-            rememberScreenshot(ownedBitmap, now);
-            Bitmap resultBitmap = copyBitmap(ownedBitmap);
-            return resultBitmap != null ? resultBitmap : ownedBitmap;
+            now = System.currentTimeMillis();
+            CachedBitmap stale = copyCachedScreenshot(now, SCREENSHOT_STALE_FALLBACK_MS);
+            if (stale == null) {
+                return null;
+            }
+            XLog.w(TAG, "Screenshot capture failed; returning recent cached frame");
+            try {
+                return ScreenshotFrame.stale(
+                        nextFrameId(false), stale.bitmap, stale.capturedAt, now);
+            } finally {
+                stale.bitmap.recycle();
+            }
         }
     }
 
-    private Bitmap captureScreenshotOnce(long timeoutMs) {
-        CountDownLatch latch = new CountDownLatch(1);
-        AtomicReference<Bitmap> bitmapRef = new AtomicReference<>(null);
-
-        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(),
-                new TakeScreenshotCallback() {
-                    @Override
-                    public void onSuccess(ScreenshotResult result) {
-                        Bitmap bmp = Bitmap.wrapHardwareBuffer(
-                                result.getHardwareBuffer(), result.getColorSpace());
-                        Bitmap copied = copyBitmap(bmp);
-                        bitmapRef.set(copied != null ? copied : bmp);
-                        if (bmp != null && copied != null) {
-                            bmp.recycle();
-                        }
-                        result.getHardwareBuffer().close();
-                        latch.countDown();
-                    }
-
-                    @Override
-                    public void onFailure(int errorCode) {
-                        XLog.e(TAG, "Screenshot failed with error code: " + errorCode);
-                        latch.countDown();
-                    }
-                });
-
+    private CapturedBitmap captureScreenshotOnceWithTimestamp(long timeoutMs) {
+        ScreenshotCaptureState<CapturedBitmap> state =
+                new ScreenshotCaptureState<>(captured -> recycleBitmap(captured.bitmap));
+        if (!activeScreenshotCapture.compareAndSet(null, state)) {
+            return null;
+        }
         try {
-            latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+            if (screenshotDestroyed.get()) {
+                state.cancel();
+                return null;
+            }
+            takeScreenshot(Display.DEFAULT_DISPLAY, screenshotCallbackExecutor,
+                    new TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(ScreenshotResult result) {
+                            long capturedAt = System.currentTimeMillis();
+                            Bitmap bmp = null;
+                            Bitmap copied = null;
+                            try {
+                                bmp = Bitmap.wrapHardwareBuffer(
+                                        result.getHardwareBuffer(), result.getColorSpace());
+                                copied = copyBitmap(bmp);
+                                if (copied != null) {
+                                    CapturedBitmap captured = new CapturedBitmap(copied, capturedAt);
+                                    copied = null;
+                                    state.publishOrDispose(captured);
+                                } else {
+                                    state.fail();
+                                }
+                            } finally {
+                                recycleBitmap(bmp);
+                                recycleBitmap(copied);
+                                result.getHardwareBuffer().close();
+                            }
+                        }
+
+                        @Override
+                        public void onFailure(int errorCode) {
+                            XLog.e(TAG, "Screenshot failed with error code: " + errorCode);
+                            state.fail();
+                        }
+                    });
+            return state.await(timeoutMs);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            state.cancel();
+            return null;
+        } catch (RuntimeException e) {
+            state.fail();
+            XLog.e(TAG, "Screenshot request failed", e);
+            return null;
+        } finally {
+            activeScreenshotCapture.compareAndSet(state, null);
         }
-        return bitmapRef.get();
+    }
+
+    private String nextFrameId(boolean callbackProduced) {
+        String serviceGeneration = generationTracker.snapshot().getServiceGeneration();
+        long sequence = frameSequence.incrementAndGet();
+        return serviceGeneration + ":" + sequence + ":"
+                + (callbackProduced ? "fresh" : "derived");
+    }
+
+    private static final class CapturedBitmap {
+        private final Bitmap bitmap;
+        private final long capturedAt;
+
+        private CapturedBitmap(Bitmap bitmap, long capturedAt) {
+            this.bitmap = bitmap;
+            this.capturedAt = capturedAt;
+        }
+    }
+
+    private static final class CachedBitmap {
+        private final Bitmap bitmap;
+        private final long capturedAt;
+
+        private CachedBitmap(Bitmap bitmap, long capturedAt) {
+            this.bitmap = bitmap;
+            this.capturedAt = capturedAt;
+        }
+    }
+
+    interface CaptureDisposer<T> {
+        void dispose(T value);
+    }
+
+    static final class ScreenshotCaptureState<T> {
+        private static final int WAITING = 0;
+        private static final int PUBLISHED = 1;
+        private static final int TERMINAL = 2;
+
+        private final CaptureDisposer<T> disposer;
+        private int state = WAITING;
+        private T published;
+
+        ScreenshotCaptureState(CaptureDisposer<T> disposer) {
+            this.disposer = disposer;
+        }
+
+        boolean publishOrDispose(T value) {
+            boolean accepted;
+            synchronized (this) {
+                accepted = state == WAITING;
+                if (accepted) {
+                    published = value;
+                    state = PUBLISHED;
+                    notifyAll();
+                }
+            }
+            if (!accepted) {
+                disposer.dispose(value);
+            }
+            return accepted;
+        }
+
+        T await(long timeoutMs) throws InterruptedException {
+            long remainingNanos = TimeUnit.MILLISECONDS.toNanos(Math.max(0L, timeoutMs));
+            long deadline = System.nanoTime() + remainingNanos;
+            synchronized (this) {
+                while (state == WAITING && remainingNanos > 0L) {
+                    long waitMillis = TimeUnit.NANOSECONDS.toMillis(remainingNanos);
+                    int waitNanos = (int) (remainingNanos
+                            - TimeUnit.MILLISECONDS.toNanos(waitMillis));
+                    wait(waitMillis, waitNanos);
+                    remainingNanos = deadline - System.nanoTime();
+                }
+                if (state == PUBLISHED) {
+                    T value = published;
+                    published = null;
+                    state = TERMINAL;
+                    return value;
+                }
+                state = TERMINAL;
+                return null;
+            }
+        }
+
+        synchronized void fail() {
+            if (state == WAITING) {
+                state = TERMINAL;
+                notifyAll();
+            }
+        }
+
+        void cancel() {
+            T toDispose = null;
+            synchronized (this) {
+                if (state == PUBLISHED) {
+                    toDispose = published;
+                    published = null;
+                }
+                state = TERMINAL;
+                notifyAll();
+            }
+            if (toDispose != null) {
+                disposer.dispose(toDispose);
+            }
+        }
+    }
+
+    interface ScreenshotAttempt<T> {
+        T capture(long timeoutMs);
+    }
+
+    static final class ScreenshotAttemptPolicy {
+        private ScreenshotAttemptPolicy() {
+        }
+
+        static <T> T capture(
+                long timeoutMs,
+                boolean allowLegacyRetry,
+                ScreenshotAttempt<T> attempt,
+                Runnable beforeRetry
+        ) {
+            T captured = attempt.capture(timeoutMs);
+            if (captured == null && allowLegacyRetry) {
+                beforeRetry.run();
+                captured = attempt.capture(Math.max(timeoutMs, 5000L));
+            }
+            return captured;
+        }
     }
 
     private void waitForScreenshotCooldown(long now) {
-        long elapsed = now - lastScreenshotAt;
+        long elapsed = now - getLastScreenshotAt();
         long waitMs = SCREENSHOT_MIN_INTERVAL_MS - elapsed;
         if (waitMs <= 0) {
             return;
@@ -998,14 +1304,23 @@ public class ClawAccessibilityService extends AccessibilityService {
         }
     }
 
-    private Bitmap copyCachedScreenshot(long now, long ttlMs) {
-        if (lastScreenshotBitmap == null || lastScreenshotBitmap.isRecycled()) {
-            return null;
+    private long getLastScreenshotAt() {
+        synchronized (screenshotCacheLock) {
+            return lastScreenshotAt;
         }
-        if (now - lastScreenshotAt > ttlMs) {
-            return null;
+    }
+
+    private CachedBitmap copyCachedScreenshot(long now, long ttlMs) {
+        synchronized (screenshotCacheLock) {
+            if (lastScreenshotBitmap == null || lastScreenshotBitmap.isRecycled()) {
+                return null;
+            }
+            if (now - lastScreenshotAt > ttlMs) {
+                return null;
+            }
+            Bitmap copied = copyBitmap(lastScreenshotBitmap);
+            return copied == null ? null : new CachedBitmap(copied, lastScreenshotAt);
         }
-        return copyBitmap(lastScreenshotBitmap);
     }
 
     private void rememberScreenshot(Bitmap bitmap, long capturedAt) {
@@ -1016,18 +1331,35 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (cachedCopy == null) {
             return;
         }
-        recycleLastScreenshot();
-        lastScreenshotBitmap = cachedCopy;
-        lastScreenshotAt = capturedAt;
+        Bitmap previous = null;
+        boolean stored = false;
+        synchronized (screenshotCacheLock) {
+            if (!screenshotDestroyed.get()) {
+                previous = lastScreenshotBitmap;
+                lastScreenshotBitmap = cachedCopy;
+                lastScreenshotAt = capturedAt;
+                stored = true;
+            }
+        }
+        if (!stored) {
+            recycleBitmap(cachedCopy);
+        }
+        recycleBitmap(previous);
     }
 
     private void recycleLastScreenshot() {
-        synchronized (screenshotLock) {
-            if (lastScreenshotBitmap != null && !lastScreenshotBitmap.isRecycled()) {
-                lastScreenshotBitmap.recycle();
-            }
+        Bitmap previous;
+        synchronized (screenshotCacheLock) {
+            previous = lastScreenshotBitmap;
             lastScreenshotBitmap = null;
             lastScreenshotAt = 0L;
+        }
+        recycleBitmap(previous);
+    }
+
+    private void recycleBitmap(Bitmap bitmap) {
+        if (bitmap != null && !bitmap.isRecycled()) {
+            bitmap.recycle();
         }
     }
 
@@ -1054,6 +1386,7 @@ public class ClawAccessibilityService extends AccessibilityService {
      */
     public boolean sendKeyEvent(int keyCode) {
         try {
+            generationTracker.markActionDispatched();
             Process process = Runtime.getRuntime().exec(
                     new String[]{"input", "keyevent", String.valueOf(keyCode)});
             int exitCode = process.waitFor();
@@ -1077,6 +1410,7 @@ public class ClawAccessibilityService extends AccessibilityService {
                 return false;
             }
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            generationTracker.markActionDispatched();
             startActivity(intent);
             return true;
         } catch (Exception e) {

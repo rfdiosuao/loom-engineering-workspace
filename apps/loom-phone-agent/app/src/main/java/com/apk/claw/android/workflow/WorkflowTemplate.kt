@@ -15,7 +15,22 @@ data class WorkflowTemplate(
     val createdAt: Long,                     // 创建时间
     val lastUsedAt: Long,                    // 最后使用时间
     val successCount: Int,                   // 成功次数
-    val failCount: Int                       // 失败次数
+    val failCount: Int,                      // 失败次数
+    val schemaVersion: Int = 2,
+    val status: TemplateStatus = TemplateStatus.DRAFT,
+    val executionMode: String = "hybrid_rpa",
+    val defaultResolverPolicy: ResolverPolicy = ResolverPolicy.TREE_PREFERRED,
+    val riskLevel: TemplateRiskLevel = TemplateRiskLevel.UNKNOWN,
+    val validationState: ValidationState = ValidationState(),
+    val revision: Int = 1,
+    val sourceAgentTaskId: String = "",
+    val targetPackage: String = "",
+    val targetVersionCode: Long = 0L,
+    val targetProfileId: String = "",
+    val activatedAt: Long = 0L,
+    val degradedAt: Long = 0L,
+    val degradedReason: String = "",
+    val visualAssetDirectory: String = ""
 ) {
     /**
      * 工作流步骤
@@ -27,7 +42,14 @@ data class WorkflowTemplate(
         val description: String,             // 步骤描述
         val waitFor: Int = 500,              // 执行后等待时间(ms)
         val isVerification: Boolean = false, // 是否为验证步骤
-        val failureHandling: FailureHandling? = null // 失败处理策略
+        val failureHandling: FailureHandling? = null, // 失败处理策略
+        val resolverPolicy: ResolverPolicy = ResolverPolicy.TREE_PREFERRED,
+        val allowedResolvers: Set<ResolverKind> = emptySet(),
+        val validatedResolvers: Set<ResolverKind> = emptySet(),
+        val semanticSelector: SemanticSelector? = null,
+        val visualAnchor: VisualAnchorSpec? = null,
+        val preCheckpoint: StepCheckpoint? = null,
+        val postCheckpoint: StepCheckpoint? = null
     )
 
     /**
@@ -57,5 +79,9 @@ data class TemplateExecutionResult(
     val stepsExecuted: Int,
     val stepsTotal: Int,
     val errorMessage: String? = null,
-    val executionTimeMs: Long = 0
+    val executionTimeMs: Long = 0,
+    val errorCode: String = "",
+    val mode: String = "template",
+    val outcomeState: String = "",
+    val handoffContext: com.apk.claw.android.rpa.AgentHandoffContext? = null
 )

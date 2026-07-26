@@ -15,6 +15,7 @@ import { renderFeaturePage } from './features/pages';
 import { SetupGate } from './components/SetupGate';
 import { LoomSplash } from './components/brand/LoomSplash';
 import { UpdateCenter, requestUpdateCenterOpen } from './components/update/UpdateCenter';
+import { PhoneUsbRecovery } from './components/phone/PhoneUsbRecovery';
 
 const NAV_PARENT_BY_PAGE: Record<string, string> = {
   models: 'license',
@@ -224,6 +225,7 @@ export default function App() {
         <ConfirmDialogHost />
         <LoomSplash />
         <SetupGate />
+        <PhoneUsbRecovery />
         <UpdateCenter />
       </div>
     </ThemeProvider>

@@ -11,7 +11,38 @@ import { DeviceSession } from './lib/phone-daemon/device-session.mjs';
 import { tryGetMetricsViaDaemon, tryRunViaDaemon, trySyncEventsViaDaemon } from './lib/phone-daemon/client.mjs';
 import { signedJsonRequest } from './openclaw-phone-secure.mjs';
 
-function startFakePhone(handler) {
+const FETCH_FORBIDDEN_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77,
+  79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135,
+  137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531,
+  532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719,
+  1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+  6668, 6669, 6697, 10080,
+]);
+
+async function listenOnFetchSafePort(server) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    await new Promise((resolve, reject) => {
+      const onError = (error) => {
+        server.off('listening', onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off('error', onError);
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(0, '127.0.0.1');
+    });
+    const { port } = server.address();
+    if (!FETCH_FORBIDDEN_PORTS.has(port)) return port;
+    await new Promise((resolve) => server.close(resolve));
+  }
+  throw new Error('unable to allocate a Fetch-safe loopback test port');
+}
+
+async function startFakePhone(handler) {
   const server = http.createServer(async (request, response) => {
     try {
       await handler(request, response);
@@ -20,12 +51,8 @@ function startFakePhone(handler) {
       response.end(JSON.stringify({ success: false, error: error.message }));
     }
   });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      resolve({ server, baseUrl: `http://127.0.0.1:${port}` });
-    });
-  });
+  const port = await listenOnFetchSafePort(server);
+  return { server, baseUrl: `http://127.0.0.1:${port}` };
 }
 
 async function readJson(request) {
@@ -1429,7 +1456,7 @@ for (const scenario of [
         response.end(JSON.stringify({ ok: false, error: 'unexpected' }));
       });
 
-      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      await listenOnFetchSafePort(server);
       try {
         const { port } = server.address();
         const runtime = await createRuntimeState(port);
@@ -1470,7 +1497,7 @@ test('daemon client aborts a stalled daemon request', async () => {
       response.end(JSON.stringify({ ok: false, error: 'unexpected' }));
     });
 
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await listenOnFetchSafePort(server);
     try {
       const { port } = server.address();
       const runtime = await createRuntimeState(port);
