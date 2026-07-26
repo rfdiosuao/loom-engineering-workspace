@@ -120,6 +120,7 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn("Wait-Job", mirror_step)
         self.assertIn("-Timeout 2100", mirror_step)
         self.assertIn("Stop-Job", mirror_step)
+        self.assertNotIn("$LASTEXITCODE", mirror_step)
         self.assertLess(
             mirror_step.index("Wait-Job"),
             mirror_step.index("-PruneDesktopReleases"),
