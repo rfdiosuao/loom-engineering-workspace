@@ -12,6 +12,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,8 +28,11 @@ from core.paths import AppPaths
 
 
 DEFAULT_RELEASE_API_URLS = (
+    "https://gitee.com/api/v5/repos/rfdiosuao/lumi/releases/latest",
+    "https://github.com/rfdiosuao/loom-engineering-workspace/releases/latest/download/LOOM-stable.update.json",
     "https://api.github.com/repos/rfdiosuao/loom-engineering-workspace/releases/latest",
 )
+RELEASE_DISCOVERY_ATTEMPTS = 3
 SETUP_NAME_RE = re.compile(r"^LOOM-(?P<version>\d+\.\d+\.\d+)-setup\.exe$", re.IGNORECASE)
 SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
 UPDATE_MANIFEST_SUFFIX = ".update.json"
@@ -193,6 +197,16 @@ def _is_github_asset_api_url(value: str) -> bool:
         parsed.scheme == "https"
         and str(parsed.hostname or "").casefold() == "api.github.com"
         and re.search(r"/releases/assets/\d+/?$", parsed.path, re.IGNORECASE) is not None
+    )
+
+
+def _is_transient_release_error(error: Exception) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        status_code = int(getattr(error, "code", 0) or 0)
+        return status_code in {408, 429} or status_code >= 500
+    return isinstance(
+        error,
+        (ConnectionError, TimeoutError, urllib.error.URLError),
     )
 
 
@@ -679,17 +693,60 @@ class LoomAppUpdater:
             callback(dict(state))
 
     def _resolve_latest_release(self) -> tuple[LoomRelease | None, str | None]:
-        errors: list[str] = []
-        releases: list[LoomRelease] = []
-        for source_url in self.release_api_urls:
-            try:
-                releases.append(self._fetch_release(source_url))
-            except Exception as error:
-                errors.append(f"{urlparse(source_url).hostname or 'release'}: {error}")
-        if not releases:
-            return None, "；".join(errors) or "没有可用的 LOOM 更新源"
+        def fetch_source(
+            source_index: int,
+            source_url: str,
+        ) -> tuple[int, LoomRelease | None, str | None]:
+            source_error: Exception | None = None
+            for attempt in range(1, RELEASE_DISCOVERY_ATTEMPTS + 1):
+                try:
+                    return source_index, self._fetch_release(source_url), None
+                except Exception as error:
+                    source_error = error
+                    if (
+                        attempt >= RELEASE_DISCOVERY_ATTEMPTS
+                        or not _is_transient_release_error(error)
+                    ):
+                        break
+                    time.sleep(float(attempt))
+            return (
+                source_index,
+                None,
+                f"{urlparse(source_url).hostname or 'release'}: {source_error}",
+            )
 
-        release = max(releases, key=lambda item: _version_tuple(item.version))
+        sources = tuple(enumerate(self.release_api_urls))
+        if not sources:
+            return None, "没有可用的 LOOM 更新源"
+
+        results: dict[int, LoomRelease] = {}
+        errors: dict[int, str] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(3, len(sources)),
+            thread_name_prefix="loom-update-source",
+        ) as executor:
+            futures = {
+                executor.submit(fetch_source, source_index, source_url): source_index
+                for source_index, source_url in sources
+            }
+            for future in as_completed(futures):
+                source_index, release, error = future.result()
+                if release is not None:
+                    results[source_index] = release
+                elif error:
+                    errors[source_index] = error
+        if not results:
+            return (
+                None,
+                "；".join(errors[index] for index, _url in sources if index in errors)
+                or "没有可用的 LOOM 更新源",
+            )
+
+        selected_index, release = max(
+            results.items(),
+            key=lambda item: (_version_tuple(item[1].version), -item[0]),
+        )
+        del selected_index
         return release, None
 
     def latest_version(self) -> tuple[str | None, str | None]:
@@ -1198,6 +1255,36 @@ class LoomAppUpdater:
                 version = match.group("version")
                 break
         if setup is None:
+            direct_manifest_names = []
+            manifest_name_re = re.compile(
+                rf"^{re.escape(self.brand.file_prefix)}-(?P<version>\d+\.\d+\.\d+)-setup\.exe"
+                rf"{re.escape(UPDATE_MANIFEST_SUFFIX)}$",
+                re.IGNORECASE,
+            )
+            for asset in assets:
+                if not isinstance(asset, dict):
+                    continue
+                name = str(asset.get("name") or asset.get("filename") or "").strip()
+                match = manifest_name_re.fullmatch(name)
+                if match:
+                    direct_manifest_names.append(
+                        (name[: -len(UPDATE_MANIFEST_SUFFIX)], match.group("version"))
+                    )
+            if len(direct_manifest_names) == 1:
+                manifest_installer_name, manifest_version = direct_manifest_names[0]
+                update_manifest = self._fetch_update_manifest(
+                    assets,
+                    manifest_installer_name,
+                )
+                if update_manifest is None:
+                    raise ValueError("国内更新源缺少可读取的签名清单")
+                release = self._release_from_direct_manifest(
+                    update_manifest,
+                    source_url,
+                )
+                if release.version != manifest_version:
+                    raise ValueError("国内更新清单版本与附件名称不一致")
+                return release
             raise ValueError(
                 f"正式发布中没有唯一推荐的 {self.brand.display_name} 完整安装包"
             )
@@ -1275,6 +1362,10 @@ class LoomAppUpdater:
             raise ValueError("更新清单 sha256 无效")
         download_parts = _parse_download_parts(payload, size)
         download_url = _safe_https_url(payload.get("downloadUrl"))
+        raw_fallback_urls = payload.get("fallbackUrls") or []
+        if not isinstance(raw_fallback_urls, list) or len(raw_fallback_urls) > 3:
+            raise ValueError("更新清单 fallbackUrls 必须是最多包含 3 项的数组")
+        fallback_urls = tuple(_safe_https_url(url) for url in raw_fallback_urls)
         release = LoomRelease(
             version=match.group("version"),
             filename=filename,
@@ -1286,6 +1377,7 @@ class LoomAppUpdater:
             published_at=str(payload.get("publishedAt") or "").strip(),
             release_url=source_url,
             update_manifest=payload,
+            fallback_urls=fallback_urls,
             download_parts=download_parts,
         )
         if not self.update_public_key:

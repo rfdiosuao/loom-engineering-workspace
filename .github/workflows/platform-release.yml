@@ -183,11 +183,13 @@ jobs:
           $outputRoot = Join-Path (Split-Path -Parent $PWD) "ci_release_nsis"
           $mirrorBaseUrl = "https://gitee.com/rfdiosuao/lumi/releases/download/$env:RELEASE_TAG"
           $githubPartsBaseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG"
+          $githubInstallerUrl = "$githubPartsBaseUrl/LOOM-$env:LOOM_RELEASE_VERSION-setup.exe"
           & powershell -NoProfile -ExecutionPolicy Bypass `
             -File scripts\prepare-desktop-update-release.ps1 `
             -InstallerPath $env:LOOM_BUILT_INSTALLER `
             -Version $env:LOOM_RELEASE_VERSION `
             -OutputDirectory $outputRoot `
+            -DownloadUrl $githubInstallerUrl `
             -MirrorBaseUrl $mirrorBaseUrl `
             -MirrorFallbackBaseUrl $githubPartsBaseUrl
           if ($LASTEXITCODE -ne 0) {
@@ -341,6 +343,7 @@ jobs:
           Copy-Item -LiteralPath $setupPath -Destination (Join-Path $artifactDir "LOOM-$version-setup.exe")
           Copy-Item -LiteralPath $setupHashPath -Destination (Join-Path $artifactDir "LOOM-$version-setup.exe.sha256.txt")
           Copy-Item -LiteralPath $setupUpdateManifest -Destination (Join-Path $artifactDir "LOOM-$version-setup.exe.update.json")
+          Copy-Item -LiteralPath $setupUpdateManifest -Destination (Join-Path $artifactDir "LOOM-stable.update.json")
           Get-ChildItem -LiteralPath (Join-Path $PWD "ci_release_nsis\mirror-parts") -File -Filter "LOOM-*-setup.part*" |
             ForEach-Object {
               Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $artifactDir $_.Name) -Force
@@ -394,7 +397,7 @@ jobs:
 
       - name: Publish signed domestic update mirror
         continue-on-error: true
-        timeout-minutes: 12
+        timeout-minutes: 35
         working-directory: apps/loom-platform
         env:
           GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
@@ -402,6 +405,11 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:GITEE_ACCESS_TOKEN)) {
             throw "GITEE_ACCESS_TOKEN is required for the signed domestic update mirror."
+          }
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          $manifestPath = Join-Path $PWD "ci_release_nsis\LOOM-$version-setup.exe.update.json"
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "Signed domestic update manifest is missing: $manifestPath"
           }
           $partsRoot = Join-Path $PWD "ci_release_nsis\mirror-parts"
           $parts = @(
@@ -423,7 +431,8 @@ jobs:
           & $publisher `
             -TagName $env:RELEASE_TAG `
             -Name $releaseName `
-            -Body $releaseBody
+            -Body $releaseBody `
+            -Assets @($manifestPath)
 
           $jobs = @(
             foreach ($part in $parts) {
@@ -439,11 +448,11 @@ jobs:
             }
           )
           try {
-            $null = Wait-Job -Job $jobs -Timeout 600
+            $null = Wait-Job -Job $jobs -Timeout 1800
             $unfinished = @($jobs | Where-Object { $_.State -notin @("Completed", "Failed", "Stopped") })
             if ($unfinished.Count -gt 0) {
               $unfinished | Stop-Job
-              throw "Domestic mirror uploads exceeded the 10 minute best-effort deadline."
+              throw "Domestic mirror uploads exceeded the 30 minute best-effort deadline."
             }
             foreach ($job in $jobs) {
               Receive-Job -Job $job | Write-Host
@@ -456,8 +465,11 @@ jobs:
             $jobs | Remove-Job -Force
           }
 
+          $expectedAssets = @($manifestPath) + @($parts)
           & $publisher `
             -TagName $env:RELEASE_TAG `
             -Name $releaseName `
             -Body $releaseBody `
+            -Assets $expectedAssets `
+            -VerifyOnly `
             -PruneDesktopReleases
