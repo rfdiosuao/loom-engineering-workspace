@@ -273,6 +273,140 @@ class LoomAppUpdaterTests(unittest.TestCase):
         self.assertIsNone(latest)
         self.assertIn("LOOM 官方更新签名", error or "")
 
+    def test_github_release_prefers_asset_api_for_manifest_and_installer(self) -> None:
+        installer = b"github-api-installer"
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.3.23-setup.exe"
+        manifest_name = filename + ".update.json"
+        setup_api_url = "https://api.github.com/repos/acme/loom/releases/assets/1001"
+        manifest_api_url = "https://api.github.com/repos/acme/loom/releases/assets/1002"
+        private_key = Ed25519PrivateKey.generate()
+        update_manifest, public_key = _signed_update_manifest(
+            private_key,
+            version="2.3.23",
+            filename=filename,
+            size=len(installer),
+            sha256=digest,
+        )
+        release = {
+            "tag_name": "v2.3.23",
+            "assets": [
+                {
+                    "name": filename,
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "url": setup_api_url,
+                    "browser_download_url": f"https://github.com/acme/loom/releases/download/v2.3.23/{filename}",
+                },
+                {
+                    "name": manifest_name,
+                    "url": manifest_api_url,
+                    "browser_download_url": (
+                        f"https://github.com/acme/loom/releases/download/v2.3.23/{manifest_name}"
+                    ),
+                },
+            ],
+        }
+        requests: list[tuple[str, str]] = []
+
+        def opener(request, timeout=0):
+            del timeout
+            requests.append((request.full_url, str(request.get_header("Accept") or "")))
+            if request.full_url.endswith("/latest"):
+                return _Response(json.dumps(release).encode("utf-8"), url=request.full_url)
+            if request.full_url == manifest_api_url:
+                return _Response(json.dumps(update_manifest).encode("utf-8"), url=request.full_url)
+            if request.full_url == setup_api_url:
+                return _Response(installer, url=request.full_url)
+            raise TimeoutError("release attachment host timed out")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(temp_dir),
+                current_version="2.3.22",
+                release_api_urls=("https://api.github.com/repos/acme/loom/releases/latest",),
+                opener=opener,
+                launcher=lambda _path: None,
+                signature_verifier=lambda _path: (True, "CN=LOOM Release"),
+                update_public_key=public_key,
+                update_cache_dir=os.path.join(temp_dir, "update-cache"),
+            )
+            latest, error = updater.latest_release()
+            self.assertIsNone(error)
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest.url, setup_api_url)
+
+            success, version, _output = updater.install_latest()
+
+        self.assertTrue(success)
+        self.assertEqual(version, "2.3.23")
+        self.assertIn((manifest_api_url, "application/octet-stream"), requests)
+        self.assertIn((setup_api_url, "application/octet-stream"), requests)
+        self.assertFalse(any("github.com/acme/loom/releases/download" in url for url, _accept in requests))
+
+    def test_github_manifest_falls_back_to_browser_download_url(self) -> None:
+        installer = b"github-browser-fallback"
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.3.23-setup.exe"
+        manifest_name = filename + ".update.json"
+        manifest_api_url = "https://api.github.com/repos/acme/loom/releases/assets/2002"
+        manifest_browser_url = (
+            f"https://github.com/acme/loom/releases/download/v2.3.23/{manifest_name}"
+        )
+        private_key = Ed25519PrivateKey.generate()
+        update_manifest, public_key = _signed_update_manifest(
+            private_key,
+            version="2.3.23",
+            filename=filename,
+            size=len(installer),
+            sha256=digest,
+        )
+        release = {
+            "tag_name": "v2.3.23",
+            "assets": [
+                {
+                    "name": filename,
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": f"https://downloads.example/{filename}",
+                },
+                {
+                    "name": manifest_name,
+                    "url": manifest_api_url,
+                    "browser_download_url": manifest_browser_url,
+                },
+            ],
+        }
+        requested_urls: list[str] = []
+
+        def opener(request, timeout=0):
+            del timeout
+            requested_urls.append(request.full_url)
+            if request.full_url.endswith("/latest"):
+                return _Response(json.dumps(release).encode("utf-8"), url=request.full_url)
+            if request.full_url == manifest_api_url:
+                raise TimeoutError("GitHub API asset route timed out")
+            if request.full_url == manifest_browser_url:
+                return _Response(json.dumps(update_manifest).encode("utf-8"), url=request.full_url)
+            raise AssertionError(request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(temp_dir),
+                current_version="2.3.22",
+                release_api_urls=("https://api.github.com/repos/acme/loom/releases/latest",),
+                opener=opener,
+                update_public_key=public_key,
+            )
+            latest, error = updater.latest_release()
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(latest)
+        self.assertLess(
+            requested_urls.index(manifest_api_url),
+            requested_urls.index(manifest_browser_url),
+        )
+
     def test_cancelled_download_keeps_partial_file_for_a_later_resume(self) -> None:
         installer = b"x" * (2 * 1024 * 1024 + 64)
         digest = hashlib.sha256(installer).hexdigest()
