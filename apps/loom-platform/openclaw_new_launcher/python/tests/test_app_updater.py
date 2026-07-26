@@ -636,6 +636,150 @@ class LoomAppUpdaterTests(unittest.TestCase):
         self.assertIn(github_part_url, requested_urls)
         self.assertNotIn(github_installer_url, requested_urls)
 
+    def test_full_installer_retries_a_transient_download_timeout(self) -> None:
+        installer = b"retry-full-installer"
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.3.25-setup.exe"
+        installer_url = f"https://downloads.example/{filename}"
+        release = {
+            "tag_name": "v2.3.25",
+            "assets": [
+                {
+                    "name": filename,
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": installer_url,
+                }
+            ],
+        }
+        installer_attempts = 0
+
+        def opener(request, timeout=0):
+            nonlocal installer_attempts
+            del timeout
+            if request.full_url.endswith("/releases/latest"):
+                return _Response(json.dumps(release).encode("utf-8"), url=request.full_url)
+            if request.full_url == installer_url:
+                installer_attempts += 1
+                if installer_attempts == 1:
+                    raise TimeoutError("download connection timed out")
+                return _Response(installer, url=request.full_url)
+            raise AssertionError(request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "services.app_updater.time.sleep",
+            return_value=None,
+        ):
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.3.24",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                launcher=lambda _path: None,
+                signature_verifier=lambda _path: (True, "CN=LOOM Release"),
+                update_cache_dir=os.path.join(temp_dir, "cache"),
+            )
+
+            success, version, output = updater.install_latest()
+
+        self.assertTrue(success, output)
+        self.assertEqual(version, "2.3.25")
+        self.assertEqual(installer_attempts, 2)
+
+    def test_segmented_fallback_retries_a_transient_download_timeout(self) -> None:
+        installer = b"retry-segmented-fallback"
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.3.25-setup.exe"
+        private_key = Ed25519PrivateKey.generate()
+        domestic_part_url = f"https://gitee.example/{filename}.part001"
+        github_part_url = f"https://github.example/{filename}.part001"
+        github_installer_url = f"https://github.example/{filename}"
+        manifest, public_key = _signed_update_manifest(
+            private_key,
+            version="2.3.25",
+            filename=filename,
+            size=len(installer),
+            sha256=digest,
+            download_url=github_installer_url,
+            download_parts=[
+                {
+                    "index": 1,
+                    "url": domestic_part_url,
+                    "fallbackUrls": [github_part_url],
+                    "size": len(installer),
+                    "sha256": digest,
+                }
+            ],
+        )
+        manifest_name = filename + ".update.json"
+        fallback_attempts = 0
+
+        def opener(request, timeout=0):
+            nonlocal fallback_attempts
+            del timeout
+            if request.full_url.endswith("/releases/latest"):
+                return _Response(
+                    json.dumps(
+                        {
+                            "tag_name": "v2.3.25",
+                            "assets": [
+                                {
+                                    "name": filename,
+                                    "size": len(installer),
+                                    "digest": f"sha256:{digest}",
+                                    "browser_download_url": github_installer_url,
+                                },
+                                {
+                                    "name": manifest_name,
+                                    "browser_download_url": (
+                                        f"https://github.example/{manifest_name}"
+                                    ),
+                                },
+                            ],
+                        }
+                    ).encode("utf-8"),
+                    url=request.full_url,
+                )
+            if request.full_url.endswith(manifest_name):
+                return _Response(json.dumps(manifest).encode("utf-8"), url=request.full_url)
+            if request.full_url == domestic_part_url:
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    404,
+                    "not found",
+                    {},
+                    None,
+                )
+            if request.full_url == github_part_url:
+                fallback_attempts += 1
+                if fallback_attempts == 1:
+                    raise TimeoutError("fallback connection timed out")
+                return _Response(installer, url=request.full_url)
+            if request.full_url == github_installer_url:
+                raise AssertionError("Full installer fallback should not be used")
+            raise AssertionError(request.full_url)
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "services.app_updater.time.sleep",
+            return_value=None,
+        ):
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.3.24",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                launcher=lambda _path: None,
+                signature_verifier=lambda _path: (False, "NotSigned"),
+                update_public_key=public_key,
+                update_cache_dir=os.path.join(temp_dir, "cache"),
+            )
+
+            success, version, output = updater.install_latest()
+
+        self.assertTrue(success, output)
+        self.assertEqual(version, "2.3.25")
+        self.assertEqual(fallback_attempts, 2)
+
     def test_latest_release_rejects_an_invalid_loom_signature_before_prompting(self) -> None:
         installer = b"release-with-tampered-signature"
         digest = hashlib.sha256(installer).hexdigest()
@@ -1367,16 +1511,12 @@ class LoomAppUpdaterTests(unittest.TestCase):
                 update_cache_dir=cache_root,
             )
 
-            first_success, _version, first_output = updater.install_latest()
-            self.assertFalse(first_success)
-            self.assertFalse(os.path.exists(partial_path))
-            self.assertTrue(any("断点续传" in line for line in first_output))
-            self.assertEqual(updater.status()["errorCode"], "network_interrupted")
+            success, version, output = updater.install_latest()
 
-            second_success, version, _output = updater.install_latest()
-
-        self.assertTrue(second_success)
+        self.assertTrue(success, output)
         self.assertEqual(version, "2.1.90")
+        self.assertEqual(download_requests, 2)
+        self.assertFalse(os.path.exists(partial_path))
 
     def test_http_416_discards_partial_and_recovers_with_full_download(self) -> None:
         installer = b"verified-installer-after-http-416"
@@ -1407,7 +1547,10 @@ class LoomAppUpdaterTests(unittest.TestCase):
             self.assertIsNone(range_header)
             return _Response(installer, url=url)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "services.app_updater.time.sleep",
+            return_value=None,
+        ):
             cache_root = os.path.join(temp_dir, "cache")
             os.makedirs(cache_root, exist_ok=True)
             partial_path = os.path.join(cache_root, "LOOM-2.1.90-setup.exe.part")
@@ -1423,16 +1566,12 @@ class LoomAppUpdaterTests(unittest.TestCase):
                 update_cache_dir=cache_root,
             )
 
-            first_success, _version, _output = updater.install_latest()
-            self.assertFalse(first_success)
-            self.assertFalse(os.path.exists(partial_path))
-            self.assertEqual(updater.status()["errorCode"], "network_interrupted")
-            self.assertTrue(updater.status()["retryable"])
+            success, version, output = updater.install_latest()
 
-            second_success, version, _output = updater.install_latest()
-
-        self.assertTrue(second_success)
+        self.assertTrue(success, output)
         self.assertEqual(version, "2.1.90")
+        self.assertEqual(download_requests, 2)
+        self.assertFalse(os.path.exists(partial_path))
 
     def test_http_403_is_not_reported_as_retryable_network_interruption(self) -> None:
         installer = b"verified-installer"
@@ -1750,20 +1889,78 @@ class LoomAppUpdaterTests(unittest.TestCase):
                 update_cache_dir=cache_root,
             )
 
-            first_success, _version, first_output = updater.install_latest()
-            first_status = updater.status()
+            success, version, output = updater.install_latest()
             partial_path = os.path.join(cache_root, "LOOM-2.1.90-setup.exe.part")
-            self.assertFalse(first_success)
-            self.assertTrue(os.path.isfile(partial_path))
-            self.assertTrue(any("网络" in line for line in first_output))
-            self.assertEqual(first_status["errorCode"], "network_interrupted")
-            self.assertTrue(first_status["retryable"])
 
-            second_success, version, _output = updater.install_latest()
-
-        self.assertTrue(second_success)
+        self.assertTrue(success, output)
         self.assertEqual(version, "2.1.90")
         self.assertEqual(ranges, ["bytes=11-"])
+        self.assertFalse(os.path.exists(partial_path))
+
+    def test_clean_early_eof_is_resumed_without_user_retry(self) -> None:
+        installer = b"verified-installer-with-clean-early-eof"
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.1.90-setup.exe"
+        installer_url = f"https://downloads.example/{filename}"
+        release = {
+            "assets": [
+                {
+                    "name": filename,
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": installer_url,
+                }
+            ]
+        }
+        split_at = 13
+        download_attempts = 0
+        ranges: list[str] = []
+
+        def opener(request, timeout=0):
+            nonlocal download_attempts
+            del timeout
+            url = request.full_url
+            if url.endswith("/latest"):
+                return _Response(json.dumps(release).encode("utf-8"), url=url)
+            self.assertEqual(url, installer_url)
+            download_attempts += 1
+            range_header = request.headers.get("Range") or request.headers.get("range")
+            if download_attempts == 1:
+                self.assertIsNone(range_header)
+                return _Response(installer[:split_at], url=url)
+            self.assertEqual(range_header, f"bytes={split_at}-")
+            ranges.append(str(range_header))
+            return _Response(
+                installer[split_at:],
+                url=url,
+                status=206,
+                headers={
+                    "Content-Range": (
+                        f"bytes {split_at}-{len(installer) - 1}/{len(installer)}"
+                    )
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "services.app_updater.time.sleep",
+            return_value=None,
+        ):
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.1.89",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                launcher=lambda _path: None,
+                signature_verifier=lambda _path: (True, "CN=LOOM Release"),
+                update_cache_dir=os.path.join(temp_dir, "cache"),
+            )
+
+            success, version, output = updater.install_latest()
+
+        self.assertTrue(success, output)
+        self.assertEqual(version, "2.1.90")
+        self.assertEqual(download_attempts, 2)
+        self.assertEqual(ranges, [f"bytes={split_at}-"])
 
 
 if __name__ == "__main__":

@@ -134,6 +134,10 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn("Wait-Job -Job $jobs -Timeout 1800", mirror_step)
         self.assertIn("$expectedAssets", mirror_step)
         self.assertIn("-VerifyOnly", mirror_step)
+        self.assertLess(
+            mirror_step.index("-PruneDesktopReleases"),
+            mirror_step.index("Start-Job"),
+        )
 
     def test_windows_release_uploads_domestic_parts_in_parallel_without_blocking_main_release(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
@@ -150,8 +154,8 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn("continue-on-error: true", mirror_step)
         self.assertIn("timeout-minutes: 35", mirror_step)
         self.assertLess(
-            mirror_step.index("Wait-Job"),
             mirror_step.index("-PruneDesktopReleases"),
+            mirror_step.index("Start-Job"),
         )
 
     def test_windows_release_exposes_update_private_key_only_to_manifest_signing(self) -> None:

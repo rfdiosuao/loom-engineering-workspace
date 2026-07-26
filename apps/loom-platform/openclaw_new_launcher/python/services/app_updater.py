@@ -33,6 +33,7 @@ DEFAULT_RELEASE_API_URLS = (
     "https://api.github.com/repos/rfdiosuao/loom-engineering-workspace/releases/latest",
 )
 RELEASE_DISCOVERY_ATTEMPTS = 3
+UPDATE_DOWNLOAD_ATTEMPTS = 3
 SETUP_NAME_RE = re.compile(r"^LOOM-(?P<version>\d+\.\d+\.\d+)-setup\.exe$", re.IGNORECASE)
 SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
 UPDATE_MANIFEST_SUFFIX = ".update.json"
@@ -1007,81 +1008,126 @@ class LoomAppUpdater:
         digest,
         progress_callback: Callable[[dict[str, Any]], None] | None,
     ) -> tuple[int, Any]:
-        response_context = None
         connection_errors: list[str] = []
+        terminal_error: Exception | None = None
         download_urls = (release.url, *release.fallback_urls)
-        for index, download_url in enumerate(download_urls):
-            headers = {
-                "User-Agent": f"{self.brand.brand_id}-Updater/2",
-                "Accept-Encoding": "identity",
-            }
-            if _is_github_asset_api_url(download_url):
-                headers["Accept"] = "application/octet-stream"
-            if written > 0:
-                headers["Range"] = f"bytes={written}-"
-            request = urllib.request.Request(download_url, headers=headers)
-            try:
-                response_context = self.opener(request, timeout=120)
-                break
-            except urllib.error.HTTPError as error:
-                if int(getattr(error, "code", 0) or 0) == 416 and written > 0:
-                    try:
-                        os.remove(partial_path)
-                    except FileNotFoundError:
-                        pass
-                    raise ConnectionError(
-                        "服务器拒绝断点续传（HTTP 416），已清除旧分段，请重试。"
-                    ) from error
-                connection_errors.append(f"{urlparse(download_url).hostname}: HTTP {error.code}")
-                if index + 1 >= len(download_urls):
+        for download_url in download_urls:
+            host = urlparse(download_url).hostname or "download"
+            for attempt in range(1, UPDATE_DOWNLOAD_ATTEMPTS + 1):
+                headers = {
+                    "User-Agent": f"{self.brand.brand_id}-Updater/2",
+                    "Accept-Encoding": "identity",
+                }
+                if _is_github_asset_api_url(download_url):
+                    headers["Accept"] = "application/octet-stream"
+                if written > 0:
+                    headers["Range"] = f"bytes={written}-"
+                request = urllib.request.Request(download_url, headers=headers)
+                try:
+                    with self.opener(request, timeout=120) as response:
+                        status = int(getattr(response, "status", 200) or 200)
+                        if written > 0 and status == 206:
+                            response_headers = getattr(response, "headers", {}) or {}
+                            content_range = str(
+                                response_headers.get("Content-Range") or ""
+                            ).strip()
+                            range_match = re.match(
+                                r"^bytes\s+(\d+)-\d+/(?:\d+|\*)$",
+                                content_range,
+                                re.IGNORECASE,
+                            )
+                            if (
+                                not range_match
+                                or int(range_match.group(1)) != written
+                            ):
+                                expected_offset = written
+                                try:
+                                    os.remove(partial_path)
+                                except FileNotFoundError:
+                                    pass
+                                written = 0
+                                digest = hashlib.sha256()
+                                raise ConnectionError(
+                                    "断点续传响应范围无效："
+                                    f"期望从 {expected_offset} 开始，"
+                                    f"实际为 {content_range or '缺失'}"
+                                )
+                        if written > 0 and status != 206:
+                            written = 0
+                            digest = hashlib.sha256()
+                            mode = "wb"
+                        else:
+                            mode = "ab" if written > 0 else "wb"
+                        with open(partial_path, mode) as output:
+                            while True:
+                                if self._cancel_event.is_set():
+                                    raise UpdateCancelled()
+                                chunk = response.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                output.write(chunk)
+                                digest.update(chunk)
+                                written += len(chunk)
+                                self._report(
+                                    "downloading",
+                                    downloaded=written,
+                                    total=release.size,
+                                    version=release.version,
+                                    message="正在下载更新包",
+                                    callback=progress_callback,
+                                )
+                                if self._cancel_event.is_set():
+                                    raise UpdateCancelled()
+                    if release.size > 0 and written < release.size:
+                        raise ConnectionError(
+                            "更新包下载提前结束："
+                            f"应为 {release.size} 字节，当前为 {written} 字节"
+                        )
+                    return written, digest
+                except UpdateCancelled:
                     raise
-            except (ConnectionError, TimeoutError, urllib.error.URLError) as error:
-                connection_errors.append(f"{urlparse(download_url).hostname}: {error}")
-                if index + 1 >= len(download_urls):
-                    raise ConnectionError("；".join(connection_errors)) from error
-        if response_context is None:
-            raise ConnectionError("；".join(connection_errors) or "更新包下载连接失败")
-        with response_context as response:
-            status = int(getattr(response, "status", 200) or 200)
-            if written > 0 and status == 206:
-                response_headers = getattr(response, "headers", {}) or {}
-                content_range = str(response_headers.get("Content-Range") or "").strip()
-                range_match = re.match(r"^bytes\s+(\d+)-\d+/(?:\d+|\*)$", content_range, re.IGNORECASE)
-                if not range_match or int(range_match.group(1)) != written:
-                    try:
-                        os.remove(partial_path)
-                    except FileNotFoundError:
-                        pass
-                    raise ConnectionError(
-                        f"断点续传响应范围无效：期望从 {written} 开始，实际为 {content_range or '缺失'}"
+                except urllib.error.HTTPError as error:
+                    terminal_error = error
+                    status_code = int(getattr(error, "code", 0) or 0)
+                    stale_range = status_code == 416 and written > 0
+                    if stale_range:
+                        try:
+                            os.remove(partial_path)
+                        except FileNotFoundError:
+                            pass
+                        written = 0
+                        digest = hashlib.sha256()
+                    connection_errors.append(
+                        f"{host}: HTTP {status_code}（第 {attempt} 次）"
                     )
-            if written > 0 and status != 206:
-                written = 0
-                digest = hashlib.sha256()
-                mode = "wb"
-            else:
-                mode = "ab" if written > 0 else "wb"
-            with open(partial_path, mode) as output:
-                while True:
-                    if self._cancel_event.is_set():
-                        raise UpdateCancelled()
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
+                    if (
+                        (
+                            not stale_range
+                            and not _is_transient_release_error(error)
+                        )
+                        or attempt >= UPDATE_DOWNLOAD_ATTEMPTS
+                    ):
                         break
-                    output.write(chunk)
-                    digest.update(chunk)
-                    written += len(chunk)
-                    self._report(
-                        "downloading",
-                        downloaded=written,
-                        total=release.size,
-                        version=release.version,
-                        message="正在下载更新包",
-                        callback=progress_callback,
+                except (
+                    ConnectionError,
+                    TimeoutError,
+                    urllib.error.URLError,
+                ) as error:
+                    terminal_error = error
+                    connection_errors.append(
+                        f"{host}: {error}（第 {attempt} 次）"
                     )
-                    if self._cancel_event.is_set():
-                        raise UpdateCancelled()
-        return written, digest
+                    if attempt >= UPDATE_DOWNLOAD_ATTEMPTS:
+                        break
+                time.sleep(min(float(attempt), 2.0))
+        if (
+            isinstance(terminal_error, urllib.error.HTTPError)
+            and not _is_transient_release_error(terminal_error)
+        ):
+            raise terminal_error
+        raise ConnectionError(
+            "；".join(connection_errors) or "更新包下载连接失败"
+        )
 
     def _download_segmented_release(
         self,
