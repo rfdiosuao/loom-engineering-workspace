@@ -392,14 +392,58 @@ jobs:
               throw "Domestic update part exceeds the Gitee 100 MiB attachment limit: $part"
             }
           }
-          & .\scripts\publish-gitee-release.ps1 `
+          $publisher = (Resolve-Path -LiteralPath ".\scripts\publish-gitee-release.ps1").Path
+          $releaseName = "LOOM $env:RELEASE_TAG 国内更新镜像"
+          $releaseBody = "LOOM 桌面自动更新签名分片。请通过 LOOM 更新中心安装，勿单独运行分片。"
+          & $publisher `
             -TagName $env:RELEASE_TAG `
-            -Name "LOOM $env:RELEASE_TAG 国内更新镜像" `
-            -Body "LOOM 桌面自动更新签名分片。请通过 LOOM 更新中心安装，勿单独运行分片。" `
-            -Assets $parts `
+            -Name $releaseName `
+            -Body $releaseBody
+          if ($LASTEXITCODE -ne 0) {
+            throw "Domestic update mirror release creation failed with exit code $LASTEXITCODE"
+          }
+
+          $jobs = @(
+            foreach ($part in $parts) {
+              Start-Job -ScriptBlock {
+                param($Publisher, $TagName, $ReleaseName, $ReleaseBody, $Asset)
+                $ErrorActionPreference = "Stop"
+                & $Publisher `
+                  -TagName $TagName `
+                  -Name $ReleaseName `
+                  -Body $ReleaseBody `
+                  -Assets @($Asset)
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Domestic mirror upload failed for $Asset with exit code $LASTEXITCODE"
+                }
+              } -ArgumentList $publisher, $env:RELEASE_TAG, $releaseName, $releaseBody, $part
+            }
+          )
+          try {
+            $null = Wait-Job -Job $jobs -Timeout 2100
+            $unfinished = @($jobs | Where-Object { $_.State -notin @("Completed", "Failed", "Stopped") })
+            if ($unfinished.Count -gt 0) {
+              $unfinished | Stop-Job
+              throw "Domestic mirror uploads exceeded the 35 minute deadline."
+            }
+            foreach ($job in $jobs) {
+              Receive-Job -Job $job | Write-Host
+              if ($job.State -ne "Completed") {
+                throw "Domestic mirror upload job failed: $($job.ChildJobs[0].JobStateInfo.Reason)"
+              }
+            }
+          } finally {
+            $jobs | Where-Object State -eq "Running" | Stop-Job
+            $jobs | Remove-Job -Force
+          }
+
+          & $publisher `
+            -TagName $env:RELEASE_TAG `
+            -Name $releaseName `
+            -Body $releaseBody `
             -PruneDesktopReleases
           if ($LASTEXITCODE -ne 0) {
-            throw "Signed domestic update mirror publication failed with exit code $LASTEXITCODE"
+            throw "Domestic update mirror finalization failed with exit code $LASTEXITCODE"
           }
 
       - name: Publish GitHub Release

@@ -358,6 +358,14 @@ class ReleaseScriptsContractTests(unittest.TestCase):
         self.assertIn("curl.exe", publish_source)
         self.assertIn("releases?page=1&per_page=100", publish_source)
 
+    def test_gitee_publish_bounds_attachment_upload_time(self) -> None:
+        publish_source = read_script("publish-gitee-release.ps1")
+
+        self.assertIn('"--connect-timeout", "30"', publish_source)
+        self.assertIn('"--max-time", "1800"', publish_source)
+        self.assertIn('"--retry", "1"', publish_source)
+        self.assertIn('"--retry-all-errors"', publish_source)
+
     def test_gitee_publish_prunes_old_exact_desktop_releases_after_upload(self) -> None:
         publish_source = read_script("publish-gitee-release.ps1")
 
