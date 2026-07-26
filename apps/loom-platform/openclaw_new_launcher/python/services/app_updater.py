@@ -14,6 +14,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
@@ -1033,10 +1034,25 @@ class LoomAppUpdater:
     ) -> tuple[int, Any]:
         parts_root = partial_path + ".parts"
         os.makedirs(parts_root, exist_ok=True)
-        completed_size = 0
-        part_paths: list[str] = []
+        progress_lock = threading.Lock()
+        part_downloaded = {part.index: 0 for part in release.download_parts}
 
-        for part in release.download_parts:
+        def report_part_progress(part_index: int, downloaded: int) -> None:
+            with progress_lock:
+                part_downloaded[part_index] = max(
+                    part_downloaded[part_index],
+                    int(downloaded),
+                )
+                self._report(
+                    "downloading",
+                    downloaded=sum(part_downloaded.values()),
+                    total=release.size,
+                    version=release.version,
+                    message=f"正在并行下载更新分片（最多 4 路）",
+                    callback=progress_callback,
+                )
+
+        def download_part(part: UpdateDownloadPart) -> tuple[int, str, int]:
             part_path = os.path.join(
                 parts_root,
                 f"{release.filename}.part{part.index:03d}",
@@ -1046,18 +1062,7 @@ class LoomAppUpdater:
                 os.remove(part_path)
                 written, digest = 0, hashlib.sha256()
 
-            self._report(
-                "downloading",
-                downloaded=completed_size + written,
-                total=release.size,
-                version=release.version,
-                message=(
-                    f"正在断点续传国内镜像分片 {part.index}/{len(release.download_parts)}"
-                    if written
-                    else f"正在下载国内镜像分片 {part.index}/{len(release.download_parts)}"
-                ),
-                callback=progress_callback,
-            )
+            report_part_progress(part.index, written)
             if written < part.size:
                 part_release = LoomRelease(
                     version=release.version,
@@ -1069,14 +1074,10 @@ class LoomAppUpdater:
                     fallback_urls=part.fallback_urls,
                 )
 
-                def report_part(state: dict[str, Any], *, offset: int = completed_size) -> None:
-                    self._report(
-                        "downloading",
-                        downloaded=offset + int(state.get("downloaded") or 0),
-                        total=release.size,
-                        version=release.version,
-                        message=f"正在下载国内镜像分片 {part.index}/{len(release.download_parts)}",
-                        callback=progress_callback,
+                def report_current_part(state: dict[str, Any]) -> None:
+                    report_part_progress(
+                        part.index,
+                        int(state.get("downloaded") or 0),
                     )
 
                 written, digest = self._download_release(
@@ -1084,7 +1085,7 @@ class LoomAppUpdater:
                     part_path,
                     written,
                     digest,
-                    report_part,
+                    report_current_part,
                 )
             actual_sha = digest.hexdigest().lower()
             if written != part.size or actual_sha != part.sha256:
@@ -1095,8 +1096,26 @@ class LoomAppUpdater:
                 raise ValueError(
                     f"国内镜像分片 {part.index} 校验失败"
                 )
-            part_paths.append(part_path)
-            completed_size += written
+            report_part_progress(part.index, written)
+            return part.index, part_path, written
+
+        part_results: dict[int, tuple[str, int]] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(4, len(release.download_parts)),
+            thread_name_prefix="loom-update-part",
+        ) as executor:
+            futures = {
+                executor.submit(download_part, part): part.index
+                for part in release.download_parts
+            }
+            for future in as_completed(futures):
+                part_index, part_path, written = future.result()
+                part_results[part_index] = (part_path, written)
+
+        part_paths = [
+            part_results[part.index][0]
+            for part in release.download_parts
+        ]
 
         combined_digest = hashlib.sha256()
         combined_size = 0
