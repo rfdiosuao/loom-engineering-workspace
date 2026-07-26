@@ -366,15 +366,20 @@ class ReleaseScriptsContractTests(unittest.TestCase):
         self.assertIn('"--retry", "1"', publish_source)
         self.assertIn('"--retry-all-errors"', publish_source)
 
-    def test_gitee_publish_prunes_old_exact_desktop_releases_after_upload(self) -> None:
+    def test_gitee_publish_prunes_old_exact_desktop_releases_before_upload(self) -> None:
         publish_source = read_script("publish-gitee-release.ps1")
 
         self.assertIn("[switch]$PruneDesktopReleases", publish_source)
         self.assertIn("Remove-StaleDesktopReleases", publish_source)
+        self.assertIn("$response -is [array]", publish_source)
+        self.assertIn("Write-Output -NoEnumerate $_", publish_source)
         self.assertIn('^v\\d+\\.\\d+\\.\\d+$', publish_source)
+        self.assertIn("Gitee mirror pruning: found", publish_source)
         self.assertLess(
+            publish_source.index(
+                "Remove-StaleDesktopReleases -CurrentTag $TagName"
+            ),
             publish_source.index("foreach ($asset in $Assets)"),
-            publish_source.index("Remove-StaleDesktopReleases"),
         )
 
 

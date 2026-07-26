@@ -396,7 +396,7 @@ jobs:
             apps/loom-platform/ci_artifacts/*.part???
 
       - name: Publish signed domestic update mirror
-        continue-on-error: true
+        continue-on-error: false
         timeout-minutes: 35
         working-directory: apps/loom-platform
         env:

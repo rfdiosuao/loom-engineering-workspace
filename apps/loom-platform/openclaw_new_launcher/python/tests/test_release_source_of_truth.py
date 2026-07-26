@@ -151,7 +151,7 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn("-Timeout 1800", mirror_step)
         self.assertIn("Stop-Job", mirror_step)
         self.assertNotIn("$LASTEXITCODE", mirror_step)
-        self.assertIn("continue-on-error: true", mirror_step)
+        self.assertIn("continue-on-error: false", mirror_step)
         self.assertIn("timeout-minutes: 35", mirror_step)
         self.assertLess(
             mirror_step.index("-PruneDesktopReleases"),
