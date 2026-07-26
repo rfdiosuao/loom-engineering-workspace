@@ -399,9 +399,6 @@ jobs:
             -TagName $env:RELEASE_TAG `
             -Name $releaseName `
             -Body $releaseBody
-          if ($LASTEXITCODE -ne 0) {
-            throw "Domestic update mirror release creation failed with exit code $LASTEXITCODE"
-          }
 
           $jobs = @(
             foreach ($part in $parts) {
@@ -413,9 +410,6 @@ jobs:
                   -Name $ReleaseName `
                   -Body $ReleaseBody `
                   -Assets @($Asset)
-                if ($LASTEXITCODE -ne 0) {
-                  throw "Domestic mirror upload failed for $Asset with exit code $LASTEXITCODE"
-                }
               } -ArgumentList $publisher, $env:RELEASE_TAG, $releaseName, $releaseBody, $part
             }
           )
@@ -442,9 +436,6 @@ jobs:
             -Name $releaseName `
             -Body $releaseBody `
             -PruneDesktopReleases
-          if ($LASTEXITCODE -ne 0) {
-            throw "Domestic update mirror finalization failed with exit code $LASTEXITCODE"
-          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
