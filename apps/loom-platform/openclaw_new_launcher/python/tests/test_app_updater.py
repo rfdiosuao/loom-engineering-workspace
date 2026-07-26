@@ -7,6 +7,7 @@ import json
 import errno
 import os
 import tempfile
+import threading
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -99,6 +100,19 @@ class _InterruptedResponse(_Response):
             self._delivered = True
             return self._stream.read(self._fail_after)
         raise ConnectionResetError("connection reset during update download")
+
+
+class _BarrierResponse(_Response):
+    def __init__(self, payload: bytes, barrier: threading.Barrier, **kwargs) -> None:
+        super().__init__(payload, **kwargs)
+        self._barrier = barrier
+        self._waited = False
+
+    def read(self, size: int = -1) -> bytes:
+        if not self._waited:
+            self._waited = True
+            self._barrier.wait(timeout=3)
+        return super().read(size)
 
 
 class LoomAppUpdaterTests(unittest.TestCase):
@@ -267,6 +281,7 @@ class LoomAppUpdaterTests(unittest.TestCase):
         }
         requested_urls: list[str] = []
         launched: list[str] = []
+        download_barrier = threading.Barrier(len(parts))
 
         def opener(request, timeout=0):
             del timeout
@@ -278,7 +293,7 @@ class LoomAppUpdaterTests(unittest.TestCase):
                 return _Response(json.dumps(manifest).encode("utf-8"), url=url)
             for index, part in enumerate(parts, start=1):
                 if url.endswith(f".part{index:03d}"):
-                    return _Response(part, url=url)
+                    return _BarrierResponse(part, download_barrier, url=url)
             if url.endswith(filename):
                 raise AssertionError("GitHub installer fallback should not be used")
             raise AssertionError(url)
@@ -303,8 +318,8 @@ class LoomAppUpdaterTests(unittest.TestCase):
             with open(launched[0], "rb") as handle:
                 self.assertEqual(handle.read(), installer)
             self.assertEqual(
-                [url for url in requested_urls if ".part" in url],
-                [item["url"] for item in download_parts],
+                sorted(url for url in requested_urls if ".part" in url),
+                sorted(item["url"] for item in download_parts),
             )
             self.assertNotIn(f"https://github.example/{filename}", requested_urls)
 
