@@ -30,6 +30,7 @@ def _signed_update_manifest(
     filename: str,
     size: int,
     sha256: str,
+    download_parts: list[dict[str, object]] | None = None,
 ) -> tuple[dict[str, object], str]:
     manifest: dict[str, object] = {
         "schemaVersion": 1,
@@ -41,6 +42,8 @@ def _signed_update_manifest(
         "sha256": sha256,
         "publishedAt": "2026-07-24T08:00:00Z",
     }
+    if download_parts:
+        manifest["downloadParts"] = download_parts
     payload = json.dumps(
         manifest,
         sort_keys=True,
@@ -220,6 +223,164 @@ class LoomAppUpdaterTests(unittest.TestCase):
         self.assertIn("全新更新中心", latest.notes)
         self.assertEqual(latest.published_at, "2026-07-22T08:30:00Z")
         self.assertEqual(latest.release_url, "https://example.invalid/releases/v2.3.0")
+
+    def test_signed_domestic_parts_are_downloaded_and_assembled_before_github_fallback(
+        self,
+    ) -> None:
+        parts = [b"domestic-part-one", b"domestic-part-two"]
+        installer = b"".join(parts)
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.3.24-setup.exe"
+        private_key = Ed25519PrivateKey.generate()
+        download_parts = [
+            {
+                "index": index,
+                "url": f"https://gitee.example/{filename}.part{index:03d}",
+                "size": len(part),
+                "sha256": hashlib.sha256(part).hexdigest(),
+            }
+            for index, part in enumerate(parts, start=1)
+        ]
+        manifest, public_key = _signed_update_manifest(
+            private_key,
+            version="2.3.24",
+            filename=filename,
+            size=len(installer),
+            sha256=digest,
+            download_parts=download_parts,
+        )
+        manifest_name = filename + ".update.json"
+        release = {
+            "tag_name": "v2.3.24",
+            "assets": [
+                {
+                    "name": filename,
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": f"https://github.example/{filename}",
+                },
+                {
+                    "name": manifest_name,
+                    "browser_download_url": f"https://github.example/{manifest_name}",
+                },
+            ],
+        }
+        requested_urls: list[str] = []
+        launched: list[str] = []
+
+        def opener(request, timeout=0):
+            del timeout
+            url = request.full_url
+            requested_urls.append(url)
+            if url.endswith("/releases/latest"):
+                return _Response(json.dumps(release).encode("utf-8"), url=url)
+            if url.endswith(manifest_name):
+                return _Response(json.dumps(manifest).encode("utf-8"), url=url)
+            for index, part in enumerate(parts, start=1):
+                if url.endswith(f".part{index:03d}"):
+                    return _Response(part, url=url)
+            if url.endswith(filename):
+                raise AssertionError("GitHub installer fallback should not be used")
+            raise AssertionError(url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.3.23",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                launcher=launched.append,
+                signature_verifier=lambda _path: (False, "NotSigned"),
+                update_public_key=public_key,
+                update_cache_dir=os.path.join(temp_dir, "cache"),
+            )
+
+            success, version, output = updater.install_latest()
+
+            self.assertTrue(success, output)
+            self.assertEqual(version, "2.3.24")
+            self.assertEqual(len(launched), 1)
+            with open(launched[0], "rb") as handle:
+                self.assertEqual(handle.read(), installer)
+            self.assertEqual(
+                [url for url in requested_urls if ".part" in url],
+                [item["url"] for item in download_parts],
+            )
+            self.assertNotIn(f"https://github.example/{filename}", requested_urls)
+
+    def test_corrupt_domestic_part_falls_back_to_verified_github_installer(self) -> None:
+        expected_part = b"trusted-domestic-part"
+        installer = expected_part
+        digest = hashlib.sha256(installer).hexdigest()
+        filename = "LOOM-2.3.24-setup.exe"
+        private_key = Ed25519PrivateKey.generate()
+        part_url = f"https://gitee.example/{filename}.part001"
+        manifest, public_key = _signed_update_manifest(
+            private_key,
+            version="2.3.24",
+            filename=filename,
+            size=len(installer),
+            sha256=digest,
+            download_parts=[
+                {
+                    "index": 1,
+                    "url": part_url,
+                    "size": len(expected_part),
+                    "sha256": hashlib.sha256(expected_part).hexdigest(),
+                }
+            ],
+        )
+        manifest_name = filename + ".update.json"
+        github_url = f"https://github.example/{filename}"
+        release = {
+            "tag_name": "v2.3.24",
+            "assets": [
+                {
+                    "name": filename,
+                    "size": len(installer),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": github_url,
+                },
+                {
+                    "name": manifest_name,
+                    "browser_download_url": f"https://github.example/{manifest_name}",
+                },
+            ],
+        }
+        requested_urls: list[str] = []
+
+        def opener(request, timeout=0):
+            del timeout
+            url = request.full_url
+            requested_urls.append(url)
+            if url.endswith("/releases/latest"):
+                return _Response(json.dumps(release).encode("utf-8"), url=url)
+            if url.endswith(manifest_name):
+                return _Response(json.dumps(manifest).encode("utf-8"), url=url)
+            if url == part_url:
+                return _Response(b"corrupted-domestic", url=url)
+            if url == github_url:
+                return _Response(installer, url=url)
+            raise AssertionError(url)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            updater = LoomAppUpdater(
+                AppPaths(os.path.join(temp_dir, "app")),
+                current_version="2.3.23",
+                release_api_urls=("https://api.example/releases/latest",),
+                opener=opener,
+                launcher=lambda _path: None,
+                signature_verifier=lambda _path: (False, "NotSigned"),
+                update_public_key=public_key,
+                update_cache_dir=os.path.join(temp_dir, "cache"),
+            )
+
+            success, version, output = updater.install_latest()
+
+        self.assertTrue(success, output)
+        self.assertEqual(version, "2.3.24")
+        self.assertIn(part_url, requested_urls)
+        self.assertIn(github_url, requested_urls)
 
     def test_latest_release_rejects_an_invalid_loom_signature_before_prompting(self) -> None:
         installer = b"release-with-tampered-signature"

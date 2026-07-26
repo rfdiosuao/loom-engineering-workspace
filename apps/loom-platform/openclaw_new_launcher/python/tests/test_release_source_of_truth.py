@@ -97,6 +97,18 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
             release,
         )
 
+    def test_windows_release_publishes_signed_domestic_parts_before_github_release(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+
+        mirror_step = "- name: Publish signed domestic update mirror"
+        github_step = "- name: Publish GitHub Release"
+        self.assertIn(mirror_step, release)
+        self.assertIn("GITEE_ACCESS_TOKEN", release)
+        self.assertIn("LOOM-*-setup.part*", release)
+        self.assertIn("publish-gitee-release.ps1", release)
+        self.assertIn("-PruneDesktopReleases", release)
+        self.assertLess(release.index(mirror_step), release.index(github_step))
+
     def test_windows_release_exposes_update_private_key_only_to_manifest_signing(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
         build_step = release.split("- name: Build protected NSIS", 1)[1].split("- name:", 1)[0]

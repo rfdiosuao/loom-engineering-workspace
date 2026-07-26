@@ -22,6 +22,7 @@ from desktop_update_signing import (
 
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _sha256(path: str) -> str:
@@ -54,6 +55,7 @@ def main() -> int:
     parser.add_argument("--channel-id", default="loom-stable")
     parser.add_argument("--file-prefix", default="LOOM")
     parser.add_argument("--download-url", default="")
+    parser.add_argument("--download-parts-json", default="")
     parser.add_argument("--public-key", required=True)
     args = parser.parse_args()
 
@@ -92,6 +94,43 @@ def main() -> int:
         if not download_url.startswith("https://"):
             raise ValueError("download-url must use HTTPS")
         manifest["downloadUrl"] = download_url
+    download_parts_path = str(args.download_parts_json).strip()
+    if download_parts_path:
+        with open(download_parts_path, "r", encoding="utf-8-sig") as handle:
+            raw_parts = json.load(handle)
+        if not isinstance(raw_parts, list) or not 1 <= len(raw_parts) <= 32:
+            raise ValueError("download-parts-json must contain 1 to 32 parts")
+        download_parts: list[dict[str, object]] = []
+        seen_urls: set[str] = set()
+        for expected_index, raw_part in enumerate(raw_parts, start=1):
+            if not isinstance(raw_part, dict):
+                raise ValueError("download part must be an object")
+            index = int(raw_part.get("index") or 0)
+            url = str(raw_part.get("url") or "").strip()
+            size = int(raw_part.get("size") or 0)
+            sha256 = str(raw_part.get("sha256") or "").strip().lower()
+            if index != expected_index:
+                raise ValueError("download part indexes must start at 1 and be contiguous")
+            if not url.startswith("https://"):
+                raise ValueError("download part URLs must use HTTPS")
+            if url in seen_urls:
+                raise ValueError("download part URLs must be unique")
+            seen_urls.add(url)
+            if size <= 0 or size > 100 * 1024 * 1024:
+                raise ValueError("download part size must be between 1 byte and 100 MiB")
+            if not SHA256_RE.fullmatch(sha256):
+                raise ValueError("download part sha256 is invalid")
+            download_parts.append(
+                {
+                    "index": index,
+                    "url": url,
+                    "size": size,
+                    "sha256": sha256,
+                }
+            )
+        if sum(int(part["size"]) for part in download_parts) != manifest["size"]:
+            raise ValueError("download parts do not add up to the installer size")
+        manifest["downloadParts"] = download_parts
     private_key = load_private_key(read_private_key())
     expected_public_key = load_public_key(read_public_key(args.public_key))
     actual_public_bytes = private_key.public_key().public_bytes(

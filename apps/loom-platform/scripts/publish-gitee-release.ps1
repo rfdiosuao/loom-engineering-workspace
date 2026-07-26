@@ -6,7 +6,8 @@ param(
     [string]$Body = "",
     [string[]]$Assets = @(),
     [string]$Token = $env:GITEE_ACCESS_TOKEN,
-    [string]$TokenFile = ""
+    [string]$TokenFile = "",
+    [switch]$PruneDesktopReleases
 )
 
 $ErrorActionPreference = "Stop"
@@ -189,16 +190,16 @@ function Publish-Asset {
     }
 
     $url = "https://gitee.com/api/v5/repos/$Owner/$Repo/releases/$ReleaseId/attach_files"
-    $curlArgs = @(
-        "-sS",
-        "-X", "POST",
-        "-F", "access_token=$Token",
-        "-F", "file=@$resolved",
-        $url
-    )
-    $result = & curl.exe @curlArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to upload asset: $fileName"
+    $result = Invoke-GiteeFormPost -Url $url -Fields @{
+        access_token = $Token
+        file = "@$resolved"
+    }
+    $uploadedName = [string]$result.name
+    if ([string]::IsNullOrWhiteSpace($uploadedName)) {
+        $uploadedName = [string]$result.filename
+    }
+    if ([string]::IsNullOrWhiteSpace($uploadedName) -or $uploadedName -ne $fileName) {
+        throw "Gitee did not confirm the uploaded asset: $fileName"
     }
     Write-Host "Uploaded asset: $fileName"
 }
@@ -214,6 +215,27 @@ if ($release) {
 
 foreach ($asset in $Assets) {
     Publish-Asset -ReleaseId ([int]$release.id) -AssetPath $asset
+}
+
+function Remove-StaleDesktopReleases {
+    param([string]$CurrentTag)
+
+    $items = @(Invoke-GiteeApi -Method "GET" -Path "/repos/$Owner/$Repo/releases?page=1&per_page=100")
+    foreach ($item in $items) {
+        $tag = [string]$item.tag_name
+        if ($tag -eq $CurrentTag -or $tag -notmatch '^v\d+\.\d+\.\d+$') {
+            continue
+        }
+        if (-not $item.id) {
+            throw "Gitee release is missing its id: $tag"
+        }
+        Invoke-GiteeApi -Method "DELETE" -Path "/repos/$Owner/$Repo/releases/$($item.id)" | Out-Null
+        Write-Host "Removed stale Gitee desktop mirror release: $tag"
+    }
+}
+
+if ($PruneDesktopReleases) {
+    Remove-StaleDesktopReleases -CurrentTag $TagName
 }
 
 Write-Host "Gitee release ready: $TagName"

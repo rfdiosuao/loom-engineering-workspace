@@ -188,6 +188,82 @@ class LosslessUpdateContractTests(unittest.TestCase):
         ).encode("utf-8")
         private_key.public_key().verify(signature, payload)
 
+    def test_desktop_update_signer_binds_domestic_download_parts(self) -> None:
+        installer = b"segmented-domestic-installer"
+        private_key = Ed25519PrivateKey.generate()
+        private_key_value = base64.b64encode(
+            private_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        ).decode("ascii")
+        public_key_value = base64.b64encode(
+            private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+        part = {
+            "index": 1,
+            "url": "https://gitee.com/example/LOOM-2.3.24-setup.part001",
+            "size": len(installer),
+            "sha256": hashlib.sha256(installer).hexdigest(),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer_path = os.path.join(temp_dir, "LOOM-2.3.24-setup.exe")
+            manifest_path = installer_path + ".update.json"
+            parts_path = os.path.join(temp_dir, "parts.json")
+            public_key_path = os.path.join(temp_dir, "desktop-update-public-key.txt")
+            with open(installer_path, "wb") as handle:
+                handle.write(installer)
+            with open(parts_path, "w", encoding="utf-8") as handle:
+                json.dump([part], handle)
+            with open(public_key_path, "w", encoding="utf-8") as handle:
+                handle.write(public_key_value)
+            env = os.environ.copy()
+            env["LOOM_DESKTOP_UPDATE_PRIVATE_KEY"] = private_key_value
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    UPDATE_SIGNER_SCRIPT,
+                    "--installer",
+                    installer_path,
+                    "--version",
+                    "2.3.24",
+                    "--output",
+                    manifest_path,
+                    "--public-key",
+                    public_key_path,
+                    "--download-parts-json",
+                    parts_path,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+
+        self.assertEqual(manifest["downloadParts"], [part])
+        signature = base64.b64decode(manifest["signature"]["value"])
+        unsigned = dict(manifest)
+        unsigned.pop("signature")
+        private_key.public_key().verify(
+            signature,
+            json.dumps(
+                unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8"),
+        )
+
     def test_desktop_update_signer_rejects_a_private_key_that_does_not_match_the_client_key(
         self,
     ) -> None:
