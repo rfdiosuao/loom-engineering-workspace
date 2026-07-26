@@ -32,3 +32,27 @@ test('update verification copy describes the active brand release signature', ()
   assert.match(source, /官方发布签名/);
   assert.doesNotMatch(source, /SHA256 与 Windows 发布者校验/);
 });
+
+test('signature failures expose the one-time official installer bridge', () => {
+  const shouldOffer = (updateCenter as unknown as {
+    shouldOfferManualUpdateBridge?: (errorCode: string) => boolean;
+  }).shouldOfferManualUpdateBridge;
+  const bridgeUrl = (updateCenter as unknown as {
+    manualUpdateBridgeUrl?: (releaseUrl?: string) => string;
+  }).manualUpdateBridgeUrl;
+
+  assert.equal(typeof shouldOffer, 'function');
+  assert.equal(typeof bridgeUrl, 'function');
+  if (!shouldOffer || !bridgeUrl) return;
+
+  assert.equal(shouldOffer('signature_invalid'), true);
+  assert.equal(shouldOffer('network_interrupted'), false);
+  assert.equal(
+    bridgeUrl('https://github.com/rfdiosuao/loom-engineering-workspace/releases/tag/v2.3.22'),
+    'https://github.com/rfdiosuao/loom-engineering-workspace/releases/tag/v2.3.22',
+  );
+  assert.equal(
+    bridgeUrl('javascript:alert(1)'),
+    'https://github.com/rfdiosuao/loom-engineering-workspace/releases/latest',
+  );
+});

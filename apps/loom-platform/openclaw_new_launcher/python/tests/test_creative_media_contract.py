@@ -89,6 +89,18 @@ class CreativeMediaUiContractTests(unittest.TestCase):
         self.assertIn("disabled={imageRunning}", source)
         self.assertIn("disabled={videoRunning}", source)
 
+    def test_creative_polling_registers_interval_before_first_terminal_tick(self) -> None:
+        with open(CREATIVE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        poll_job_start = source.index("const pollJob")
+        interval_assignment = source.index(
+            "pollRefs.current[kind] = window.setInterval",
+            poll_job_start,
+        )
+        first_tick = source.index("void tick();", poll_job_start)
+        self.assertLess(interval_assignment, first_tick)
+
     def test_creative_page_supports_pippit_manual_continuation(self) -> None:
         with open(CREATIVE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()

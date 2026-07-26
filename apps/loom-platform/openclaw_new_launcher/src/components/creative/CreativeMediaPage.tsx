@@ -384,8 +384,8 @@ export const CreativeMediaPage: React.FC = () => {
         showToast(friendlyError(error, '读取生成状态失败'), 'error');
       }
     };
-    void tick();
     pollRefs.current[kind] = window.setInterval(tick, 1300);
+    void tick();
   }, [applyFinishedJob, refreshAssets, setKindJob, stopPolling]);
 
   React.useEffect(() => {

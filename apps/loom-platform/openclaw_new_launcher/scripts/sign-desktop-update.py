@@ -11,7 +11,14 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
-from desktop_update_signing import load_private_key, read_private_key
+from cryptography.hazmat.primitives import serialization
+
+from desktop_update_signing import (
+    load_private_key,
+    load_public_key,
+    read_private_key,
+    read_public_key,
+)
 
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
@@ -47,6 +54,7 @@ def main() -> int:
     parser.add_argument("--channel-id", default="loom-stable")
     parser.add_argument("--file-prefix", default="LOOM")
     parser.add_argument("--download-url", default="")
+    parser.add_argument("--public-key", required=True)
     args = parser.parse_args()
 
     version = str(args.version).strip()
@@ -85,6 +93,19 @@ def main() -> int:
             raise ValueError("download-url must use HTTPS")
         manifest["downloadUrl"] = download_url
     private_key = load_private_key(read_private_key())
+    expected_public_key = load_public_key(read_public_key(args.public_key))
+    actual_public_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    expected_public_bytes = expected_public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    if actual_public_bytes != expected_public_bytes:
+        raise ValueError(
+            "desktop update private key does not match the public key bundled with the client"
+        )
     manifest["signature"] = {
         "algorithm": "ed25519",
         "value": base64.b64encode(private_key.sign(_canonical_payload(manifest))).decode("ascii"),

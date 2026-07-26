@@ -268,6 +268,10 @@ class BrandBuildContractTests(unittest.TestCase):
         self.assertIn("brand_build.py", hook)
         self.assertIn("tauri.brand.conf.json", hook)
         self.assertIn("bundledLogoRelativePath", hook)
+        self.assertIn(
+            '-PublicKeyPath (Join-Path $plan.paths.runtime "desktop-update-brand.json")',
+            hook,
+        )
         self.assertIn("Assert-GitWorktreeClean -Repository $WorkspaceRoot", hook)
         self.assertIn("assembleRelease", hook)
         self.assertIn("$androidBuildStartedAt", hook)

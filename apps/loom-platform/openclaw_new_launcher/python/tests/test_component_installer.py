@@ -923,11 +923,47 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             self.assertIn("--prefix", install_call)
             self.assertIn(private_prefix, install_call)
 
-    def test_self_contained_claude_and_opencode_use_verified_extracted_entry_without_second_download(self) -> None:
-        for component_id, entry_name in (
-            ("claude-code", "claude.exe"),
-            ("opencode", "opencode.exe"),
-        ):
+    def test_claude_code_prefers_managed_npm_shim_over_archive_pseudo_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_path = os.path.join(temp_dir, "agents", "claude-code")
+            archive_entry = os.path.join(install_path, "package", "bin", "claude.exe")
+            external_entry = os.path.join(temp_dir, "data", ".installer", "npm-global", "claude.cmd")
+            os.makedirs(os.path.dirname(archive_entry), exist_ok=True)
+            os.makedirs(os.path.dirname(external_entry), exist_ok=True)
+            with open(archive_entry, "wb") as handle:
+                handle.write(b"npm archive payload, not a Windows PE")
+            with open(external_entry, "wb") as handle:
+                handle.write(b"@echo off\r\n")
+            component = ReleaseComponent(
+                component_id="claude-code",
+                name="Claude Code",
+                version="2.1.195",
+                platform="windows",
+                arch="x64",
+                archive_type="tgz",
+                size=1,
+                sha256="a" * 64,
+                urls=("https://download.example.invalid/claude-code.tgz",),
+                install_path="agents/claude-code",
+                entry=None,
+                install_command=("npm", "install", "-g", "@anthropic-ai/claude-code@2.1.195"),
+                external_paths=(external_entry,),
+            )
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+            )
+
+            resolved = installer._resolve_component_entry(
+                component,
+                install_path,
+                force_external_probe=True,
+            )
+
+            self.assertEqual(os.path.normcase(resolved), os.path.normcase(external_entry))
+
+    def test_self_contained_opencode_uses_verified_extracted_entry_without_second_download(self) -> None:
+        for component_id, entry_name in (("opencode", "opencode.exe"),):
             with self.subTest(component_id=component_id), tempfile.TemporaryDirectory() as temp_dir:
                 payload = make_tgz_payload({f"package/bin/{entry_name}": b"verified executable"})
                 component = ReleaseComponent(

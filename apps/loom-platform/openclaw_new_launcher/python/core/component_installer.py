@@ -1029,7 +1029,6 @@ class ComponentInstaller:
 
     def _verified_bundled_entry(self, component: ReleaseComponent, install_path: str) -> str | None:
         relative_by_component = {
-            "claude-code": os.path.join("package", "bin", "claude.exe"),
             "opencode": os.path.join("package", "bin", "opencode.exe"),
         }
         relative = relative_by_component.get(component.component_id)

@@ -959,6 +959,9 @@ class LoomAppUpdaterTests(unittest.TestCase):
         self.assertTrue(any("签名" in line or "signature" in line.lower() for line in output))
         self.assertEqual(updater.status()["errorCode"], "signature_invalid")
         self.assertFalse(updater.status()["retryable"])
+        self.assertTrue(
+            any("手动安装一次最新版" in item for item in updater.status()["remediation"])
+        )
 
     def test_install_latest_accepts_valid_loom_signature_when_authenticode_is_unavailable(self) -> None:
         installer = b"loom-signed-but-authenticode-unavailable"

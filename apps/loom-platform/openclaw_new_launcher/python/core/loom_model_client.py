@@ -23,6 +23,7 @@ CONNECT_TIMEOUT_SEC = 10.0
 FIRST_RESPONSE_TIMEOUT_SEC = 45.0
 DEFAULT_TOTAL_ROUND_TIMEOUT_SEC = 120.0
 MAX_RETRIES_BEFORE_CHUNK = 2
+MAX_MODEL_FALLBACKS = 2
 RETRY_BASE_DELAY_SEC = 0.25
 RETRY_MAX_DELAY_SEC = 2.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -46,6 +47,7 @@ SAFE_TOKEN_USAGE_FIELDS = frozenset({
 })
 TOOL_CALL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 CAPABILITY_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,127}\Z")
+MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 MODEL_TOOL_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_-]+")
 MODEL_TOOL_NAME_MAX_LENGTH = 64
 MAX_TOOL_HISTORY_JSON_CHARS = 12000
@@ -962,12 +964,26 @@ class LoomModelClient:
             _canonical_to_alias, alias_to_canonical = _model_tool_alias_maps(request.get("capabilities"))
             aggregate = ChatAggregate(tool_name_map=alias_to_canonical)
             active_profile = profile
+            fallback_model_ids = self._fallback_model_ids(profile.model)
+
+            def announce_fallback(from_model: str, to_model: str, reason: str) -> None:
+                emit(redact_sensitive({
+                    "type": "model.fallback",
+                    "data": {
+                        "fromModel": from_model,
+                        "toModel": to_model,
+                        "reason": reason,
+                    },
+                }))
+
             for active_profile, chunk in self._stream_with_retry(
                 profile,
                 payload,
                 cancel,
                 total_timeout,
                 model_id=model_id,
+                fallback_model_ids=fallback_model_ids,
+                on_fallback=announce_fallback,
             ):
                 for event in aggregate.consume(chunk):
                     emit(redact_sensitive(event))
@@ -1010,6 +1026,40 @@ class LoomModelClient:
         except Exception as exc:
             raise _model_account_error(exc) from None
 
+    def _fallback_model_ids(self, active_model: str) -> tuple[str, ...]:
+        try:
+            session = self.account.current()
+        except Exception:
+            return ()
+        if not isinstance(session, Mapping):
+            return ()
+        gateway = session.get("gateway") if isinstance(session.get("gateway"), Mapping) else {}
+        classified = gateway.get("classifiedModels") if isinstance(gateway.get("classifiedModels"), Mapping) else {}
+        text_models = classified.get("text") if isinstance(classified.get("text"), list) else []
+        candidates = [
+            str(session.get("gatewayDefaultModel") or gateway.get("defaultModel") or "").strip(),
+            *[
+                str(item.get("modelId") or item.get("id") or item.get("name") or "").strip()
+                if isinstance(item, Mapping)
+                else str(item or "").strip()
+                for item in text_models
+            ],
+        ]
+        result: list[str] = []
+        seen = {active_model}
+        for candidate in candidates:
+            if (
+                not candidate
+                or candidate in seen
+                or not _is_safe_model_identifier(candidate, MODEL_ID_PATTERN)
+            ):
+                continue
+            seen.add(candidate)
+            result.append(candidate)
+            if len(result) >= MAX_MODEL_FALLBACKS:
+                break
+        return tuple(result)
+
     def _stream_with_retry(
         self,
         profile: LoomModelProfile,
@@ -1018,6 +1068,8 @@ class LoomModelClient:
         total_timeout_sec: float,
         *,
         model_id: str = "",
+        fallback_model_ids: tuple[str, ...] = (),
+        on_fallback: Callable[[str, str, str], None] | None = None,
     ) -> Iterator[tuple[LoomModelProfile, dict[str, Any]]]:
         deadline = time.monotonic() + total_timeout_sec
         active_profile = profile
@@ -1026,6 +1078,7 @@ class LoomModelClient:
         refreshed = False
         received_chunk = False
         first_attempt = True
+        remaining_fallbacks = list(fallback_model_ids)
 
         while True:
             if cancel.is_set():
@@ -1049,8 +1102,31 @@ class LoomModelClient:
                     raise _sanitized_gateway_error(exc) from None
                 if exc.status_code in {401, 403} and not refreshed:
                     refreshed = True
-                    active_profile = self._ensure_profile(force_refresh=True, model_id=model_id)
+                    refresh_model_id = (
+                        active_profile.model
+                        if model_id or active_profile.model != profile.model
+                        else ""
+                    )
+                    active_profile = self._ensure_profile(
+                        force_refresh=True,
+                        model_id=refresh_model_id,
+                    )
                     active_payload = {**active_payload, "model": active_profile.model}
+                    continue
+                if (
+                    remaining_fallbacks
+                    and (
+                        _is_retryable_gateway_error(exc)
+                        or exc.status_code == 404
+                    )
+                ):
+                    fallback_model = remaining_fallbacks.pop(0)
+                    previous_model = active_profile.model
+                    active_profile = self._ensure_profile(model_id=fallback_model)
+                    active_payload = {**active_payload, "model": active_profile.model}
+                    network_retries = 0
+                    if on_fallback is not None:
+                        on_fallback(previous_model, active_profile.model, exc.code)
                     continue
                 if _is_retryable_gateway_error(exc) and network_retries < MAX_RETRIES_BEFORE_CHUNK:
                     network_retries += 1

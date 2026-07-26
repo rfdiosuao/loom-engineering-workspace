@@ -907,6 +907,78 @@ class LoomModelClientTests(unittest.TestCase):
         self.assertGreaterEqual(cancel.waits[1], 0.5)
         self.assertLessEqual(cancel.waits[1], 0.625)
 
+    def test_transient_upstream_failure_falls_back_to_next_account_text_model_before_output(self):
+        session = managed_session(model="broken-primary")
+        session["gateway"]["classifiedModels"] = {
+            "text": ["broken-primary", "provider/healthy-fallback"],
+        }
+        transport = ScriptedTransport([
+            [ModelGatewayError(
+                "AGENT_MODEL_HTTP_ERROR",
+                "upstream unavailable",
+                status_code=503,
+            )],
+            [{"choices": [{"delta": {"content": "Recovered on fallback"}}]}],
+        ])
+        events = []
+
+        result = LoomModelClient(FakeAccount(session), transport=transport).complete(
+            {"runId": "run_fallback", "round": 1, "prompt": "check"},
+            events.append,
+            threading.Event(),
+        )
+
+        self.assertEqual(result["text"], "Recovered on fallback")
+        self.assertEqual(result["model"], "provider/healthy-fallback")
+        self.assertEqual(
+            [request[0].model for request in transport.requests],
+            ["broken-primary", "provider/healthy-fallback"],
+        )
+        fallback = next(event for event in events if event["type"] == "model.fallback")
+        self.assertEqual(fallback["data"]["fromModel"], "broken-primary")
+        self.assertEqual(fallback["data"]["toModel"], "provider/healthy-fallback")
+        self.assertEqual(fallback["data"]["reason"], "AGENT_MODEL_HTTP_ERROR")
+
+    def test_auth_refresh_preserves_the_selected_fallback_model(self):
+        session = managed_session("sk-expired-secret", "broken-primary")
+        session["gateway"]["classifiedModels"] = {
+            "text": ["broken-primary", "provider/healthy-fallback"],
+        }
+        refreshed_session = managed_session("sk-refreshed-secret", "different-default-after-refresh")
+        account = FakeAccount(session, refreshed_session=refreshed_session)
+        transport = ScriptedTransport([
+            [ModelGatewayError(
+                "AGENT_MODEL_HTTP_ERROR",
+                "upstream unavailable",
+                status_code=503,
+            )],
+            [ModelGatewayError(
+                "AGENT_MODEL_HTTP_ERROR",
+                "expired fallback token",
+                status_code=401,
+            )],
+            [{"choices": [{"delta": {"content": "Recovered after refresh"}}]}],
+        ])
+
+        result = LoomModelClient(account, transport=transport).complete(
+            {"runId": "run_fallback_refresh", "round": 1, "prompt": "check"},
+            lambda _event: None,
+            threading.Event(),
+        )
+
+        self.assertEqual(result["text"], "Recovered after refresh")
+        self.assertEqual(result["model"], "provider/healthy-fallback")
+        self.assertEqual(
+            [request[0].model for request in transport.requests],
+            [
+                "broken-primary",
+                "provider/healthy-fallback",
+                "provider/healthy-fallback",
+            ],
+        )
+        self.assertEqual(transport.requests[1][0].access_token, "sk-expired-secret")
+        self.assertEqual(transport.requests[2][0].access_token, "sk-refreshed-secret")
+
     def test_retry_backoff_stops_immediately_when_cancelled(self):
         transport = RepeatingErrorTransport(
             ModelGatewayError("AGENT_MODEL_NETWORK_ERROR", "network down")
