@@ -4,6 +4,7 @@ import android.os.PowerManager
 import androidx.lifecycle.ViewModel
 import com.apk.claw.android.ClawApplication.Companion.appViewModelInstance
 import com.apk.claw.android.agent.AgentConfig
+import com.apk.claw.android.agent.AgentExecutionPolicy
 import com.apk.claw.android.channel.Channel
 import com.apk.claw.android.channel.ChannelManager
 import com.apk.claw.android.channel.ChannelSetup
@@ -58,7 +59,7 @@ class AppViewModel : ViewModel() {
             .baseUrl(baseUrl)
             .modelName(KVUtils.getLlmModelName())
             .temperature(0.1)
-            .maxIterations(60)
+            .maxIterations(AgentExecutionPolicy.absoluteMaxRounds())
             .build()
     }
 

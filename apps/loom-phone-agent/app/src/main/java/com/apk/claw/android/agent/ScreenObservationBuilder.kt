@@ -15,7 +15,12 @@ object ScreenObservationBuilder {
     fun build(
         tree: JsonObject,
         capturedAt: Long = System.currentTimeMillis(),
-        durationMs: Long = 0L
+        durationMs: Long = 0L,
+        uiGeneration: Long = 0L,
+        serviceGeneration: String = "",
+        frameSource: String? = null,
+        frameId: String? = null,
+        frameAgeMs: Long? = null
     ): JsonObject {
         val screen = tree.objectOrNull("screen") ?: JsonObject()
         val nodes = tree.arrayOrNull("nodes") ?: JsonArray()
@@ -101,6 +106,11 @@ object ScreenObservationBuilder {
                 addProperty("cacheHit", false)
                 addProperty("rounds", 0)
                 addProperty("mode", "observe_fast")
+                addProperty("uiGeneration", uiGeneration)
+                addProperty("serviceGeneration", serviceGeneration)
+                addProperty("frameSource", frameSource)
+                addProperty("frameId", frameId)
+                addProperty("frameAgeMs", frameAgeMs)
             })
         }
     }

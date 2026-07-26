@@ -91,6 +91,13 @@ object RpaSafetyPolicy {
                 values += value.toString()
             }
         }
+        step.semanticSelector?.let { selector ->
+            selector.text?.let(values::add)
+            selector.contentDescription?.let(values::add)
+            selector.resourceId?.let(values::add)
+            selector.className?.let(values::add)
+            selector.packageName?.let(values::add)
+        }
         return values.joinToString(" ")
     }
 }

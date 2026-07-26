@@ -50,6 +50,9 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
 
+      - name: Test and build Android 7 compatibility variant
+        run: ./gradlew -Pandroid7Compat=true testDebugUnitTest assembleDebug --stacktrace
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:

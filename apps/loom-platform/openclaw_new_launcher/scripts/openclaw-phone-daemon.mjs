@@ -9,6 +9,7 @@ import {
   deviceKeyFromConfig,
   isAuthorized,
   readRuntimeState,
+  removeRuntimeStateIfOwned,
 } from './lib/phone-daemon/runtime-auth.mjs';
 import { phoneBridgeErrorPayload } from './openclaw-phone-secure.mjs';
 
@@ -18,6 +19,37 @@ const DEFAULT_MAX_ROUNDS_BY_MODE = {
   safe: 12,
   full: 30,
 };
+const FETCH_FORBIDDEN_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77,
+  79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135,
+  137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531,
+  532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719,
+  1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+  6668, 6669, 6697, 10080,
+]);
+
+async function listenOnFetchSafePort(server) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    await new Promise((resolve, reject) => {
+      const onError = (error) => {
+        server.off('listening', onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off('error', onError);
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(0, '127.0.0.1');
+    });
+    const address = server.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    if (port > 0 && !FETCH_FORBIDDEN_PORTS.has(port)) return port;
+    await new Promise((resolve) => server.close(resolve));
+  }
+  throw new Error('phone_daemon_safe_port_unavailable');
+}
 
 function sessionFor(config) {
   const key = deviceKeyFromConfig(config);
@@ -281,8 +313,8 @@ async function startHttpServer() {
       }
 
       if (request.method === 'POST' && pathname === '/shutdown') {
-        sendJson(response, 200, { ok: true, stopping: true });
-        server.close(() => process.exit(0));
+        sendJson(response, 200, { ok: true, stopping: true, pid: process.pid });
+        server.close();
         return;
       }
 
@@ -296,15 +328,11 @@ async function startHttpServer() {
     }
   });
 
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
-  });
+  const port = await listenOnFetchSafePort(server);
 
+  let runtime = null;
   try {
-    const address = server.address();
-    const port = typeof address === 'object' && address ? address.port : 0;
-    const runtime = await createRuntimeState(port);
+    runtime = await createRuntimeState(port);
     process.stdout.write(`${JSON.stringify({ ok: true, type: 'phone_daemon_started', port: runtime.port, pid: runtime.pid })}\n`);
   } catch (error) {
     await new Promise((resolve) => server.close(resolve));
@@ -314,6 +342,9 @@ async function startHttpServer() {
   await new Promise((resolve) => {
     server.on('close', resolve);
   });
+  if (runtime) {
+    await removeRuntimeStateIfOwned(runtime);
+  }
 }
 
 async function readRuntimeOrNull() {

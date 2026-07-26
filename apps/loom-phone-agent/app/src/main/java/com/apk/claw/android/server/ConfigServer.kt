@@ -18,8 +18,8 @@ import fi.iki.elonen.NanoHTTPD
  */
 class ConfigServer(
     private val context: Context,
-    port: Int = PORT
-) : NanoHTTPD(port) {
+    private val configuredPort: Int = PORT
+) : NanoHTTPD(configuredPort) {
 
     companion object {
         private const val TAG = "ConfigServer"
@@ -47,6 +47,8 @@ class ConfigServer(
                 uri == "/api/llm" && method == Method.GET -> handleGetLlm()
                 uri == "/api/llm" && method == Method.POST -> handlePostLlm(session)
                 // ==================== Lumi Secure Channel (Token + HMAC required) ====================
+                uri == "/api/lumi/security/identity-challenge" && method == Method.POST ->
+                    LumiSecurityController.handleIdentityChallenge(session, configuredPort)
                 uri == "/api/lumi/security/pair" && method == Method.POST -> LumiSecurityController.handlePair(session)
                 uri == "/api/lumi/security/status" && method == Method.GET -> LumiSecurityController.handleStatus(session)
                 uri == "/api/lumi/events" && method == Method.GET -> handleLumiGet(session) {
@@ -69,6 +71,12 @@ class ConfigServer(
                 }
                 uri == "/api/lumi/rpa/validate" && method == Method.POST -> handleLumiJson(session) {
                     RpaApiController.handleValidate(it, requireToken = false)
+                }
+                uri == "/api/lumi/rpa/template/validate" && method == Method.POST -> handleLumiJson(session) {
+                    WorkflowApiController.handleValidateTemplate(it, requireToken = false)
+                }
+                uri == "/api/lumi/rpa/template/disable" && method == Method.POST -> handleLumiJson(session) {
+                    WorkflowApiController.handleDisableTemplate(it, requireToken = false)
                 }
                 uri == "/api/lumi/rpa/capabilities" && method == Method.GET -> handleLumiGet(session) {
                     RpaApiController.handleCapabilities(it, requireToken = false)
@@ -156,6 +164,21 @@ class ConfigServer(
                 uri == "/api/lumi/publish/packet" && method == Method.POST -> handleLumiJson(session) {
                     PublishApiController.handleExecutePacket(it)
                 }
+                uri == "/api/lumi/comment-campaign/prepare" && method == Method.POST -> handleLumiJson(session) {
+                    CommentCampaignApiController.handlePrepare(it, requireToken = false)
+                }
+                uri == "/api/lumi/comment-campaign/status" && method == Method.POST -> handleLumiJson(session) {
+                    CommentCampaignApiController.handleStatus(it, requireToken = false)
+                }
+                uri == "/api/lumi/comment-campaign/confirm" && method == Method.POST -> handleLumiJson(session) {
+                    CommentCampaignApiController.handleConfirm(it, requireToken = false)
+                }
+                uri == "/api/lumi/comment-campaign/cancel" && method == Method.POST -> handleLumiJson(session) {
+                    CommentCampaignApiController.handleCancel(it, requireToken = false)
+                }
+                uri == "/api/lumi/comment-campaign/resume" && method == Method.POST -> handleLumiJson(session) {
+                    CommentCampaignApiController.handleResume(it, requireToken = false)
+                }
                 // 电脑端把 LLM 模型配置同步到手机（地址/密钥/模型名）。
                 uri == "/api/lumi/config/llm/import" && method == Method.POST -> handleLumiJson(session) {
                     handleImportLlmConfig(it)
@@ -205,6 +228,12 @@ class ConfigServer(
                 uri == "/api/agent/status" && method == Method.GET -> AgentApiController.handleGetStatus(session)
                 uri == "/api/agent/execute_task" && method == Method.POST -> AgentApiController.handleExecuteTask(session)
                 uri == "/api/agent/cancel_task" && method == Method.POST -> AgentApiController.handleCancelTask(session)
+                // ==================== Comment Campaign API (Token required) ====================
+                uri == "/api/comment-campaign/prepare" && method == Method.POST -> CommentCampaignApiController.handlePrepare(session)
+                uri == "/api/comment-campaign/status" && method == Method.POST -> CommentCampaignApiController.handleStatus(session)
+                uri == "/api/comment-campaign/confirm" && method == Method.POST -> CommentCampaignApiController.handleConfirm(session)
+                uri == "/api/comment-campaign/cancel" && method == Method.POST -> CommentCampaignApiController.handleCancel(session)
+                uri == "/api/comment-campaign/resume" && method == Method.POST -> CommentCampaignApiController.handleResume(session)
                 // ==================== RPA API (Token required) ====================
                 uri == "/api/rpa/run" && method == Method.POST -> RpaApiController.handleRun(session)
                 uri == "/api/rpa/validate" && method == Method.POST -> RpaApiController.handleValidate(session)
@@ -226,6 +255,10 @@ class ConfigServer(
                 uri == "/api/workflow/delete" && method == Method.POST -> WorkflowApiController.handleDeleteTemplate(session)
                 uri == "/api/workflow/match" && method == Method.POST -> WorkflowApiController.handleMatchTemplate(session)
                 uri == "/api/workflow/clear" && method == Method.POST -> WorkflowApiController.handleClearTemplates(session)
+                uri == "/api/workflow/template/validate" && method == Method.POST ->
+                    WorkflowApiController.handleValidateTemplate(session)
+                uri == "/api/workflow/template/disable" && method == Method.POST ->
+                    WorkflowApiController.handleDisableTemplate(session)
                 // ==================== Debug (仅 DEBUG 构建) ====================
                 uri == "/debug.html" && method == Method.GET && BuildConfig.DEBUG -> serveDebugHtml()
                 uri == "/api/debug/tools" && method == Method.GET && BuildConfig.DEBUG -> handleGetTools()

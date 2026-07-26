@@ -12,6 +12,9 @@ interface AgentCallback {
     fun onToolCall(round: Int, toolId: String, toolName: String, parameters: String)
     fun onToolResult(round: Int, toolId: String, toolName: String, parameters: String, result: ToolResult)
     fun onComplete(round: Int, finalAnswer: String, totalTokens: Int)
+    fun onTerminal(round: Int, finalAnswer: String, totalTokens: Int, successful: Boolean) {
+        onComplete(round, finalAnswer, totalTokens)
+    }
     fun onError(round: Int, error: Exception, totalTokens: Int)
     fun onSystemDialogBlocked(round: Int, totalTokens: Int)
     fun onMetrics(round: Int, llmRoundMs: Long = 0L, toolCallMs: Long = 0L) {}

@@ -1,0 +1,138 @@
+{
+  "templateIndex": {
+    "templates": [
+      {
+        "id": "hybrid-native-fixture",
+        "name": "Hybrid native fixture",
+        "description": "Deterministic native control verification",
+        "taskPattern": "hybrid native fixture",
+        "keywords": ["hybrid", "native", "fixture"],
+        "appName": "Hybrid fixture",
+        "steps": [
+          {
+            "toolName": "tap",
+            "paramsTemplate": {},
+            "description": "Tap native target",
+            "waitFor": 0,
+            "isVerification": false,
+            "resolverPolicy": "TREE_PREFERRED",
+            "allowedResolvers": ["RESOURCE_ID"],
+            "validatedResolvers": ["RESOURCE_ID"],
+            "semanticSelector": {
+              "resourceId": "com.apk.claw.android:id/native_target",
+              "className": "Button",
+              "packageName": "com.apk.claw.android"
+            },
+            "postCheckpoint": {
+              "expectedPackage": "com.apk.claw.android",
+              "requiredSelector": {
+                "resourceId": "com.apk.claw.android:id/result_text",
+                "text": "native_verified",
+                "className": "TextView",
+                "packageName": "com.apk.claw.android"
+              }
+            }
+          }
+        ],
+        "createdAt": 0,
+        "lastUsedAt": 0,
+        "successCount": 0,
+        "failCount": 0,
+        "schemaVersion": 2,
+        "status": "ACTIVE",
+        "executionMode": "hybrid_rpa",
+        "defaultResolverPolicy": "TREE_PREFERRED",
+        "riskLevel": "REVERSIBLE",
+        "validationState": {
+          "target": 3,
+          "profileId": "__PROFILE_ID__",
+          "consecutiveSuccesses": 3,
+          "failures": 0,
+          "validatedResolvers": ["RESOURCE_ID"],
+          "validatedResetIds": ["fixture-reset-a", "fixture-reset-b"],
+          "lastValidationAt": 0,
+          "validatedRevision": 1
+        },
+        "revision": 1,
+        "sourceAgentTaskId": "hybrid-native-fixture",
+        "targetPackage": "com.apk.claw.android",
+        "targetVersionCode": 926,
+        "targetProfileId": "__PROFILE_ID__",
+        "activatedAt": 0,
+        "degradedAt": 0,
+        "degradedReason": "",
+        "visualAssetDirectory": ""
+      }
+    ]
+  },
+  "rpaRunPayload": {
+    "sync": false,
+    "workflow": {
+      "workflowId": "hybrid-native-fixture",
+      "name": "Hybrid native fixture",
+      "version": 1,
+      "params": {},
+      "maxDurationMs": 300000,
+      "schemaVersion": 2,
+      "executionMode": "hybrid_rpa",
+      "templateId": "hybrid-native-fixture",
+      "templateRevision": 1,
+      "targetProfileId": "__PROFILE_ID__",
+      "templateStatus": "active",
+      "validationProgress": "3/3",
+      "promotionEligible": true,
+      "promotionIneligibleReason": "",
+      "steps": [
+        {
+          "id": "step_1",
+          "action": "tap_semantic",
+          "params": {},
+          "description": "Tap native target",
+          "waitAfterMs": 0,
+          "timeoutMs": 5000,
+          "maxRetries": 0,
+          "retryDelayMs": 300,
+          "guard": {
+            "requireText": [],
+            "forbidText": []
+          },
+          "resolverPolicy": "TREE_PREFERRED",
+          "allowedResolvers": ["RESOURCE_ID"],
+          "validatedResolvers": ["RESOURCE_ID"],
+          "semanticSelector": {
+            "resourceId": "com.apk.claw.android:id/native_target",
+            "className": "Button",
+            "packageName": "com.apk.claw.android",
+            "structuralPath": []
+          },
+          "postCheckpoint": {
+            "expectedPackage": "com.apk.claw.android",
+            "requiredSelector": {
+              "resourceId": "com.apk.claw.android:id/result_text",
+              "text": "native_verified",
+              "className": "TextView",
+              "packageName": "com.apk.claw.android",
+              "structuralPath": []
+            },
+            "maximumHammingDistance": 8
+          },
+          "resolverPolicyExplicit": true
+        }
+      ]
+    }
+  },
+  "negativeFixtures": {
+    "duplicateSelector": {
+      "selector": {
+        "text": "Twin label",
+        "className": "Button",
+        "packageName": "com.apk.claw.android"
+      },
+      "expectedDispatchCount": 0
+    },
+    "visualMissingOrStale": {
+      "expectedDispatchCount": 0,
+      "reason": "requires runtime visual asset and fresh-frame injection"
+    }
+  }
+}

@@ -26,6 +26,8 @@ class FakeCompletedProcess:
 
 
 class TestableProcessService(OpenClawProcessService):
+    __test__ = False
+
     def _stop_registered_gateway(self) -> int:
         return 0
 
@@ -480,6 +482,356 @@ class ProcessDiagnosticsRepairTests(unittest.TestCase):
         flattened = [" ".join(command) for command in calls]
         self.assertFalse(any("KEYCODE_WAKEUP" in command for command in flattened))
         self.assertFalse(any("monkey -p" in command for command in flattened))
+
+    def test_phone_adb_forward_uses_dynamic_local_port_and_verifies_tunnel(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            calls.append(command)
+            if command[1:] == ["devices", "-l"]:
+                return FakeCompletedProcess(
+                    returncode=0,
+                    stdout="List of devices attached\nphone-a\tdevice product:test model:Pixel\n",
+                )
+            if command[1:] == ["-s", "phone-a", "forward", "tcp:19527", "tcp:9527"]:
+                return FakeCompletedProcess(returncode=0)
+            if command[1:] == ["-s", "phone-a", "forward", "--list"]:
+                return FakeCompletedProcess(returncode=0, stdout="phone-a tcp:19527 tcp:9527\n")
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            with mock.patch.object(service, "_allocate_loopback_port", return_value=19527):
+                result = service.phone_adb_forward(serial="phone-a")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "connected")
+        self.assertEqual(result["serial"], "phone-a")
+        self.assertEqual(result["localPort"], 19527)
+        self.assertEqual(result["remotePort"], 9527)
+        self.assertEqual(result["baseUrl"], "http://127.0.0.1:19527")
+        self.assertTrue(any(command[1:] == ["-s", "phone-a", "forward", "tcp:19527", "tcp:9527"] for command in calls))
+
+    def test_phone_adb_forward_does_not_depend_on_adb_dynamic_port_output(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            calls.append(command)
+            if command[1:] == ["devices", "-l"]:
+                return FakeCompletedProcess(
+                    returncode=0,
+                    stdout="List of devices attached\nphone-a\tdevice product:test model:Pixel\n",
+                )
+            if command[1:] == ["-s", "phone-a", "forward", "--list"]:
+                return FakeCompletedProcess(returncode=0, stdout="phone-a tcp:19600 tcp:9527\n")
+            if command[1:] == ["-s", "phone-a", "forward", "tcp:19600", "tcp:9527"]:
+                return FakeCompletedProcess(returncode=0, stdout="not-a-port\n")
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            with mock.patch.object(service, "_allocate_loopback_port", return_value=19600):
+                result = service.phone_adb_forward(serial="phone-a")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["localPort"], 19600)
+        self.assertIn(
+            ["-s", "phone-a", "forward", "tcp:19600", "tcp:9527"],
+            [command[1:] for command in calls],
+        )
+
+    def test_phone_adb_forward_accepts_prejournaled_local_port(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            calls.append(command)
+            if command[1:] == ["devices", "-l"]:
+                return FakeCompletedProcess(
+                    returncode=0,
+                    stdout="List of devices attached\nphone-a\tdevice product:test model:Pixel\n",
+                )
+            if command[1:] == ["-s", "phone-a", "forward", "tcp:19602", "tcp:9527"]:
+                return FakeCompletedProcess(returncode=0)
+            if command[1:] == ["-s", "phone-a", "forward", "--list"]:
+                return FakeCompletedProcess(returncode=0, stdout="phone-a tcp:19602 tcp:9527\n")
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            result = service.phone_adb_forward(serial="phone-a", local_port=19602)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["localPort"], 19602)
+        self.assertIn(
+            ["-s", "phone-a", "forward", "tcp:19602", "tcp:9527"],
+            [command[1:] for command in calls],
+        )
+
+    def test_phone_adb_forward_reports_when_verification_and_cleanup_both_fail(self) -> None:
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            if command[1:] == ["devices", "-l"]:
+                return FakeCompletedProcess(
+                    returncode=0,
+                    stdout="List of devices attached\nphone-a\tdevice product:test model:Pixel\n",
+                )
+            if command[1:] == ["-s", "phone-a", "forward", "tcp:19601", "tcp:9527"]:
+                return FakeCompletedProcess(returncode=0)
+            if command[1:] == ["-s", "phone-a", "forward", "--list"]:
+                return FakeCompletedProcess(returncode=1, stderr="transport unavailable")
+            if command[1:] == ["-s", "phone-a", "forward", "--remove", "tcp:19601"]:
+                return FakeCompletedProcess(returncode=1, stderr="listener still busy")
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            with mock.patch.object(service, "_allocate_loopback_port", return_value=19601):
+                result = service.phone_adb_forward(serial="phone-a")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "forward_verify_and_cleanup_failed")
+        self.assertEqual(result["localPort"], 19601)
+        self.assertIn("未能自动撤销", result["message"])
+
+    def test_phone_adb_forward_status_requires_ready_device_and_exact_mapping(self) -> None:
+        forward_present = True
+
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            if command[1:] == ["devices", "-l"]:
+                return FakeCompletedProcess(
+                    returncode=0,
+                    stdout="List of devices attached\nphone-a\tdevice product:test model:Pixel_9\n",
+                )
+            if command[1:] == ["-s", "phone-a", "forward", "--list"]:
+                return FakeCompletedProcess(
+                    returncode=0,
+                    stdout="phone-a tcp:19527 tcp:9527\n" if forward_present else "",
+                )
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            connected = service.phone_adb_forward_status(
+                serial="phone-a",
+                local_port=19527,
+            )
+            forward_present = False
+            missing = service.phone_adb_forward_status(
+                serial="phone-a",
+                local_port=19527,
+            )
+
+        self.assertTrue(connected["ok"])
+        self.assertEqual(connected["status"], "connected")
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["status"], "forward_missing")
+
+    def test_phone_adb_forward_status_distinguishes_list_failure_from_missing_mapping(self) -> None:
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            if command[1:] == ["devices", "-l"]:
+                return FakeCompletedProcess(
+                    returncode=0,
+                    stdout="List of devices attached\nphone-a\tdevice product:test model:Pixel\n",
+                )
+            if command[1:] == ["-s", "phone-a", "forward", "--list"]:
+                return FakeCompletedProcess(returncode=1, stderr="transport unavailable")
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            result = service.phone_adb_forward_status(serial="phone-a", local_port=19527)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "forward_list_failed")
+
+    def test_phone_adb_forward_remove_does_not_claim_success_when_global_list_fails(self) -> None:
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            if command[1:] == ["forward", "--list"]:
+                return FakeCompletedProcess(returncode=1, stderr="daemon unavailable")
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            result = service.phone_adb_forward_remove(serial="", local_port=19527)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "forward_list_failed")
+
+    def test_phone_adb_devices_returns_labels_without_internal_details(self) -> None:
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            if command[1:] == ["devices", "-l"]:
+                return FakeCompletedProcess(
+                    returncode=0,
+                    stdout=(
+                        "List of devices attached\n"
+                        "phone-a\tdevice product:private model:Pixel_9 transport_id:7\n"
+                    ),
+                )
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            result = service.phone_adb_devices()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["devices"],
+            [{"serial": "phone-a", "state": "device", "label": "Pixel 9"}],
+        )
+        self.assertNotIn("detail", result["devices"][0])
+        self.assertNotIn("adbPath", result)
+
+    def test_phone_adb_forward_requires_explicit_serial_for_multiple_devices(self) -> None:
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            return FakeCompletedProcess(
+                returncode=0,
+                stdout=(
+                    "List of devices attached\n"
+                    "phone-a\tdevice product:test model:Pixel\n"
+                    "phone-b\tdevice product:test model:Galaxy\n"
+                ),
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            result = service.phone_adb_forward()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "multiple_devices")
+        self.assertEqual([item["serial"] for item in result["devices"]], ["phone-a", "phone-b"])
+
+    def test_phone_adb_forward_remove_is_idempotent_when_listener_is_absent(self) -> None:
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            if command[1:] == ["-s", "phone-a", "forward", "--remove", "tcp:19527"]:
+                return FakeCompletedProcess(returncode=1, stderr="listener not found")
+            return FakeCompletedProcess(returncode=0)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            result = service.phone_adb_forward_remove(serial="phone-a", local_port=19527)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "disconnected")
+
+    def test_phone_adb_forward_remove_recovers_serial_from_global_forward_list(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str], _timeout_sec: int) -> FakeCompletedProcess:
+            calls.append(command)
+            if command[1:] == ["forward", "--list"]:
+                return FakeCompletedProcess(returncode=0, stdout="phone-a tcp:19527 tcp:9527\n")
+            if command[1:] == ["-s", "phone-a", "forward", "--remove", "tcp:19527"]:
+                return FakeCompletedProcess(returncode=0)
+            return FakeCompletedProcess(returncode=1, stderr="unexpected")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adb_dir = os.path.join(temp_dir, "platform-tools")
+            os.makedirs(adb_dir)
+            with open(os.path.join(adb_dir, "adb.exe"), "wb") as file:
+                file.write(b"fake adb")
+            service = TestableProcessService(
+                AppPaths(temp_dir),
+                append_log=lambda _text: None,
+                ui_call=lambda *_args: None,
+                command_runner=fake_runner,
+            )
+            result = service.phone_adb_forward_remove(serial="", local_port=19527)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["serial"], "phone-a")
+        self.assertIn(
+            ["-s", "phone-a", "forward", "--remove", "tcp:19527"],
+            [command[1:] for command in calls],
+        )
 
     def test_diagnostics_use_system_node_and_npm_as_prerequisite_fallback(self) -> None:
         import services.process as process_module

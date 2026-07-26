@@ -26,6 +26,14 @@ import com.apk.claw.android.service.ClawAccessibilityService
 import com.apk.claw.android.tool.impl.InputTextTool
 import com.apk.claw.android.tool.impl.OpenAppTool
 import com.apk.claw.android.tool.ToolResult
+import com.apk.claw.android.workflow.AgentTrajectoryRecorder
+import com.apk.claw.android.workflow.CompileResult
+import com.apk.claw.android.workflow.DeviceProfileProvider
+import com.apk.claw.android.workflow.HybridTemplateCompiler
+import com.apk.claw.android.workflow.StepCheckpoint
+import com.apk.claw.android.workflow.TrajectoryEvidenceKind
+import com.apk.claw.android.workflow.TrajectoryEvidenceRef
+import com.apk.claw.android.workflow.ValidationState
 import com.apk.claw.android.workflow.WorkflowTemplateManager
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
@@ -36,10 +44,12 @@ import com.google.gson.JsonObject
 import com.google.gson.reflect.TypeToken
 import fi.iki.elonen.NanoHTTPD
 import java.util.Locale
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Agent API 控制器
@@ -84,6 +94,10 @@ object AgentApiController {
         if (preclaimedTaskSlot) {
             synchronized(taskLock) { releaseTaskSlotLocked() }
         }
+    }
+
+    fun isIdleForTemplateValidation(): Boolean = synchronized(taskLock) {
+        !isTaskRunning && asyncTasks.values.none { it.status == "queued" || it.status == "running" }
     }
 
     /**
@@ -234,10 +248,18 @@ object AgentApiController {
         // 1. 如果允许使用模板，先尝试模板匹配和执行
         var agentPrompt = prompt
         var templateFallbackReason: String? = null
+        var reconciliationInstructions: AgentReconciliationInstructions? = null
         if (useTemplate && !forceAgent && toolPolicy != AgentToolPolicy.OBSERVE_ONLY) {
             val requestedTemplate = findRequestedTemplate(json)
-            val matchedTemplate = requestedTemplate ?: WorkflowTemplateManager.matchTemplate(prompt)
-            if (matchedTemplate != null && (requestedTemplate != null || matchedTemplate.successRate() >= 0.6f)) {
+            val freshProfileId = DeviceProfileProvider.current()
+            val matchedTemplate = when {
+                requestedTemplate?.executionMode == "hybrid_rpa" -> requestedTemplate.takeIf {
+                    WorkflowTemplateManager.canRunHybridFastPath(it, freshProfileId)
+                }
+                requestedTemplate != null -> requestedTemplate
+                else -> WorkflowTemplateManager.matchTemplate(prompt, freshProfileId)
+            }
+            if (matchedTemplate != null) {
                 val resolvedTemplateParams = WorkflowTemplateManager.resolveTemplateParams(
                     template = matchedTemplate,
                     userPrompt = prompt,
@@ -247,6 +269,10 @@ object AgentApiController {
                 if (resolvedTemplateParams.missingParams.isEmpty()) {
                     XLog.i(TAG, "Using template: ${matchedTemplate.name}, successRate=${matchedTemplate.successRate()}, params=${resolvedTemplateParams.params}")
                     metrics.templateHit = true
+                    metrics.templateStatus = matchedTemplate.status.name.lowercase(Locale.US)
+                    metrics.templateRevision = matchedTemplate.revision
+                    metrics.validationProgress = validationProgress(matchedTemplate.validationState)
+                    metrics.promotionEligible = matchedTemplate.status.name == "ACTIVE"
 
                     // 显示悬浮窗运行状态
                     FloatingCircleManager.setRunningStateFromApi(1)
@@ -257,11 +283,11 @@ object AgentApiController {
                     if (templateResult.success) {
                         synchronized(taskLock) { releaseTaskSlotLocked() }
                         FloatingCircleManager.setSuccessState()
-                        metrics.mode = "template"
+                        metrics.mode = templateResult.mode
                         metrics.rounds = 0
                         val data = JsonObject().apply {
                             addProperty("success", true)
-                            addProperty("mode", "template")
+                            addProperty("mode", templateResult.mode)
                             addProperty("readOnly", false)
                             addProperty("toolPolicy", toolPolicy.wireName)
                             addProperty("templateId", templateResult.templateId)
@@ -298,11 +324,17 @@ object AgentApiController {
 
                     val templateError = templateResult.errorMessage ?: "Template execution failed"
                     XLog.w(TAG, "Template failed, falling back to Agent: $templateError")
-                    templateFallbackReason = "template_failed:${templateResult.stepsExecuted}/${templateResult.stepsTotal}:${templateError.take(180)}"
+                    templateFallbackReason = "${templateResult.errorCode.ifBlank { "template_failed" }}:${templateResult.stepsExecuted}/${templateResult.stepsTotal}:${templateError.take(180)}"
                     metrics.mode = "agent_fallback"
                     metrics.agentFallback = true
                     metrics.fallbackReason = templateFallbackReason
-                    agentPrompt = "$prompt\n\n[Template fast path failed]\nTemplate: ${matchedTemplate.name}\nSteps: ${templateResult.stepsExecuted}/${templateResult.stepsTotal}\nError: $templateError\nContinue from the current screen and avoid repeating completed steps."
+                    val handoff = templateResult.handoffContext
+                    if (templateResult.outcomeState == "uncertain" && handoff != null) {
+                        reconciliationInstructions = AgentReconciliationContextBuilder.build(prompt, handoff)
+                        agentPrompt = "$prompt\n\n${reconciliationInstructions?.prompt.orEmpty()}"
+                    } else {
+                        agentPrompt = "$prompt\n\n[Template fast path failed]\nTemplate: ${matchedTemplate.name}\nSteps: ${templateResult.stepsExecuted}/${templateResult.stepsTotal}\nError: $templateError\nContinue from the current screen and avoid repeating completed steps."
+                    }
                 } else {
                     XLog.i(
                         TAG,
@@ -377,8 +409,11 @@ object AgentApiController {
         }
 
         // 工具调用记录（用于学习模板）
-        val toolCallRecords = mutableListOf<WorkflowTemplateManager.ToolCallRecord>()
+        val trajectoryRecorder = if (learnTemplate) AgentTrajectoryRecorder() else null
+        val trajectorySequence = AtomicInteger(0)
+        val pendingTrajectoryId = AtomicReference<String?>()
         var detectedAppName: String? = null
+        var detectedPackageName: String? = null
 
         // 只有 full_access 保持旧行为回到桌面；受限策略不自动改变当前手机状态。
         if (TaskStartNavigationPolicy.shouldPressHomeBeforeHttpTask(toolPolicy)) {
@@ -408,25 +443,36 @@ object AgentApiController {
 
                 // 记录工具调用（用于学习模板）
                 try {
-                    val paramsMap: Map<String, Any> = if (parameters.isNotEmpty()) {
-                        gson.fromJson(parameters, object : TypeToken<Map<String, Any>>() {}.type) ?: emptyMap()
+                    val rawParams: Map<String, Any?> = if (parameters.isNotEmpty()) {
+                        gson.fromJson(parameters, object : TypeToken<Map<String, Any?>>() {}.type) ?: emptyMap()
                     } else {
                         emptyMap()
                     }
+                    val paramsMap = normalizeTrajectoryParams(rawParams)
 
                     // 检测应用名
                     if (toolId == "open_app" && paramsMap.containsKey("package_name")) {
                         val packageName = paramsMap["package_name"] as String
+                        detectedPackageName = packageName
                         detectedAppName = getAppNameFromPackage(packageName)
                     }
 
-                    toolCallRecords.add(WorkflowTemplateManager.ToolCallRecord(
+                    val trajectoryId = "$round-${trajectorySequence.incrementAndGet()}-${toolId.take(32)}"
+                    val before = captureTrajectoryEvidence("before", trajectoryId)
+                    trajectoryRecorder?.beforeAction(
+                        toolId = trajectoryId,
                         toolName = toolId,
                         params = paramsMap,
-                        description = toolName,
-                        waitFor = 500
-                    ))
+                        evidence = before.evidence,
+                        safetyLabel = prompt.take(4_096),
+                        description = toolName.take(200),
+                        preCheckpoint = before.checkpoint,
+                        riskDeclaration = null
+                    )
+                    pendingTrajectoryId.set(trajectoryId)
                 } catch (e: Exception) {
+                    metrics.promotionEligible = false
+                    metrics.promotionIneligibleReason = "trajectory_recording_rejected"
                     XLog.w(TAG, "Failed to record tool call: ${e.message}")
                 }
             }
@@ -442,40 +488,69 @@ object AgentApiController {
                     success = result.isSuccess,
                     message = result.data ?: result.error
                 )
+                pendingTrajectoryId.getAndSet(null)?.let { trajectoryId ->
+                    try {
+                        val after = captureTrajectoryEvidence("after", trajectoryId)
+                        trajectoryRecorder?.afterAction(
+                            toolId = trajectoryId,
+                            success = result.isSuccess,
+                            evidence = after.evidence,
+                            postCheckpoint = after.checkpoint
+                        )
+                    } catch (e: Exception) {
+                        metrics.promotionEligible = false
+                        metrics.promotionIneligibleReason = "trajectory_recording_rejected"
+                        XLog.w(TAG, "Failed to complete trajectory action: ${e.message}")
+                    }
+                }
             }
 
             override fun onComplete(round: Int, finalAnswer: String, totalTokens: Int) {
+                completeTask(round, finalAnswer, totalTokens, successful = true)
+            }
+
+            override fun onTerminal(round: Int, finalAnswer: String, totalTokens: Int, successful: Boolean) {
+                completeTask(round, finalAnswer, totalTokens, successful)
+            }
+
+            private fun completeTask(round: Int, finalAnswer: String, totalTokens: Int, successful: Boolean) {
                 XLog.i(TAG, "Task complete: rounds=$round, tokens=$totalTokens")
-                recordAgentEvent("complete", round, success = true, message = finalAnswer)
-                resultRef.set(TaskExecuteResult(success = true, answer = finalAnswer, rounds = round, tokens = totalTokens))
+                val terminal = AgentTerminalCompletionPolicy.decide(successful, finalAnswer, round, totalTokens)
+                recordAgentEvent("complete", round, success = terminal.result.success, message = finalAnswer)
+                if (terminal.shouldCompile && learnTemplate) {
+                    val packageName = detectedPackageName
+                    val profileId = packageName?.let(DeviceProfileProvider::current).orEmpty()
+                    val compileResult = HybridTemplateCompiler.compile(
+                        prompt = prompt,
+                        appName = detectedAppName,
+                        actions = trajectoryRecorder?.completed().orEmpty(),
+                        profileId = profileId
+                    )
+                    when (compileResult) {
+                        is CompileResult.Compiled -> {
+                            val draft = compileResult.template.copy(
+                                targetPackage = packageName.orEmpty(),
+                                targetProfileId = profileId
+                            )
+                            val saved = WorkflowTemplateManager.saveDraft(draft)
+                            metrics.promotionEligible = saved != null
+                            metrics.templateStatus = saved?.status?.name?.lowercase(Locale.US).orEmpty()
+                            metrics.templateRevision = saved?.revision ?: 0
+                            metrics.validationProgress = saved?.validationState?.let(::validationProgress).orEmpty()
+                            if (saved == null) metrics.promotionIneligibleReason = "draft_save_rejected"
+                        }
+                        is CompileResult.Ineligible -> {
+                            metrics.promotionEligible = false
+                            metrics.promotionIneligibleReason = compileResult.reason
+                        }
+                    }
+                }
+                resultRef.set(terminal.result)
                 synchronized(taskLock) { releaseTaskSlotLocked() }
-                // 显示悬浮窗成功状态
-                FloatingCircleManager.setSuccessState()
+                if (terminal.result.success) FloatingCircleManager.setSuccessState() else FloatingCircleManager.setErrorState()
                 resultLatch.countDown()
 
                 // 学习模板（异步，不阻塞响应）
-                val recordsToLearn = toolCallRecords.toList()
-                val appNameToLearn = detectedAppName
-                if (learnTemplate && recordsToLearn.isNotEmpty()) {
-                    Thread({
-                        try {
-                            val learnedTemplate = WorkflowTemplateManager.learnFromExecution(
-                                userPrompt = prompt,
-                                toolCalls = recordsToLearn,
-                                appName = appNameToLearn,
-                                success = true
-                            )
-                            if (learnedTemplate != null) {
-                                XLog.i(TAG, "Learned template: ${learnedTemplate.name}")
-                            }
-                        } catch (e: Exception) {
-                            XLog.w(TAG, "Failed to learn template: ${e.message}")
-                        }
-                    }, "WorkflowTemplateLearning").apply {
-                        isDaemon = true
-                        start()
-                    }
-                }
             }
 
             override fun onError(round: Int, error: Exception, totalTokens: Int) {
@@ -503,7 +578,17 @@ object AgentApiController {
                 if (llmRoundMs > 0) metrics.addLlmRound(llmRoundMs)
                 if (toolCallMs > 0) metrics.addToolCall(toolCallMs)
             }
-        }, AgentRunOptions(readOnly = effectiveReadOnly, toolPolicy = toolPolicy, maxRounds = taskMaxRounds))
+        }, if (reconciliationInstructions != null) {
+            AgentRunOptions(
+                readOnly = effectiveReadOnly,
+                toolPolicy = toolPolicy,
+                maxRounds = taskMaxRounds,
+                allowReplayFailedStep = false,
+                oldPostconditionAbsent = { false }
+            )
+        } else {
+            AgentRunOptions(readOnly = effectiveReadOnly, toolPolicy = toolPolicy, maxRounds = taskMaxRounds)
+        })
 
         // 等待任务完成；Lumi 可按任务传入 timeout_sec，避免复杂任务被短超时窗口截断。
         try {
@@ -553,7 +638,12 @@ object AgentApiController {
             addProperty("mode", metrics.mode)
             addProperty("answer", result.answer ?: "")
             addProperty("error", result.error ?: "")
-            if (!result.error.isNullOrBlank()) addProperty("errorCode", "agent_error")
+            if (!result.success) {
+                val failure = AgentTerminalCompletionPolicy.failurePayload(result, metrics.mode)
+                listOf("errorCode", "message", "currentStep", "mode", "retryable").forEach { name ->
+                    add(name, failure[name])
+                }
+            }
             if (!templateFallbackReason.isNullOrBlank()) addProperty("fallbackReason", templateFallbackReason)
             addProperty("rounds", result.rounds)
             addProperty("tokens", result.tokens)
@@ -634,11 +724,10 @@ object AgentApiController {
         metrics.addPrecheck(System.currentTimeMillis() - precheckStartedAt)
 
         val capturedAt = System.currentTimeMillis()
-        val screenStartedAt = System.currentTimeMillis()
+        val screenStartedAt = System.nanoTime()
         val tree = service.screenTreeJson
-        val screenTreeMs = System.currentTimeMillis() - screenStartedAt
-        metrics.addScreenTree(screenTreeMs)
         if (tree == null) {
+            metrics.addScreenTree(elapsedNanosAsMs(screenStartedAt))
             return trackedJsonElementResponse(
                 NanoHTTPD.Response.Status.OK,
                 false,
@@ -656,6 +745,7 @@ object AgentApiController {
             compactData.addProperty("full", true)
             compactData.add("fullTree", tree.deepCopy())
         }
+        metrics.addScreenTree(elapsedNanosAsMs(screenStartedAt))
         compactData.add("metrics", metrics.toJson())
         compactData.addProperty("durationMs", metrics.elapsedMs())
         return trackedJsonElementResponse(NanoHTTPD.Response.Status.OK, true, compactData, null)
@@ -858,7 +948,7 @@ object AgentApiController {
             addProperty("status", task.status)
             addProperty("cancelRequested", task.cancelRequested)
             add("events", eventArray)
-            AgentProgressLogBuilder.attachTo(this, eventArray)
+            add("progressLog", AgentProgressLogBuilder.fromEvents(eventArray))
         }
         return jsonElementResponse(NanoHTTPD.Response.Status.OK, true, data, null)
     }
@@ -1111,7 +1201,7 @@ object AgentApiController {
             .baseUrl(baseUrl)
             .modelName(KVUtils.getLlmModelName())
             .temperature(0.1)
-            .maxIterations(AgentExecutionPolicy.defaultMaxRounds(AgentExecutionMode.FULL))
+            .maxIterations(AgentExecutionPolicy.absoluteMaxRounds())
             .build()
     }
 
@@ -1404,10 +1494,15 @@ object AgentApiController {
                     queueDepth = queueDepth,
                     queuePosition = queuePosition
                 ))
-                AgentProgressLogBuilder.attachTo(this, eventArray)
+                add("progressLog", AgentProgressLogBuilder.fromEvents(eventArray))
                 if (includeEvents) add("events", eventArray)
             }
         }
+    }
+
+    private fun elapsedNanosAsMs(startedAt: Long): Long {
+        val elapsed = (System.nanoTime() - startedAt).coerceAtLeast(0L)
+        return if (elapsed == 0L) 0L else ((elapsed - 1L) / 1_000_000L) + 1L
     }
 
     private class ApiMetrics(initialMode: String) {
@@ -1424,6 +1519,25 @@ object AgentApiController {
         var agentFallback: Boolean = false
         var fallbackReason: String? = null
         var rounds: Int = 0
+        var templateStatus: String = ""
+        var templateRevision: Int = 0
+        var validationProgress: String = ""
+        var promotionEligible: Boolean = false
+        var promotionIneligibleReason: String = ""
+        var resolverPolicy: String = ""
+        var resolverUsed: String = ""
+        var uiGeneration: Long = 0L
+        var frameId: String = ""
+        var frameSource: String = ""
+        var frameAgeMs: Long = 0L
+        var outcomeState: String = ""
+        var fallbackStepIndex: Int = 0
+        var treeSnapshotMs: Long = 0L
+        var treeLookupMs: Long = 0L
+        var treeCacheHit: Boolean = false
+        var nodesVisited: Int = 0
+        var compactTreeReads: Int = 0
+        var fullTreeReads: Int = 0
 
         fun elapsedMs(): Long = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
 
@@ -1458,6 +1572,25 @@ object AgentApiController {
                 if (!fallbackReason.isNullOrBlank()) addProperty("fallbackReason", fallbackReason)
                 addProperty("rounds", rounds)
                 addProperty("mode", mode)
+                addProperty("templateStatus", templateStatus)
+                addProperty("templateRevision", templateRevision.coerceAtLeast(0))
+                addProperty("validationProgress", validationProgress)
+                addProperty("promotionEligible", promotionEligible)
+                addProperty("promotionIneligibleReason", promotionIneligibleReason)
+                addProperty("resolverPolicy", resolverPolicy)
+                addProperty("resolverUsed", resolverUsed)
+                addProperty("uiGeneration", uiGeneration.coerceAtLeast(0L))
+                addProperty("frameId", frameId)
+                addProperty("frameSource", frameSource)
+                addProperty("frameAgeMs", frameAgeMs.coerceAtLeast(0L))
+                addProperty("outcomeState", outcomeState)
+                addProperty("fallbackStepIndex", fallbackStepIndex.coerceAtLeast(0))
+                addProperty("treeSnapshotMs", treeSnapshotMs.coerceAtLeast(0L))
+                addProperty("treeLookupMs", treeLookupMs.coerceAtLeast(0L))
+                addProperty("treeCacheHit", treeCacheHit)
+                addProperty("nodesVisited", nodesVisited.coerceAtLeast(0))
+                addProperty("compactTreeReads", compactTreeReads.coerceAtLeast(0))
+                addProperty("fullTreeReads", fullTreeReads.coerceAtLeast(0))
             }
         }
     }
@@ -1827,8 +1960,65 @@ object AgentApiController {
         val answer: String? = null,
         val error: String? = null,
         val rounds: Int = 0,
-        val tokens: Int = 0
+        val tokens: Int = 0,
+        val errorCode: String = "agent_error",
+        val currentStep: String = "execute",
+        val retryable: Boolean = false
     )
+
+    private data class CapturedTrajectoryEvidence(
+        val evidence: TrajectoryEvidenceRef?,
+        val checkpoint: StepCheckpoint?
+    )
+
+    private fun captureTrajectoryEvidence(phase: String, toolId: String): CapturedTrajectoryEvidence {
+        val service = ClawAccessibilityService.getInstance() ?: return CapturedTrajectoryEvidence(null, null)
+        val generation = runCatching { service.generationSnapshot }.getOrNull()
+            ?: return CapturedTrajectoryEvidence(null, null)
+        val packageName = runCatching { service.currentPackageName }.getOrNull().orEmpty()
+        val windowId = runCatching { service.currentWindowId }.getOrDefault(-1)
+        val canonical = listOf(
+            phase,
+            toolId,
+            generation.uiGeneration.toString(),
+            generation.serviceGeneration,
+            packageName,
+            windowId.toString(),
+            System.currentTimeMillis().toString()
+        ).joinToString("|")
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return CapturedTrajectoryEvidence(
+            evidence = TrajectoryEvidenceRef("tree://$digest", TrajectoryEvidenceKind.TREE),
+            checkpoint = StepCheckpoint(
+                expectedPackage = packageName.takeIf { it.isNotBlank() },
+                expectedWindowId = windowId.takeIf { it >= 0 }
+            )
+        )
+    }
+
+    private fun normalizeTrajectoryParams(params: Map<String, Any?>): Map<String, Any?> =
+        params.mapValues { (_, value) -> normalizeTrajectoryValue(value) }
+
+    private fun normalizeTrajectoryValue(value: Any?): Any? = when (value) {
+        is Double -> if (value.isFinite() && value % 1.0 == 0.0 && value in Int.MIN_VALUE.toDouble()..Int.MAX_VALUE.toDouble()) {
+            value.toInt()
+        } else {
+            value
+        }
+        is Float -> if (value.isFinite() && value % 1f == 0f && value in Int.MIN_VALUE.toFloat()..Int.MAX_VALUE.toFloat()) {
+            value.toInt()
+        } else {
+            value
+        }
+        is Map<*, *> -> value.entries.associate { (key, nested) -> key.toString() to normalizeTrajectoryValue(nested) }
+        is List<*> -> value.map(::normalizeTrajectoryValue)
+        else -> value
+    }
+
+    private fun validationProgress(state: ValidationState): String =
+        "${state.consecutiveSuccesses.coerceIn(0, state.target.coerceAtLeast(1))}/${state.target.coerceAtLeast(1)}"
 
     /**
      * 从包名获取应用名（常见应用的映射）
@@ -1854,5 +2044,51 @@ object AgentApiController {
             ?: packageName.split(".").lastOrNull()?.replaceFirstChar { char ->
                 if (char.isLowerCase()) char.titlecase(Locale.getDefault()) else char.toString()
             }
+    }
+}
+
+internal data class AgentTerminalDecision(
+    val result: AgentApiController.TaskExecuteResult,
+    val shouldCompile: Boolean
+)
+
+internal object AgentTerminalCompletionPolicy {
+    fun decide(
+        successful: Boolean,
+        finalAnswer: String,
+        rounds: Int,
+        tokens: Int
+    ): AgentTerminalDecision = if (successful) {
+        AgentTerminalDecision(
+            result = AgentApiController.TaskExecuteResult(
+                success = true,
+                answer = finalAnswer,
+                rounds = rounds,
+                tokens = tokens
+            ),
+            shouldCompile = true
+        )
+    } else {
+        AgentTerminalDecision(
+            result = AgentApiController.TaskExecuteResult(
+                success = false,
+                error = finalAnswer,
+                rounds = rounds,
+                tokens = tokens,
+                errorCode = "agent_execution_incomplete",
+                currentStep = "complete",
+                retryable = true
+            ),
+            shouldCompile = false
+        )
+    }
+
+    fun failurePayload(result: AgentApiController.TaskExecuteResult, mode: String): JsonObject = JsonObject().apply {
+        addProperty("success", false)
+        addProperty("errorCode", result.errorCode)
+        addProperty("message", result.error ?: "Agent execution failed")
+        addProperty("currentStep", result.currentStep)
+        addProperty("mode", mode)
+        addProperty("retryable", result.retryable)
     }
 }

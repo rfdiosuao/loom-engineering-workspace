@@ -30,7 +30,7 @@ class PhoneDemoPageContractTests(unittest.TestCase):
 
         self.assertIn("手机连接配置", source)
         self.assertIn("手机 IP", source)
-        self.assertIn("端口固定 9527", source)
+        self.assertIn("只使用 USB 时可留空", source)
         self.assertIn("displayPhoneAddress", source)
         self.assertIn("连接令牌", source)
         self.assertIn("保存并检测", source)
@@ -152,7 +152,7 @@ class PhoneDemoPageContractTests(unittest.TestCase):
 
         self.assertIn("const canUsePhone", source)
         self.assertIn("!canUsePhone", source)
-        self.assertIn("请先保存手机 IP 和连接令牌", source)
+        self.assertIn("请先保存手机连接令牌", source)
 
     def test_phone_demo_exposes_bridge_owned_model_sync_action(self) -> None:
         with open(PHONE_PAGE, "r", encoding="utf-8") as handle:

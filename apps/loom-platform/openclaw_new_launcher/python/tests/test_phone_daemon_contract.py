@@ -111,6 +111,55 @@ class PhoneDaemonContractTest(unittest.TestCase):
         self.assertFalse(result["stopped"])
         self.assertEqual(result["reason"], "not_running")
 
+    def test_daemon_stop_confirms_recorded_process_exit(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"ok": true, "stopping": true}'
+
+        runtime = {"port": 9321, "pid": 123, "token": "runtime-test-token"}
+        with (
+            patch("api.routes_phone.read_phone_daemon_runtime", return_value=runtime),
+            patch("api.routes_phone._phone_daemon_health", return_value={"ok": True, "pid": 123}),
+            patch("api.routes_phone.urlopen", return_value=FakeResponse()),
+            patch(
+                "api.routes_phone._stop_phone_daemon_pid",
+                return_value={"exited": True, "forced": True, "reason": "forced"},
+            ) as stop_pid,
+        ):
+            result = routes_phone.stop_phone_daemon()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stopped"])
+        self.assertTrue(result["forced"])
+        self.assertTrue(result["identityVerified"])
+        self.assertFalse(result["running"])
+        stop_pid.assert_called_once_with(123, allow_terminate=True)
+
+    def test_daemon_stop_reports_failure_when_recorded_process_survives(self) -> None:
+        runtime = {"port": 9321, "pid": 123, "token": "runtime-test-token"}
+        with (
+            patch("api.routes_phone.read_phone_daemon_runtime", return_value=runtime),
+            patch("api.routes_phone._phone_daemon_health", return_value=None),
+            patch("api.routes_phone.urlopen", side_effect=OSError("daemon socket unavailable")),
+            patch(
+                "api.routes_phone._stop_phone_daemon_pid",
+                return_value={"exited": False, "forced": True, "reason": "kill_timeout"},
+            ),
+        ):
+            result = routes_phone.stop_phone_daemon()
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["stopped"])
+        self.assertTrue(result["running"])
+        self.assertFalse(result["identityVerified"])
+        self.assertEqual(result["reason"], "kill_timeout")
+
     def test_phone_process_env_supports_lightweight_matrix_context(self) -> None:
         ctx = SimpleNamespace(paths=SimpleNamespace(base_path="D:/loom-test"))
 

@@ -22,8 +22,6 @@ class AgentTaskPublicSnapshotTest {
             addProperty("cancelRequested", false)
             addProperty("mode", "agent")
             addProperty("screenHash", "hash-1")
-            addProperty("contractVersion", 1)
-            addProperty("progressLogSchema", "apkclaw.progress_log.v1")
             add("metrics", JsonObject().apply {
                 addProperty("totalMs", 44)
                 addProperty("rounds", 1)
@@ -66,8 +64,6 @@ class AgentTaskPublicSnapshotTest {
         assertEquals("hash-1", public["screenHash"].asString)
         assertTrue(public.has("agentReport"))
         assertTrue(public.has("metrics"))
-        assertEquals(1, public["contractVersion"].asInt)
-        assertEquals("apkclaw.progress_log.v1", public["progressLogSchema"].asString)
         assertTrue(public.has("progressLog"))
         assertEquals("tool", public["progressLog"].asJsonArray[0].asJsonObject["type"].asString)
         assertFalse(public["progressLog"].asJsonArray[0].asJsonObject.has("parameters"))
@@ -78,24 +74,49 @@ class AgentTaskPublicSnapshotTest {
     }
 
     @Test
-    fun legacy_task_without_progress_schema_remains_compatible() {
+    fun hybrid_public_snapshot_allows_only_additive_scalar_metrics() {
         val task = JsonObject().apply {
-            addProperty("taskId", "legacy-task")
-            addProperty("status", "running")
-            add("progressLog", JsonArray().apply {
-                add(JsonObject().apply {
-                    addProperty("round", 2)
-                    addProperty("type", "tool")
-                    addProperty("text", "第 2 阶段：执行手机操作")
-                    addProperty("time", 456L)
-                })
+            addProperty("mode", "hybrid_rpa")
+            addProperty("templateStatus", "validating")
+            addProperty("templateRevision", 2)
+            addProperty("validationProgress", "2/3")
+            addProperty("promotionEligible", true)
+            addProperty("promotionIneligibleReason", "")
+            addProperty("fallbackStepIndex", 3)
+            add("metrics", JsonObject().apply {
+                addProperty("resolverPolicy", "TREE_PREFERRED")
+                addProperty("resolverUsed", "RESOURCE_ID")
+                addProperty("uiGeneration", 9)
+                addProperty("frameId", "frame-9")
+                addProperty("frameSource", "fresh")
+                addProperty("frameAgeMs", 4)
+                addProperty("outcomeState", "verified")
+                addProperty("treeSnapshotMs", 2)
+                addProperty("treeLookupMs", 1)
+                addProperty("treeCacheHit", true)
+                addProperty("nodesVisited", 7)
+                addProperty("compactTreeReads", 1)
+                addProperty("fullTreeReads", 0)
+                addProperty("selectorText", "private-screen-text")
+                addProperty("params", "secret-value")
+                addProperty("rawTree", "private-screen-text")
             })
         }
 
         val public = AgentTaskPublicSnapshot.sanitize(task)
+        val serialized = public.toString()
 
-        assertFalse(public.has("progressLogSchema"))
-        assertFalse(public.has("contractVersion"))
-        assertEquals("第 2 阶段：执行手机操作", public["progressLog"].asJsonArray[0].asJsonObject["text"].asString)
+        listOf(
+            "templateStatus", "templateRevision", "validationProgress", "promotionEligible",
+            "promotionIneligibleReason", "fallbackStepIndex"
+        ).forEach { assertTrue("missing public field $it", public.has(it)) }
+        listOf(
+            "resolverPolicy", "resolverUsed", "uiGeneration", "frameId", "frameSource", "frameAgeMs",
+            "outcomeState", "treeSnapshotMs", "treeLookupMs", "treeCacheHit", "nodesVisited",
+            "compactTreeReads", "fullTreeReads"
+        ).forEach { assertTrue("missing metric $it", public["metrics"].asJsonObject.has(it)) }
+        listOf("selectorText", "params", "rawTree", "private-screen-text", "secret-value").forEach {
+            assertFalse("leaked $it", serialized.contains(it, ignoreCase = true))
+        }
     }
 }

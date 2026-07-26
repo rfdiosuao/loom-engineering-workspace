@@ -10,11 +10,12 @@ import {
   type MatrixDeviceSummary,
   type MatrixStatusSnapshot,
   type PhoneConfigSnapshot,
+  type PhoneAdbDevice,
   type PhoneDeviceSummary,
   type PhoneTaskMode,
   type PhoneTaskProfile,
 } from '../../services/api';
-import { BusyOverlay, Button, Input, TextArea, showConfirm, showToast } from '../common';
+import { BusyOverlay, Button, Input, Modal, Select, TextArea, showConfirm, showToast } from '../common';
 import { APP_DISPLAY_NAME } from '../../version';
 
 type CliResult = {
@@ -438,6 +439,13 @@ function displayPhoneAddress(baseUrl?: string): string {
   }
 }
 
+function editablePhoneAddress(device?: PhoneDeviceSummary | null): string {
+  if (device?.connectionMode === 'usb') {
+    return device.lanBaseUrl || '';
+  }
+  return device?.baseUrl || '';
+}
+
 function detectDirectPhoneAction(text: string): 'back' | 'home' | '' {
   const normalized = String(text || '').toLowerCase().replace(/\s+/g, '');
   if (/^(返回|返回上一页|上一页|后退|back|pressback)$/.test(normalized)) return 'back';
@@ -476,6 +484,9 @@ export const PhoneDemoPage: React.FC = () => {
   const [accountLoggedIn, setAccountLoggedIn] = React.useState(false);
   const [hasWireConfig, setHasWireConfig] = React.useState(false);
   const [phoneAppModalOpen, setPhoneAppModalOpen] = React.useState(false);
+  const [usbDevicePickerOpen, setUsbDevicePickerOpen] = React.useState(false);
+  const [usbDevices, setUsbDevices] = React.useState<PhoneAdbDevice[]>([]);
+  const [selectedUsbSerial, setSelectedUsbSerial] = React.useState('');
   const [phoneConfigSnapshot, setPhoneConfigSnapshot] = React.useState<PhoneConfigSnapshot | null>(null);
   const [isAddingDevice, setIsAddingDevice] = React.useState(false);
   const [matrixStatus, setMatrixStatus] = React.useState<MatrixStatusSnapshot | null>(null);
@@ -494,9 +505,13 @@ export const PhoneDemoPage: React.FC = () => {
     && selectedConfiguredPhone?.baseUrl
     && selectedConfiguredPhone?.tokenAvailable,
   );
+  const usbConfigured = Boolean(
+    !isAddingDevice
+    && selectedConfiguredPhone?.tokenAvailable,
+  );
   const hasUnsavedPhoneConfig = isAddingDevice
     || Boolean(phoneToken.trim())
-    || displayPhoneAddress(phoneAddress) !== displayPhoneAddress(selectedConfiguredPhone?.baseUrl || '');
+    || displayPhoneAddress(phoneAddress) !== displayPhoneAddress(editablePhoneAddress(selectedConfiguredPhone));
   const canUsePhone = Boolean(phoneAddress.trim() && (tokenAvailable || phoneToken.trim()));
   const selectedCheckedRuntime = deviceRuntime[selectedDeviceId];
   const selectedRuntimeIsFresh = Boolean(
@@ -585,7 +600,7 @@ export const PhoneDemoPage: React.FC = () => {
     const selected = selectedPhoneDevice(snapshot, preferredId);
     setSelectedDeviceId(selected?.id || preferredId || snapshot.selectedDeviceId || 'phone-1');
     setDeviceName(selected?.name || selected?.id || 'Android Phone');
-    setPhoneAddress(displayPhoneAddress(selected?.baseUrl || ''));
+    setPhoneAddress(displayPhoneAddress(editablePhoneAddress(selected)));
     setTokenAvailable(Boolean(selected?.tokenAvailable));
     setPhoneToken('');
   }, []);
@@ -607,7 +622,7 @@ export const PhoneDemoPage: React.FC = () => {
     setIsAddingDevice(false);
     setSelectedDeviceId(nextId);
     setDeviceName(device.name || nextId);
-    setPhoneAddress(displayPhoneAddress(device.baseUrl || ''));
+    setPhoneAddress(displayPhoneAddress(editablePhoneAddress(device)));
     setPhoneToken('');
     setTokenAvailable(Boolean(device.tokenAvailable));
     const restoredJob = jobs.find((job) => (
@@ -622,7 +637,7 @@ export const PhoneDemoPage: React.FC = () => {
       const snapshot = await phoneApi.saveDevice({
         id: nextId,
         name: device.name || nextId,
-        baseUrl: device.baseUrl,
+        baseUrl: editablePhoneAddress(device),
         selectedDeviceId: nextId,
       });
       applyPhoneConfig(snapshot, nextId);
@@ -639,6 +654,26 @@ export const PhoneDemoPage: React.FC = () => {
     try {
       const snapshot = await phoneApi.config();
       applyPhoneConfig(snapshot);
+      const selected = selectedPhoneDevice(snapshot);
+      if (selected?.connectionMode === 'usb') {
+        try {
+          const restored = await phoneApi.usbConnect({
+            deviceId: selected.id,
+            confirmed: true,
+          });
+          applyPhoneConfig(restored.config, selected.id);
+        } catch (error) {
+          setDeviceRuntime((current) => ({
+            ...current,
+            [selected.id]: {
+              status: 'offline',
+              summary: friendlyPhoneText(parseErrorText(error)) || 'USB 连接需要重新建立',
+              checkedAt: Date.now(),
+            },
+          }));
+          showToast('已保存的 USB 连接当前不可用，请检查数据线和 USB 调试授权。', 'info');
+        }
+      }
     } catch (error: any) {
       showToast(parseErrorText(error) || '读取手机连接配置失败', 'error');
     }
@@ -807,10 +842,6 @@ export const PhoneDemoPage: React.FC = () => {
     const cleanAddress = phoneAddress.trim();
     const cleanName = deviceName.trim() || 'Android Phone';
     const cleanToken = phoneToken.trim();
-    if (!cleanAddress) {
-      showToast('请输入手机 IP，例如 192.168.1.78', 'error');
-      return;
-    }
     if (!cleanToken && !tokenAvailable) {
       showToast('请输入手机端连接令牌', 'error');
       return;
@@ -838,8 +869,12 @@ export const PhoneDemoPage: React.FC = () => {
       });
       setMatrixStatus(matrixSnapshot.status);
       setPhoneToken('');
-      showToast('手机连接配置已保存', 'success');
-      await checkConnection(deviceId, true);
+      if (cleanAddress) {
+        showToast('手机连接配置已保存', 'success');
+        await checkConnection(deviceId, true);
+      } else {
+        showToast('配置已保存，现在可以通过 USB 连接手机', 'success');
+      }
     } catch (error: any) {
       showToast(friendlyPhoneText(parseErrorText(error)) || '保存手机连接配置失败', 'error');
     } finally {
@@ -880,6 +915,93 @@ export const PhoneDemoPage: React.FC = () => {
       }
     }
     await refreshMatrix();
+  };
+
+  const establishUsbConnection = async (serial: string) => {
+    const confirmed = await showConfirm({
+      title: '通过 USB 连接手机',
+      message: `将使用内置 ADB 连接 ${serial}，并验证它与当前麓鸣手机配置的令牌一致。`,
+      confirmText: '建立 USB 连接',
+      cancelText: '取消',
+    });
+    if (!confirmed) return;
+    setBusy('usb');
+    let switched = false;
+    try {
+      const response = await phoneApi.usbConnect({
+        deviceId: selectedDeviceId,
+        serial,
+        confirmed: true,
+      });
+      applyPhoneConfig(response.config, selectedDeviceId);
+      switched = true;
+      showToast(`USB 连接已建立${response.connection.serial ? `：${response.connection.serial}` : ''}`, 'success');
+    } catch (error) {
+      showToast(friendlyPhoneText(parseErrorText(error)) || 'USB 连接失败', 'error');
+    } finally {
+      setBusy('');
+    }
+    if (switched) await checkConnection(selectedDeviceId, true);
+  };
+
+  const toggleUsbConnection = async () => {
+    if (hasUnsavedPhoneConfig) {
+      showToast('手机连接令牌有未保存修改，请先点击“保存并检测”。', 'info');
+      return;
+    }
+    if (!usbConfigured) {
+      showToast('请先保存手机连接令牌，再建立 USB 连接。', 'info');
+      return;
+    }
+    const usingUsb = selectedConfiguredPhone?.connectionMode === 'usb';
+    if (usingUsb) {
+      const hasLanFallback = Boolean(selectedConfiguredPhone?.lanBaseUrl);
+      const confirmed = await showConfirm({
+        title: hasLanFallback ? '切回局域网连接' : '断开 USB 连接',
+        message: hasLanFallback
+          ? '将移除当前 ADB 端口转发，并恢复这台手机原来的局域网地址。'
+          : '将移除当前 ADB 端口转发。这台手机尚未配置局域网地址，断开后会显示为未连接。',
+        confirmText: hasLanFallback ? '切回局域网' : '断开 USB',
+        cancelText: '取消',
+      });
+      if (!confirmed) return;
+      setBusy('usb');
+      let switched = false;
+      try {
+        const response = await phoneApi.usbDisconnect({ deviceId: selectedDeviceId, confirmed: true });
+        applyPhoneConfig(response.config, selectedDeviceId);
+        switched = true;
+        showToast(hasLanFallback ? '已切回局域网连接' : 'USB 连接已断开', 'success');
+      } catch (error) {
+        showToast(friendlyPhoneText(parseErrorText(error)) || '切回局域网失败', 'error');
+      } finally {
+        setBusy('');
+      }
+      if (switched && hasLanFallback) await checkConnection(selectedDeviceId, true);
+      return;
+    }
+
+    setBusy('usb');
+    try {
+      const response = await phoneApi.usbDevices();
+      const readyDevices = (response.devices || []).filter((device) => device.state === 'device');
+      if (!response.ok || readyDevices.length === 0) {
+        showToast(friendlyPhoneText(response.message || '') || '未检测到可连接的 USB 手机', 'error');
+        return;
+      }
+      if (readyDevices.length === 1) {
+        setBusy('');
+        await establishUsbConnection(readyDevices[0].serial);
+        return;
+      }
+      setUsbDevices(readyDevices);
+      setSelectedUsbSerial(readyDevices[0].serial);
+      setUsbDevicePickerOpen(true);
+    } catch (error) {
+      showToast(friendlyPhoneText(parseErrorText(error)) || '读取 USB 手机失败', 'error');
+    } finally {
+      setBusy('');
+    }
   };
 
   const readScreen = async () => {
@@ -949,6 +1071,8 @@ export const PhoneDemoPage: React.FC = () => {
     ? '正在读取手机配置'
     : busy === 'select-phone'
       ? '正在切换当前手机'
+      : busy === 'usb'
+        ? '正在切换手机连接方式'
     : busy === 'status'
       ? '正在检测手机连接'
       : busy === 'devices'
@@ -968,6 +1092,40 @@ export const PhoneDemoPage: React.FC = () => {
         title={busyOverlayTitle}
         detail={phoneExecutionStage || `${APP_DISPLAY_NAME} 正在等待手机返回结果。`}
       />
+      <Modal
+        isOpen={usbDevicePickerOpen}
+        onClose={() => setUsbDevicePickerOpen(false)}
+        title="选择 USB 手机"
+      >
+        <p className="text-sm leading-6 text-text-muted">
+          检测到多台 USB 手机。请选择要与当前麓鸣配置绑定的设备，系统会在保存前校验连接令牌。
+        </p>
+        <Select
+          className="mt-5 w-full"
+          value={selectedUsbSerial}
+          onChange={(event) => setSelectedUsbSerial(event.target.value)}
+        >
+          {usbDevices.map((device) => (
+            <option key={device.serial} value={device.serial}>
+              {device.label || device.serial} ({device.serial})
+            </option>
+          ))}
+        </Select>
+        <div className="mt-6 flex justify-end gap-3">
+          <Button variant="quiet" onClick={() => setUsbDevicePickerOpen(false)}>取消</Button>
+          <Button
+            variant="primary"
+            disabled={!selectedUsbSerial}
+            onClick={() => {
+              const serial = selectedUsbSerial;
+              setUsbDevicePickerOpen(false);
+              void establishUsbConnection(serial);
+            }}
+          >
+            连接
+          </Button>
+        </div>
+      </Modal>
       {phoneAppModalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#071916]/70 p-6 backdrop-blur-sm">
           <div
@@ -1031,6 +1189,11 @@ export const PhoneDemoPage: React.FC = () => {
           </div>
           <div className="flex flex-wrap justify-end gap-3">
             <Button variant="quiet" onClick={() => setPhoneAppModalOpen(true)}>下载手机端 App</Button>
+            <Button variant="quiet" onClick={toggleUsbConnection} disabled={Boolean(busy) || !usbConfigured}>
+              {selectedConfiguredPhone?.connectionMode === 'usb'
+                ? (selectedConfiguredPhone?.lanBaseUrl ? '切回局域网' : '断开 USB')
+                : 'USB 连接'}
+            </Button>
             <Button variant="primary" onClick={() => checkConnection()} disabled={Boolean(busy) || !canUsePhone}>
               {busy === 'status' ? '检测中...' : '检测连接'}
             </Button>
@@ -1079,7 +1242,9 @@ export const PhoneDemoPage: React.FC = () => {
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="rounded-full border border-border/70 bg-surface-alt/40 px-3 py-1 text-xs font-bold text-text-muted">
-                      {isAddingDevice ? '新增手机' : <>已保存 {configuredPhones.length} 台 · 当前：{selectedDeviceId || 'phone-1'}</>}
+                      {isAddingDevice
+                        ? '新增手机'
+                        : <>已保存 {configuredPhones.length} 台 · 当前：{selectedDeviceId || 'phone-1'} · {selectedConfiguredPhone?.connectionMode === 'usb' ? 'USB' : '局域网'}</>}
                     </span>
                     {!isAddingDevice && configuredPhones.some((device) => device.id === selectedDeviceId) ? (
                       <Button variant="danger" onClick={() => void deleteSelectedPhone()} disabled={Boolean(busy)}>
@@ -1130,7 +1295,10 @@ export const PhoneDemoPage: React.FC = () => {
                               {runtimeLabel}
                             </span>
                           </span>
-                          <span className="mt-1 block truncate text-[11px] font-bold text-text-muted">{displayPhoneAddress(device.baseUrl) || '未填写地址'}</span>
+                          <span className="mt-1 block truncate text-[11px] font-bold text-text-muted">
+                            {device.connectionMode === 'usb' ? 'USB · ' : ''}
+                            {displayPhoneAddress(device.baseUrl) || '未填写地址'}
+                          </span>
                         </button>
                       );
                     })}
@@ -1155,7 +1323,7 @@ export const PhoneDemoPage: React.FC = () => {
                       disabled={Boolean(busy)}
                     />
                     <span className="mt-1 block text-[11px] leading-4 text-text-subtle">
-                      端口固定 9527，粘贴完整地址也会自动整理。
+                      局域网连接可填写；只使用 USB 时可留空。
                     </span>
                   </label>
                   <label className="block">
@@ -1171,7 +1339,11 @@ export const PhoneDemoPage: React.FC = () => {
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <Button variant="primary" onClick={saveDeviceAndDetect} disabled={Boolean(busy)}>
-                    {busy === 'config' || busy === 'status' ? '保存检测中...' : '保存并检测'}
+                    {busy === 'config' || busy === 'status'
+                      ? '保存检测中...'
+                      : phoneAddress.trim()
+                        ? '保存并检测'
+                        : '保存配置'}
                   </Button>
                   <span className="text-xs font-bold text-text-subtle">
                     {hasUnsavedPhoneConfig

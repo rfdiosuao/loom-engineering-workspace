@@ -45,21 +45,31 @@ class MatrixRouteContractTests(unittest.TestCase):
             self.assertEqual(result["status"], "applied")
             self.assertEqual(build_plan.call_args.args[1]["actionBody"], {"action": action})
 
-    def test_matrix_manual_recent_returns_actionable_unsupported_failure(self) -> None:
+    def test_matrix_manual_recent_uses_supported_phone_system_key(self) -> None:
         from api.routes_matrix import _execute_matrix_manual_action
 
-        with patch("api.routes_matrix._submit_phone_job") as submit_phone:
+        with patch(
+            "api.routes_matrix._build_phone_task_plan", return_value={}
+        ) as build_plan, patch(
+            "api.routes_matrix._submit_phone_job", return_value={"success": True}
+        ) as submit_phone:
             result = _execute_matrix_manual_action(
                 SimpleNamespace(),
                 "phone-a",
                 {"action": "recent", "clientCommandId": "command-recent"},
             )
 
-        submit_phone.assert_not_called()
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["code"], "matrix_control_unsupported")
-        self.assertIn("最近任务", result["error"])
-        self.assertIn("暂不支持", result["error"])
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(
+            build_plan.call_args.args[1]["actionBody"],
+            {
+                "action": "system_key",
+                "key": "recent",
+                "targetLabel": "system recent apps navigation",
+                "reason": "User requested the recent-apps control from Matrix",
+            },
+        )
+        submit_phone.assert_called_once()
 
     def test_matrix_screen_parser_accepts_pretty_printed_json(self) -> None:
         stdout = json.dumps(

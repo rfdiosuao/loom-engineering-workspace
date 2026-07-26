@@ -30,6 +30,17 @@ export async function readRuntimeState() {
   return JSON.parse(await fs.readFile(RUNTIME_PATH, 'utf8'));
 }
 
+export async function removeRuntimeStateIfOwned(runtime) {
+  try {
+    const current = await readRuntimeState();
+    if (current?.pid !== runtime?.pid || current?.token !== runtime?.token) return false;
+    await fs.unlink(RUNTIME_PATH);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function daemonAuthHeaders(runtime) {
   return { 'X-LOOM-PHONE-DAEMON-TOKEN': runtime?.token || '' };
 }

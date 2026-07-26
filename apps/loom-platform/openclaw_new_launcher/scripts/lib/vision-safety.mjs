@@ -16,6 +16,7 @@ const MUTATING_ACTIONS = new Set([
   'input',
   'input_text',
   'scroll',
+  'system_key',
 ]);
 const ACTION_FAST_ACTIONS = new Set([
   'back',
@@ -229,10 +230,13 @@ export function minimalActionForPhone(plan) {
 }
 
 export function visionActionEndpointForBody(plan, fastPath = '') {
+  const action = normalizePhoneActionName(plan?.action || plan?.type || '');
+  if (action === 'system_key') {
+    return '/api/tool/system_key';
+  }
   if (String(fastPath || '').toLowerCase() === 'action_fast') {
     return '/api/lumi/agent/action_fast';
   }
-  const action = normalizePhoneActionName(plan?.action || plan?.type || '');
   if (ACTION_FAST_ACTIONS.has(action)) {
     return '/api/lumi/agent/action_fast';
   }

@@ -711,14 +711,19 @@ class DefaultAgentService : AgentService {
             // 如果没有工具调用，Agent 认为完成了
             if (!llmResponse.hasToolExecutionRequests()) {
                 val finalAnswer = llmResponse.text ?: ClawApplication.instance.getString(R.string.agent_task_completed)
-                callback.onComplete(iterations, finalAnswer, totalTokens)
+                callback.onTerminal(iterations, finalAnswer, totalTokens, successful = true)
                 return
             }
 
             // 执行工具调用
             for (toolRequest in llmResponse.toolExecutionRequests) {
                 if (cancelled.get()) {
-                    callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens)
+                    callback.onTerminal(
+                        iterations,
+                        ClawApplication.instance.getString(R.string.agent_task_cancel),
+                        totalTokens,
+                        successful = false
+                    )
                     return
                 }
 
@@ -739,7 +744,17 @@ class DefaultAgentService : AgentService {
                 params = guard.params
 
                 val toolStartedAt = System.currentTimeMillis()
-                val result = if (!guard.blockedReason.isNullOrBlank()) {
+                val replayAllowed = AgentReplaySafetyPolicy.mayDispatchAction(
+                    allowReplayFailedStep = options.allowReplayFailedStep,
+                    oldPostconditionAbsent = runCatching { options.oldPostconditionAbsent() }.getOrDefault(false),
+                    toolName = toolName
+                )
+                val result = if (!replayAllowed) {
+                    ToolResult.error(
+                        "Reconciliation blocked action replay until the old postcondition is proven absent. " +
+                            "Observe the current state and finish with a bounded handoff if absence cannot be proven."
+                    )
+                } else if (!guard.blockedReason.isNullOrBlank()) {
                     ToolResult.error(
                         "${guard.blockedReason}. Ask OpenClaw/user for explicit confirmation or call finish with a blocked safety summary."
                     )
@@ -766,7 +781,12 @@ class DefaultAgentService : AgentService {
                 // finish 工具 → 任务完成
                 if (toolName == "finish" && result.isSuccess) {
                     val finishData = result.data
-                    callback.onComplete(iterations, finishData ?: ClawApplication.instance.getString(R.string.agent_task_completed), totalTokens)
+                    callback.onTerminal(
+                        iterations,
+                        finishData ?: ClawApplication.instance.getString(R.string.agent_task_completed),
+                        totalTokens,
+                        successful = true
+                    )
                     return
                 }
 
@@ -800,10 +820,11 @@ class DefaultAgentService : AgentService {
                 stuckSignalCount += 1
                 XLog.w(TAG, "Dead loop detected at iteration $iterations")
                 if (AgentLoopEarlyStopPolicy.shouldStop(stuckSignalCount, options.toolPolicy)) {
-                    callback.onComplete(
+                    callback.onTerminal(
                         iterations,
                         AgentLoopEarlyStopPolicy.completionMessage(lastPartialSummary),
-                        totalTokens
+                        totalTokens,
+                        successful = false
                     )
                     return
                 }
@@ -822,17 +843,23 @@ class DefaultAgentService : AgentService {
         }
 
         if (cancelled.get()) {
-            callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens)
+            callback.onTerminal(
+                iterations,
+                ClawApplication.instance.getString(R.string.agent_task_cancel),
+                totalTokens,
+                successful = false
+            )
         } else {
             val partial = if (lastPartialSummary.isNotBlank()) {
                 "\n\nPartial result:\n$lastPartialSummary"
             } else {
                 ""
             }
-            callback.onComplete(
+            callback.onTerminal(
                 iterations,
                 "Reached round budget of $maxIterations. Return a bounded follow-up task if more work is needed.$partial",
-                totalTokens
+                totalTokens,
+                successful = false
             )
         }
     }
