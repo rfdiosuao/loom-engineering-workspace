@@ -1145,12 +1145,31 @@ def _capture_matrix_screen(
             device_id=device_id,
         )
     if process.get("returncode") != 0:
-        error = _redact_matrix_output(process.get("stderr") or "Phone screenshot failed")[:300]
-        raise MatrixTargetError("matrix_screen_unavailable", error)
+        failure = _phone_stdout_payload(process.get("stdout") or "")
+        error_code = str(failure.get("errorCode") or failure.get("code") or "").strip()
+        error = _redact_matrix_output(
+            failure.get("error")
+            or failure.get("message")
+            or process.get("stderr")
+            or "Phone screenshot failed"
+        )[:300]
+        raise MatrixTargetError(error_code or "matrix_screen_unavailable", error)
     payload = _last_json_object(process.get("stdout") or "")
     if isinstance(payload.get("data"), dict) and not isinstance(payload.get("frame"), dict):
         payload = payload["data"]
     frame = payload.get("frame") if isinstance(payload.get("frame"), dict) else {}
+    returned_device_id = str(
+        frame.get("deviceId")
+        or frame.get("device_id")
+        or payload.get("deviceId")
+        or payload.get("device_id")
+        or ""
+    ).strip()
+    if returned_device_id and returned_device_id != str(device_id).strip():
+        raise MatrixTargetError(
+            "matrix_screen_device_mismatch",
+            "Phone screenshot response did not match the requested device",
+        )
     image_info = frame.get("image") if isinstance(frame.get("image"), dict) else {}
     encoded_image = str(image_info.get("base64") or "").strip()
     file_path = str(payload.get("filePath") or "").strip()
@@ -1291,10 +1310,17 @@ def _run_matrix_campaign(ctx, matrix: MatrixControlPlane, task: dict, body: dict
                 }
             results_by_index[index] = result
             completed_count += 1
+            uncertain = _matrix_execution_is_uncertain(result)
             ctx.get_job_mgr().progress(
                 job_id,
-                f"{device_id or index + 1} 执行完成",
-                "success" if result.get("success") else "danger",
+                (
+                    f"{device_id or index + 1} 执行完成"
+                    if result.get("success")
+                    else f"{device_id or index + 1} 手机端可能仍在执行"
+                    if uncertain
+                    else f"{device_id or index + 1} 执行失败"
+                ),
+                "success" if result.get("success") else "neutral" if uncertain else "danger",
                 phase="matrix.dispatch.device.done",
                 commandId="matrix.dispatch",
                 campaignId=task.get("campaignId"),
@@ -1305,7 +1331,13 @@ def _run_matrix_campaign(ctx, matrix: MatrixControlPlane, task: dict, body: dict
                 completedDevices=completed_count,
             )
     results = [results_by_index[index] for index in range(len(device_tasks))]
-    ok = all(item.get("success") for item in results)
+    uncertain_results = [
+        item
+        for item in results
+        if item.get("success") is not True
+        and item.get("cancelled") is not True
+        and _matrix_execution_is_uncertain(item)
+    ]
     failed_devices = [
         {
             "deviceId": str(item.get("deviceId") or ""),
@@ -1314,21 +1346,39 @@ def _run_matrix_campaign(ctx, matrix: MatrixControlPlane, task: dict, body: dict
             "error": _redact_matrix_output(str(item.get("error") or "手机任务执行失败"))[:300],
         }
         for item in results
-        if item.get("success") is not True and item.get("cancelled") is not True
+        if item.get("success") is not True
+        and item.get("cancelled") is not True
+        and not _matrix_execution_is_uncertain(item)
     ]
+    cancelled_results = [
+        item
+        for item in results
+        if item.get("cancelled") is True
+    ]
+    cancelled = ctx.get_job_mgr().is_cancelled(job_id) or bool(cancelled_results)
+    ok = not failed_devices and not cancelled
     failure_summary = "；".join(
         f"{item['deviceId'] or '未知设备'}：{item['error']}"
         for item in failed_devices[:3]
     )
+    uncertain_summary = "、".join(
+        str(item.get("deviceId") or "未知设备")
+        for item in uncertain_results[:3]
+    )
     ctx.get_job_mgr().progress(
         job_id,
-        "Matrix 任务执行完成" if ok else f"Matrix 任务执行失败：{failure_summary or '任务已取消'}",
-        "success" if ok else "danger",
+        (
+            f"Matrix 已完成下发，{uncertain_summary} 手机端仍可能在执行"
+            if uncertain_results and ok
+            else "Matrix 任务执行完成"
+            if ok
+            else f"Matrix 任务执行失败：{failure_summary or '任务已取消'}"
+        ),
+        "neutral" if uncertain_results and ok else "success" if ok else "danger",
         phase="matrix.dispatch.done" if ok else "matrix.dispatch.failed",
         commandId="matrix.dispatch",
         campaignId=task.get("campaignId"),
     )
-    cancelled = ctx.get_job_mgr().is_cancelled(job_id)
     result = {
         "success": ok,
         "task": task,
@@ -1340,8 +1390,23 @@ def _run_matrix_campaign(ctx, matrix: MatrixControlPlane, task: dict, body: dict
     }
     if cancelled:
         result["cancelled"] = True
+    if uncertain_results:
+        result["outcomeIndeterminate"] = True
+        result["executionMayContinue"] = any(
+            item.get("executionMayContinue") is True
+            for item in uncertain_results
+        )
     if not ok:
-        failed = next((item for item in results if not item.get("success")), {})
+        failed = next(
+            (
+                item
+                for item in results
+                if item.get("success") is not True
+                and item.get("cancelled") is not True
+                and not _matrix_execution_is_uncertain(item)
+            ),
+            {},
+        )
         result["error"] = str(failed.get("error") or "手机矩阵任务执行失败，请查看设备连接和任务日志。")
         result["errorCode"] = str(failed.get("errorCode") or "matrix_device_task_failed")
     _record_matrix_task_evidence(body, result, started)
@@ -1556,6 +1621,9 @@ def _run_matrix_device_task(
                 return cancelled_result()
             if _matrix_execution_is_uncertain(raw_result):
                 raw_result["outcomeIndeterminate"] = True
+                error_code = str(raw_result.get("errorCode") or raw_result.get("code") or "").strip().lower()
+                if error_code == "timeout" and str(raw_result.get("taskId") or "").strip():
+                    raw_result["executionMayContinue"] = True
             if (
                 raw_result.get("success") is True
                 or _matrix_execution_is_uncertain(raw_result)

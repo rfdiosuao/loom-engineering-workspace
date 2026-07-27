@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -20,12 +22,32 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from api.routes_matrix import _capture_matrix_screen, register_matrix_routes
-from core.phone_matrix import MatrixControlPlane
+from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 from core.stream_tickets import StreamTicketIssuer
 from services.jobs import JobManager
 
 
 class MatrixScreenContractTests(unittest.TestCase):
+    def test_matrix_reuses_phone_control_protocol_credentials_and_device_store(self) -> None:
+        import api.routes_matrix as matrix_routes
+        import api.routes_phone as phone_routes
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = SimpleNamespace(launcher_dir=temp_dir, wire_path="")
+            matrix = MatrixControlPlane(paths)
+
+            self.assertIs(matrix_routes._build_phone_task_plan, phone_routes._build_phone_task_plan)
+            self.assertIs(matrix_routes._submit_phone_job, phone_routes._submit_phone_job)
+            self.assertIs(
+                matrix_routes._run_phone_process_with_matrix_stream,
+                phone_routes._run_phone_process_with_matrix_stream,
+            )
+            self.assertEqual(
+                matrix.phone_devices_path,
+                os.path.join(temp_dir, "phone-agents.json"),
+            )
+            self.assertEqual(phone_routes._phone_store_path(SimpleNamespace(paths=paths)), matrix.phone_devices_path)
+
     def test_ticketless_once_stream_does_not_expose_matrix_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
@@ -129,6 +151,113 @@ class MatrixScreenContractTests(unittest.TestCase):
         self.assertEqual(mocked.call_args_list[0].kwargs["max_long_side"], 960)
         self.assertEqual(mocked.call_args_list[1].kwargs["quality"], 48)
         self.assertEqual(mocked.call_args_list[1].kwargs["max_long_side"], 640)
+
+    def test_screen_capture_rejects_a_frame_returned_for_another_device(self) -> None:
+        paths = SimpleNamespace(
+            base_path=os.path.dirname(__file__),
+            launcher_dir=os.path.dirname(__file__),
+            node_exe=sys.executable,
+        )
+        payload = {
+            "ok": True,
+            "deviceId": "phone-b",
+            "frame": {
+                "deviceId": "phone-b",
+                "width": 432,
+                "height": 960,
+                "image": {"mime": "image/jpeg", "base64": "QUJD"},
+            },
+        }
+        ctx = SimpleNamespace(paths=paths)
+
+        with patch("api.routes_matrix._script_path", return_value=__file__), patch(
+            "api.routes_matrix._run_phone_process_with_matrix_stream",
+            return_value={"returncode": 0, "stdout": json.dumps(payload), "stderr": ""},
+        ):
+            with self.assertRaises(MatrixTargetError) as raised:
+                _capture_matrix_screen(ctx, "phone-a")
+
+        self.assertEqual(raised.exception.code, "matrix_screen_device_mismatch")
+
+    def test_screen_capture_preserves_shared_phone_transport_errors(self) -> None:
+        paths = SimpleNamespace(
+            base_path=os.path.dirname(__file__),
+            launcher_dir=os.path.dirname(__file__),
+            node_exe=sys.executable,
+        )
+        ctx = SimpleNamespace(paths=paths)
+        cases = (
+            ("phone_config_server_unreachable", "无法连接手机端 APKClaw ConfigServer"),
+            ("forward_missing", "USB 转发已经失效，需要重新建立"),
+        )
+
+        for error_code, message in cases:
+            with self.subTest(error_code=error_code), patch(
+                "api.routes_matrix._script_path",
+                return_value=__file__,
+            ), patch(
+                "api.routes_matrix._run_phone_process_with_matrix_stream",
+                return_value={
+                    "returncode": 1,
+                    "stdout": json.dumps({"ok": False, "errorCode": error_code, "error": message}),
+                    "stderr": "",
+                },
+            ):
+                with self.assertRaises(MatrixTargetError) as raised:
+                    _capture_matrix_screen(ctx, "phone-a")
+
+            self.assertEqual(raised.exception.code, error_code)
+            self.assertEqual(raised.exception.message, message)
+
+    def test_screen_capture_caps_global_concurrency_and_keeps_device_identity(self) -> None:
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def capture(_ctx, command, **_kwargs):
+            nonlocal active, peak
+            device_id = command[command.index("--device-id") + 1]
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                time.sleep(0.03)
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps({
+                        "ok": True,
+                        "deviceId": device_id,
+                        "frame": {
+                            "deviceId": device_id,
+                            "width": 432,
+                            "height": 960,
+                            "image": {"mime": "image/jpeg", "base64": "QUJD"},
+                        },
+                    }),
+                    "stderr": "",
+                }
+            finally:
+                with lock:
+                    active -= 1
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = SimpleNamespace(
+                base_path=temp_dir,
+                launcher_dir=temp_dir,
+                node_exe=sys.executable,
+            )
+            ctx = SimpleNamespace(paths=paths)
+            device_ids = [f"phone-{index}" for index in range(12)]
+            with patch("api.routes_matrix._script_path", return_value=__file__), patch(
+                "api.routes_matrix._run_phone_process_with_matrix_stream",
+                side_effect=capture,
+            ), patch("api.routes_matrix._sync_matrix_screen_presence"):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(device_ids)) as executor:
+                    screens = list(executor.map(lambda device_id: _capture_matrix_screen(ctx, device_id), device_ids))
+
+        self.assertGreater(peak, 1)
+        self.assertLessEqual(peak, 6)
+        self.assertEqual([screen["deviceId"] for screen in screens], device_ids)
 
     def test_screen_capture_refreshes_matrix_foreground_app_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

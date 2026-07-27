@@ -2199,13 +2199,8 @@ class MatrixControlPlane:
                 "status": task_status,
                 "deviceTaskId": device_task_id,
             }
-        found["status"] = (
-            "succeeded"
-            if ok
-            else "needs_human"
-            if outcome_indeterminate or execution_may_continue
-            else "failed"
-        )
+        uncertain = not ok and (outcome_indeterminate or execution_may_continue)
+        found["status"] = "succeeded" if ok else "running" if uncertain else "failed"
         found["durationMs"] = int(duration_ms)
         found["failureCode"] = "" if ok else _clip(failure_code, 100)
         found["failureReason"] = _clip(failure_reason, 200)
@@ -2219,28 +2214,28 @@ class MatrixControlPlane:
         found["updatedAt"] = _now_iso()
         for step in found.get("steps", []):
             if step.get("status") == "running":
-                step["status"] = "succeeded" if ok else "failed"
+                step["status"] = "succeeded" if ok else "running" if uncertain else "failed"
                 step["updatedAt"] = found["updatedAt"]
         self._refresh_campaign_status(tasks, campaign_id)
         self._write_json(self.tasks_path, tasks)
-        event_type = "result" if ok else "error"
+        event_type = "result" if ok or uncertain else "error"
         self._append_event(
             event_type,
             campaign_id,
             mission_id,
             device_task_id,
             str(found.get("deviceId") or ""),
-            "任务完成" if ok else "任务失败",
+            "任务完成" if ok else "任务状态待确认" if uncertain else "任务失败",
             assignment_id=str(found.get("assignmentId") or ""),
         )
         self._update_device(
             str(found.get("deviceId") or ""),
             {
-                "currentTaskId": "",
-                "lastResult": "成功" if ok else (failure_reason or "失败"),
+                "currentTaskId": device_task_id if execution_may_continue else "",
+                "lastResult": "成功" if ok else "执行状态待确认" if uncertain else (failure_reason or "失败"),
                 "failureCount": 0 if ok else None,
             },
-            increment_failure=not ok,
+            increment_failure=not ok and not uncertain,
         )
         record = {
             "schema": "loom.matrix.experience_record.v1",

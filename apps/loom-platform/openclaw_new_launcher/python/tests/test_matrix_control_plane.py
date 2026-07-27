@@ -1476,7 +1476,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "matrix_campaign_not_found")
 
-    def test_indeterminate_result_requires_human_and_blocks_immediate_retry(self) -> None:
+    def test_indeterminate_result_stays_running_and_blocks_immediate_retry(self) -> None:
         from core.paths import AppPaths
         from core.phone_matrix import MatrixControlPlane
 
@@ -1502,7 +1502,9 @@ class MatrixControlPlaneTests(unittest.TestCase):
             retry = matrix.retry_failed(task["campaignId"], {})
 
         stored_task = campaign["missions"][0]["deviceTasks"][0]
-        self.assertEqual(stored_task["status"], "needs_human")
+        self.assertEqual(stored_task["status"], "running")
+        self.assertEqual(campaign["status"], "running")
+        self.assertTrue(campaign["missions"][0]["deviceTasks"][0]["executionMayContinue"])
         self.assertFalse(retry["retried"])
         self.assertFalse(retry["retryable"])
         self.assertTrue(retry["outcomeIndeterminate"])
