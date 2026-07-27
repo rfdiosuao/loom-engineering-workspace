@@ -1,0 +1,175 @@
+{
+  "schema": "loom.reliability-gates.v1",
+  "baselineCommit": "4f2a01e40c2e0b777ec4f279e06969f962b4bc08",
+  "policy": {
+    "runner": "scripts/invoke-reliability-gates.ps1",
+    "readOnly": true,
+    "externalEvidenceMustRemainUnverified": true
+  },
+  "gates": [
+    {
+      "id": "installer.transaction.contracts",
+      "domain": "installer",
+      "risk": "high",
+      "description": "安装、组件 API 与安装页面必须拒绝假成功并保留用户数据。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "python",
+        "arguments": [
+          "-B",
+          "-m",
+          "pytest",
+          "python/tests/test_component_installer.py",
+          "python/tests/test_routes_components.py",
+          "python/tests/test_agent_installer_page_contract.py",
+          "-q"
+        ]
+      }
+    },
+    {
+      "id": "model.wiring.contracts",
+      "domain": "model",
+      "risk": "high",
+      "description": "模型目录、接线探测和请求协议必须区分配置、权限与上游故障。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "python",
+        "arguments": [
+          "-B",
+          "-m",
+          "pytest",
+          "python/tests/test_wire_config.py",
+          "python/tests/test_routes_wire.py",
+          "python/tests/test_loom_model_client.py",
+          "-q"
+        ]
+      }
+    },
+    {
+      "id": "agent.runtime.contracts",
+      "domain": "agent",
+      "risk": "high",
+      "description": "原生智能体必须保持终态一致、工具参数有效且不得返回假完成。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "python",
+        "arguments": [
+          "-B",
+          "-m",
+          "pytest",
+          "python/tests/test_native_agent_runtime.py",
+          "python/tests/test_native_agent_ui_contract.py",
+          "-q"
+        ]
+      }
+    },
+    {
+      "id": "matrix.control.contracts",
+      "domain": "matrix",
+      "risk": "high",
+      "description": "矩阵路由与控制平面必须拒绝假成功、错误目标和误超时。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "python",
+        "arguments": [
+          "-B",
+          "-m",
+          "pytest",
+          "python/tests/test_routes_matrix.py",
+          "python/tests/test_matrix_control_plane.py",
+          "-q"
+        ]
+      }
+    },
+    {
+      "id": "ui.first-success.contracts",
+      "domain": "ui",
+      "risk": "high",
+      "description": "首次成功旅程与主要页面必须只显示后端可验证状态和中文可行动错误。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "python",
+        "arguments": [
+          "-B",
+          "-m",
+          "pytest",
+          "python/tests/test_agent_installer_page_contract.py",
+          "python/tests/test_models_page_contract.py",
+          "python/tests/test_native_agent_ui_contract.py",
+          "-q"
+        ]
+      }
+    }
+  ],
+  "incidentMappings": [
+    {
+      "type": "agent_install_or_launch_failure",
+      "failureDomains": [
+        "loom_installer",
+        "agent_package",
+        "local_environment"
+      ],
+      "gateIds": [
+        "installer.transaction.contracts"
+      ]
+    },
+    {
+      "type": "model_unavailable_or_upstream_error",
+      "failureDomains": [
+        "account_auth",
+        "model_permission",
+        "provider_upstream",
+        "network"
+      ],
+      "gateIds": [
+        "model.wiring.contracts"
+      ]
+    },
+    {
+      "type": "agent_false_success_or_stuck_tool",
+      "failureDomains": [
+        "local_environment",
+        "unknown"
+      ],
+      "gateIds": [
+        "agent.runtime.contracts",
+        "ui.first-success.contracts"
+      ]
+    },
+    {
+      "type": "matrix_timeout_wrong_target_or_screenshot_failure",
+      "failureDomains": [
+        "local_environment",
+        "network",
+        "unknown"
+      ],
+      "gateIds": [
+        "matrix.control.contracts"
+      ]
+    },
+    {
+      "type": "ui_false_success_or_unactionable_error",
+      "failureDomains": [
+        "unknown"
+      ],
+      "gateIds": [
+        "ui.first-success.contracts"
+      ]
+    }
+  ]
+}

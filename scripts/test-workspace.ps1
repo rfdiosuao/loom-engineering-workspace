@@ -78,6 +78,11 @@ $requiredDocs = @(
     'LICENSE-COMMERCIAL.md',
     'THIRD_PARTY_NOTICES.md',
     'docs\DEVELOPMENT_WIKI.md',
+    'docs\superpowers\plans\2026-07-27-loom-core-business-stability-roadmap.md',
+    'docs\reviews\2026-07-27-agent-install-model-baseline.md',
+    'docs\reviews\2026-07-28-worktree-retention-report.md',
+    'docs\runbooks\agent-reliability-release-gates.md',
+    'docs\releases\RELEASE_CHECKLIST.md',
     'docs\runbooks\repository-hygiene.md',
     'docs\decisions\0002-single-repository-monorepo.md',
     'docs\migration\MONOREPO_CUTOVER_20260722.md'
@@ -91,11 +96,52 @@ $commercialLicense = Get-Content -LiteralPath (Join-Path $root 'LICENSE-COMMERCI
 $thirdPartyNotices = Get-Content -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES.md') -Raw
 $launcherPackage = Get-Content -LiteralPath (Join-Path $root 'apps\loom-platform\openclaw_new_launcher\package.json') -Raw | ConvertFrom-Json
 $pullRequestTemplate = Get-Content -LiteralPath (Join-Path $root '.github\PULL_REQUEST_TEMPLATE.md') -Raw
+$platformCi = Get-Content -LiteralPath (Join-Path $root '.github\workflows\platform-ci.yml') -Raw
+$gateManifestPath = Join-Path $root 'packages\contracts\reliability-gates.v1.json'
+$gateRunnerPath = Join-Path $root 'scripts\invoke-reliability-gates.ps1'
 
 Assert-Workspace -Condition ($license.Contains('GNU AFFERO GENERAL PUBLIC LICENSE')) -Message 'root license is GNU AGPL'
 Assert-Workspace -Condition ($commercialLicense.Contains('separate commercial license')) -Message 'commercial alternative is documented'
 Assert-Workspace -Condition ($thirdPartyNotices.Contains('apps/loom-phone-agent')) -Message 'phone-agent upstream exception is documented'
 Assert-Workspace -Condition ($launcherPackage.license -eq 'AGPL-3.0-only') -Message 'launcher package declares AGPL-3.0-only'
 Assert-Workspace -Condition ($pullRequestTemplate.Contains('AGPL-3.0-only')) -Message 'pull requests record dual-license contribution consent'
+Assert-Workspace -Condition (Test-Path -LiteralPath $gateManifestPath -PathType Leaf) -Message 'structured reliability gate manifest exists'
+Assert-Workspace -Condition (Test-Path -LiteralPath $gateRunnerPath -PathType Leaf) -Message 'read-only reliability gate runner exists'
+
+$gateManifest = Get-Content -LiteralPath $gateManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+Assert-Workspace -Condition ($gateManifest.schema -eq 'loom.reliability-gates.v1') -Message 'reliability gate manifest uses v1 schema'
+Assert-Workspace -Condition ($gateManifest.baselineCommit -eq '4f2a01e40c2e0b777ec4f279e06969f962b4bc08') -Message 'reliability gates record the frozen baseline'
+
+$requiredGateDomains = @('installer', 'model', 'agent', 'matrix', 'ui')
+$actualGateDomains = @($gateManifest.gates | ForEach-Object { $_.domain } | Sort-Object -Unique)
+foreach ($domain in $requiredGateDomains) {
+    Assert-Workspace -Condition ($actualGateDomains -contains $domain) -Message "reliability gates include $domain domain"
+}
+
+$gateIds = @($gateManifest.gates | ForEach-Object { $_.id })
+Assert-Workspace -Condition ($gateIds.Count -eq (@($gateIds | Sort-Object -Unique)).Count) -Message 'reliability gate ids are unique'
+foreach ($gate in $gateManifest.gates) {
+    Assert-Workspace -Condition ($gate.readOnly -eq $true) -Message "$($gate.id) is declared read-only"
+    Assert-Workspace -Condition ($gate.requiresExternalEnvironment -eq $false) -Message "$($gate.id) does not claim external validation"
+    Assert-Workspace -Condition (@('python', 'npm', 'powershell') -contains $gate.command.executable) -Message "$($gate.id) uses an allow-listed executable"
+    if ($gate.command.executable -eq 'python') {
+        $arguments = @($gate.command.arguments)
+        Assert-Workspace -Condition ($arguments.Count -ge 4 -and $arguments[0] -eq '-B' -and $arguments[1] -eq '-m' -and $arguments[2] -eq 'pytest') -Message "$($gate.id) invokes read-only pytest"
+    }
+}
+
+foreach ($incident in $gateManifest.incidentMappings) {
+    Assert-Workspace -Condition (-not [string]::IsNullOrWhiteSpace($incident.type)) -Message 'incident mapping has a type'
+    Assert-Workspace -Condition (@($incident.gateIds).Count -gt 0) -Message "$($incident.type) maps to executable gates"
+    foreach ($gateId in @($incident.gateIds)) {
+        Assert-Workspace -Condition ($gateIds -contains $gateId) -Message "$($incident.type) references known gate $gateId"
+    }
+}
+
+$targetedGateIndex = $platformCi.IndexOf('invoke-reliability-gates.ps1')
+$fullSuiteIndex = $platformCi.IndexOf('python -B -m pytest python/tests -q')
+Assert-Workspace -Condition ($targetedGateIndex -ge 0) -Message 'platform CI invokes targeted reliability gates'
+Assert-Workspace -Condition ($fullSuiteIndex -ge 0 -and $targetedGateIndex -lt $fullSuiteIndex) -Message 'targeted reliability gates run before the full Python suite'
+Assert-Workspace -Condition ($pullRequestTemplate.Contains('未执行或外部验收')) -Message 'pull request template records unverified external evidence'
 
 Write-Host "Workspace tests passed: $script:Passed" -ForegroundColor Green
