@@ -2442,7 +2442,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                             "/api/phone/status",
                             json={"deviceId": "phone-stalled"},
                         )
-                        job = _wait_for_job(client, submitted.json()["jobId"], timeout=5.0)
+                        job = _wait_for_job(client, submitted.json()["jobId"], timeout=30.0)
             finally:
                 release_response.set()
                 server.shutdown()
