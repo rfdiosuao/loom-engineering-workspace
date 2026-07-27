@@ -41,6 +41,7 @@ from api.routes_phone import (
     _phone_progress_result_fields_from_stdout,
     _phone_payload_failure,
     _phone_runtime_config_json,
+    _phone_status_request_timeout_ms,
     _probe_phone_tunnel,
     _public_store,
     _run_phone_process_with_matrix_stream,
@@ -2211,6 +2212,30 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
         self.assertNotIn("secret-value", cleaned)
         self.assertEqual(len(payload["remediation"]), 2)
 
+    def test_phone_job_failure_diagnostics_include_payload_and_logs_without_secrets(self) -> None:
+        ctx = SimpleNamespace(sanitize_text=lambda value: value)
+        job = {
+            "status": "failed",
+            "error": "phone parser failed",
+            "result": {
+                "stdout": '{"token":"phone-token-secret","errorCode":"phone_config_server_timeout"}',
+                "stderr": "Authorization: Bearer abcdefghijklmnop",
+            },
+        }
+        logs = [
+            'launcherSecret="launcher-secret-value"',
+            "[Job:phone.status] failed",
+        ]
+
+        diagnostics = _phone_job_failure_diagnostics(ctx, job, logs)
+
+        self.assertIn("phone parser failed", diagnostics)
+        self.assertIn("phone_config_server_timeout", diagnostics)
+        self.assertIn("[Job:phone.status] failed", diagnostics)
+        self.assertNotIn("phone-token-secret", diagnostics)
+        self.assertNotIn("abcdefghijklmnop", diagnostics)
+        self.assertNotIn("launcher-secret-value", diagnostics)
+
     def test_public_store_defaults_to_first_device_without_exposing_secrets(self) -> None:
         snapshot = _public_store(
             {
@@ -2274,16 +2299,30 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
         self.assertEqual(failure["reason"], "连接令牌已经变更")
         self.assertEqual(failure["remediation"], ["重新复制连接令牌", "保存后重新检测"])
 
+    def test_phone_status_request_timeout_precedes_outer_step_deadline(self) -> None:
+        cases = {
+            8.0: 7000,
+            0.5: 250,
+            0.1: 50,
+        }
+
+        for outer_timeout_sec, expected_inner_ms in cases.items():
+            with self.subTest(outer_timeout_sec=outer_timeout_sec):
+                inner_timeout_ms = _phone_status_request_timeout_ms(outer_timeout_sec)
+                self.assertEqual(inner_timeout_ms, expected_inner_ms)
+                self.assertLess(inner_timeout_ms, outer_timeout_sec * 1000)
+
     def test_phone_status_route_passes_decrypted_runtime_config_to_fleet_process(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scripts_dir = os.path.join(temp_dir, "scripts")
             os.makedirs(scripts_dir, exist_ok=True)
             with open(os.path.join(scripts_dir, "openclaw-phone-fleet.mjs"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "import json, os\n"
+                    "import json, os, sys\n"
                     "runtime = json.loads(os.environ['LOOM_PHONE_RUNTIME_CONFIG_JSON'])\n"
                     "device = runtime['devices'][0]\n"
                     "print(json.dumps({'ok': bool(device.get('token')), 'selectedDeviceId': runtime['selectedDeviceId'], "
+                    "'argv': sys.argv[1:], "
                     "'results': [{'ok': bool(device.get('token')), 'device': {'id': device['id']}, "
                     "'status': {'online': bool(device.get('token'))}}]}, ensure_ascii=False))\n"
                 )
@@ -2316,8 +2355,107 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             payload = json.loads(job["result"]["stdout"])
             self.assertTrue(payload["ok"])
             self.assertTrue(payload["results"][0]["status"]["online"])
+            request_timeout_index = payload["argv"].index("--request-timeout-ms")
+            self.assertEqual(payload["argv"][request_timeout_index + 1], "7000")
             self.assertNotIn("plain-phone-token", json.dumps(job, ensure_ascii=False))
             self.assertEqual(storage[path]["devices"][0]["token"]["__loomSecret"], "dpapi")
+
+    def test_phone_status_route_bounds_stalled_real_fleet_request_inside_process_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            for script_name in ("openclaw-phone-fleet.mjs", "openclaw-phone-secure.mjs"):
+                shutil.copyfile(
+                    os.path.join(LAUNCHER_DIR, "scripts", script_name),
+                    os.path.join(scripts_dir, script_name),
+                )
+
+            server_loop_ready = threading.Event()
+            request_received = threading.Event()
+            release_response = threading.Event()
+
+            class StalledStatusHandler(BaseHTTPRequestHandler):
+                def do_GET(self) -> None:
+                    request_received.set()
+                    release_response.wait(timeout=10.0)
+                    payload = json.dumps({"online": True}).encode("utf-8")
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(payload)))
+                        self.end_headers()
+                        self.wfile.write(payload)
+                    except OSError:
+                        return
+
+                def log_message(self, _format: str, *_args) -> None:
+                    return
+
+            class ReadyThreadingHTTPServer(ThreadingHTTPServer):
+                daemon_threads = True
+
+                def service_actions(self) -> None:
+                    server_loop_ready.set()
+
+            server = ReadyThreadingHTTPServer(("127.0.0.1", 0), StalledStatusHandler)
+            server_thread = threading.Thread(
+                target=server.serve_forever,
+                kwargs={"poll_interval": 0.01},
+                name="phone-status-stalled-test-server",
+            )
+            server_thread.start()
+            try:
+                self.assertTrue(
+                    server_loop_ready.wait(timeout=10.0),
+                    "stalled phone status test server did not enter serve_forever",
+                )
+                config_dir = os.path.join(temp_dir, "data", ".openclaw", "launcher")
+                os.makedirs(config_dir, exist_ok=True)
+                with open(os.path.join(config_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "selectedDeviceId": "phone-stalled",
+                            "devices": [{
+                                "id": "phone-stalled",
+                                "name": "Stalled phone",
+                                "baseUrl": f"http://127.0.0.1:{server.server_port}",
+                                "token": "phone-stalled-token",
+                            }],
+                        },
+                        handle,
+                    )
+
+                logs: list[str] = []
+                job_mgr = JobManager(logs.append)
+                app = FastAPI()
+                ctx = _test_context(temp_dir, job_mgr, logs)
+                ctx.paths.node_exe = shutil.which("node") or ""
+                register_phone_routes(app, ctx)
+                register_job_routes(app, ctx)
+
+                outer_timeout_sec = 0.5
+                inner_timeout_ms = _phone_status_request_timeout_ms(outer_timeout_sec)
+                self.assertLess(inner_timeout_ms, outer_timeout_sec * 1000)
+                with patch("api.routes_phone._PHONE_DIRECT_STEP_TIMEOUT_SEC", outer_timeout_sec):
+                    with TestClient(app) as client:
+                        submitted = client.post(
+                            "/api/phone/status",
+                            json={"deviceId": "phone-stalled"},
+                        )
+                        job = _wait_for_job(client, submitted.json()["jobId"], timeout=5.0)
+            finally:
+                release_response.set()
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=10)
+
+            diagnostics = _phone_job_failure_diagnostics(ctx, job, logs)
+            self.assertFalse(server_thread.is_alive(), diagnostics)
+            self.assertTrue(request_received.is_set(), diagnostics)
+            self.assertEqual(job["status"], "failed", diagnostics)
+            self.assertEqual(job["result"]["errorCode"], "phone_config_server_timeout", diagnostics)
+            self.assertEqual(job["result"]["details"]["timeoutMs"], inner_timeout_ms, diagnostics)
+            self.assertNotEqual(job["result"]["errorCode"], "timeout", diagnostics)
 
     def test_phone_status_route_targets_requested_device_through_real_fleet_parser(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2330,6 +2468,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 )
 
             requests: list[str] = []
+            server_loop_ready = threading.Event()
 
             class StatusHandler(BaseHTTPRequestHandler):
                 def do_GET(self) -> None:
@@ -2344,55 +2483,83 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 def log_message(self, _format: str, *_args) -> None:
                     return
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), StatusHandler)
-            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            class ReadyThreadingHTTPServer(ThreadingHTTPServer):
+                daemon_threads = True
+
+                def service_actions(self) -> None:
+                    server_loop_ready.set()
+
+            server = ReadyThreadingHTTPServer(("127.0.0.1", 0), StatusHandler)
+            server_thread = threading.Thread(
+                target=server.serve_forever,
+                kwargs={"poll_interval": 0.01},
+                name="phone-status-test-server",
+            )
             server_thread.start()
-            config_dir = os.path.join(temp_dir, "data", ".openclaw", "launcher")
-            os.makedirs(config_dir, exist_ok=True)
-            with open(os.path.join(config_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
-                json.dump(
-                    {
-                        "selectedDeviceId": "phone-1",
-                        "devices": [
-                            {
-                                "id": "phone-1",
-                                "name": "Offline phone",
-                                "baseUrl": "http://127.0.0.1:1",
-                                "token": "phone-1-token",
-                            },
-                            {
-                                "id": "phone-2",
-                                "name": "Requested phone",
-                                "baseUrl": f"http://127.0.0.1:{server.server_port}",
-                                "token": "phone-2-token",
-                            },
-                        ],
-                    },
-                    handle,
-                )
-
-            logs: list[str] = []
-            job_mgr = JobManager(logs.append)
-            app = FastAPI()
-            ctx = _test_context(temp_dir, job_mgr, logs)
-            ctx.paths.node_exe = shutil.which("node") or ""
-            register_phone_routes(app, ctx)
-            register_job_routes(app, ctx)
-            client = TestClient(app)
-
             try:
-                submitted = client.post("/api/phone/status", json={"deviceId": "phone-2"})
-                job = _wait_for_job(client, submitted.json()["jobId"], timeout=30.0)
+                self.assertTrue(
+                    server_loop_ready.wait(timeout=10.0),
+                    "phone status test server did not enter serve_forever",
+                )
+                config_dir = os.path.join(temp_dir, "data", ".openclaw", "launcher")
+                os.makedirs(config_dir, exist_ok=True)
+                with open(os.path.join(config_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "selectedDeviceId": "phone-1",
+                            "devices": [
+                                {
+                                    "id": "phone-1",
+                                    "name": "Offline phone",
+                                    "baseUrl": "http://127.0.0.1:1",
+                                    "token": "phone-1-token",
+                                },
+                                {
+                                    "id": "phone-2",
+                                    "name": "Requested phone",
+                                    "baseUrl": f"http://127.0.0.1:{server.server_port}",
+                                    "token": "phone-2-token",
+                                },
+                            ],
+                        },
+                        handle,
+                    )
+
+                logs: list[str] = []
+                job_mgr = JobManager(logs.append)
+                app = FastAPI()
+                ctx = _test_context(temp_dir, job_mgr, logs)
+                ctx.paths.node_exe = shutil.which("node") or ""
+                register_phone_routes(app, ctx)
+                register_job_routes(app, ctx)
+
+                with TestClient(app) as client:
+                    submitted = client.post("/api/phone/status", json={"deviceId": "phone-2"})
+                    job_id = submitted.json()["jobId"]
+                    try:
+                        job = _wait_for_job(client, job_id, timeout=30.0)
+                    except AssertionError as error:
+                        snapshot = client.get(f"/api/jobs/{job_id}")
+                        pending_job = snapshot.json().get("job", {}) if snapshot.status_code == 200 else {}
+                        self.fail(
+                            f"{error}; "
+                            f"diagnostics={_phone_job_failure_diagnostics(ctx, pending_job, logs)}"
+                        )
             finally:
                 server.shutdown()
                 server.server_close()
-                server_thread.join(timeout=2)
+                server_thread.join(timeout=10)
 
-        self.assertEqual(job["status"], "succeeded")
-        result = json.loads(job["result"]["stdout"])
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["results"][0]["device"]["id"], "phone-2")
-        self.assertEqual(requests, ["/api/device/status"])
+            self.assertFalse(server_thread.is_alive(), "phone status test server did not stop")
+            self.assertEqual(
+                job["status"],
+                "succeeded",
+                _phone_job_failure_diagnostics(ctx, job, logs),
+            )
+            result = json.loads(job["result"]["stdout"])
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(result["results"][0]["device"]["id"], "phone-2")
+            self.assertEqual(requests, ["/api/device/status"])
 
     def test_phone_status_job_updates_matrix_presence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5029,6 +5196,45 @@ def _wait_for_job(client: TestClient, job_id: str, timeout: float = 10.0) -> dic
                 return job
         time.sleep(0.02)
     raise AssertionError(f"job did not finish: {job_id}")
+
+
+def _phone_job_failure_diagnostics(ctx, job: dict, logs: list[str]) -> str:
+    sensitive_keys = {
+        "accesstoken",
+        "apikey",
+        "authorization",
+        "launchersecret",
+        "lumilaunchersecret",
+        "membertoken",
+        "password",
+        "phonetoken",
+        "secret",
+        "token",
+        "xlumisignature",
+    }
+
+    def sanitize(value, key: str = ""):
+        normalized_key = "".join(character for character in key.lower() if character.isalnum())
+        if normalized_key in sensitive_keys:
+            return "[redacted]"
+        if isinstance(value, dict):
+            return {
+                str(item_key): sanitize(item_value, str(item_key))
+                for item_key, item_value in value.items()
+            }
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        if isinstance(value, tuple):
+            return [sanitize(item) for item in value]
+        if isinstance(value, str):
+            return _sanitize_cli_output(ctx, value, kind="phone.status")
+        return value
+
+    return json.dumps(
+        sanitize({"job": job, "logs": list(logs)}),
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def _wait_for_matrix_event(base_path: str, needle: str, timeout: float = 1.0) -> dict:

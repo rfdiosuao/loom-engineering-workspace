@@ -41,6 +41,8 @@ _PHONE_TEMPLATE_STEP_TIMEOUT_SEC = 12
 _PHONE_AGENT_STEP_TIMEOUT_SEC = 15
 _PHONE_OBSERVE_STEP_TIMEOUT_SEC = 30
 _PHONE_OBSERVE_TIMEOUT_SEC = 45
+_PHONE_STATUS_REQUEST_TIMEOUT_FLOOR_MS = 250
+_PHONE_STATUS_REQUEST_TIMEOUT_MARGIN_MS = 1000
 _PHONE_SCREENSHOT_REQUEST_TIMEOUT_MS = max(5_000, (_PHONE_OBSERVE_TIMEOUT_SEC - 5) * 1000)
 _PHONE_CANCEL_GRACE_SEC = 5.0
 _PHONE_SCREENSHOT_CACHE_TTL_MS = 1200
@@ -1081,6 +1083,18 @@ def _phone_step_timeout_sec(layer: str, profile: str) -> int:
         # executor cap so a slow poll does not outlive an otherwise healthy task.
         return 30
     return _PHONE_AGENT_STEP_TIMEOUT_SEC
+
+
+def _phone_status_request_timeout_ms(outer_timeout_sec: float) -> int:
+    outer_timeout_ms = int(float(outer_timeout_sec) * 1000)
+    if outer_timeout_ms < 2:
+        raise ValueError("phone status outer timeout must be at least 2ms")
+    if outer_timeout_ms <= _PHONE_STATUS_REQUEST_TIMEOUT_FLOOR_MS * 2:
+        return max(1, outer_timeout_ms // 2)
+    return max(
+        _PHONE_STATUS_REQUEST_TIMEOUT_FLOOR_MS,
+        outer_timeout_ms - _PHONE_STATUS_REQUEST_TIMEOUT_MARGIN_MS,
+    )
 
 
 def _phone_max_wait_for_layer(
@@ -4725,7 +4739,13 @@ def register_phone_routes(app, ctx) -> None:
             kind="phone.status",
             label="手机连接",
             script_name="openclaw-phone-fleet.mjs",
-            args=["status", *(["--target", _normalize_device_id(device_id)] if device_id else []), "--json"],
+            args=[
+                "status",
+                *(["--target", _normalize_device_id(device_id)] if device_id else []),
+                "--request-timeout-ms",
+                str(_phone_status_request_timeout_ms(_PHONE_DIRECT_STEP_TIMEOUT_SEC)),
+                "--json",
+            ],
             timeout_sec=20,
             execution_layer="direct",
             step_timeout_sec=_PHONE_DIRECT_STEP_TIMEOUT_SEC,
