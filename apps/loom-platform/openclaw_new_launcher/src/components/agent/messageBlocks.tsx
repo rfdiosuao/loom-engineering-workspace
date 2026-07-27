@@ -115,7 +115,7 @@ function ToolBlock({ data }: { data: Record<string, unknown> }) {
   const occurrences = typeof data.occurrences === 'number' && data.occurrences > 1 ? data.occurrences : 1;
   return (
     <div
-      className="agent-tool-item border-t border-border/70 px-3 py-2.5 first:border-t-0"
+      className="agent-tool-item min-w-0 border-t border-border/70 px-3 py-2.5 first:border-t-0"
       data-agent-tool-action
       data-tool-status={status}
     >
@@ -141,9 +141,9 @@ function ToolBlock({ data }: { data: Record<string, unknown> }) {
         </span>
       </div>
       {error ? (
-        <div className="ml-7 mt-1.5 rounded-[6px] bg-status-danger/8 px-2.5 py-2" data-agent-tool-error>
+        <div className="ml-7 mt-1.5 min-w-0 rounded-[6px] bg-status-danger/8 px-2.5 py-2" data-agent-tool-error>
           <div className="text-[11px] font-bold text-status-danger">{error.title}</div>
-          <p className="mt-0.5 text-[11px] leading-4 text-text-muted">{error.message}</p>
+          <p className="mt-0.5 break-words text-[11px] leading-4 text-text-muted [overflow-wrap:anywhere]">{error.message}</p>
           {error.recoverable ? <div className="mt-1 text-[10px] font-semibold text-accent">修复后可重试</div> : null}
         </div>
       ) : null}
@@ -255,7 +255,7 @@ export function ToolExecutionGroup({
 
   return (
     <section
-      className="agent-tool-group overflow-hidden rounded-[8px] border border-border bg-surface-alt/30"
+      className="agent-tool-group min-w-0 overflow-hidden rounded-[8px] border border-border bg-surface-alt/30"
       data-agent-tool-group
       data-state={summary.state}
       data-expanded={expanded ? 'true' : 'false'}
@@ -378,12 +378,12 @@ function AttachmentBlock({ data }: { data: Record<string, unknown> }) {
 function ErrorBlock({ data }: { data: Record<string, unknown> }) {
   const error = userFacingAgentError(data);
   return (
-    <section className="rounded-[8px] border border-status-danger/30 bg-status-danger/10 p-3">
+    <section className="min-w-0 rounded-[8px] border border-status-danger/30 bg-status-danger/10 p-3">
       <div className="flex items-center gap-2 text-xs font-black text-status-danger">
         <span aria-hidden="true">!</span>
         <span>{error.title}</span>
       </div>
-      <p className="mt-1 text-sm leading-5 text-text">{error.message}</p>
+      <p className="mt-1 break-words text-sm leading-5 text-text [overflow-wrap:anywhere]">{error.message}</p>
       {error.recoverable ? <div className="mt-1 text-[11px] font-bold text-accent">可以重试</div> : null}
     </section>
   );

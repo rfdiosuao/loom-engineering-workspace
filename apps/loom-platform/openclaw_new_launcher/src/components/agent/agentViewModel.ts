@@ -251,6 +251,11 @@ function actionableErrorText(data: Record<string, unknown>): string {
     .slice(0, 280);
 }
 
+function actionableChineseErrorText(data: Record<string, unknown>): string {
+  const detail = actionableErrorText(data);
+  return /[\u3400-\u9fff]/.test(detail) ? detail : '';
+}
+
 function isProtocolError(data: Record<string, unknown>): boolean {
   const code = errorCode(data);
   const message = errorText(data).toLowerCase();
@@ -520,7 +525,7 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
     };
   }
   if (code.includes('matrix') || message.includes('matrix')) {
-    const detail = actionableErrorText(data);
+    const detail = actionableChineseErrorText(data);
     return {
       title: '矩阵任务未完成',
       message: detail || '矩阵任务未能完成，请检查失败设备和手机连接后重试。',
@@ -530,13 +535,15 @@ export function userFacingAgentError(data: Record<string, unknown>): UserFacingA
   if (error.recoverable === true || data.recoverable === true) {
     return {
       title: '任务暂未完成',
-      message: actionableErrorText(data) || '当前步骤未完成，任务已保留，可重试或查看运行详情。',
+      message: actionableChineseErrorText(data)
+        || '上游服务返回了未识别的错误。请检查模型连接和网络后重试；若持续出现，请前往环境诊断导出日志。',
       recoverable: true,
     };
   }
   return {
     title: '任务执行失败',
-    message: actionableErrorText(data) || '当前任务未能完成，请查看运行详情。',
+    message: actionableChineseErrorText(data)
+      || '当前任务未能完成。请检查模型连接和网络；若持续出现，请前往环境诊断导出日志。',
     recoverable: false,
   };
 }

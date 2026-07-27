@@ -147,3 +147,20 @@ test('shared modal, confirmation, and toast controls expose accessibility contra
   assert.match(toast, /aria-atomic="true"/);
   assert.ok(toast.includes('aria-label={`关闭通知：${toast.message}`}'));
 });
+
+test('dashboard journey advances only from current Bridge responses', () => {
+  const source = readSource('./dashboard/DashboardPage.tsx');
+
+  assert.match(source, /data-dashboard-journey/);
+  assert.match(source, /wireApi\.current\(\)/);
+  assert.match(source, /wireApi\.verify\(\)/);
+  assert.match(source, /loadCachedComponentSnapshot/);
+  assert.match(source, /loadLastVerifiedJourney/);
+  assert.match(source, /上次验证通过/);
+  assert.match(source, /这不是当前在线声明/);
+  assert.match(source, /const canVerifyNow = liveInstallReady && liveModelReady/);
+  assert.match(source, /安装 Agent/);
+  assert.match(source, /选择模型/);
+  assert.match(source, /真实验证/);
+  assert.match(source, /进入 Agent/);
+});

@@ -19,6 +19,7 @@ import {
   ToolExecutionGroup,
   toolExecutionGroupSummary,
 } from './messageBlocks.tsx';
+import * as conversationStream from './ConversationStream.tsx';
 
 const SESSION_ID = 'session_1';
 
@@ -195,6 +196,78 @@ test('ordinary errors are Chinese and hide protocol identifiers', () => {
     recoverable: true,
   });
   assert.doesNotMatch(JSON.stringify(summary), /capability_not_found|loom_mcp|Unknown capability/);
+});
+
+test('unknown English backend errors become actionable Chinese guidance', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'vendor_gateway_crashed',
+      message: 'Unexpected upstream response: connection reset by peer',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(summary.title, '任务暂未完成');
+  assert.match(summary.message, /模型连接|网络|重试|诊断/);
+  assert.doesNotMatch(JSON.stringify(summary), /vendor_gateway_crashed|Unexpected upstream|connection reset/i);
+});
+
+test('one run across multiple messages produces one aggregated execution group', () => {
+  const buildPlan = (conversationStream as typeof conversationStream & {
+    buildConversationRenderPlan?: (
+      messages: AgentMessage[],
+    ) => Array<{
+      message: AgentMessage;
+      entries: Array<
+        | { kind: 'block'; blockIndex: number }
+        | { kind: 'tool-group'; runId: string; blocks: AgentMessage['blocks'] }
+      >;
+    }>;
+  }).buildConversationRenderPlan;
+  assert.equal(typeof buildPlan, 'function');
+
+  const queued: AgentMessage = {
+    schema: 'loom.agent.message.v1',
+    messageId: 'tool-message-queued',
+    sessionId: SESSION_ID,
+    role: 'tool',
+    status: 'streaming',
+    blocks: [{
+      type: 'tool',
+      data: {
+        runId: 'run_shared',
+        toolCallId: 'tool_1',
+        capability: 'loom.media.image.generate',
+        status: 'queued',
+      },
+    }],
+    createdAt: '2026-07-16T10:00:00+08:00',
+  };
+  const completed: AgentMessage = {
+    ...queued,
+    messageId: 'tool-message-completed',
+    status: 'completed',
+    blocks: [{
+      type: 'tool',
+      data: {
+        runId: 'run_shared',
+        toolCallId: 'tool_1',
+        capability: 'loom.media.image.generate',
+        status: 'completed',
+      },
+    }],
+    createdAt: '2026-07-16T10:00:03+08:00',
+  };
+
+  const plan = buildPlan?.([queued, completed]) || [];
+  assert.equal(plan.length, 1);
+  assert.equal(plan[0]?.message.messageId, 'tool-message-queued');
+  assert.equal(plan[0]?.entries.length, 1);
+  assert.deepEqual(plan[0]?.entries[0], {
+    kind: 'tool-group',
+    runId: 'run_shared',
+    blocks: [queued.blocks[0], completed.blocks[0]],
+  });
 });
 
 test('missing phone request scope is localized without leaking the policy code', () => {
