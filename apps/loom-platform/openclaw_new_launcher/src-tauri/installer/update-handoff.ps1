@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$AppExe,
     [Parameter(Mandatory = $true)][string]$RecoveryRoot,
     [Parameter(Mandatory = $true)][string]$MarkerPath,
+    [string]$ReadyPath = "",
     [Parameter(Mandatory = $true)][int]$ParentPid,
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$BrandId = "loom",
@@ -43,6 +44,23 @@ function Write-UpdateLog([string]$Message) {
     }
 }
 
+function Publish-HandoffReady {
+    if ([string]::IsNullOrWhiteSpace($ReadyPath)) {
+        return
+    }
+    $readyDirectory = Split-Path -Parent $ReadyPath
+    New-Item -ItemType Directory -Force -Path $readyDirectory | Out-Null
+    $temporaryReadyPath = $ReadyPath + ".tmp"
+    [pscustomobject]@{
+        state = "ready"
+        processId = $PID
+        parentProcessId = $ParentPid
+        version = $Version
+        readyAt = (Get-Date -Format o)
+    } | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporaryReadyPath -Encoding UTF8
+    Move-Item -LiteralPath $temporaryReadyPath -Destination $ReadyPath -Force
+}
+
 function Assert-SafeUpdatePaths {
     $normalizedInstall = [System.IO.Path]::GetFullPath($InstallRoot).TrimEnd(
         [System.IO.Path]::DirectorySeparatorChar,
@@ -77,6 +95,12 @@ function Assert-SafeUpdatePaths {
     $normalizedMarker = [System.IO.Path]::GetFullPath($MarkerPath)
     if ($normalizedMarker.StartsWith($installPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "update marker must be external to install root: $normalizedMarker"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ReadyPath)) {
+        $normalizedReady = [System.IO.Path]::GetFullPath($ReadyPath)
+        if (-not $normalizedReady.StartsWith($recoveryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "update handoff ready marker must be inside recovery root: $normalizedReady"
+        }
     }
     $normalizedInstaller = [System.IO.Path]::GetFullPath($Installer)
     if ($normalizedInstaller.StartsWith($installPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -697,6 +721,8 @@ try {
     New-Item -ItemType Directory -Force -Path $RecoveryRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $markerDirectory | Out-Null
     Remove-Item -LiteralPath $failureMarkerPath -Force -ErrorAction SilentlyContinue
+    Write-UpdateLog "detached update handoff started pid=$PID parentPid=$ParentPid version=$Version"
+    Publish-HandoffReady
     Acquire-UpdateHandoffMutex
     $parentDeadline = [DateTime]::UtcNow.AddSeconds(30)
     while (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
@@ -730,11 +756,15 @@ try {
     Register-UpdateRecoveryRunOnce
     Write-UpdateLog "data and application backup complete; starting installer"
 
-    & $Installer "/S" "/D=$InstallRoot"
-    $setupExit = $LASTEXITCODE
-    if ($null -eq $setupExit) {
-        $setupExit = 0
-    }
+    $installDirectoryArgument = '"/D={0}"' -f $InstallRoot
+    $setupProcess = Start-Process `
+        -FilePath $Installer `
+        -ArgumentList @("/S", $installDirectoryArgument) `
+        -WindowStyle Hidden `
+        -PassThru
+    $setupProcess.WaitForExit()
+    $setupExit = $setupProcess.ExitCode
+    Write-UpdateLog "installer exited pid=$($setupProcess.Id) exit=$setupExit"
     if ($setupExit -ne 0) {
         throw "installer failed: exit=$setupExit"
     }

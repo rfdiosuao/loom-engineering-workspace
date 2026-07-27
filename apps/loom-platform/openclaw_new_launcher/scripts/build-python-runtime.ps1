@@ -16,8 +16,30 @@ function Test-RuntimeReady {
   $python = Join-Path $Dir "python.exe"
   if (!(Test-Path -LiteralPath $python)) { return $false }
   $code = "import fastapi, uvicorn, pydantic, cryptography, httpx2; from fastapi.testclient import TestClient; from PIL import Image; from core.paths import AppPaths; from python.core.paths import AppPaths as PackageAppPaths; print('ok')"
-  $result = & $python -c $code 2>$null
+  $result = & $python -B -c $code 2>$null
   return ($LASTEXITCODE -eq 0 -and ($result -join "`n").Trim() -eq "ok")
+}
+
+function Remove-RuntimeBytecodeCaches {
+  param([string]$Dir)
+  if (!(Test-Path -LiteralPath $Dir -PathType Container)) { return }
+
+  $bytecodeFiles = @(
+    Get-ChildItem -LiteralPath $Dir -File -Recurse -ErrorAction SilentlyContinue |
+      Where-Object { $_.Extension -in @(".pyc", ".pyo") }
+  )
+  foreach ($file in $bytecodeFiles) {
+    Remove-Item -LiteralPath $file.FullName -Force
+  }
+  $cacheDirectories = @(
+    Get-ChildItem -LiteralPath $Dir -Directory -Recurse -Filter "__pycache__" -ErrorAction SilentlyContinue |
+      Sort-Object { $_.FullName.Length } -Descending
+  )
+  foreach ($cacheDirectory in $cacheDirectories) {
+    if (@(Get-ChildItem -LiteralPath $cacheDirectory.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+      Remove-Item -LiteralPath $cacheDirectory.FullName -Force
+    }
+  }
 }
 
 function Get-PythonInstaller {
@@ -49,7 +71,10 @@ function Get-PythonInstaller {
   throw "No working Python $targetMajorMinor installer found. Set PYTHON to a Python $targetMajorMinor executable with pip."
 }
 
+Remove-RuntimeBytecodeCaches -Dir (Join-Path $projectDir "python")
+
 if (!$Force -and (Test-RuntimeReady $runtimeDir)) {
+  Remove-RuntimeBytecodeCaches -Dir $runtimeDir
   Write-Host "python-runtime already ready: $runtimeDir"
   exit 0
 }
@@ -138,4 +163,5 @@ if (!(Test-RuntimeReady $runtimeDir)) {
   throw "python-runtime verification failed: required Bridge dependencies cannot be imported."
 }
 
+Remove-RuntimeBytecodeCaches -Dir $runtimeDir
 Write-Host "python-runtime ready: $runtimeDir"
