@@ -396,7 +396,7 @@ export const DashboardPage: React.FC = () => {
             </div>
 
             <div className="mt-5 border-t border-border/70 pt-4 text-xs leading-5 text-text-subtle">
-              本页检查本机凭据和 Agent 配置，不会发起上游模型推理。模型或中转站是否可用，请以“模型账户”中的实时连接测试为准；历史记录不会解锁当前入口。
+              本页检查本机凭据和 Agent 配置，不会发起上游模型推理。模型与 API 服务是否可用，请以“模型账户”中的实时连接测试为准；历史记录不会解锁当前入口。
             </div>
           </section>
         </div>
