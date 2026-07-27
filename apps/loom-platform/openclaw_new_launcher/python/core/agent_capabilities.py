@@ -1252,7 +1252,12 @@ def _validate_schema(value: Any, schema: Mapping[str, Any], *, path: str) -> Non
     if expected == "string" and isinstance(value, str):
         minimum_length = schema.get("minLength")
         maximum_length = schema.get("maxLength")
-        if isinstance(minimum_length, int) and len(value) < minimum_length:
+        measured_value = (
+            value.strip()
+            if isinstance(minimum_length, int) and minimum_length > 0
+            else value
+        )
+        if isinstance(minimum_length, int) and len(measured_value) < minimum_length:
             raise CapabilityInputError(f"{path} must contain at least {minimum_length} characters")
         if isinstance(maximum_length, int) and len(value) > maximum_length:
             raise CapabilityInputError(f"{path} must contain at most {maximum_length} characters")

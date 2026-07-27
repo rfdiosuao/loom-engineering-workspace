@@ -113,6 +113,11 @@ AGENT_RUN = {
     "runId": "run_001",
     "sessionId": "session_001",
     "status": "running",
+    "executionState": {
+        "phase": "planning",
+        "retryable": False,
+        "degraded": False,
+    },
     "campaignIds": ["cmp_001"],
     "startedAt": "2026-07-15T14:30:00+08:00",
 }

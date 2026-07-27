@@ -145,6 +145,7 @@ class AgentOrchestrator:
             "runId": run_id or f"run_{uuid.uuid4().hex}",
             "sessionId": session_id,
             "status": "queued",
+            "executionState": _execution_state("planning"),
             "campaignIds": [],
             "checkpoint": _dump_checkpoint(_empty_checkpoint()),
         }
@@ -223,7 +224,12 @@ class AgentOrchestrator:
                 session_id,
                 run_id,
                 checkpoint,
-                {"status": "running", "startedAt": started_at, "checkpoint": _dump_checkpoint(checkpoint)},
+                {
+                    "status": "running",
+                    "startedAt": started_at,
+                    "executionState": _execution_state("planning"),
+                    "checkpoint": _dump_checkpoint(checkpoint),
+                },
             )
         if previous_status != "running":
             self._emit(session_id, run_id, "run.started", {"status": "running", "startedAt": started_at})
@@ -608,7 +614,10 @@ class AgentOrchestrator:
             control.cancel.set()
             updated = self.repository.update_run_releasing_lease(
                 run_id,
-                {"status": "paused"},
+                {
+                    "status": "paused",
+                    "executionState": _execution_state("planning", retryable=True),
+                },
                 session_id=session_id,
             )
         self._emit(session_id, run_id, "run.paused", {"checkpoint": updated.get("checkpoint")})
@@ -629,7 +638,10 @@ class AgentOrchestrator:
             self._controls[run_id] = _RunControl()
         self.repository.update_run_releasing_lease(
             run_id,
-            {"status": "queued"},
+            {
+                "status": "queued",
+                "executionState": _execution_state("planning"),
+            },
             session_id=session_id,
             remove_fields=("error", "completedAt"),
         )
@@ -646,7 +658,11 @@ class AgentOrchestrator:
             control.cancel.set()
             updated = self.repository.update_run_releasing_lease(
                 run_id,
-                {"status": "cancelled", "completedAt": _utc_now()},
+                {
+                    "status": "cancelled",
+                    "completedAt": _utc_now(),
+                    "executionState": _execution_state("terminal"),
+                },
                 session_id=session_id,
             )
         self._emit(session_id, run_id, "run.cancelled", {})
@@ -714,6 +730,7 @@ class AgentOrchestrator:
                 run_id,
                 {
                     "status": "paused",
+                    "executionState": _execution_state("planning", retryable=True),
                     "error": error,
                 },
                 session_id=session_id,
@@ -750,7 +767,10 @@ class AgentOrchestrator:
                 if isinstance(approval, Mapping) and approval.get("status") == "approved":
                     run = self.repository.update_run_releasing_lease(
                         str(run["runId"]),
-                        {"status": "queued"},
+                        {
+                            "status": "queued",
+                            "executionState": _execution_state("planning"),
+                        },
                         session_id=str(run["sessionId"]),
                     )
                 recovered.append(run)
@@ -782,6 +802,11 @@ class AgentOrchestrator:
             status = "failed" if in_flight else "paused"
             changes = {
                 "status": status,
+                "executionState": (
+                    _execution_state("terminal")
+                    if in_flight
+                    else _execution_state("planning", retryable=True)
+                ),
                 "error": error,
                 "checkpoint": _dump_checkpoint(checkpoint),
             }
@@ -847,6 +872,10 @@ class AgentOrchestrator:
                 {
                     "status": "failed",
                     "completedAt": _utc_now(),
+                    "executionState": _execution_state(
+                        "terminal",
+                        retryable=bool(error.get("recoverable")),
+                    ),
                     "checkpoint": _dump_checkpoint(checkpoint),
                     "error": error,
                 },
@@ -897,7 +926,11 @@ class AgentOrchestrator:
             session_id,
             run_id,
             checkpoint,
-            {"status": "waiting_approval", "checkpoint": _dump_checkpoint(checkpoint)},
+            {
+                "status": "waiting_approval",
+                "executionState": _execution_state("tool"),
+                "checkpoint": _dump_checkpoint(checkpoint),
+            },
             release_lease=True,
         )
         self._emit(
@@ -987,6 +1020,7 @@ class AgentOrchestrator:
                 checkpoint,
                 {
                     "status": "paused",
+                    "executionState": _execution_state("planning", retryable=True),
                     "error": error,
                     "checkpoint": _dump_checkpoint(checkpoint),
                 },
@@ -1013,7 +1047,11 @@ class AgentOrchestrator:
                 session_id,
                 str(run["runId"]),
                 checkpoint,
-                {"status": "running", "checkpoint": _dump_checkpoint(checkpoint)},
+                {
+                    "status": "running",
+                    "executionState": _execution_state("tool"),
+                    "checkpoint": _dump_checkpoint(checkpoint),
+                },
             )
         try:
             self._execute_tool(session_id, run["runId"], normalized, capability, checkpoint, approval=approval)
@@ -1045,7 +1083,11 @@ class AgentOrchestrator:
                         session_id,
                         str(run["runId"]),
                         checkpoint,
-                        {"status": "running", "checkpoint": _dump_checkpoint(checkpoint)},
+                        {
+                            "status": "running",
+                            "executionState": _execution_state("planning", retryable=True),
+                            "checkpoint": _dump_checkpoint(checkpoint),
+                        },
                     )
                     self._emit(
                         session_id,
@@ -1130,7 +1172,11 @@ class AgentOrchestrator:
                 session_id,
                 str(run["runId"]),
                 checkpoint,
-                {"status": "running", "checkpoint": _dump_checkpoint(checkpoint)},
+                {
+                    "status": "running",
+                    "executionState": _execution_state("planning"),
+                    "checkpoint": _dump_checkpoint(checkpoint),
+                },
             )
         return run, checkpoint
 
@@ -1254,7 +1300,10 @@ class AgentOrchestrator:
             session_id,
             run_id,
             checkpoint,
-            {"checkpoint": _dump_checkpoint(checkpoint)},
+            {
+                "executionState": _execution_state("tool"),
+                "checkpoint": _dump_checkpoint(checkpoint),
+            },
         )
         if approval is not None:
             consumed = self.policy.consume_approval(approval, call_id, call["name"], call["input"])
@@ -1302,7 +1351,10 @@ class AgentOrchestrator:
                 session_id,
                 run_id,
                 completed_checkpoint,
-                {"checkpoint": _dump_checkpoint(completed_checkpoint)},
+                {
+                    "executionState": _execution_state("planning"),
+                    "checkpoint": _dump_checkpoint(completed_checkpoint),
+                },
             )
         except Exception as exc:
             raise CapabilityExecutionError(
@@ -1442,7 +1494,16 @@ class AgentOrchestrator:
                 pass
 
     def _complete_run(self, session_id: str, run_id: str, result: Mapping[str, Any], checkpoint: Json) -> Json:
-        final = result.get("final") or result.get("message") or {"text": "Completed"}
+        final = result.get("final")
+        if not _has_final_content(final):
+            return self._fail_run(
+                session_id,
+                run_id,
+                "agent_runtime_missing_final",
+                "Agent runtime returned no final answer.",
+                True,
+                checkpoint,
+            )
         safe_final = redact_sensitive(final)
         message_id = str(result.get("messageId") or "").strip() or None
         with self._lock:
@@ -1451,15 +1512,33 @@ class AgentOrchestrator:
                 return self._finish_control_request(session_id, run_id, control)
             message = self._append_assistant_message(session_id, safe_final, message_id=message_id)
             event_data = {"message": message} if message is not None else {"text": _final_text(safe_final)}
-            self._emit(session_id, run_id, "message.completed", event_data)
             run = self._update_claimed_run(
                 session_id,
                 run_id,
                 checkpoint,
-                {"status": "completed", "completedAt": _utc_now(), "checkpoint": _dump_checkpoint(checkpoint)},
+                {
+                    "status": "completed",
+                    "completedAt": _utc_now(),
+                    "executionState": _execution_state("terminal"),
+                    "checkpoint": _dump_checkpoint(checkpoint),
+                },
                 release_lease=True,
             )
-        self._emit(session_id, run_id, "run.completed", {"campaignIds": run.get("campaignIds", [])})
+        event_degraded = False
+        try:
+            self._emit(session_id, run_id, "message.completed", event_data)
+        except Exception:
+            event_degraded = True
+        try:
+            self._emit(session_id, run_id, "run.completed", {"campaignIds": run.get("campaignIds", [])})
+        except Exception:
+            event_degraded = True
+        if event_degraded:
+            run = self.repository.update_run(
+                run_id,
+                {"executionState": _execution_state("terminal", degraded=True)},
+                session_id=session_id,
+            )
         return run
 
     def _append_assistant_message(self, session_id: str, final: Any, *, message_id: str | None = None) -> Json | None:
@@ -1556,10 +1635,29 @@ class AgentOrchestrator:
                 session_id,
                 run_id,
                 checkpoint,
-                {"status": "failed", "completedAt": _utc_now(), "checkpoint": _dump_checkpoint(checkpoint), "error": error},
+                {
+                    "status": "failed",
+                    "completedAt": _utc_now(),
+                    "executionState": _execution_state("terminal", retryable=bool(recoverable)),
+                    "checkpoint": _dump_checkpoint(checkpoint),
+                    "error": error,
+                },
                 release_lease=True,
             )
-        self._emit(session_id, run_id, "run.failed", {"error": error})
+        try:
+            self._emit(session_id, run_id, "run.failed", {"error": error})
+        except Exception:
+            run = self.repository.update_run(
+                run_id,
+                {
+                    "executionState": _execution_state(
+                        "terminal",
+                        retryable=bool(recoverable),
+                        degraded=True,
+                    )
+                },
+                session_id=session_id,
+            )
         return run
 
     def _update_claimed_run(
@@ -2010,6 +2108,30 @@ def _final_text(final: Any) -> str:
     if isinstance(final, Mapping):
         return str(final.get("text") or "")[:4000]
     return str(final or "")[:4000]
+
+
+def _has_final_content(final: Any) -> bool:
+    if isinstance(final, Mapping):
+        if str(final.get("text") or "").strip():
+            return True
+        blocks = final.get("blocks")
+        return isinstance(blocks, list) and bool(blocks)
+    return isinstance(final, str) and bool(final.strip())
+
+
+def _execution_state(
+    phase: str,
+    *,
+    retryable: bool = False,
+    degraded: bool = False,
+) -> Json:
+    if phase not in {"planning", "tool", "terminal"}:
+        raise ValueError(f"invalid execution phase: {phase}")
+    return {
+        "phase": phase,
+        "retryable": bool(retryable),
+        "degraded": bool(degraded),
+    }
 
 
 def _load_checkpoint(raw: Any) -> Json:
