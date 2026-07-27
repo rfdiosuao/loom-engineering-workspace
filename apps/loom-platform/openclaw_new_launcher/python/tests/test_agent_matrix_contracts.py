@@ -16,7 +16,7 @@ SCHEMA_ROOT = Path(__file__).with_name("contract_schemas")
 SCHEMA_SNAPSHOT_SHA256 = {
     "agent-approval.v1.schema.json": "ab2b95be8792c5de46d5d1cf573e6dd00b338f92a5cf4153eff97950a604ea51",
     "agent-message.v1.schema.json": "a982a47cbe8e6e8f4e6f55c70d7f3438dd4256c03630007af663982d3b1fe6a9",
-    "agent-run.v1.schema.json": "0b3faa4a3d475f2c55c3acd67748a76d43defb9d3df720a617f97c9321bc6a91",
+    "agent-run.v1.schema.json": "72a654f464bf55fc7f09759375210146655ea194a01717004b0aeaf2d39344e0",
     "agent-session.v1.schema.json": "6aecc3326c1d2369833d1c600e4f908a36c1f173849dee9044bacacf5b05fc4b",
     "device-lease.v1.schema.json": "fefbd7e727276483ef7263b4609662608292b8810c056f7c3fb2873e0a1951e5",
     "matrix-campaign.v2.schema.json": "997d58c26c201a5836012e7fd7316cb90ade54fe6b742c422b6442cd94c9794d",

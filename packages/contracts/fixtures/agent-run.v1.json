@@ -3,6 +3,11 @@
   "runId": "run_fixture_001",
   "sessionId": "session_fixture_001",
   "status": "running",
+  "executionState": {
+    "phase": "planning",
+    "retryable": false,
+    "degraded": false
+  },
   "checkpoint": "checkpoint_fixture_001",
   "campaignIds": [
     "cmp_fixture_001"
