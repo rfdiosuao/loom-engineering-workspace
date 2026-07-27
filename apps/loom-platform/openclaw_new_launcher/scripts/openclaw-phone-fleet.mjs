@@ -14,6 +14,7 @@ import {
 const DEFAULT_TIMEOUT_SEC = 600;
 const DEFAULT_MAX_WAIT_SEC = DEFAULT_TIMEOUT_SEC + 15;
 const DEFAULT_POLL_MS = 1800;
+const DEFAULT_STATUS_REQUEST_TIMEOUT_MS = 30_000;
 
 function usage() {
   return `
@@ -36,6 +37,7 @@ Options:
   --timeout-sec <n>            APKClaw-side timeout. Default: 600
   --max-wait-sec <n>           CLI wait window for run. Default: 615
   --poll-ms <n>                Poll interval. Default: 1800
+  --request-timeout-ms <n>     Status request timeout. Default: 30000
   --concurrency <n>            Device concurrency. Default: 1, max: 8
   --json                       Print machine-readable JSON
   -h, --help                   Show help
@@ -51,6 +53,7 @@ function parseArgs(argv) {
     timeoutSec: DEFAULT_TIMEOUT_SEC,
     maxWaitSec: DEFAULT_MAX_WAIT_SEC,
     pollMs: DEFAULT_POLL_MS,
+    requestTimeoutMs: DEFAULT_STATUS_REQUEST_TIMEOUT_MS,
     concurrency: 1,
     json: false,
     help: false,
@@ -94,6 +97,9 @@ function parseArgs(argv) {
       case '--poll-ms':
         args.pollMs = nextInt();
         break;
+      case '--request-timeout-ms':
+        args.requestTimeoutMs = nextInt();
+        break;
       case '--concurrency':
         args.concurrency = nextInt();
         break;
@@ -111,6 +117,7 @@ function parseArgs(argv) {
 
   args.command = (args.command || 'list').toLowerCase();
   args.concurrency = Math.max(1, Math.min(8, args.concurrency || 1));
+  if (args.requestTimeoutMs <= 0) throw new Error('Invalid --request-timeout-ms: use a positive integer.');
   return args;
 }
 
@@ -197,14 +204,14 @@ function taskBody(args) {
   };
 }
 
-async function probeStatus(device) {
+async function probeStatus(device, timeoutMs = DEFAULT_STATUS_REQUEST_TIMEOUT_MS) {
   ensurePhoneConfig(device);
   const response = await fetchWithTimeout(`${normalizePhoneUrl(device.phoneUrl)}/api/device/status`, {
     headers: {
       ...authHeaders(device),
       Accept: 'application/json',
     },
-  }, 30_000);
+  }, timeoutMs);
   const text = await response.text();
   let payload = {};
   try {
@@ -261,7 +268,7 @@ async function runOnDevice(device, args) {
   try {
     ensurePhoneConfig(device);
     if (args.command === 'status') {
-      return { ok: true, device: publicDevice(device), status: await probeStatus(device), startedAt, finishedAt: new Date().toISOString() };
+      return { ok: true, device: publicDevice(device), status: await probeStatus(device, args.requestTimeoutMs), startedAt, finishedAt: new Date().toISOString() };
     }
     const submitted = await submitTask(device, args);
     const final = await waitForTask(device, submitted.taskId, args);
