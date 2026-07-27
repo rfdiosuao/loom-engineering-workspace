@@ -511,6 +511,10 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
                 base_path=temp_dir,
                 state_store=store,
                 fetcher=lambda _url, _timeout: payload,
+                installer_runner=lambda command, _cwd, _timeout: FakeCompletedProcess(
+                    returncode=0,
+                    stdout="Claude Code 1.0.0" if "--version" in command else "",
+                ),
             )
 
             state = installer.install(component, job_id="job_tgz")
@@ -606,6 +610,8 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
             def installer_runner(command: list[str], cwd: str, timeout_ms: int) -> FakeCompletedProcess:
                 calls.append((command, cwd, timeout_ms))
+                if "--version" in command:
+                    return FakeCompletedProcess(returncode=0, stdout="Hermes 0.12.0")
                 os.makedirs(os.path.dirname(external_entry), exist_ok=True)
                 with open(external_entry, "wb") as handle:
                     handle.write(b"hermes")
@@ -628,7 +634,10 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             self.assertEqual(state.status, "ready")
             self.assertEqual(
                 calls,
-                [([os.path.join(install_dir, "Hermes-Setup.exe"), "/S"], install_dir, 123000)],
+                [
+                    ([os.path.join(install_dir, "Hermes-Setup.exe"), "/S"], install_dir, 123000),
+                    ([external_entry, "--version"], install_dir, component_installer_module.VERSION_DETECT_TIMEOUT_MS),
+                ],
             )
 
     def test_install_runs_declared_install_command_and_detects_external_entry(self) -> None:
@@ -846,6 +855,8 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
             def installer_runner(command: list[str], cwd: str, timeout_ms: int) -> FakeCompletedProcess:
                 calls.append((command, cwd, timeout_ms))
+                if "--version" in command:
+                    return FakeCompletedProcess(returncode=0, stdout="OpenClaw 2026.6.10")
                 os.makedirs(os.path.dirname(external_entry), exist_ok=True)
                 with open(external_entry, "wb") as handle:
                     handle.write(b"openclaw")
@@ -962,6 +973,179 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
             self.assertEqual(os.path.normcase(resolved), os.path.normcase(external_entry))
 
+    def test_windows_npm_entry_prefers_cmd_over_extensionless_posix_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+            extensionless_entry = os.path.join(private_prefix, "claude")
+            cmd_entry = f"{extensionless_entry}.cmd"
+            ps1_entry = f"{extensionless_entry}.ps1"
+            os.makedirs(private_prefix, exist_ok=True)
+            for path, content in (
+                (extensionless_entry, b"#!/usr/bin/env sh\n"),
+                (cmd_entry, b"@echo off\r\n"),
+                (ps1_entry, b"#!/usr/bin/env pwsh\n"),
+            ):
+                with open(path, "wb") as handle:
+                    handle.write(content)
+            component = ReleaseComponent(
+                component_id="claude-code",
+                name="Claude Code",
+                version="2.1.195",
+                platform="windows",
+                arch="x64",
+                archive_type="tgz",
+                size=1,
+                sha256="a" * 64,
+                urls=("https://download.example.invalid/claude-code.tgz",),
+                install_path="agents/claude-code",
+                entry=None,
+                install_command=("npm", "install", "-g", "@anthropic-ai/claude-code@2.1.195"),
+                external_paths=(extensionless_entry,),
+            )
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+            )
+            installer._external_entry_candidates = lambda _component: [extensionless_entry]  # type: ignore[method-assign]
+
+            selected = installer._first_existing_external_entry(component, refresh=True)
+
+            self.assertEqual(os.path.normcase(selected or ""), os.path.normcase(cmd_entry))
+
+    def test_windows_npm_entry_keeps_legacy_extensionless_fallback_without_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            legacy_entry = os.path.join(temp_dir, "legacy", "claude")
+            os.makedirs(os.path.dirname(legacy_entry), exist_ok=True)
+            with open(legacy_entry, "wb") as handle:
+                handle.write(b"legacy launcher")
+            component = ReleaseComponent(
+                component_id="claude-code",
+                name="Claude Code",
+                version="2.1.195",
+                platform="windows",
+                arch="x64",
+                archive_type="tgz",
+                size=1,
+                sha256="a" * 64,
+                urls=("https://download.example.invalid/claude-code.tgz",),
+                install_path="agents/claude-code",
+                entry=None,
+                external_paths=(legacy_entry,),
+            )
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+            )
+            installer._external_entry_candidates = lambda _component: [legacy_entry]  # type: ignore[method-assign]
+
+            selected = installer._first_existing_external_entry(component, refresh=True)
+
+            self.assertEqual(os.path.normcase(selected or ""), os.path.normcase(legacy_entry))
+
+    def test_install_probes_the_same_selected_windows_npm_entry_before_ready(self) -> None:
+        payload = make_tgz_payload({"package/bin/claude.js": b"console.log('claude')"})
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+            extensionless_entry = os.path.join(private_prefix, "claude")
+            cmd_entry = f"{extensionless_entry}.cmd"
+            ps1_entry = f"{extensionless_entry}.ps1"
+            component = ReleaseComponent(
+                component_id="claude-code",
+                name="Claude Code",
+                version="2.1.195",
+                platform="windows",
+                arch="x64",
+                archive_type="tgz",
+                size=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+                urls=("https://download.example.invalid/claude-code.tgz",),
+                install_path="agents/claude-code",
+                entry=None,
+                install_command=("npm", "install", "-g", "@anthropic-ai/claude-code@2.1.195"),
+                external_paths=(extensionless_entry,),
+            )
+            calls: list[list[str]] = []
+
+            def runner(command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                calls.append(command)
+                if "install" in command:
+                    os.makedirs(private_prefix, exist_ok=True)
+                    for path, content in (
+                        (extensionless_entry, b"#!/usr/bin/env sh\n"),
+                        (cmd_entry, b"@echo off\r\n"),
+                        (ps1_entry, b"#!/usr/bin/env pwsh\n"),
+                    ):
+                        with open(path, "wb") as handle:
+                            handle.write(content)
+                    return FakeCompletedProcess(returncode=0)
+                if command == ["cmd", "/c", cmd_entry, "--version"]:
+                    return FakeCompletedProcess(returncode=0, stdout="2.1.195\n")
+                return FakeCompletedProcess(returncode=1, stderr="unexpected entry")
+
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                fetcher=lambda _url, _timeout: payload,
+                installer_runner=runner,
+            )
+
+            state = installer.install(component, job_id="job_claude_probe")
+
+            self.assertEqual(state.status, "ready")
+            self.assertIn(["cmd", "/c", cmd_entry, "--version"], calls)
+            self.assertFalse(any(command[-2:] == [extensionless_entry, "--version"] for command in calls))
+
+    def test_failed_install_entry_probe_preserves_user_data_and_never_marks_ready(self) -> None:
+        payload = make_tgz_payload({"package/bin/claude.js": b"console.log('claude')"})
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+            cmd_entry = os.path.join(private_prefix, "claude.cmd")
+            component = ReleaseComponent(
+                component_id="claude-code",
+                name="Claude Code",
+                version="2.1.195",
+                platform="windows",
+                arch="x64",
+                archive_type="tgz",
+                size=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+                urls=("https://download.example.invalid/claude-code.tgz",),
+                install_path="agents/claude-code",
+                entry=None,
+                install_command=("npm", "install", "-g", "@anthropic-ai/claude-code@2.1.195"),
+                external_paths=(cmd_entry,),
+            )
+
+            def runner(command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                if "install" in command:
+                    os.makedirs(private_prefix, exist_ok=True)
+                    with open(cmd_entry, "wb") as handle:
+                        handle.write(b"@echo off\r\n")
+                    return FakeCompletedProcess(returncode=0)
+                return FakeCompletedProcess(returncode=1, stderr="shim cannot launch")
+
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                fetcher=lambda _url, _timeout: payload,
+                installer_runner=runner,
+            )
+
+            with self.assertRaises(ComponentInstallError) as raised:
+                installer.install(component, job_id="job_claude_probe_failed")
+
+            self.assertEqual(raised.exception.phase, "health_checking")
+            self.assertEqual(raised.exception.error_code, "install_entry_probe_failed")
+            self.assertTrue(raised.exception.retryable)
+            self.assertTrue(raised.exception.preserved_user_data)
+            failed = store.load()[component.component_id]
+            self.assertEqual(failed.status, "health_failed")
+            self.assertEqual(failed.error_code, "install_entry_probe_failed")
+
     def test_self_contained_opencode_uses_verified_extracted_entry_without_second_download(self) -> None:
         for component_id, entry_name in (("opencode", "opencode.exe"),):
             with self.subTest(component_id=component_id), tempfile.TemporaryDirectory() as temp_dir:
@@ -982,11 +1166,17 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
                     external_paths=(os.path.join(temp_dir, "missing.cmd"),),
                 )
                 store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+
+                def runner(command: list[str], _cwd: str, _timeout: int) -> FakeCompletedProcess:
+                    if "install" in command:
+                        self.fail("self-contained verified component must not run npm")
+                    return FakeCompletedProcess(returncode=0, stdout=f"{component_id} 1.0.0")
+
                 installer = ComponentInstaller(
                     base_path=temp_dir,
                     state_store=store,
                     fetcher=lambda _url, _timeout: payload,
-                    installer_runner=lambda *_args: self.fail("self-contained verified component must not run npm"),
+                    installer_runner=runner,
                 )
 
                 state = installer.install(component, job_id=f"job-{component_id}")
@@ -1783,6 +1973,8 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             self.assertIsNone(installer._first_existing_external_entry(component))
 
             def runner(command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                if "--version" in command:
+                    return FakeCompletedProcess(returncode=0, stdout="opencode 1.0.0")
                 if "install" in command:
                     os.makedirs(os.path.dirname(external_entry), exist_ok=True)
                     with open(external_entry, "wb") as handle:

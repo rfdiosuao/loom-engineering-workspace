@@ -446,7 +446,15 @@ def register_component_routes(app, ctx) -> None:
                     ctx.append_log(f"[Components] {component.component_id}: {message}\n")
 
                 installer = _component_installer(ctx)
-                state = installer.install(component, simulate=simulate, job_id=job_id, on_progress=on_progress)
+                try:
+                    state = installer.install(component, simulate=simulate, job_id=job_id, on_progress=on_progress)
+                except ComponentInstallError as exc:
+                    return {
+                        "success": False,
+                        "error": str(exc),
+                        **exc.to_payload(),
+                        "catalog": _component_catalog(ctx).status(),
+                    }
                 if state.status == "manual_install_required":
                     return {
                         "success": False,
@@ -474,7 +482,14 @@ def register_component_routes(app, ctx) -> None:
                 "catalog": _component_catalog(ctx).status(),
             }, 202)
         except ComponentInstallError as exc:
-            return ctx.fastapi_json({"error": str(exc), "catalog": _component_catalog(ctx).status()}, 500)
+            return ctx.fastapi_json(
+                {
+                    "error": str(exc),
+                    **exc.to_payload(),
+                    "catalog": _component_catalog(ctx).status(),
+                },
+                500,
+            )
         except Exception as exc:
             ctx.append_log(f"[Components] install failed: {exc}\n")
             return ctx.fastapi_json({"error": str(exc)}, 500)

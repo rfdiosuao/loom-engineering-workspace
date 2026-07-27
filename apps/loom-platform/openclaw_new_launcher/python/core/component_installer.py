@@ -48,6 +48,29 @@ RetrySleeper = Callable[[float], None]
 class ComponentInstallError(RuntimeError):
     """Raised when a component cannot be installed safely."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str = "",
+        error_code: str = "",
+        retryable: bool = False,
+        preserved_user_data: bool = True,
+    ):
+        super().__init__(message)
+        self.phase = phase
+        self.error_code = error_code
+        self.retryable = bool(retryable)
+        self.preserved_user_data = bool(preserved_user_data)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "phase": self.phase or "installing",
+            "errorCode": self.error_code or "component_install_failed",
+            "retryable": self.retryable,
+            "preservedUserData": self.preserved_user_data,
+        }
+
 
 WINDOWS_COMMAND_SUFFIXES = ("", ".cmd", ".exe", ".ps1", ".bat")
 
@@ -355,6 +378,53 @@ class ComponentInstaller:
             if on_progress:
                 on_progress(f"{component.name} 安装器已保存，等待手动安装和检测", "warning")
             return state
+
+        if self._requires_launch_version_probe(component):
+            self._mark(
+                component,
+                "health_checking",
+                job_id=job_id,
+                on_progress=on_progress,
+                message=f"验证 {component.name} 启动入口",
+            )
+            entry_path = ""
+            try:
+                entry_path = self._resolve_component_entry(
+                    component,
+                    install_path,
+                    force_external_probe=True,
+                )
+                installed_version = self._detect_installed_version(
+                    component,
+                    install_path,
+                    entry_path=entry_path,
+                )
+            except Exception:
+                installed_version = None
+            if not installed_version:
+                message = (
+                    f"安装入口验证失败：{os.path.basename(entry_path) or component.name} "
+                    "无法执行 --version，请重新安装后重试"
+                )
+                self._restore_previous_after_failed_health(install_path, previous)
+                self.state_store.mark(
+                    component.component_id,
+                    "health_failed",
+                    version=component.version,
+                    job_id=job_id,
+                    previous_version=previous.version if previous else None,
+                    error_code="install_entry_probe_failed",
+                    error_message=message,
+                )
+                if on_progress:
+                    on_progress(f"检测失败：{message}", "danger")
+                raise ComponentInstallError(
+                    message,
+                    phase="health_checking",
+                    error_code="install_entry_probe_failed",
+                    retryable=True,
+                    preserved_user_data=True,
+                )
 
         state = self.state_store.mark(
             component.component_id,
@@ -1068,6 +1138,10 @@ class ComponentInstaller:
             managed_entry = self._managed_codex_entry(install_path)
             if managed_entry:
                 return managed_entry
+        if force_external_probe and allow_expensive and getattr(component, "external_paths", ()):
+            external_entry = self._first_existing_external_entry(component, refresh=True)
+            if external_entry:
+                return external_entry
         verified_bundled_entry = self._verified_bundled_entry(component, install_path)
         if verified_bundled_entry:
             return verified_bundled_entry
@@ -1108,10 +1182,24 @@ class ComponentInstaller:
             cached_entry = self._cached_existing_external_entry(component)
             if cached_entry is not None or cache_key in _EXTERNAL_ENTRY_CACHE:
                 return cached_entry
+        deferred_extensionless: list[str] = []
         for candidate in self._external_entry_candidates(component):
-            if os.path.isfile(candidate):
-                _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), candidate)
-                return candidate
+            if not os.path.isfile(candidate):
+                continue
+            if str(component.platform or "").strip().lower() == "windows" and not os.path.splitext(candidate)[1]:
+                for suffix in (".cmd", ".exe", ".ps1", ".bat"):
+                    sibling = f"{candidate}{suffix}"
+                    if os.path.isfile(sibling):
+                        _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), sibling)
+                        return sibling
+                deferred_extensionless.append(candidate)
+                continue
+            _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), candidate)
+            return candidate
+        if deferred_extensionless:
+            entry_path = deferred_extensionless[0]
+            _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), entry_path)
+            return entry_path
         _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), None)
         return None
 
