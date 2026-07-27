@@ -2301,7 +2301,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
     def test_phone_status_request_timeout_precedes_outer_step_deadline(self) -> None:
         cases = {
-            8.0: 7000,
+            8.0: 4000,
             0.5: 250,
             0.1: 50,
         }
@@ -2356,7 +2356,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertTrue(payload["results"][0]["status"]["online"])
             request_timeout_index = payload["argv"].index("--request-timeout-ms")
-            self.assertEqual(payload["argv"][request_timeout_index + 1], "7000")
+            self.assertEqual(payload["argv"][request_timeout_index + 1], "4000")
             self.assertNotIn("plain-phone-token", json.dumps(job, ensure_ascii=False))
             self.assertEqual(storage[path]["devices"][0]["token"]["__loomSecret"], "dpapi")
 
@@ -2433,7 +2433,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 register_phone_routes(app, ctx)
                 register_job_routes(app, ctx)
 
-                outer_timeout_sec = 0.5
+                outer_timeout_sec = 8.0
                 inner_timeout_ms = _phone_status_request_timeout_ms(outer_timeout_sec)
                 self.assertLess(inner_timeout_ms, outer_timeout_sec * 1000)
                 with patch("api.routes_phone._PHONE_DIRECT_STEP_TIMEOUT_SEC", outer_timeout_sec):
