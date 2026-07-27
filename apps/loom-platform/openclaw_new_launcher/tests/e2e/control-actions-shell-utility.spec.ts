@@ -115,6 +115,11 @@ test('dashboard enables and restores workspaces only after live Bridge verificat
   await expectToast(page, '真实连接验证通过，可以进入智能体或创作。');
   await expect(agentEntry).toBeEnabled();
   await expect(creativeEntry).toBeEnabled();
+  await expect(agentEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
+  await expect(agentEntry).toHaveCSS('color', 'rgb(255, 255, 255)');
+  await expect(creativeEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
+  await expect(creativeEntry).toHaveCSS('color', 'rgb(255, 255, 255)');
+  await page.waitForTimeout(250);
   await page.screenshot({ path: testInfo.outputPath('dashboard-journey-verified.png') });
   await expect.poll(() => page.evaluate(() => (
     window.localStorage.getItem('loom.dashboard.last-verified-journey.v1')
