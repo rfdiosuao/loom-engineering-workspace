@@ -93,14 +93,20 @@ for (const destination of dashboardJourneyDestinations) {
   });
 }
 
-test('dashboard enables and restores workspaces only after live Bridge verification succeeds', async ({ audit, page }, testInfo) => {
+test('dashboard unlocks workspaces only after the current Bridge configuration check succeeds', async ({ audit, page }, testInfo) => {
   await audit.registerRoute('GET', '/api/components/status', { value: componentSnapshot('ready') });
   await audit.registerRoute('POST', '/api/wire/verify', {
     value: {
-      ok: true,
+      ok: false,
       targets: {
-        agent: { ok: true },
-        creative: { ok: true },
+        token: { ok: true },
+        codex: { ok: true },
+        claude: { ok: true },
+        opencode: { ok: true },
+        openclaw: { ok: true },
+        image: { ok: false },
+        phone: { ok: false },
+        video: { ok: false },
       },
     },
   });
@@ -111,8 +117,8 @@ test('dashboard enables and restores workspaces only after live Bridge verificat
   await expect(agentEntry).toBeDisabled();
   await expect(creativeEntry).toBeDisabled();
 
-  await appMain(page).getByRole('button', { name: '开始验证', exact: true }).click();
-  await expectToast(page, '真实连接验证通过，可以进入智能体或创作。');
+  await appMain(page).getByRole('button', { name: '开始检查', exact: true }).click();
+  await expectToast(page, '当前配置检查通过，可以进入智能体或创作。');
   await expect(agentEntry).toBeEnabled();
   await expect(creativeEntry).toBeEnabled();
   await expect(agentEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
@@ -128,11 +134,39 @@ test('dashboard enables and restores workspaces only after live Bridge verificat
   await page.reload();
   await expect(page.locator('[data-commercial-app-shell]')).toBeVisible();
   await audit.registerRoute('GET', '/api/components/status', { value: componentSnapshot('ready') });
+  await audit.registerRoute('POST', '/api/wire/verify', {
+    value: {
+      ok: false,
+      targets: {
+        token: { ok: true },
+        codex: { ok: true },
+        claude: { ok: true },
+        opencode: { ok: true },
+        openclaw: { ok: true },
+        image: { ok: false },
+        phone: { ok: false },
+        video: { ok: false },
+      },
+    },
+  });
   await page.getByRole('button', { name: '开始配置' }).click();
-  await expect(appMain(page).getByText(/上次通过/).first()).toBeVisible();
-  await expect(appMain(page).getByRole('button', { name: '进入智能体', exact: true })).toBeEnabled();
+  await expect(appMain(page).getByText(/上次检查/).first()).toBeVisible();
+  const restoredAgentEntry = appMain(page).getByRole('button', { name: '进入智能体', exact: true });
+  await expect(restoredAgentEntry).toBeDisabled();
+  await appMain(page).getByRole('button', { name: '开始检查', exact: true }).click();
+  await expect(restoredAgentEntry).toBeEnabled();
 
-  await appMain(page).getByRole('button', { name: '进入智能体', exact: true }).click();
+  const journey = appMain(page).locator('[data-dashboard-journey]');
+  await expect.poll(() => journey.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  const viewport = page.viewportSize();
+  for (const entry of [restoredAgentEntry, appMain(page).getByRole('button', { name: '进入创作', exact: true })]) {
+    const bounds = await entry.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport?.width || Number.MAX_SAFE_INTEGER);
+  }
+
+  await restoredAgentEntry.click();
   await expect(page.locator(registryEntry('agent').readySelector).first()).toBeVisible();
 });
 

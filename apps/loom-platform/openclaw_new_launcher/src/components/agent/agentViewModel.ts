@@ -627,15 +627,17 @@ function toolStatus(value: unknown): ToolLifecycleStatus | undefined {
     : undefined;
 }
 
-function mergeToolStatus(
-  current: ToolLifecycleStatus | undefined,
-  incoming: ToolLifecycleStatus,
+export function mergeToolLifecycleStatus(
+  current: unknown,
+  incoming: unknown,
 ): ToolLifecycleStatus {
-  if (current === 'completed' || current === 'failed') return current;
-  if (incoming === 'completed' || incoming === 'failed') return incoming;
-  if (current === 'running' && (incoming === 'queued' || incoming === 'awaiting')) return current;
-  if (current === 'awaiting' && incoming === 'queued') return current;
-  return incoming;
+  const currentStatus = toolStatus(current);
+  const incomingStatus = toolStatus(incoming) || currentStatus || 'running';
+  if (currentStatus === 'completed' || currentStatus === 'failed') return currentStatus;
+  if (incomingStatus === 'completed' || incomingStatus === 'failed') return incomingStatus;
+  if (currentStatus === 'running' && (incomingStatus === 'queued' || incomingStatus === 'awaiting')) return currentStatus;
+  if (currentStatus === 'awaiting' && incomingStatus === 'queued') return currentStatus;
+  return incomingStatus;
 }
 
 function messageStatusForTool(status: ToolLifecycleStatus): AgentMessage['status'] {
@@ -696,7 +698,7 @@ function upsertToolBlock(
         && block.data.toolCallId === identity.toolCallId
       ));
       const currentBlock = blockIndex >= 0 ? message.blocks[blockIndex] : undefined;
-      const status = mergeToolStatus(toolStatus(currentBlock?.data.status), incomingStatus);
+      const status = mergeToolLifecycleStatus(currentBlock?.data.status, incomingStatus);
       const nextBlock: AgentMessageBlock = {
         type: 'tool',
         data: { ...currentBlock?.data, ...data, status },

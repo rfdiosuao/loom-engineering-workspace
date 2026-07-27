@@ -5,7 +5,7 @@ import { AlertCircle, Check, ChevronDown, Circle, Image as ImageIcon, LoaderCirc
 import { useEffect, useId, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { capabilityActionLabel, userFacingAgentError } from './agentViewModel';
+import { capabilityActionLabel, mergeToolLifecycleStatus, userFacingAgentError } from './agentViewModel';
 import { AgentApprovalCard } from './AgentApprovalCard';
 import { AgentRunAttachment } from './AgentRunAttachment';
 
@@ -147,6 +147,11 @@ function ToolBlock({ data }: { data: Record<string, unknown> }) {
           {error.recoverable ? <div className="mt-1 text-[10px] font-semibold text-accent">修复后可重试</div> : null}
         </div>
       ) : null}
+      {Array.isArray(data.attachments) ? (
+        <div className="ml-7 mt-2">
+          <AttachmentBlock data={data} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -173,11 +178,19 @@ export function compactToolExecutionBlocks(blocks: AgentMessageBlock[]): AgentMe
       compacted.set(identity, { ...block, data: { ...block.data, occurrences: 1 } });
       return;
     }
+    const status = mergeToolLifecycleStatus(previous.data.status, block.data.status);
+    const previousIsTerminal = previous.data.status === 'completed' || previous.data.status === 'failed';
+    const incomingIsActive = block.data.status === 'queued'
+      || block.data.status === 'awaiting'
+      || block.data.status === 'running';
+    const mergedData = previousIsTerminal && incomingIsActive
+      ? { ...block.data, ...previous.data }
+      : { ...previous.data, ...block.data };
     compacted.set(identity, {
-      ...block,
+      ...(previousIsTerminal && incomingIsActive ? previous : block),
       data: {
-        ...previous.data,
-        ...block.data,
+        ...mergedData,
+        status,
         occurrences: countsFallbackEvents
           ? Number(previous.data.occurrences || 1) + 1
           : 1,
@@ -408,7 +421,8 @@ export function MessageBlockView({
   }
   if (block.type === 'plan') return <PlanBlock data={block.data} />;
   if (block.type === 'tool') {
-    return Array.isArray(block.data.attachments)
+    const hasLifecycleIdentity = Boolean(text(block.data.runId).trim() && text(block.data.toolCallId).trim());
+    return Array.isArray(block.data.attachments) && !hasLifecycleIdentity
       ? <AttachmentBlock data={block.data} />
       : <ToolExecutionGroup blocks={[block]} run={runs[text(block.data.runId)]} />;
   }

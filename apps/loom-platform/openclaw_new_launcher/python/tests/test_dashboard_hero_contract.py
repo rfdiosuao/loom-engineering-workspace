@@ -22,7 +22,9 @@ class DashboardHeroContractTests(unittest.TestCase):
             source = handle.read()
 
         self.assertIn("loadCachedComponentSnapshot", source)
-        self.assertIn("components === null", source)
+        self.assertIn("componentsProvenance", source)
+        self.assertIn("历史记录不会解锁当前入口", source)
+        self.assertNotIn("restoredVerificationReady", source)
         self.assertNotIn("useState<ComponentSnapshot | null>(null)", source)
         self.assertIn('aria-label="开始配置"', source)
         self.assertIn('aria-label="查看可做的事"', source)

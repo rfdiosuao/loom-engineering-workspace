@@ -255,6 +255,12 @@ test('one run across multiple messages produces one aggregated execution group',
         toolCallId: 'tool_1',
         capability: 'loom.media.image.generate',
         status: 'completed',
+        attachments: [{
+          kind: 'image',
+          name: 'generated.png',
+          path: 'https://example.invalid/generated.png',
+          mime: 'image/png',
+        }],
       },
     }],
     createdAt: '2026-07-16T10:00:03+08:00',
@@ -268,6 +274,38 @@ test('one run across multiple messages produces one aggregated execution group',
     kind: 'tool-group',
     runId: 'run_shared',
     blocks: [queued.blocks[0], completed.blocks[0]],
+  });
+
+  const markup = renderToStaticMarkup(React.createElement(ToolExecutionGroup, {
+    blocks: [queued.blocks[0], completed.blocks[0]],
+    run: { schema: 'loom.agent.run.v1', runId: 'run_shared', sessionId: SESSION_ID, status: 'completed', campaignIds: [] },
+  }));
+  assert.equal((markup.match(/data-agent-tool-action/g) || []).length, 1);
+  assert.match(markup, /data-agent-attachments/);
+  assert.match(markup, /generated\.png/);
+});
+
+test('legacy tool events without lifecycle identity keep their message-level execution group', () => {
+  const buildPlan = conversationStream.buildConversationRenderPlan;
+  const legacy: AgentMessage = {
+    schema: 'loom.agent.message.v1',
+    messageId: 'legacy-tool-message',
+    sessionId: SESSION_ID,
+    role: 'tool',
+    status: 'completed',
+    blocks: [
+      { type: 'tool', data: { capability: 'loom.cli.phone.status', status: 'queued' } },
+      { type: 'tool', data: { capability: 'loom.cli.phone.status', status: 'completed' } },
+    ],
+    createdAt: '2026-07-16T10:00:00+08:00',
+  };
+
+  const plan = buildPlan([legacy]);
+  assert.equal(plan.length, 1);
+  assert.deepEqual(plan[0]?.entries[0], {
+    kind: 'tool-group',
+    runId: 'legacy-tool-message',
+    blocks: legacy.blocks,
   });
 });
 
@@ -1085,6 +1123,64 @@ test('one toolCallId lifecycle keeps the latest state without counting lifecycle
   }));
   assert.equal((markup.match(/data-agent-tool-action/g) || []).length, 1);
   assert.doesNotMatch(markup, /2 次/);
+});
+
+test('tool compaction never regresses terminal lifecycle state on replay', () => {
+  const completed = compactToolExecutionBlocks([
+    {
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_completed',
+        capability: 'loom.media.image.generate',
+        status: 'completed',
+        attachments: [{ kind: 'image', name: 'result.png', path: 'C:\\LOOM\\result.png' }],
+      },
+    },
+    {
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_completed',
+        capability: 'loom.media.image.generate',
+        status: 'running',
+      },
+    },
+  ]);
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0]?.data.status, 'completed');
+  assert.deepEqual(completed[0]?.data.attachments, [{
+    kind: 'image',
+    name: 'result.png',
+    path: 'C:\\LOOM\\result.png',
+  }]);
+
+  const failed = compactToolExecutionBlocks([
+    {
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_failed',
+        capability: 'loom.phone.control',
+        status: 'failed',
+        code: 'device_offline',
+        message: 'Device offline',
+      },
+    },
+    {
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_failed',
+        capability: 'loom.phone.control',
+        status: 'queued',
+      },
+    },
+  ]);
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0]?.data.status, 'failed');
+  assert.equal(failed[0]?.data.code, 'device_offline');
+  assert.equal(failed[0]?.data.message, 'Device offline');
 });
 
 test('different toolCallIds using one capability remain separate execution rows', () => {

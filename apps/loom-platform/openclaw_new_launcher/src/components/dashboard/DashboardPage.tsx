@@ -29,6 +29,11 @@ import {
   saveLastVerifiedJourney,
   type LastVerifiedJourney,
 } from './dashboardJourneyCache';
+import {
+  configurationCheckSucceeded,
+  resolveDashboardJourneyState,
+  type ComponentSnapshotProvenance,
+} from './dashboardJourneyState';
 
 const REQUIRED_AGENT_IDS = ['codex-desktop', 'claude-code', 'opencode', 'openclaw-companion', 'hermes'];
 
@@ -43,7 +48,6 @@ const FALLBACK_AGENTS: Record<string, { name: string; description: string }> = {
 type WireVerification = Awaited<ReturnType<typeof wireApi.verify>>;
 type JourneyTone = 'complete' | 'current' | 'blocked' | 'error';
 type VerificationState = 'idle' | 'checking' | 'passed' | 'failed';
-type ComponentSnapshotProvenance = 'empty' | 'cache' | 'live';
 
 function requiredRows(snapshot: ComponentSnapshot | null): ComponentSummary[] {
   const byId = new Map((snapshot?.components || []).map((item) => [item.id, item]));
@@ -81,11 +85,6 @@ function isAgentReady(agent: ComponentSummary): boolean {
 
 function hasConfiguredTextModel(wire: WireSnapshot | null): boolean {
   return wire?.ok === true && Boolean(wire.models?.text?.trim());
-}
-
-function verificationSucceeded(verification: WireVerification | null): boolean {
-  if (verification?.ok !== true) return false;
-  return !Object.values(verification.targets || {}).some((target) => target.ok === false);
 }
 
 function actionableJourneyError(error: unknown, action: string): string {
@@ -135,24 +134,22 @@ export const DashboardPage: React.FC = () => {
   const liveComponents = componentsProvenance === 'live' ? components : null;
   const agents = useMemo(() => requiredRows(components), [components]);
   const readyAgents = components ? agents.filter(isAgentReady).length : 0;
+  const readyAgentIds = agents.filter(isAgentReady).map((agent) => agent.id);
   const failedAgents = liveComponents ? agents.filter((agent) => agent.status.endsWith('_failed')).length : 0;
-  const liveInstallReady = liveComponents !== null && readyAgents > 0;
-  const restoredInstallReady = (components === null || componentsProvenance === 'cache')
-    && (readyAgents > 0 || Boolean(lastVerified?.readyAgentIds.length));
-  const installReady = liveInstallReady || restoredInstallReady;
-  const liveModelReady = hasConfiguredTextModel(wire);
-  const restoredModelReady = wire === null && Boolean(lastVerified?.textModel);
-  const modelReady = liveModelReady || restoredModelReady;
-  const canVerifyNow = liveInstallReady && liveModelReady;
-  const verificationReady = verificationSucceeded(verification);
-  const restoredVerificationReady = verificationState === 'idle'
-    && Boolean(lastVerified)
-    && (wire === null || wire.models?.text === lastVerified?.textModel)
-    && (liveComponents === null || lastVerified?.readyAgentIds.some((id) => (
-      liveComponents.components.some((component) => component.id === id && isAgentReady(component))
-    )));
-  const journeyReady = verificationReady || restoredVerificationReady;
-  const activeStep = !installReady ? 1 : !modelReady ? 2 : !journeyReady ? 3 : 4;
+  const verificationReady = configurationCheckSucceeded(verification, readyAgentIds);
+  const {
+    liveInstallReady,
+    liveModelReady,
+    canCheckNow,
+    journeyReady,
+    activeStep,
+  } = resolveDashboardJourneyState({
+    loading,
+    componentsProvenance,
+    readyAgentIds,
+    hasConfiguredTextModel: hasConfiguredTextModel(wire),
+    configurationCheckPassed: verificationReady,
+  });
 
   const refreshJourney = useCallback(async () => {
     setLoading(true);
@@ -160,6 +157,8 @@ export const DashboardPage: React.FC = () => {
     setVerificationError('');
     setVerificationState('idle');
     setVerification(null);
+    setComponentsProvenance((provenance) => provenance === 'empty' ? 'empty' : 'cache');
+    setWire(null);
     const [componentResult, wireResult] = await Promise.allSettled([
       componentApi.status(),
       wireApi.current(),
@@ -188,7 +187,7 @@ export const DashboardPage: React.FC = () => {
   }, [refreshJourney]);
 
   const verifyConnection = useCallback(async () => {
-    if (!canVerifyNow || verificationState === 'checking') return;
+    if (!canCheckNow || verificationState === 'checking') return;
     setVerificationState('checking');
     setVerification(null);
     setVerificationError('');
@@ -196,9 +195,8 @@ export const DashboardPage: React.FC = () => {
       const result = await wireApi.verify();
       setVerification(result);
       if (result.wire) setWire(result.wire);
-      if (verificationSucceeded(result)) {
+      if (configurationCheckSucceeded(result, readyAgentIds)) {
         const verifiedWire = result.wire || wire;
-        const readyAgentIds = agents.filter(isAgentReady).map((agent) => agent.id);
         const record = saveLastVerifiedJourney({
           verifiedAt: new Date().toISOString(),
           textModel: verifiedWire?.models?.text?.trim() || lastVerified?.textModel || '',
@@ -206,22 +204,22 @@ export const DashboardPage: React.FC = () => {
         });
         setLastVerified(record);
         setVerificationState('passed');
-        showToast('真实连接验证通过，可以进入智能体或创作。', 'success');
+        showToast('当前配置检查通过，可以进入智能体或创作。', 'success');
       } else {
         const targetErrors = Object.values(result.targets || {})
           .filter((target) => target.ok === false && target.error)
-          .map((target) => actionableJourneyError(target.error, '验证模型连接'));
-        setVerificationError(targetErrors[0] || '验证未通过。请检查模型选择和上游服务后重试。');
+          .map((target) => actionableJourneyError(target.error, '检查本机配置'));
+        setVerificationError(targetErrors[0] || '配置检查未通过。请确认模型凭据和至少一个已安装 Agent 的配置。');
         setVerificationState('failed');
-        showToast('真实连接验证未通过。', 'error');
+        showToast('当前配置检查未通过。', 'error');
       }
     } catch (error) {
-      const message = actionableJourneyError(error, '验证模型连接');
+      const message = actionableJourneyError(error, '检查本机配置');
       setVerificationError(message);
       setVerificationState('failed');
       showToast(message, 'error');
     }
-  }, [agents, canVerifyNow, lastVerified, verificationState, wire]);
+  }, [canCheckNow, lastVerified, readyAgentIds, verificationState, wire]);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-surface">
@@ -258,7 +256,7 @@ export const DashboardPage: React.FC = () => {
                 <div className="text-[11px] font-bold tracking-[0.18em] text-accent">首次使用主旅程</div>
                 <h1 className="mt-2 text-[28px] font-black leading-tight text-text">{APP_HOME_TITLE}</h1>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-text-muted">
-                  安装 Agent、选择模型并完成一次真实验证，随后进入智能体或创作。
+                  安装 Agent、选择模型并完成一次当前配置检查，随后进入智能体或创作。
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -303,20 +301,20 @@ export const DashboardPage: React.FC = () => {
                     ? '正在后台刷新当前基础状态'
                     : statusError ? '当前基础状态读取不完整'
                       : liveCheckedAt ? '当前基础状态已刷新'
-                        : lastVerified ? '已恢复上次验证旅程'
+                        : lastVerified ? '已读取上次配置检查记录'
                           : '尚无验证记录'}
                 </div>
                 <div className="mt-0.5 break-words text-xs leading-5 text-text-muted [overflow-wrap:anywhere]">
                   {loading
                     ? lastVerified
-                      ? `保留 ${verificationTimeLabel(lastVerified.verifiedAt)} 的验证结果，当前在线状态以本次 Bridge 刷新为准。`
+                      ? `保留 ${verificationTimeLabel(lastVerified.verifiedAt)} 的历史检查记录；它不会代替本次 Bridge 状态。`
                       : '页面可以继续使用；检测完成后会更新当前状态。'
                     : statusError
                       || (liveCheckedAt
-                        ? `基础状态刷新于 ${verificationTimeLabel(liveCheckedAt)}；完整连接仍以“真实验证”结果为准。`
+                        ? `基础状态刷新于 ${verificationTimeLabel(liveCheckedAt)}；入口仍需完成本次配置检查。`
                         : lastVerified
-                          ? `上次验证通过：${verificationTimeLabel(lastVerified.verifiedAt)}。这不是当前在线声明，可随时重新检测。`
-                          : '请完成一次真实验证，麓鸣会保留验证时间用于下次秒开。')}
+                          ? `上次配置检查：${verificationTimeLabel(lastVerified.verifiedAt)}。这不是当前可用性声明。`
+                          : '请完成一次当前配置检查；历史记录只用于参考。')}
                 </div>
               </div>
             </div>
@@ -330,14 +328,14 @@ export const DashboardPage: React.FC = () => {
                   ? readyAgents > 0
                     ? `上次识别 ${readyAgents} 个`
                     : lastVerified?.readyAgentIds.length
-                      ? `上次验证 ${lastVerified.readyAgentIds.length} 个`
+                      ? `上次检查 ${lastVerified.readyAgentIds.length} 个`
                       : loading ? '后台检测中' : '尚未确认'
                   : failedAgents > 0 ? '需要处理'
-                    : installReady ? `${readyAgents} 个可用`
+                    : liveInstallReady ? `${readyAgents} 个可用`
                       : '尚未安装'}
-                tone={failedAgents > 0 ? 'error' : installReady ? 'complete' : activeStep === 1 ? 'current' : 'blocked'}
+                tone={failedAgents > 0 ? 'error' : liveInstallReady ? 'complete' : activeStep === 1 ? 'current' : 'blocked'}
                 icon={<Bot className="h-5 w-5" aria-hidden="true" />}
-                actionLabel={installReady ? '查看 Agent' : '安装 Agent'}
+                actionLabel={liveInstallReady ? '查看 Agent' : '安装 Agent'}
                 onAction={() => setCurrentPage('agents')}
               />
               <JourneyStep
@@ -346,29 +344,29 @@ export const DashboardPage: React.FC = () => {
                 detail="选择文本模型，状态以当前配置为准。"
                 state={wire === null
                   ? lastVerified?.textModel ? `上次：${lastVerified.textModel}` : loading ? '后台检测中' : '尚未确认'
-                  : modelReady ? wire.models?.text || '已选择'
+                  : liveModelReady ? wire.models?.text || '已选择'
                     : '尚未选择'}
-                tone={modelReady ? 'complete' : activeStep === 2 ? 'current' : 'blocked'}
+                tone={liveModelReady ? 'complete' : activeStep === 2 ? 'current' : 'blocked'}
                 icon={<Cpu className="h-5 w-5" aria-hidden="true" />}
-                actionLabel={modelReady ? '查看模型' : '选择模型'}
+                actionLabel={liveModelReady ? '查看模型' : '选择模型'}
                 onAction={() => setCurrentPage('models')}
               />
               <JourneyStep
                 number={3}
-                title="真实验证"
-                detail="由 Bridge 验证模型和上游连接。"
+                title="配置检查"
+                detail="由 Bridge 检查模型凭据与已安装 Agent 的本机配置，不发起上游推理。"
                 state={verificationState === 'checking'
-                  ? '验证中'
-                  : verificationReady ? '本次验证通过'
-                    : restoredVerificationReady && lastVerified ? `上次通过 · ${verificationTimeLabel(lastVerified.verifiedAt)}`
-                      : verificationError ? '验证未通过'
-                        : '等待验证'}
+                  ? '检查中'
+                  : verificationReady ? '本次检查通过'
+                    : lastVerified ? `上次检查 · ${verificationTimeLabel(lastVerified.verifiedAt)}`
+                      : verificationError ? '检查未通过'
+                        : '等待检查'}
                 tone={verificationError ? 'error' : journeyReady ? 'complete' : activeStep === 3 ? 'current' : 'blocked'}
                 icon={verificationState === 'checking'
                   ? <LoaderCircle className="h-5 w-5 animate-spin" aria-hidden="true" />
                   : <ShieldCheck className="h-5 w-5" aria-hidden="true" />}
-                actionLabel={verificationState === 'checking' ? '正在验证' : journeyReady ? '重新验证' : '开始验证'}
-                disabled={!canVerifyNow || verificationState === 'checking'}
+                actionLabel={verificationState === 'checking' ? '正在检查' : journeyReady ? '重新检查' : '开始检查'}
+                disabled={!canCheckNow || verificationState === 'checking'}
                 disabledReason={!liveInstallReady
                   ? '请等待 Bridge 确认当前 Agent 状态。'
                   : !liveModelReady ? '请等待 Bridge 确认当前模型配置。'
@@ -379,17 +377,17 @@ export const DashboardPage: React.FC = () => {
               <JourneyStep
                 number={4}
                 title="进入 Agent / 创作"
-                detail="验证通过后进入真实工作区。"
+                detail="本次配置检查通过后进入真实工作区。"
                 state={verificationReady
-                  ? '本次验证通过'
-                  : restoredVerificationReady && lastVerified ? `按 ${verificationTimeLabel(lastVerified.verifiedAt)} 的记录恢复`
-                    : '等待验证'}
+                  ? '本次检查通过'
+                  : lastVerified ? `有 ${verificationTimeLabel(lastVerified.verifiedAt)} 的历史记录，仍需本次检查`
+                    : '等待检查'}
                 tone={journeyReady ? 'complete' : 'blocked'}
                 icon={journeyReady
                   ? <Check className="h-5 w-5" aria-hidden="true" />
                   : <LockKeyhole className="h-5 w-5" aria-hidden="true" />}
                 disabled={!journeyReady}
-                disabledReason="当前 Bridge 尚未返回验证通过，入口暂不可用。"
+                disabledReason="当前 Bridge 尚未返回本次配置检查通过，入口暂不可用。"
                 actions={[
                   { label: '进入智能体', icon: <Bot className="h-4 w-4" aria-hidden="true" />, onClick: () => setCurrentPage('agent') },
                   { label: '进入创作', icon: <Image className="h-4 w-4" aria-hidden="true" />, onClick: () => setCurrentPage('creative') },
@@ -398,7 +396,7 @@ export const DashboardPage: React.FC = () => {
             </div>
 
             <div className="mt-5 border-t border-border/70 pt-4 text-xs leading-5 text-text-subtle">
-              当前壳层只使用现有组件状态、当前模型配置和连接验证响应。安装事务证据、模型协议级验证明细与配置回滚事务字段待并行任务补齐，在字段可用前不会显示为成功。
+              本页检查本机凭据和 Agent 配置，不会发起上游模型推理。模型或中转站是否可用，请以“模型账户”中的实时连接测试为准；历史记录不会解锁当前入口。
             </div>
           </section>
         </div>

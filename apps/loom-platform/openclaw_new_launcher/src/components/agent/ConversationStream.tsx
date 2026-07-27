@@ -36,10 +36,12 @@ export interface ConversationMessageRenderPlan {
 }
 
 function lifecycleToolRunId(message: AgentMessage, block: AgentMessageBlock): string | null {
-  if (block.type !== 'tool' || Array.isArray(block.data.attachments)) return null;
-  return typeof block.data.runId === 'string' && block.data.runId.trim()
-    ? block.data.runId
-    : message.messageId;
+  if (block.type !== 'tool') return null;
+  const runId = typeof block.data.runId === 'string' ? block.data.runId.trim() : '';
+  const toolCallId = typeof block.data.toolCallId === 'string' ? block.data.toolCallId.trim() : '';
+  if (runId && toolCallId) return runId;
+  if (Array.isArray(block.data.attachments)) return null;
+  return runId || message.messageId;
 }
 
 export function buildConversationRenderPlan(messages: AgentMessage[]): ConversationMessageRenderPlan[] {

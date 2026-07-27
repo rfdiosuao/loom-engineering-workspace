@@ -8,6 +8,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import { CapabilityCenterPage } from './capabilities/CapabilityCenterPage.tsx';
 import { IMAGE_RATIO_PRESETS, validateReferenceFile } from './creative/mediaPresets.ts';
+import {
+  configurationCheckSucceeded,
+  resolveDashboardJourneyState,
+} from './dashboard/dashboardJourneyState.ts';
 
 function readSource(relativePath: string): string {
   return readFileSync(new URL(relativePath, import.meta.url), 'utf8');
@@ -158,11 +162,60 @@ test('dashboard journey advances only from current Bridge responses', () => {
   assert.match(source, /loadLastVerifiedJourney/);
   assert.match(source, /componentsProvenance === 'live'/);
   assert.match(source, /const liveComponents = componentsProvenance === 'live'/);
-  assert.match(source, /上次验证通过/);
-  assert.match(source, /这不是当前在线声明/);
-  assert.match(source, /const canVerifyNow = liveInstallReady && liveModelReady/);
+  assert.match(source, /历史记录不会解锁当前入口/);
+  assert.match(source, /resolveDashboardJourneyState/);
+  assert.doesNotMatch(source, /restoredVerificationReady|const journeyReady = verificationReady \|\|/);
   assert.match(source, /安装 Agent/);
   assert.match(source, /选择模型/);
-  assert.match(source, /真实验证/);
+  assert.match(source, /配置检查/);
   assert.match(source, /进入 Agent/);
+});
+
+test('dashboard history and refresh state never unlock the current journey', () => {
+  const cached = resolveDashboardJourneyState({
+    loading: false,
+    componentsProvenance: 'cache',
+    readyAgentIds: ['codex-desktop'],
+    hasConfiguredTextModel: true,
+    configurationCheckPassed: false,
+  });
+  assert.equal(cached.liveInstallReady, false);
+  assert.equal(cached.canCheckNow, false);
+  assert.equal(cached.journeyReady, false);
+
+  const refreshing = resolveDashboardJourneyState({
+    loading: true,
+    componentsProvenance: 'live',
+    readyAgentIds: ['codex-desktop'],
+    hasConfiguredTextModel: true,
+    configurationCheckPassed: true,
+  });
+  assert.equal(refreshing.canCheckNow, false);
+  assert.equal(refreshing.journeyReady, false);
+});
+
+test('dashboard configuration check ignores unrelated modules but requires a usable current Agent', () => {
+  const result = {
+    targets: {
+      token: { ok: true },
+      codex: { ok: true },
+      image: { ok: false },
+      phone: { ok: false },
+      video: { ok: false },
+    },
+  };
+  assert.equal(configurationCheckSucceeded(result, ['codex-desktop']), true);
+  assert.equal(configurationCheckSucceeded(result, ['claude-code']), false);
+  assert.equal(configurationCheckSucceeded({ targets: { token: { ok: false }, codex: { ok: true } } }, ['codex-desktop']), false);
+
+  const current = resolveDashboardJourneyState({
+    loading: false,
+    componentsProvenance: 'live',
+    readyAgentIds: ['codex-desktop'],
+    hasConfiguredTextModel: true,
+    configurationCheckPassed: true,
+  });
+  assert.equal(current.canCheckNow, true);
+  assert.equal(current.journeyReady, true);
+  assert.equal(current.activeStep, 4);
 });
