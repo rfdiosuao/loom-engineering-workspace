@@ -156,6 +156,8 @@ test('dashboard journey advances only from current Bridge responses', () => {
   assert.match(source, /wireApi\.verify\(\)/);
   assert.match(source, /loadCachedComponentSnapshot/);
   assert.match(source, /loadLastVerifiedJourney/);
+  assert.match(source, /componentsProvenance === 'live'/);
+  assert.match(source, /const liveComponents = componentsProvenance === 'live'/);
   assert.match(source, /上次验证通过/);
   assert.match(source, /这不是当前在线声明/);
   assert.match(source, /const canVerifyNow = liveInstallReady && liveModelReady/);

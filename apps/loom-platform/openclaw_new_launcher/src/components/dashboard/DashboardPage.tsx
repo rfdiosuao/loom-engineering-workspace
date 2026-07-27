@@ -43,6 +43,7 @@ const FALLBACK_AGENTS: Record<string, { name: string; description: string }> = {
 type WireVerification = Awaited<ReturnType<typeof wireApi.verify>>;
 type JourneyTone = 'complete' | 'current' | 'blocked' | 'error';
 type VerificationState = 'idle' | 'checking' | 'passed' | 'failed';
+type ComponentSnapshotProvenance = 'empty' | 'cache' | 'live';
 
 function requiredRows(snapshot: ComponentSnapshot | null): ComponentSummary[] {
   const byId = new Map((snapshot?.components || []).map((item) => [item.id, item]));
@@ -117,9 +118,12 @@ function verificationTimeLabel(value: string): string {
 export const DashboardPage: React.FC = () => {
   const setCurrentPage = useAppStore((state) => state.setCurrentPage);
   const [view, setView] = useState<'hero' | 'journey'>('hero');
-  const cachedComponents = useMemo(() => loadCachedComponentSnapshot(), []);
+  const initialComponents = useMemo(() => loadCachedComponentSnapshot(), []);
   const [lastVerified, setLastVerified] = useState<LastVerifiedJourney | null>(() => loadLastVerifiedJourney());
-  const [components, setComponents] = useState<ComponentSnapshot | null>(null);
+  const [components, setComponents] = useState<ComponentSnapshot | null>(initialComponents);
+  const [componentsProvenance, setComponentsProvenance] = useState<ComponentSnapshotProvenance>(
+    initialComponents ? 'cache' : 'empty',
+  );
   const [wire, setWire] = useState<WireSnapshot | null>(null);
   const [verification, setVerification] = useState<WireVerification | null>(null);
   const [loading, setLoading] = useState(false);
@@ -128,12 +132,12 @@ export const DashboardPage: React.FC = () => {
   const [statusError, setStatusError] = useState('');
   const [verificationError, setVerificationError] = useState('');
 
-  const displayedComponents = components || cachedComponents;
-  const agents = useMemo(() => requiredRows(displayedComponents), [displayedComponents]);
-  const readyAgents = displayedComponents ? agents.filter(isAgentReady).length : 0;
-  const failedAgents = components ? agents.filter((agent) => agent.status.endsWith('_failed')).length : 0;
-  const liveInstallReady = components !== null && readyAgents > 0;
-  const restoredInstallReady = components === null
+  const liveComponents = componentsProvenance === 'live' ? components : null;
+  const agents = useMemo(() => requiredRows(components), [components]);
+  const readyAgents = components ? agents.filter(isAgentReady).length : 0;
+  const failedAgents = liveComponents ? agents.filter((agent) => agent.status.endsWith('_failed')).length : 0;
+  const liveInstallReady = liveComponents !== null && readyAgents > 0;
+  const restoredInstallReady = (components === null || componentsProvenance === 'cache')
     && (readyAgents > 0 || Boolean(lastVerified?.readyAgentIds.length));
   const installReady = liveInstallReady || restoredInstallReady;
   const liveModelReady = hasConfiguredTextModel(wire);
@@ -144,8 +148,8 @@ export const DashboardPage: React.FC = () => {
   const restoredVerificationReady = verificationState === 'idle'
     && Boolean(lastVerified)
     && (wire === null || wire.models?.text === lastVerified?.textModel)
-    && (components === null || lastVerified?.readyAgentIds.some((id) => (
-      components.components.some((component) => component.id === id && isAgentReady(component))
+    && (liveComponents === null || lastVerified?.readyAgentIds.some((id) => (
+      liveComponents.components.some((component) => component.id === id && isAgentReady(component))
     )));
   const journeyReady = verificationReady || restoredVerificationReady;
   const activeStep = !installReady ? 1 : !modelReady ? 2 : !journeyReady ? 3 : 4;
@@ -164,6 +168,7 @@ export const DashboardPage: React.FC = () => {
     const errors: string[] = [];
     if (componentResult.status === 'fulfilled') {
       setComponents(componentResult.value);
+      setComponentsProvenance('live');
     } else {
       errors.push(actionableJourneyError(componentResult.reason, '读取 Agent 状态'));
     }
@@ -321,8 +326,12 @@ export const DashboardPage: React.FC = () => {
                 number={1}
                 title="安装 Agent"
                 detail="安装并启动至少一个受管 Agent。"
-                state={components === null
-                  ? readyAgents > 0 ? `上次识别 ${readyAgents} 个` : loading ? '后台检测中' : '尚未确认'
+                state={componentsProvenance !== 'live'
+                  ? readyAgents > 0
+                    ? `上次识别 ${readyAgents} 个`
+                    : lastVerified?.readyAgentIds.length
+                      ? `上次验证 ${lastVerified.readyAgentIds.length} 个`
+                      : loading ? '后台检测中' : '尚未确认'
                   : failedAgents > 0 ? '需要处理'
                     : installReady ? `${readyAgents} 个可用`
                       : '尚未安装'}
