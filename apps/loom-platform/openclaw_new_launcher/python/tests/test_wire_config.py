@@ -1570,6 +1570,12 @@ class WireServiceTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["model"], "gpt-test")
             self.assertEqual(result["availableModelCount"], 2)
+            self.assertTrue(result["catalogVisible"])
+            self.assertFalse(result["protocolVerified"])
+            self.assertFalse(result["modelAvailable"])
+            self.assertEqual(result["modelDescriptor"]["modelId"], "gpt-test")
+            self.assertEqual(result["modelDescriptor"]["protocols"], [])
+            self.assertEqual(result["modelDescriptor"]["unavailableReason"], "protocol_not_verified")
             self.assertNotIn(secret, repr(result))
             self.assertFalse(os.path.exists(paths.wire_current))
             request.assert_called_once_with(
@@ -1595,8 +1601,32 @@ class WireServiceTests(unittest.TestCase):
                     )
 
             self.assertIn("selected_model_not_listed", str(caught.exception))
+            self.assertEqual(caught.exception.to_dict()["code"], "selected_model_not_listed")
+            self.assertFalse(caught.exception.to_dict()["retryable"])
             with self.assertRaises(WireConfigError):
                 service.rollback()
+
+    def test_verify_candidate_classifies_upstream_503_without_exposing_provider_body(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = WireService(AppPaths(temp_dir))
+            with mock.patch.object(
+                wire_config_module,
+                "_provider_json_request",
+                side_effect=WireConfigError("http_503: upstream unavailable"),
+            ):
+                with self.assertRaises(WireConfigError) as caught:
+                    service.verify_candidate(
+                        provider="Example",
+                        base_url="https://api.example.invalid/v1",
+                        api_key="candidate-secret-not-real",
+                        text_model="gpt-test",
+                    )
+
+            detail = caught.exception.to_dict()
+            self.assertEqual(detail["code"], "upstream_temporarily_unavailable")
+            self.assertEqual(detail["statusCode"], 503)
+            self.assertTrue(detail["retryable"])
+            self.assertNotIn("upstream unavailable", detail["messageZh"])
 
     def test_sync_target_errors_are_redacted_before_returning_to_account_layer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

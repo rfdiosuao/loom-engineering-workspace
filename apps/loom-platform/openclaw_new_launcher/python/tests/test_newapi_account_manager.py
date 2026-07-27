@@ -24,6 +24,8 @@ from core.newapi_account_manager import (
     _choose_model,
     _extract_models,
     _flatten_model_catalog,
+    _model_catalog_snapshot,
+    _model_descriptors_from_catalog,
 )
 import core.newapi_account_manager as account_module
 from core.license_manager import LicenseManager
@@ -210,6 +212,42 @@ class NewApiAccountManagerTests(unittest.TestCase):
         self.assertIn("agnes-image-2.1-flash", classes["image"])
         self.assertIn("agnes-video-v2.0", classes["video"])
         self.assertIn("agnes-2.0-flash", flat)
+
+    def test_catalog_descriptors_preserve_protocol_evidence_aliases_and_group(self) -> None:
+        catalog = {
+            "models": {
+                "gpt-5.6-luna": {
+                    "displayName": "GPT 5.6 Luna",
+                    "aliases": ["gpt-luna", "GPT-5.6-LUNA"],
+                    "protocols": ["responses"],
+                },
+                "gpt-visible-only": {},
+            }
+        }
+
+        descriptors = _model_descriptors_from_catalog(
+            catalog,
+            provider_id="member_gateway",
+        )
+
+        self.assertEqual([item.model_id for item in descriptors], ["gpt-5.6-luna", "gpt-visible-only"])
+        self.assertEqual(descriptors[0].display_name, "GPT 5.6 Luna")
+        self.assertEqual(descriptors[0].protocols, ("responses",))
+        self.assertTrue(descriptors[0].available)
+        self.assertFalse(descriptors[1].available)
+        self.assertEqual(descriptors[1].unavailable_reason, "protocol_not_verified")
+
+        snapshot = _model_catalog_snapshot(
+            catalog,
+            provider_id="member_gateway",
+            effective_group="SVIP",
+            observed_at="2026-07-28T00:00:00Z",
+        )
+        self.assertEqual(snapshot["effectiveGroup"], "SVIP")
+        self.assertEqual(snapshot["observedAt"], "2026-07-28T00:00:00Z")
+        self.assertEqual(snapshot["descriptors"][0]["modelId"], "gpt-5.6-luna")
+        self.assertNotIn("effectiveGroup", snapshot["descriptors"][0])
+        self.assertNotIn("observedAt", snapshot["descriptors"][0])
 
     def test_newapi_user_models_map_response_keeps_multiple_text_models_without_phone_default(self) -> None:
         payload = {
