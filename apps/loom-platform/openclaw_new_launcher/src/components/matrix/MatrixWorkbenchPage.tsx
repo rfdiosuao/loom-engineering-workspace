@@ -22,6 +22,7 @@ import { resolveScreenRequestOutcome } from './screenScheduler';
 import {
   buildDeviceGroups,
   buildDeviceViews,
+  matrixDispatchCompletion,
   matrixDispatchFingerprint,
   normalizeMatrixCampaigns,
   resolveCampaignAtomicEmergencyScope,
@@ -288,10 +289,11 @@ export const MatrixWorkbenchPage = () => {
         const message = String(job.progress?.message || job.message || '后台执行中');
         setActionResult(`${campaignLabel}：${message}`);
       },
-    }).then(() => {
+    }).then((job) => {
       if (latestDispatchJobIdRef.current !== jobId) return;
-      setActionResult(`${campaignLabel} 执行完成`);
-      showToast(`${campaignLabel}执行完成`, 'success');
+      const completion = matrixDispatchCompletion(job.result);
+      setActionResult(`${campaignLabel}：${completion.message}`);
+      showToast(`${campaignLabel}：${completion.message}`, completion.uncertain ? 'info' : 'success');
     }).catch((reason) => {
       if (latestDispatchJobIdRef.current !== jobId) return;
       const message = parseErrorText(reason) || '矩阵任务执行失败，请检查设备连接和任务详情';

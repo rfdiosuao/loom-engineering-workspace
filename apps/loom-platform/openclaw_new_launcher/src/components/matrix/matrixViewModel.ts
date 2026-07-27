@@ -174,6 +174,17 @@ function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
 }
 
+export function matrixDispatchCompletion(result: unknown): { uncertain: boolean; message: string } {
+  const raw = record(result);
+  const uncertain = raw?.outcomeIndeterminate === true || raw?.executionMayContinue === true;
+  return {
+    uncertain,
+    message: uncertain
+      ? '任务已下发，手机端可能仍在执行，状态待确认'
+      : '任务执行完成',
+  };
+}
+
 function normalizeDeviceTask(value: unknown): MatrixDeviceTask | null {
   const raw = record(value);
   if (!raw) return null;

@@ -301,20 +301,51 @@ class MatrixRouteContractTests(unittest.TestCase):
                 )
                 job = _wait_for_job(client, submitted.json()["jobId"])
 
-            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["status"], "succeeded")
             self.assertEqual(len(attempts), 1)
+            self.assertTrue(job["result"]["success"])
+            self.assertTrue(job["result"]["outcomeIndeterminate"])
+            self.assertTrue(job["result"]["executionMayContinue"])
+            self.assertEqual(job["result"]["failedDevices"], [])
             result = job["result"]["results"][0]
             self.assertEqual(result["attempts"], 1)
             self.assertEqual(result["taskId"], "remote-task-42")
             self.assertTrue(result["outcomeIndeterminate"])
+            self.assertTrue(result["executionMayContinue"])
             status = client.get(
                 "/api/matrix/status",
                 params={"campaignId": "campaign_uncertain"},
             ).json()
+            self.assertEqual(status["campaigns"][0]["status"], "running")
             stored_task = status["campaigns"][0]["missions"][0]["deviceTasks"][0]
             self.assertEqual(stored_task.get("taskId"), "remote-task-42")
             self.assertTrue(stored_task.get("outcomeIndeterminate"))
-            self.assertEqual(stored_task.get("status"), "needs_human")
+            self.assertTrue(stored_task.get("executionMayContinue"))
+            self.assertEqual(stored_task.get("status"), "running")
+            device = status["devices"][0]
+            self.assertTrue(device["busy"])
+            self.assertEqual(device["currentTaskId"], stored_task["deviceTaskId"])
+
+    def test_canonical_dispatch_never_reports_a_cancelled_device_as_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            with patch(
+                "api.routes_matrix._submit_phone_job",
+                return_value={"success": False, "cancelled": True, "error": "cancelled"},
+            ):
+                submitted = client.post(
+                    "/api/matrix/dispatch",
+                    json={
+                        "prompt": "read the current screen",
+                        "target": {"deviceIds": ["phone-a"]},
+                    },
+                )
+                job = _wait_for_job(client, submitted.json()["jobId"])
+
+        self.assertEqual(job["status"], "failed")
+        self.assertFalse(job["result"]["success"])
+        self.assertTrue(job["result"]["cancelled"])
 
     def test_matrix_status_can_query_campaign_older_than_default_window(self) -> None:
         from core.phone_matrix import MatrixControlPlane

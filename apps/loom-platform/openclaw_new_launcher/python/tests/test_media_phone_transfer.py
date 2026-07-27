@@ -323,7 +323,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         generate.assert_not_called()
         self.assertEqual(jobs.results, {})
 
-    def test_library_transfer_endpoint_targets_only_requested_phone(self) -> None:
+    def test_library_transfer_endpoint_returns_each_explicit_phone_result(self) -> None:
         jobs = ImmediateJobManager()
 
         async def body(request):
@@ -366,15 +366,21 @@ class MediaPhoneTransferTests(unittest.TestCase):
         ) as run:
             response = TestClient(app).post(
                 f"/api/media/assets/{asset['id']}/transfer",
-                json={"deviceIds": ["phone-b"]},
+                json={"deviceIds": ["phone-b", "phone-a"]},
             )
 
         self.assertEqual(response.status_code, 200)
         result = jobs.results["job-media.transfer"]
-        self.assertEqual(result["succeededDeviceCount"], 1)
-        self.assertEqual(result["deviceResults"][0]["deviceId"], "phone-b")
-        command = run.call_args.args[0]
-        self.assertEqual(command[command.index("--device-id") + 1], "phone-b")
+        self.assertEqual(result["succeededDeviceCount"], 2)
+        self.assertEqual(
+            [item["deviceId"] for item in result["deviceResults"]],
+            ["phone-b", "phone-a"],
+        )
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertCountEqual(
+            [command[command.index("--device-id") + 1] for command in commands],
+            ["phone-b", "phone-a"],
+        )
 
     def test_async_image_failure_returns_safe_structured_result(self) -> None:
         jobs = ImmediateJobManager()
