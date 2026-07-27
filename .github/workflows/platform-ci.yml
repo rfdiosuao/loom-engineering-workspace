@@ -97,6 +97,9 @@ jobs:
         working-directory: apps/loom-platform/openclaw_new_launcher
         run: python -m pip install -r python\requirements.txt pytest
 
+      - name: Run high-risk targeted reliability gates
+        run: .\scripts\invoke-reliability-gates.ps1 -Risk high -Ci
+
       - name: Build bundled Skill library
         run: powershell -NoProfile -ExecutionPolicy Bypass -File apps\loom-platform\scripts\build-luming-skills-library.ps1
 

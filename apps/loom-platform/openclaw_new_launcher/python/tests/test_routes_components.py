@@ -543,6 +543,47 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             self.assertEqual(job["result"]["state"]["status"], "manual_install_required")
             self.assertNotIn("succeeded", "".join(logs).lower())
 
+    def test_real_install_route_returns_structured_probe_failure_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            job_mgr = JobManager(logs.append)
+            app = FastAPI()
+            ctx = _test_context(temp_dir, job_mgr, logs)
+            register_component_routes(app, ctx)
+            register_job_routes(app, ctx)
+            client = TestClient(app)
+            component = SIMULATION_COMPONENTS["claude-code"]
+
+            class FailingInstaller:
+                def install(self, _component, *, simulate=False, job_id=None, on_progress=None):
+                    raise ComponentInstallError(
+                        "安装入口无法执行",
+                        phase="health_checking",
+                        error_code="install_entry_probe_failed",
+                        retryable=True,
+                        preserved_user_data=True,
+                    )
+
+            with (
+                patch(
+                    "api.routes_components._resolve_component_for_action",
+                    return_value=(component, None),
+                ),
+                patch("api.routes_components._component_installer", return_value=FailingInstaller()),
+            ):
+                submitted = client.post(
+                    "/api/components/install",
+                    json={"componentId": component.component_id, "confirmed": True},
+                )
+                job = _wait_for_job(client, submitted.json()["jobId"])
+
+            self.assertEqual(submitted.status_code, 202)
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["result"]["phase"], "health_checking")
+            self.assertEqual(job["result"]["errorCode"], "install_entry_probe_failed")
+            self.assertTrue(job["result"]["retryable"])
+            self.assertTrue(job["result"]["preservedUserData"])
+
     def test_detect_route_passes_force_to_external_probe_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []

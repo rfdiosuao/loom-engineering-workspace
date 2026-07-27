@@ -113,6 +113,25 @@ test('deriveDeviceStatus distinguishes active work, queued work, and idle device
   assert.equal(deriveDeviceStatus(device('idle')), 'online_idle');
 });
 
+test('matrixDispatchCompletion keeps uncertain phone execution visible as pending', () => {
+  const completion = (matrixViewModel as unknown as {
+    matrixDispatchCompletion: (result: unknown) => { uncertain: boolean; message: string };
+  }).matrixDispatchCompletion;
+
+  assert.deepEqual(completion({
+    success: true,
+    outcomeIndeterminate: true,
+    executionMayContinue: true,
+  }), {
+    uncertain: true,
+    message: '任务已下发，手机端可能仍在执行，状态待确认',
+  });
+  assert.deepEqual(completion({ success: true }), {
+    uncertain: false,
+    message: '任务执行完成',
+  });
+});
+
 test('mergeMatrixSnapshot merges partial device updates and keeps untouched devices', () => {
   const current: MatrixStatusSnapshot = {
     schema: 'loom.matrix.v1',
