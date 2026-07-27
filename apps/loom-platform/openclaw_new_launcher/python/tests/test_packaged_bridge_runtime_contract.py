@@ -92,6 +92,25 @@ class PackagedBridgeRuntimeContractTests(unittest.TestCase):
         self.assertIn("No working Python $targetMajorMinor installer found", script)
         self.assertNotIn("& py -3 -m pip", script)
 
+    def test_python_runtime_build_removes_transient_bytecode_before_packaging(self) -> None:
+        script_path = os.path.join(REPO_ROOT, "scripts", "build-python-runtime.ps1")
+        with open(script_path, "r", encoding="utf-8") as handle:
+            script = handle.read()
+
+        self.assertIn("Remove-RuntimeBytecodeCaches", script)
+        self.assertIn('$_.Extension -in @(".pyc", ".pyo")', script)
+        self.assertNotIn('-Include "*.pyc", "*.pyo"', script)
+        self.assertIn('"__pycache__"', script)
+        self.assertIn("& $python -B -c $code", script)
+        self.assertIn(
+            'Remove-RuntimeBytecodeCaches -Dir (Join-Path $projectDir "python")',
+            script,
+        )
+        self.assertLess(
+            script.index("Remove-RuntimeBytecodeCaches -Dir $runtimeDir"),
+            script.index('Write-Host "python-runtime already ready'),
+        )
+
     def test_phone_script_path_resolves_packaged_up_scripts(self) -> None:
         from api.routes_phone import _script_path
         from core.paths import AppPaths

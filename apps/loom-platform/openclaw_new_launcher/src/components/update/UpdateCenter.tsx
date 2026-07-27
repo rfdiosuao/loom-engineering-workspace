@@ -294,10 +294,18 @@ export const UpdateCenter: React.FC = () => {
   const restartAndInstall = async () => {
     if (!installerPath) return;
     setPhase('restarting');
+    setErrorMessage('');
+    setErrorCode('');
+    setRemediation([]);
     try {
       await updateApi.prepareInstall(installerPath);
     } catch (error) {
       setErrorMessage(parseErrorText(error) || '无法启动安全更新接力。');
+      setErrorCode('update_handoff_failed');
+      setRemediation([
+        '当前版本尚未关闭，已下载并验证的安装包仍然保留。',
+        `请重试；若仍失败，请完全退出 ${APP_DISPLAY_NAME} 后运行：${installerPath}`,
+      ]);
       setPhase('failed');
     }
   };

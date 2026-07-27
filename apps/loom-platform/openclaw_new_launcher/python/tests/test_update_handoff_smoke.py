@@ -29,12 +29,14 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
         inject_direct_stop_failure: bool = False,
         health_fail: bool = False,
         health_late_fail: bool = False,
+        expect_ready_marker: bool = False,
     ) -> tuple[str, str, str]:
         temp_dir = tempfile.mkdtemp(prefix="loom-update-中文-")
         self.addCleanup(shutil.rmtree, temp_dir, True)
         install_root = os.path.join(temp_dir, "旧版本 LOOM")
         recovery_root = os.path.join(temp_dir, "外部恢复")
         marker_path = os.path.join(temp_dir, "state", "update-pending.json")
+        ready_path = os.path.join(recovery_root, "handoff-ready.json")
         previous_success = os.path.join(temp_dir, "previous-success")
         other_install_success = os.path.join(temp_dir, "other-install-success")
         os.makedirs(os.path.join(install_root, "data", "nested"), exist_ok=True)
@@ -137,6 +139,8 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
             "-Version",
             "2.1.62",
         ]
+        if expect_ready_marker:
+            handoff_arguments.extend(["-ReadyPath", ready_path])
         handoff_arguments.append("-TestMode")
         if disable_cim_process_scan or fail_cim_process_scan:
             wrapper_path = os.path.join(temp_dir, "handoff-without-cim.ps1")
@@ -247,6 +251,12 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
                     self.assertIn("direct process termination verified", log_text)
             for lingering_process in lingering_processes:
                 lingering_process.wait(timeout=10)
+            if expect_ready_marker:
+                with open(ready_path, "r", encoding="utf-8-sig") as handle:
+                    ready = json.load(handle)
+                self.assertEqual(ready["state"], "ready")
+                self.assertEqual(ready["parentProcessId"], 2147483647)
+                self.assertEqual(ready["version"], "2.1.62")
         finally:
             for lingering_process in lingering_processes:
                 if lingering_process.poll() is None:
@@ -341,6 +351,9 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(recovery_root, "update-success.json")))
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(recovery_root), "previous-success")))
         self.assertTrue(os.path.exists(os.path.join(os.path.dirname(recovery_root), "other-install-success")))
+
+    def test_handoff_publishes_ready_marker_before_installing(self) -> None:
+        self._run_handoff(fail=False, expect_ready_marker=True)
 
     def test_failed_update_restores_data_and_leaves_recovery_manifest(self) -> None:
         marker_path, recovery_root, install_root = self._run_handoff(fail=True)

@@ -440,6 +440,23 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("strip_prefix(&expected_prefix)", source)
         self.assertIn('strip_suffix("-setup.exe")', source)
         self.assertIn('command.arg("-Version").arg(&target_version)', source)
+        self.assertIn('command.arg("-ReadyPath").arg(&ready_path)', source)
+        self.assertIn(
+            "command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)",
+            source,
+        )
+        self.assertIn("if ready_path.is_file()", source)
+        self.assertIn("handoff_process.try_wait()", source)
+        self.assertIn("app_handle.exit(0)", source)
+        self.assertLess(
+            source.index("if ready_path.is_file()"),
+            source.index("shutdown_backend().await"),
+        )
+        self.assertIn("Publish-HandoffReady", handoff)
+        self.assertIn("$installDirectoryArgument", handoff)
+        self.assertIn("-PassThru", handoff)
+        self.assertIn("$setupProcess.WaitForExit()", handoff)
+        self.assertIn("$setupProcess.ExitCode", handoff)
 
     def test_installer_hooks_never_kill_processes_by_global_image_name(self) -> None:
         with open(INSTALLER_HOOKS, "r", encoding="utf-8") as handle:

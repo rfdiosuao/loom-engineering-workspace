@@ -89,6 +89,10 @@ fn acquire_update_handoff_system_mutex() -> Result<UpdateHandoffSystemMutex, Str
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x00000008;
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
 const PRIMARY_PAYLOAD_DIR: &str = "LOOMFiles";
 const LEGACY_PAYLOAD_DIR: &str = "OpenClawFiles";
 const PORTABLE_PAYLOAD_DIRS: [&str; 2] = [PRIMARY_PAYLOAD_DIR, LEGACY_PAYLOAD_DIR];
@@ -1066,7 +1070,6 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
         }
         let target_version = target_version.to_string();
 
-        shutdown_backend().await;
         let install_root = bootstrap::install_root()?;
         let app_exe = std::env::current_exe()
             .map_err(|e| format!("无法定位当前 {BRAND_DISPLAY_NAME}: {e}"))?;
@@ -1083,9 +1086,11 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
             .map_err(|e| format!("无法创建升级恢复目录: {e}"))?;
         let marker_path = update_state_root.join("update-pending.json");
         let script_path = recovery_root.join("update-handoff.ps1");
+        let ready_path = recovery_root.join("handoff-ready.json");
         let script = include_str!("../installer/update-handoff.ps1");
         std::fs::write(&script_path, script.as_bytes())
             .map_err(|e| format!("无法写入升级交接脚本: {e}"))?;
+        let _ = std::fs::remove_file(&ready_path);
 
         let powershell = std::path::PathBuf::from(
             std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into()),
@@ -1108,6 +1113,7 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
         command.arg("-AppExe").arg(&app_exe);
         command.arg("-RecoveryRoot").arg(&recovery_root);
         command.arg("-MarkerPath").arg(&marker_path);
+        command.arg("-ReadyPath").arg(&ready_path);
         command.arg("-ParentPid").arg(std::process::id().to_string());
         command.arg("-Version").arg(&target_version);
         command.arg("-BrandId").arg(BRAND_ID);
@@ -1116,17 +1122,56 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
         if test_mode {
             command.arg("-TestMode");
         }
-        command.creation_flags(CREATE_NO_WINDOW);
         command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        let mut handoff_process = command
             .spawn()
             .map_err(|e| format!("无法启动升级交接进程: {e}"))?;
 
         if !test_mode {
+            let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if ready_path.is_file() {
+                    break;
+                }
+                match handoff_process.try_wait() {
+                    Ok(Some(status)) => {
+                        return Err(format!(
+                            "升级交接进程提前退出（{status}），当前版本未关闭。请导出诊断日志后重试。"
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "无法确认升级交接进程状态: {error}。当前版本未关闭。"
+                        ));
+                    }
+                }
+                if std::time::Instant::now() >= ready_deadline {
+                    let _ = handoff_process.kill();
+                    return Err(
+                        "升级交接进程未在 5 秒内就绪，当前版本未关闭。请检查安全软件或 PowerShell 策略。"
+                            .to_string(),
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
             handoff_guard.reset_on_drop = false;
             std::mem::forget(system_mutex);
+
+            // Start cleanup only after the detached updater confirms it is
+            // alive. The bounded exit prevents a slow Bridge endpoint from
+            // leaving the UI stuck on "restarting".
+            tauri::async_runtime::spawn(async move {
+                shutdown_backend().await;
+            });
             let app_handle = app.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(350));
+                std::thread::sleep(Duration::from_millis(1200));
                 app_handle.exit(0);
             });
         }

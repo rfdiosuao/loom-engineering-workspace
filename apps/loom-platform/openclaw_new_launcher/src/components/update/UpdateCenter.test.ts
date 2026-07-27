@@ -56,3 +56,10 @@ test('signature failures expose the one-time official installer bridge', () => {
     'https://github.com/rfdiosuao/loom-engineering-workspace/releases/latest',
   );
 });
+
+test('handoff failures keep the verified installer available for manual recovery', () => {
+  const source = readFileSync(new URL('./UpdateCenter.tsx', import.meta.url), 'utf8');
+  assert.match(source, /setErrorCode\('update_handoff_failed'\)/);
+  assert.match(source, /当前版本尚未关闭，已下载并验证的安装包仍然保留/);
+  assert.match(source, /完全退出 \$\{APP_DISPLAY_NAME\} 后运行：\$\{installerPath\}/);
+});
