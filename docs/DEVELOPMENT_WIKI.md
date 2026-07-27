@@ -21,6 +21,11 @@
 | 清理与归档 | [Repository Hygiene](runbooks/repository-hygiene.md) |
 | Agent/Matrix 生产设计 | [Production Design](superpowers/specs/2026-07-15-loom-agent-matrix-production-design.md) |
 | 当前完成度与剩余验收 | [2.3.20 Comprehensive Audit](reviews/2026-07-26-loom-2.3.20-comprehensive-audit.md) |
+| `2.4.x` 核心稳定性路线 | [Core Business Stability Plan](superpowers/plans/2026-07-27-loom-core-business-stability-roadmap.md) |
+| Agent 安装与模型基线 | [Agent Install / Model Baseline](reviews/2026-07-27-agent-install-model-baseline.md) |
+| 发行可靠性门禁 | [Agent Reliability Release Gates](runbooks/agent-reliability-release-gates.md) |
+| 发布检查清单 | [Release Checklist](releases/RELEASE_CHECKLIST.md) |
+| 历史 worktree 复核 | [Worktree Retention Report](reviews/2026-07-28-worktree-retention-report.md) |
 | 单仓库迁移 | [Monorepo Cutover](migration/MONOREPO_CUTOVER_20260722.md) |
 
 ## 日常命令
@@ -28,6 +33,8 @@
 ```powershell
 .\scripts\status.ps1
 .\scripts\sync.ps1
+.\scripts\invoke-reliability-gates.ps1 -List
+.\scripts\invoke-reliability-gates.ps1 -Risk high -Ci
 .\scripts\verify.ps1
 ```
 
