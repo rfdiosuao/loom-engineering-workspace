@@ -25,6 +25,12 @@ from core.agent_session_retention import (
     assert_agent_sessions_preserved,
     capture_agent_session_inventory,
 )
+from core.model_catalog import (
+    build_model_descriptors,
+    classify_model_catalog_error,
+    model_descriptor_to_dict,
+    resolve_model_descriptor,
+)
 from core.openclaw_model_sync import sync_openclaw_models_from_gateway_profile
 from core.paths import AppPaths
 from core.secret_store import protect_secret, unprotect_secret
@@ -106,6 +112,18 @@ SECRET_TEXT_PATTERNS = (
 
 class WireConfigError(RuntimeError):
     """Raised when runtime wire sync cannot be completed safely."""
+
+    def __init__(self, message: str, *, detail: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.detail = detail
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.detail or {
+            "code": "wire_config_error",
+            "messageZh": "模型配置暂时无法完成，请检查配置后重试。",
+            "retryable": False,
+            "statusCode": None,
+        }
 
 
 class WireService:
@@ -319,6 +337,7 @@ class WireService:
         if not base.endswith("/v1"):
             candidates.append(f"{base}/v1")
         errors: list[str] = []
+        error_details: list[dict[str, Any]] = []
         for candidate in candidates:
             try:
                 payload = _provider_json_request(
@@ -328,9 +347,20 @@ class WireService:
                 )
                 model_ids = _extract_remote_model_ids(payload)
                 if not model_ids:
-                    raise WireConfigError("provider_models_empty")
-                if text_model not in model_ids:
-                    raise WireConfigError("selected_model_not_listed")
+                    raise WireConfigError(
+                        "provider_models_empty",
+                        detail=classify_model_catalog_error("provider_models_empty"),
+                    )
+                descriptors = build_model_descriptors(
+                    model_ids,
+                    provider_id=provider,
+                )
+                selected_descriptor = resolve_model_descriptor(descriptors, text_model)
+                if selected_descriptor is None:
+                    raise WireConfigError(
+                        "selected_model_not_listed",
+                        detail=classify_model_catalog_error("selected_model_not_listed"),
+                    )
                 return {
                     "ok": True,
                     "provider": provider,
@@ -338,12 +368,26 @@ class WireService:
                     "model": text_model,
                     "modelsVerified": True,
                     "availableModelCount": len(model_ids),
+                    "catalogVisible": True,
+                    "protocolVerified": False,
+                    "modelAvailable": False,
+                    "modelDescriptor": model_descriptor_to_dict(selected_descriptor),
                     "verifiedAt": _iso_now(),
                 }
             except WireConfigError as exc:
                 errors.append(f"{candidate}/models: {exc}")
+                error_details.append(
+                    exc.detail or classify_model_catalog_error(str(exc))
+                )
+        selected_error = next(
+            (item for item in error_details if item.get("code") == "selected_model_not_listed"),
+            None,
+        )
+        if selected_error is not None:
+            raise WireConfigError("selected_model_not_listed", detail=selected_error)
         safe = _redact_secret_text("; ".join(errors[-2:]))
-        raise WireConfigError(f"provider_models_probe_failed: {safe}")
+        detail = error_details[-1] if error_details else classify_model_catalog_error(safe)
+        raise WireConfigError(f"provider_models_probe_failed: {safe}", detail=detail)
 
     def rollback(self) -> dict[str, Any]:
         previous = _read_json_if_exists(self.paths.wire_last_good)

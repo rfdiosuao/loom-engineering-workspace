@@ -18,7 +18,8 @@ from fastapi.testclient import TestClient
 
 from api.routes_wire import register_wire_routes
 from core.paths import AppPaths
-from core.wire_config import WireService
+from core.model_catalog import classify_model_catalog_error
+from core.wire_config import WireConfigError, WireService
 
 
 def session_snapshot(model: str = "qwen3.7-plus") -> dict:
@@ -122,8 +123,39 @@ class WireRouteTests(unittest.TestCase):
             self.assertEqual(response.json()["syncResults"], [])
             self.assertFalse(os.path.exists(os.path.join(temp_dir, "data", ".codex", "config.toml")))
 
+    def test_wire_verify_returns_structured_localized_catalog_error(self) -> None:
+        class FailingWireService:
+            def verify_candidate(self, **_kwargs):
+                raise WireConfigError(
+                    "provider_models_probe_failed: http_524",
+                    detail=classify_model_catalog_error("http_524"),
+                )
 
-def _app(base_path: str, session: dict | None) -> FastAPI:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = TestClient(_app(temp_dir, session=None, wire_service=FailingWireService()))
+            response = client.post(
+                "/api/wire/verify",
+                json={
+                    "provider": "Example",
+                    "baseUrl": "https://api.example.invalid/v1",
+                    "apiKey": "sk-route-test-not-real",
+                    "textModel": "gpt-test",
+                },
+            )
+
+            self.assertEqual(response.status_code, 400)
+            payload = response.json()
+            detail = payload["errorDetail"]
+            self.assertEqual(detail["code"], "upstream_response_timeout")
+            self.assertEqual(detail["statusCode"], 524)
+            self.assertTrue(detail["retryable"])
+            self.assertTrue(detail["messageZh"])
+            self.assertEqual(payload["errorCode"], "upstream_response_timeout")
+            self.assertEqual(payload["error"], detail["messageZh"])
+            self.assertNotIn("provider_models_probe_failed", repr(payload))
+
+
+def _app(base_path: str, session: dict | None, wire_service=None) -> FastAPI:
     app = FastAPI()
     paths = AppPaths(base_path)
     app.state.session = session
@@ -146,7 +178,7 @@ def _app(base_path: str, session: dict | None) -> FastAPI:
         body=body,
         fastapi_json=fastapi_json,
         get_newapi_account_mgr=lambda: manager,
-        get_wire_svc=lambda: WireService(paths),
+        get_wire_svc=lambda: wire_service or WireService(paths),
     )
     register_wire_routes(app, ctx)
     return app

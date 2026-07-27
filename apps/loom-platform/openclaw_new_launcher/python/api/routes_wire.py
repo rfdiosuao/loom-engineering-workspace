@@ -7,6 +7,17 @@ from fastapi import Request
 from core.wire_config import WireConfigError
 
 
+def _wire_error_payload(exc: WireConfigError, **extra):
+    detail = exc.to_dict()
+    payload = {
+        "error": detail["messageZh"] if exc.detail else str(exc),
+        "errorCode": detail["code"],
+        "errorDetail": detail,
+    }
+    payload.update(extra)
+    return payload
+
+
 def register_wire_routes(app, ctx) -> None:
     @app.api_route("/api/wire/current", methods=["GET", "POST"])
     async def wire_current(request: Request):
@@ -44,7 +55,10 @@ def register_wire_routes(app, ctx) -> None:
                 **target_args,
             ))
         except WireConfigError as exc:
-            return ctx.fastapi_json({"error": str(exc), "wire": ctx.get_wire_svc().current_public()}, 400)
+            return ctx.fastapi_json(_wire_error_payload(
+                exc,
+                wire=ctx.get_wire_svc().current_public(),
+            ), 400)
 
     @app.post("/api/wire/verify")
     async def wire_verify(request: Request):
@@ -61,7 +75,7 @@ def register_wire_routes(app, ctx) -> None:
             try:
                 return ctx.fastapi_json(ctx.get_wire_svc().verify_candidate(**candidate_fields))
             except WireConfigError as exc:
-                return ctx.fastapi_json({"error": str(exc)}, 400)
+                return ctx.fastapi_json(_wire_error_payload(exc), 400)
         return ctx.fastapi_json(ctx.get_wire_svc().verify())
 
     @app.post("/api/wire/rollback")
@@ -71,4 +85,7 @@ def register_wire_routes(app, ctx) -> None:
         try:
             return ctx.fastapi_json(ctx.get_wire_svc().rollback())
         except WireConfigError as exc:
-            return ctx.fastapi_json({"error": str(exc), "wire": ctx.get_wire_svc().current_public()}, 400)
+            return ctx.fastapi_json(_wire_error_payload(
+                exc,
+                wire=ctx.get_wire_svc().current_public(),
+            ), 400)

@@ -15,6 +15,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.license_manager import LicenseManager
+from core.model_catalog import (
+    ModelDescriptor,
+    build_model_descriptors,
+    model_descriptor_to_dict,
+)
 from core.openclaw_model_sync import sync_openclaw_models
 from core.paths import AppPaths
 from core.secret_store import protect_secret, unprotect_secret
@@ -608,6 +613,62 @@ def _flatten_model_catalog(catalog: Any) -> list[str]:
     classes = _classified_models_from_catalog(catalog)
     phone = _phone_model_ids_from_catalog(catalog)
     return _merge_model_ids(classes["text"], classes["image"], classes["video"], phone)
+
+
+def _model_descriptors_from_catalog(
+    catalog: Any,
+    *,
+    provider_id: str,
+) -> list[ModelDescriptor]:
+    entries = _catalog_descriptor_entries(catalog)
+    if not entries:
+        entries = _flatten_model_catalog(catalog)
+    return build_model_descriptors(
+        entries,
+        provider_id=provider_id,
+    )
+
+
+def _model_catalog_snapshot(
+    catalog: Any,
+    *,
+    provider_id: str,
+    effective_group: str = "",
+    observed_at: str = "",
+) -> dict[str, Any]:
+    descriptors = _model_descriptors_from_catalog(catalog, provider_id=provider_id)
+    return {
+        "descriptors": [model_descriptor_to_dict(item) for item in descriptors],
+        "effectiveGroup": _pick_text(effective_group),
+        "observedAt": _pick_text(observed_at) or _iso(_utc_now()),
+    }
+
+
+def _catalog_descriptor_entries(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        result: list[Any] = []
+        for item in value:
+            result.extend(_catalog_descriptor_entries(item))
+        return result
+    if not isinstance(value, dict):
+        model_id = _pick_text(value)
+        return [model_id] if model_id else []
+
+    direct_id = _model_id_from_item(value)
+    if direct_id:
+        return [{**value, "id": direct_id}]
+
+    result: list[Any] = []
+    for key, nested in value.items():
+        if _looks_like_model_map_entry(key, nested):
+            if isinstance(nested, dict):
+                result.append({**nested, "id": _pick_text(_model_id_from_item(nested), key)})
+            else:
+                result.append({"id": str(key)})
+            continue
+        if key in MODEL_CONTAINER_KEYS:
+            result.extend(_catalog_descriptor_entries(nested))
+    return result
 
 
 def _phone_model_ids_from_catalog(catalog: Any) -> list[str]:
@@ -1365,6 +1426,11 @@ class NewApiAccountManager:
             "videoDraftModel": video_model,
             "models": flat_models,
             "classifiedModels": classified,
+            "modelCatalog": _model_catalog_snapshot(
+                models_catalog,
+                provider_id="member_gateway",
+                effective_group=plan,
+            ),
         })
         gateway.pop("videoModel", None)
         session["gateway"] = gateway
@@ -1692,6 +1758,13 @@ class NewApiAccountManager:
         image_model = classified["image"][0] if classified["image"] else ""
         video_model = classified["video"][0] if classified["video"] else ""
         now = _utc_now()
+        plan = _pick_text((self_data or {}).get("group") if isinstance(self_data, dict) else "", "default")
+        model_catalog = _model_catalog_snapshot(
+            models,
+            provider_id="member_gateway",
+            effective_group=plan,
+            observed_at=_iso(now),
+        )
         cookies = "; ".join(f"{cookie.name}={cookie.value}" for cookie in cookie_jar)
         usage = {}
         if isinstance(self_data, dict):
@@ -1704,7 +1777,7 @@ class NewApiAccountManager:
             "source": ACCOUNT_SOURCE,
             "memberId": f"newapi:{user_id}",
             "memberName": account_name,
-            "plan": _pick_text((self_data or {}).get("group") if isinstance(self_data, dict) else "", "default"),
+            "plan": plan,
             "status": "active",
             "expiresAt": None,
             "leaseExpiresAt": _iso(now + timedelta(days=SESSION_GRACE_DAYS)),
@@ -1750,6 +1823,7 @@ class NewApiAccountManager:
                 "videoDraftModel": video_model,
                 "models": models,
                 "classifiedModels": classified,
+                "modelCatalog": model_catalog,
             },
             "newApi": {
                 "baseUrl": base_url,
@@ -2055,6 +2129,12 @@ class NewApiAccountManager:
             "videoDraftModel": session["gatewayVideoDraftModel"],
             "models": models,
             "classifiedModels": classified,
+            "modelCatalog": _model_catalog_snapshot(
+                models,
+                provider_id="member_gateway",
+                effective_group=_pick_text(session.get("plan"), token_meta.get("group")),
+                observed_at=_iso(now),
+            ),
         })
         session["gateway"] = gateway
 
@@ -2155,6 +2235,12 @@ class NewApiAccountManager:
         gateway.update({
             "models": models,
             "classifiedModels": classified,
+            "modelCatalog": _model_catalog_snapshot(
+                models,
+                provider_id="member_gateway",
+                effective_group=_pick_text(session.get("plan")),
+                observed_at=_iso(now),
+            ),
             "defaultModel": session["gatewayDefaultModel"],
             "imageModel": session["gatewayImageModel"],
             "videoDraftModel": session["gatewayVideoDraftModel"],
