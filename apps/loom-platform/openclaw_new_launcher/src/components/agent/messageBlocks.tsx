@@ -163,8 +163,11 @@ export interface ToolExecutionGroupSummary {
 export function compactToolExecutionBlocks(blocks: AgentMessageBlock[]): AgentMessageBlock[] {
   const compacted = new Map<string, AgentMessageBlock>();
   blocks.forEach((block, index) => {
+    const toolCallId = text(block.data.toolCallId).trim();
     const capability = text(block.data.capability ?? block.data.tool ?? block.data.name).trim().toLowerCase();
-    const identity = capability || text(block.data.toolCallId, `tool-${index}`);
+    const fallbackIdentity = capability ? `capability:${capability}` : `event:${index}`;
+    const identity = toolCallId ? `tool-call:${toolCallId}` : fallbackIdentity;
+    const countsFallbackEvents = !toolCallId && Boolean(capability);
     const previous = compacted.get(identity);
     if (!previous) {
       compacted.set(identity, { ...block, data: { ...block.data, occurrences: 1 } });
@@ -175,7 +178,9 @@ export function compactToolExecutionBlocks(blocks: AgentMessageBlock[]): AgentMe
       data: {
         ...previous.data,
         ...block.data,
-        occurrences: Number(previous.data.occurrences || 1) + 1,
+        occurrences: countsFallbackEvents
+          ? Number(previous.data.occurrences || 1) + 1
+          : 1,
       },
     });
   });

@@ -15,6 +15,7 @@ import {
 } from './agentViewModel.ts';
 import * as agentViewModel from './agentViewModel.ts';
 import {
+  compactToolExecutionBlocks,
   MessageBlockView,
   ToolExecutionGroup,
   toolExecutionGroupSummary,
@@ -1068,17 +1069,50 @@ test('tool execution group is compact after success and stays expanded with inli
   assert.equal((failed.match(/data-agent-tool-action/g) || []).length, 1);
 });
 
-test('repeated calls to the same capability collapse into one visible execution row', () => {
+test('one toolCallId lifecycle keeps the latest state without counting lifecycle events as calls', () => {
+  const blocks = compactToolExecutionBlocks([
+    { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', capability: 'loom.cli.phone.status', status: 'queued' } },
+    { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', capability: 'loom.cli.phone.status', status: 'completed' } },
+  ]);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.data.status, 'completed');
+  assert.equal(blocks[0]?.data.occurrences, 1);
+
   const markup = renderToStaticMarkup(React.createElement(ToolExecutionGroup, {
-    blocks: [
-      { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', capability: 'loom.cli.phone.status', status: 'completed' } },
-      { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_2', capability: 'loom.cli.phone.status', status: 'completed' } },
-    ],
+    blocks,
     run: { schema: 'loom.agent.run.v1', runId: 'run_1', sessionId: SESSION_ID, status: 'completed', campaignIds: [] },
   }));
-
   assert.equal((markup.match(/data-agent-tool-action/g) || []).length, 1);
-  assert.match(markup, /2 次/);
+  assert.doesNotMatch(markup, /2 次/);
+});
+
+test('different toolCallIds using one capability remain separate execution rows', () => {
+  const blocks = compactToolExecutionBlocks([
+    { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', capability: 'loom.cli.phone.status', status: 'completed' } },
+    { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_2', capability: 'loom.cli.phone.status', status: 'completed' } },
+  ]);
+
+  assert.equal(blocks.length, 2);
+  assert.deepEqual(blocks.map((block) => block.data.toolCallId), ['tool_1', 'tool_2']);
+
+  const markup = renderToStaticMarkup(React.createElement(ToolExecutionGroup, {
+    blocks,
+    run: { schema: 'loom.agent.run.v1', runId: 'run_1', sessionId: SESSION_ID, status: 'completed', campaignIds: [] },
+  }));
+  assert.equal((markup.match(/data-agent-tool-action/g) || []).length, 2);
+  assert.doesNotMatch(markup, /2 次/);
+});
+
+test('tool events without toolCallId may use capability as a safe compacting fallback', () => {
+  const blocks = compactToolExecutionBlocks([
+    { type: 'tool', data: { runId: 'run_1', capability: 'loom.cli.phone.status', status: 'queued' } },
+    { type: 'tool', data: { runId: 'run_1', capability: 'loom.cli.phone.status', status: 'completed' } },
+  ]);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.data.status, 'completed');
+  assert.equal(blocks[0]?.data.occurrences, 2);
 });
 
 test('terminal tool status never regresses to a later nonterminal update', () => {
