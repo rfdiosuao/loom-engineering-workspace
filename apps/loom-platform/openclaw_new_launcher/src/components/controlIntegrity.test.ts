@@ -1,13 +1,14 @@
 import 'tsx/esm';
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { CapabilityCenterPage } from './capabilities/CapabilityCenterPage.tsx';
 import { IMAGE_RATIO_PRESETS, validateReferenceFile } from './creative/mediaPresets.ts';
+import { DARK_THEME, LIGHT_THEME } from '../theme/default.ts';
 import {
   configurationCheckSucceeded,
   resolveDashboardJourneyState,
@@ -24,6 +25,57 @@ function sourceBlock(source: string, start: string, end: string): string {
   assert.notEqual(endIndex, -1, `missing source block end: ${end}`);
   return source.slice(startIndex, endIndex);
 }
+
+function recursiveFiles(directory: URL): URL[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const child = new URL(entry.name, directory.href.endsWith('/') ? directory : new URL(`${directory.href}/`));
+    return entry.isDirectory() ? recursiveFiles(child) : [child];
+  });
+}
+
+test('semantic theme contract covers light and dark operational states', () => {
+  const requiredColors = [
+    'info', 'info_soft', 'info_border', 'info_ink',
+    'success', 'success_soft', 'success_border', 'success_ink',
+    'warning', 'warning_soft', 'warning_border', 'warning_ink',
+    'danger', 'danger_soft', 'danger_border', 'danger_ink',
+    'focus', 'focus_soft', 'selected', 'selected_hover', 'selected_ink',
+    'disabled', 'disabled_text', 'overlay',
+  ] as const;
+  const defaultThemeSource = readSource('../theme/default.ts');
+
+  for (const key of requiredColors) {
+    assert.ok(LIGHT_THEME.colors[key], `light theme missing ${key}`);
+    assert.ok(DARK_THEME.colors[key], `dark theme missing ${key}`);
+    assert.match(defaultThemeSource, new RegExp(`${key}:\\s*'--color-`), `CSS variable map missing ${key}`);
+  }
+  for (const duration of ['150ms', '200ms', '300ms']) {
+    assert.match(defaultThemeSource, new RegExp(`['"]${duration}['"]`));
+  }
+  assert.deepEqual(Object.keys(LIGHT_THEME.colors).sort(), Object.keys(DARK_THEME.colors).sort());
+  assert.doesNotMatch(readSource('../styles/theme.css'), /#[0-9a-f]{3,8}\b/i);
+});
+
+test('React presentation modules do not introduce private business hex colors', () => {
+  const componentsRoot = new URL('./', import.meta.url);
+  const allowed = new Set([
+    'brand/LoomBrand.tsx',
+    'phone/PhoneDemoPage.tsx',
+  ]);
+  const violations = recursiveFiles(componentsRoot)
+    .filter((file) => file.pathname.endsWith('.tsx'))
+    .filter((file) => {
+      const relative = decodeURIComponent(file.pathname.split('/components/')[1] || '').replace(/\//g, '\\');
+      return !allowed.has(relative.replace(/\\/g, '/'));
+    })
+    .flatMap((file) => {
+      const source = readFileSync(file, 'utf8');
+      const relative = decodeURIComponent(file.pathname.split('/components/')[1] || file.pathname);
+      return [...source.matchAll(/#[0-9a-f]{3,8}\b/gi)].map((match) => `${relative}:${match[0]}`);
+    });
+
+  assert.deepEqual(violations, []);
+});
 
 test('unavailable capabilities render as non-interactive status rows', () => {
   const markup = renderToStaticMarkup(React.createElement(CapabilityCenterPage));

@@ -92,13 +92,15 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
       {licenseGate.status === 'offline_grace' ? (
         <div
           data-license-offline-banner
-          className="flex min-h-10 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#c7a75d] bg-[#fff5d8] px-4 py-2 text-[12px] font-bold text-[#6a4d0b]"
+          className="flex min-h-10 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-status-warning bg-status-warning-soft px-4 py-2 text-[12px] font-bold text-status-warning-ink"
+          role="status"
+          aria-live="polite"
         >
           <span>本机签名授权有效，授权服务暂时离线；手机矩阵可继续使用。</span>
           <button
             type="button"
             onClick={() => void refreshAllAccess()}
-            className="h-8 border border-[#9b7927] bg-white px-3 text-[11px] font-black text-[#6a4d0b] hover:bg-[#fffaf0]"
+            className="h-8 rounded-[6px] border border-status-warning bg-surface px-3 text-[11px] font-black text-status-warning-ink hover:bg-hover"
           >
             重新检查
           </button>

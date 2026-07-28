@@ -26,7 +26,7 @@ const WindowButton: React.FC<{
     }}
     className={`flex h-10 w-12 items-center justify-center rounded-none transition-colors ${
       danger
-        ? 'text-white/60 hover:bg-[#E81123] hover:text-white'
+        ? 'text-white/60 hover:bg-status-danger hover:text-white'
         : 'text-white/58 hover:bg-white/[0.07] hover:text-white'
     }`}
   >
@@ -64,9 +64,9 @@ export const WindowTitlebar: React.FC = () => {
       data-window-drag-above-overlays
       data-tauri-drag-region
       onDoubleClick={toggleMaximize}
-      className="relative z-[100000] flex h-10 shrink-0 items-stretch border-b border-[#12343D]/75 bg-app-sidebar text-white"
+      className="relative z-[100000] flex h-10 shrink-0 items-stretch border-b border-white/10 bg-app-sidebar text-white"
     >
-      <div data-tauri-drag-region className="flex w-[292px] shrink-0 items-center border-r border-[#12343D]/75 px-3 text-white">
+      <div data-tauri-drag-region className="flex w-[292px] shrink-0 items-center border-r border-white/10 px-3 text-white">
         <LoomTitleLockup wordmarkTone="light" />
       </div>
 

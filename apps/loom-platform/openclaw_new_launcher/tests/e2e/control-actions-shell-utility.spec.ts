@@ -121,9 +121,9 @@ test('dashboard unlocks workspaces only after the current Bridge configuration c
   await expectToast(page, '当前配置检查通过，可以进入智能体或创作。');
   await expect(agentEntry).toBeEnabled();
   await expect(creativeEntry).toBeEnabled();
-  await expect(agentEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
+  await expect(agentEntry).toHaveCSS('background-color', 'rgb(11, 90, 72)');
   await expect(agentEntry).toHaveCSS('color', 'rgb(255, 255, 255)');
-  await expect(creativeEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
+  await expect(creativeEntry).toHaveCSS('background-color', 'rgb(11, 90, 72)');
   await expect(creativeEntry).toHaveCSS('color', 'rgb(255, 255, 255)');
   await page.waitForTimeout(250);
   await page.screenshot({ path: testInfo.outputPath('dashboard-journey-verified.png') });

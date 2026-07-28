@@ -3,11 +3,63 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer utilities {
+  .bg-info { background-color: var(--color-info); }
+  .bg-info-soft { background-color: var(--color-info-soft); }
+  .border-info { border-color: var(--color-info-border); }
+  .text-info { color: var(--color-info); }
+  .text-info-ink { color: var(--color-info-ink); }
+
+  .bg-status-success-soft { background-color: var(--color-success-soft); }
+  .border-status-success { border-color: var(--color-success-border); }
+  .text-status-success-ink { color: var(--color-success-ink); }
+
+  .bg-status-warning-soft { background-color: var(--color-warning-soft); }
+  .border-status-warning { border-color: var(--color-warning-border); }
+  .text-status-warning-ink { color: var(--color-warning-ink); }
+
+  .bg-status-danger-soft { background-color: var(--color-danger-soft); }
+  .border-status-danger { border-color: var(--color-danger-border); }
+  .text-status-danger-ink { color: var(--color-danger-ink); }
+
+  .bg-selected { background-color: var(--color-selected); }
+  .text-selected-ink { color: var(--color-selected-ink); }
+  .bg-disabled { background-color: var(--color-disabled); }
+  .text-disabled { color: var(--color-disabled-text); }
+  .bg-overlay { background-color: var(--color-overlay); }
+  .border-focus { border-color: var(--color-focus); }
+  .ring-focus { --tw-ring-color: var(--color-focus); }
+  .shadow-elevation-low { box-shadow: var(--elevation-low); }
+  .shadow-elevation-medium { box-shadow: var(--elevation-medium); }
+  .shadow-elevation-high { box-shadow: var(--elevation-high); }
+  .duration-motion-fast { transition-duration: var(--motion-fast); }
+  .duration-motion-standard { transition-duration: var(--motion-standard); }
+  .duration-motion-deliberate { transition-duration: var(--motion-deliberate); }
+}
+
 html, body, #root {
   height: 100%;
   margin: 0;
   padding: 0;
   font-family: var(--font-display), system-ui, sans-serif;
+}
+
+button,
+a,
+input,
+textarea,
+select,
+summary,
+[role='button'] {
+  touch-action: manipulation;
+}
+
+button,
+a,
+summary,
+[role='button'] {
+  transition-duration: var(--motion-standard);
+  transition-timing-function: var(--ease-out);
 }
 
 ::-webkit-scrollbar {
@@ -188,7 +240,7 @@ html, body, #root {
 }
 
 main > div {
-  animation: page-enter 140ms ease-out both;
+  animation: page-enter var(--motion-fast) var(--ease-out) both;
 }
 
 main > div[data-phone-matrix-access-granted] {
@@ -241,7 +293,7 @@ main > div[data-phone-matrix-access-granted] {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: #37e6d0;
+  background: var(--color-terminal-text);
   animation: loom-dot-rise 920ms ease-in-out infinite;
 }
 
@@ -296,10 +348,10 @@ main > div[data-phone-matrix-access-granted] {
   height: 48px;
   width: 48px;
   border-radius: 999px;
-  border: 3px solid rgba(11, 74, 62, 0.16);
-  border-top-color: #0B4A3E;
+  border: 3px solid var(--color-accent-soft);
+  border-top-color: var(--color-accent);
   animation: loom-busy-spin 860ms linear infinite;
-  box-shadow: 0 0 0 7px rgba(11, 74, 62, 0.06), 0 14px 36px rgba(11, 74, 62, 0.16);
+  box-shadow: var(--elevation-medium);
 }
 
 .loom-busy-ring::after {
@@ -307,12 +359,12 @@ main > div[data-phone-matrix-access-granted] {
   position: absolute;
   inset: 10px;
   border-radius: inherit;
-  border: 2px solid rgba(11, 74, 62, 0.14);
-  border-left-color: #0B4A3E;
+  border: 2px solid var(--color-accent-soft);
+  border-left-color: var(--color-accent);
 }
 
 .toast-enter {
-  animation: toast-enter 200ms ease-out both;
+  animation: toast-enter var(--motion-standard) var(--ease-out) both;
 }
 
 .loom-agent-mark__asset {
@@ -351,7 +403,7 @@ main > div[data-phone-matrix-access-granted] {
 }
 
 .agent-message-enter {
-  animation: agent-message-enter 180ms ease-out both;
+  animation: agent-message-enter var(--motion-standard) var(--ease-out) both;
 }
 
 .agent-message-status-dot {
@@ -366,18 +418,20 @@ main > div[data-phone-matrix-access-granted] {
 .agent-tool-chevron,
 .agent-tool-item {
   transition:
-    background-color 180ms ease,
-    border-color 180ms ease,
-    color 180ms ease,
-    transform 180ms ease,
-    opacity 180ms ease;
+    background-color var(--motion-standard) var(--ease-out),
+    border-color var(--motion-standard) var(--ease-out),
+    color var(--motion-standard) var(--ease-out),
+    transform var(--motion-standard) var(--ease-out),
+    opacity var(--motion-standard) var(--ease-out);
 }
 
 .agent-tool-group__body {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
-  transition: grid-template-rows 200ms ease, opacity 160ms ease;
+  transition:
+    grid-template-rows var(--motion-standard) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
 }
 
 .agent-tool-group__body[data-open='true'] {
@@ -386,6 +440,15 @@ main > div[data-phone-matrix-access-granted] {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
   .loom-agent-mark--executing .loom-agent-mark__asset,
   .loom-agent-waveform > span,
   .agent-message-enter,
@@ -409,21 +472,19 @@ main > div[data-phone-matrix-access-granted] {
 }
 
 .loom-white-page {
-  background:
-    linear-gradient(180deg, rgba(255, 252, 244, 0.88), rgba(246, 243, 234, 0.96)),
-    #F6F3EA;
-  color: #111815;
+  background: var(--color-app-bg);
+  color: var(--color-text);
 }
 
 .loom-white-page header {
-  border-color: rgba(227, 222, 210, 0.92);
+  border-color: var(--color-border);
 }
 
 .loom-panel {
   border-radius: 8px;
-  border-color: rgba(227, 222, 210, 0.94);
-  background: rgba(255, 252, 244, 0.72);
-  box-shadow: 0 18px 54px rgba(17, 24, 21, 0.055);
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  box-shadow: var(--elevation-low);
 }
 
 .loom-installer-shell > div {
@@ -435,7 +496,7 @@ main > div[data-phone-matrix-access-granted] {
 }
 
 .loom-installer-stage > section {
-  background: linear-gradient(180deg, rgba(255, 252, 244, 0.78), rgba(246, 243, 234, 0.42));
+  background: var(--color-surface);
 }
 
 .loom-installer-stage button,
@@ -444,9 +505,7 @@ main > div[data-phone-matrix-access-granted] {
 }
 
 .loom-account-main {
-  background:
-    radial-gradient(circle at 82% 8%, rgba(11, 107, 91, 0.055), transparent 24rem),
-    #F6F3EA;
+  background: var(--color-app-bg);
 }
 
 .loom-account-layout {
@@ -507,17 +566,15 @@ main > div[data-phone-matrix-access-granted] {
 
 .loom-subscription-frame {
   border: 0;
-  background: #FFFCF4;
+  background: var(--color-surface);
 }
 
 .loom-matrix-shell {
-  background:
-    linear-gradient(180deg, rgba(9, 24, 31, 0.96), rgba(7, 19, 27, 0.98)),
-    #07131B;
+  background: var(--color-surface-deeper);
 }
 
 .loom-matrix-shell header {
-  background: rgba(7, 19, 27, 0.88);
+  background: var(--color-surface-deeper);
   backdrop-filter: none;
 }
 
@@ -529,15 +586,15 @@ main > div[data-phone-matrix-access-granted] {
 .loom-matrix-workers,
 .loom-matrix-stream,
 .loom-matrix-shell section[data-matrix-phone-app-download] {
-  border-color: rgba(148, 163, 184, 0.16);
-  background: rgba(10, 27, 38, 0.72);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-deep);
+  box-shadow: var(--elevation-low);
 }
 
 .loom-matrix-composer select,
 .loom-matrix-composer textarea {
-  border-color: rgba(148, 163, 184, 0.18);
-  background: rgba(5, 15, 22, 0.72);
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-deeper);
 }
 
 .matrix-live-feed-row {
@@ -566,8 +623,8 @@ main > div[data-phone-matrix-access-granted] {
 }
 
 ::selection {
-  background: rgba(11, 74, 62, 0.22);
-  color: var(--color-text);
+  background: var(--color-selected);
+  color: var(--color-selected-ink);
 }
 
 input::placeholder,
@@ -577,7 +634,7 @@ textarea::placeholder {
 }
 
 *:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -599,7 +656,7 @@ textarea::placeholder {
 }
 
 .update-center-enter {
-  animation: update-center-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: update-center-enter var(--motion-standard) var(--ease-out) both;
 }
 
 .update-progress-pulse {

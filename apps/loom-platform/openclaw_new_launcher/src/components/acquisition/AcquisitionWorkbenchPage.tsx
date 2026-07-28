@@ -285,23 +285,23 @@ export const AcquisitionWorkbenchPage = () => {
   const latestLog = snapshot.logs[snapshot.logs.length - 1] || null;
 
   return (
-    <div data-acquisition-workbench data-ai-executor-console className="h-full overflow-auto overflow-x-hidden bg-[#F5F7FA] text-[#17202A]">
+    <div data-acquisition-workbench data-ai-executor-console className="h-full overflow-auto overflow-x-hidden bg-app-bg text-text">
       <div className="mx-auto flex min-h-full w-full max-w-[1180px] flex-col gap-4 px-4 py-4">
         <section
           data-acquisition-overview
           data-acquisition-matrix-overview
-          className="rounded-[8px] border border-[#C8D6D9] bg-white p-4 shadow-sm"
+          className="rounded-[8px] border border-border bg-surface p-4 shadow-elevation-low"
         >
-          <div className="rounded-[8px] border border-[#10464B] bg-[#062A2C] p-4 text-white shadow-[0_18px_50px_rgba(6,42,44,0.16)]">
+          <div className="rounded-[8px] border border-border-strong bg-surface-deep p-4 text-white shadow-elevation-medium">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-[11px] font-black tracking-[0.18em] text-[#8AE3D1]">获客总览</div>
+                <div className="text-[11px] font-black tracking-[0.18em] text-white/75">获客总览</div>
                 <h1 className="mt-2 text-[28px] font-black leading-9 sm:text-[34px] sm:leading-10">多台手机矩阵获客总控</h1>
-                <p className="mt-2 max-w-[820px] break-words text-sm font-semibold leading-6 text-[#CFE9E5]">
+                <p className="mt-2 max-w-[820px] break-words text-sm font-semibold leading-6 text-white/75">
                   把手机 Agent、线索判断、AI 跟进草稿、人工确认和飞书沉淀放在同一个执行面。数字来自本机真实状态，没有演示流。
                 </p>
               </div>
-              <Button variant="quiet" onClick={() => void refresh()} className="w-full !rounded-[8px] !border-[#7BCDC0] !bg-white !text-[#06363A] sm:w-auto">
+              <Button variant="quiet" onClick={() => void refresh()} className="w-full !rounded-[8px] !border-white/30 !bg-white !text-accent sm:w-auto">
                 刷新总览
               </Button>
             </div>
@@ -327,7 +327,7 @@ export const AcquisitionWorkbenchPage = () => {
           </div>
 
           <div className="mt-4 grid gap-3 lg:grid-cols-[1.25fr_1fr_1fr]">
-            <section data-matrix-device-summary className="min-h-[160px] rounded-[8px] border border-[#D5DDE5] bg-[#F8FAFC] p-3">
+            <section data-matrix-device-summary className="min-h-[160px] rounded-[8px] border border-border bg-surface-alt p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-black">矩阵设备</h3>
                 <StatusPill>{matrixError ? '矩阵状态待刷新' : `${matrixCounts.total} 台设备`}</StatusPill>
@@ -339,7 +339,7 @@ export const AcquisitionWorkbenchPage = () => {
                 {matrixStatus.devices.length === 0 ? <Empty>暂无手机接入，绑定手机后这里会显示真实矩阵状态</Empty> : null}
               </div>
               {matrixStatus.devices.length > 4 ? (
-                <div className="mt-2 text-[11px] font-black text-[#0F6B7A]">另有 {matrixStatus.devices.length - 4} 台设备已接入</div>
+                <div className="mt-2 text-[11px] font-black text-info">另有 {matrixStatus.devices.length - 4} 台设备已接入</div>
               ) : null}
             </section>
             <OverviewPanel marker="data-acquisition-lead-pool" title="线索池" empty="暂无线索">
@@ -372,13 +372,13 @@ export const AcquisitionWorkbenchPage = () => {
           data-feishu-bitable-binding
           data-feishu-sync-panel
           data-acquisition-feishu-sync
-          className="rounded-[8px] border border-[#D5DDE5] bg-white p-4 shadow-sm"
+          className="rounded-[8px] border border-border bg-surface p-4 shadow-elevation-low"
         >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] font-black tracking-[0.18em] text-[#0F6B7A]">线索沉淀出口</div>
+              <div className="text-[11px] font-black tracking-[0.18em] text-info">线索沉淀出口</div>
               <h2 className="mt-1 text-xl font-black">飞书多维表格</h2>
-              <p className="mt-1 max-w-[780px] break-words text-sm font-semibold leading-6 text-[#647181]">
+              <p className="mt-1 max-w-[780px] break-words text-sm font-semibold leading-6 text-text-muted">
                 绑定后，Codex 写入的线索会同步到飞书多维表格；失败会留在本地队列，方便重试和审计。
               </p>
             </div>
@@ -402,7 +402,7 @@ export const AcquisitionWorkbenchPage = () => {
           </div>
 
           {loginGuide ? (
-            <div data-feishu-login-guide className="mt-4 rounded-[8px] border border-[#BAE6FD] bg-[#F0F9FF] p-3 text-xs font-semibold leading-5 text-[#075985]">
+            <div data-feishu-login-guide className="mt-4 rounded-[8px] border border-info bg-info-soft p-3 text-xs font-semibold leading-5 text-info-ink">
               <FeishuQrPanel guide={loginGuide} />
               <div className="break-all">登录链接：{loginGuide.loginUrl || '请查看飞书 CLI 输出'}</div>
               <div>验证码：{loginGuide.userCode || '无'}</div>
@@ -416,12 +416,12 @@ export const AcquisitionWorkbenchPage = () => {
           </div>
         </section>
 
-        <section data-acquisition-agent-prompt className="rounded-[8px] border border-[#D5DDE5] bg-white p-4 shadow-sm">
+        <section data-acquisition-agent-prompt className="rounded-[8px] border border-border bg-surface p-4 shadow-elevation-low">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] font-black tracking-[0.18em] text-[#0F6B7A]">AI 执行入口</div>
+              <div className="text-[11px] font-black tracking-[0.18em] text-info">AI 执行入口</div>
               <h2 className="mt-1 text-xl font-black">AI 接入提示词</h2>
-              <p className="mt-1 max-w-[780px] break-words text-sm font-semibold leading-6 text-[#647181]">
+              <p className="mt-1 max-w-[780px] break-words text-sm font-semibold leading-6 text-text-muted">
                 复制给 Codex 或其他 Agent 后，它会读取获客任务，调用手机 Agent，回收线索日志，并把确认后的线索写入飞书。
               </p>
             </div>
@@ -430,19 +430,19 @@ export const AcquisitionWorkbenchPage = () => {
             </Button>
           </div>
 
-          <details className="mt-4 rounded-[8px] border border-[#E1E7EE] bg-[#F8FAFC] p-3">
-            <summary className="cursor-pointer text-sm font-black text-[#1F2937]">展开提示词全文</summary>
+          <details className="mt-4 rounded-[8px] border border-border bg-surface-alt p-3">
+            <summary className="cursor-pointer text-sm font-black text-text">展开提示词全文</summary>
             <textarea
               aria-label="AI 接入提示词预览"
               readOnly
               value={agentPrompt}
               rows={12}
-              className="mt-3 w-full resize-y rounded-[8px] border border-[#CBD5E1] bg-white p-3 font-mono text-[11px] leading-5 text-[#334155] outline-none"
+              className="mt-3 w-full resize-y rounded-[8px] border border-border bg-input p-3 font-mono text-[11px] leading-5 text-text outline-none focus:border-focus"
             />
           </details>
         </section>
 
-        <footer className="flex flex-wrap items-center gap-2 rounded-[8px] border border-[#D8E0E8] bg-white p-3 text-[11px] font-black text-[#647181]">
+        <footer className="flex flex-wrap items-center gap-2 rounded-[8px] border border-border bg-surface p-3 text-[11px] font-black text-text-muted">
           {snapshot.outboundPolicy.map((item) => <Badge key={item}>{policyLabel(item)}</Badge>)}
           <span>真实外发必须人工确认；禁止无确认批量私信、评论、加好友、群发或发布。</span>
         </footer>
@@ -455,19 +455,19 @@ function FeishuQrPanel({ guide }: { guide: FeishuLoginGuideState }) {
   const qrSrc = React.useMemo(() => createQrDataUri(guide.loginUrl), [guide.loginUrl]);
   return (
     <div className="mb-3 grid gap-3 md:grid-cols-[148px_minmax(0,1fr)]">
-      <div data-feishu-login-qr className="flex min-h-[148px] items-center justify-center rounded-[8px] border border-[#B7DBEA] bg-white p-2">
+      <div data-feishu-login-qr className="flex min-h-[148px] items-center justify-center rounded-[8px] border border-info bg-surface p-2">
         {qrSrc ? (
           <img src={qrSrc} alt="飞书扫码登录二维码" className="h-[132px] w-[132px]" />
         ) : guide.qrAscii ? (
-          <pre className="max-h-[132px] max-w-[132px] overflow-hidden whitespace-pre text-[4px] leading-[4px] text-[#0B4A3E]">{guide.qrAscii}</pre>
+          <pre className="max-h-[132px] max-w-[132px] overflow-hidden whitespace-pre text-[4px] leading-[4px] text-accent">{guide.qrAscii}</pre>
         ) : (
-          <div className="px-3 text-center text-xs font-black leading-5 text-[#0F6B7A]">等待飞书二维码</div>
+          <div className="px-3 text-center text-xs font-black leading-5 text-info">等待飞书二维码</div>
         )}
       </div>
-      <div className="min-w-0 rounded-[8px] border border-[#B7DBEA] bg-white/70 p-3">
-        <div className="text-sm font-black text-[#0F3440]">飞书扫码登录</div>
-        <div className="mt-1 text-xs font-semibold leading-5 text-[#48616B]">用飞书 App 扫码，或打开链接后输入验证码。</div>
-        <div className="mt-2 rounded-[6px] bg-[#E6F6FD] px-2 py-1.5 text-xs font-black text-[#075985]">
+      <div className="min-w-0 rounded-[8px] border border-info bg-surface p-3">
+        <div className="text-sm font-black text-text">飞书扫码登录</div>
+        <div className="mt-1 text-xs font-semibold leading-5 text-text-muted">用飞书 App 扫码，或打开链接后输入验证码。</div>
+        <div className="mt-2 rounded-[6px] bg-info-soft px-2 py-1.5 text-xs font-black text-info-ink">
           验证码：{guide.userCode || '无'}
         </div>
         <div className="mt-2 flex flex-wrap gap-2">
@@ -475,7 +475,7 @@ function FeishuQrPanel({ guide }: { guide: FeishuLoginGuideState }) {
             复制登录链接
           </Button>
           {guide.loginUrl ? (
-            <a className="rounded-[8px] border border-[#0B4A3E]/25 bg-white px-3 py-1.5 text-xs font-black text-[#0B4A3E] hover:bg-[#ECFDF5]" href={guide.loginUrl} target="_blank" rel="noreferrer">
+            <a className="rounded-[8px] border border-accent bg-surface px-3 py-1.5 text-xs font-black text-accent hover:bg-selected" href={guide.loginUrl} target="_blank" rel="noreferrer">
               打开链接
             </a>
           ) : null}
@@ -486,38 +486,46 @@ function FeishuQrPanel({ guide }: { guide: FeishuLoginGuideState }) {
 }
 
 function Metric({ label, value, desc, tone = 'default' }: { label: string; value: React.ReactNode; desc: React.ReactNode; tone?: 'default' | 'warn' }) {
-  const toneClass = tone === 'warn' ? 'border-[#F4B8B8] bg-[#FFF7F7] text-[#B42318]' : 'border-[#D5DDE5] bg-[#F8FAFC] text-[#0F6B7A]';
+  const toneClass = tone === 'warn'
+    ? 'border-status-danger bg-status-danger-soft text-status-danger-ink'
+    : 'border-info bg-info-soft text-info-ink';
   return (
     <div className={`min-w-0 rounded-[8px] border p-3 ${toneClass}`}>
-      <div className="text-[11px] font-black text-[#647181]">{label}</div>
+      <div className="text-[11px] font-black text-text-muted">{label}</div>
       <div className="mt-1 truncate text-xl font-black">{value}</div>
-      <div className="mt-1 truncate text-xs font-semibold text-[#647181]">{desc}</div>
+      <div className="mt-1 truncate text-xs font-semibold text-text-muted">{desc}</div>
     </div>
   );
 }
 
 function CapabilityStep({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="min-w-0 rounded-[8px] border border-[#1E5559] bg-white/10 p-3">
+    <div className="min-w-0 rounded-[8px] border border-white/15 bg-white/5 p-3">
       <div className="truncate text-sm font-black text-white">{label}</div>
-      <div className="mt-1 truncate text-xs font-bold text-[#A9E8DC]">{value}</div>
+      <div className="mt-1 truncate text-xs font-bold text-white/70">{value}</div>
     </div>
   );
 }
 
 function MatrixDeviceItem({ device }: { device: MatrixDeviceSummary }) {
   const status = matrixDeviceStatus(device);
-  const statusClass = status === '异常' ? 'text-[#B42318]' : status === '执行中' ? 'text-[#B7791F]' : status === '在线' ? 'text-[#0F6B7A]' : 'text-[#647181]';
+  const statusClass = status === '异常'
+    ? 'text-status-danger'
+    : status === '执行中'
+      ? 'text-status-warning'
+      : status === '在线'
+        ? 'text-status-success'
+        : 'text-text-muted';
   return (
-    <div className="min-w-0 rounded-[8px] border border-[#E1E7EE] bg-white p-3">
+    <div className="min-w-0 rounded-[8px] border border-border bg-surface p-3">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-sm font-black text-[#1F2937]">{device.name || device.deviceId}</div>
-          <div className="mt-1 truncate text-[11px] font-bold text-[#647181]">{device.group || device.model || device.deviceId}</div>
+          <div className="truncate text-sm font-black text-text">{device.name || device.deviceId}</div>
+          <div className="mt-1 truncate text-[11px] font-bold text-text-muted">{device.group || device.model || device.deviceId}</div>
         </div>
         <span className={`shrink-0 text-xs font-black ${statusClass}`}>{status}</span>
       </div>
-      <div className="mt-2 line-clamp-2 text-xs font-semibold leading-5 text-[#647181]">
+      <div className="mt-2 line-clamp-2 text-xs font-semibold leading-5 text-text-muted">
         {device.currentScreenSummary || device.lastResult || device.currentTaskId || '等待矩阵任务'}
       </div>
     </div>
@@ -530,7 +538,7 @@ function OverviewPanel({ marker, title, empty, children }: { marker: string; tit
     return acc;
   }, {});
   return (
-    <section {...markerProps} className="min-h-[160px] rounded-[8px] border border-[#E1E7EE] bg-[#F8FAFC] p-3">
+    <section {...markerProps} className="min-h-[160px] rounded-[8px] border border-border bg-surface-alt p-3">
       <h3 className="text-sm font-black">{title}</h3>
       <div className="mt-2">{children || <Empty>{empty}</Empty>}</div>
     </section>
@@ -539,31 +547,31 @@ function OverviewPanel({ marker, title, empty, children }: { marker: string; tit
 
 function SummaryItem({ title, body, meta }: { title: string; body?: string; meta: string }) {
   return (
-    <div className="rounded-[8px] border border-[#E1E7EE] bg-white p-3">
-      <div className="truncate text-sm font-black text-[#1F2937]">{title}</div>
-      <div className="mt-1 line-clamp-2 text-xs font-semibold leading-5 text-[#647181]">{body || '暂无详情'}</div>
-      <div className="mt-2 text-[11px] font-black text-[#0F6B7A]">{meta}</div>
+    <div className="rounded-[8px] border border-border bg-surface p-3">
+      <div className="truncate text-sm font-black text-text">{title}</div>
+      <div className="mt-1 line-clamp-2 text-xs font-semibold leading-5 text-text-muted">{body || '暂无详情'}</div>
+      <div className="mt-2 text-[11px] font-black text-info">{meta}</div>
     </div>
   );
 }
 
 function Mini({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="min-w-0 rounded-[8px] border border-[#E1E7EE] bg-[#F8FAFC] p-2">
-      <div className="text-[11px] font-black text-[#647181]">{label}</div>
-      <div className="mt-1 truncate text-xs font-bold text-[#1F2937]">{value}</div>
+    <div className="min-w-0 rounded-[8px] border border-border bg-surface-alt p-2">
+      <div className="text-[11px] font-black text-text-muted">{label}</div>
+      <div className="mt-1 truncate text-xs font-bold text-text">{value}</div>
     </div>
   );
 }
 
 function StatusPill({ children }: { children: React.ReactNode }) {
-  return <span className="rounded-[8px] border border-[#B6D7DD] bg-[#F2FBFC] px-3 py-2 text-xs font-black text-[#0F6B7A]">{children}</span>;
+  return <span className="rounded-[8px] border border-info bg-info-soft px-3 py-2 text-xs font-black text-info-ink">{children}</span>;
 }
 
 function Badge({ children }: { children: React.ReactNode }) {
-  return <span className="rounded-[6px] border border-[#CBD5E1] bg-white px-2 py-1 text-[11px] font-black text-[#475569]">{children}</span>;
+  return <span className="rounded-[6px] border border-border bg-surface px-2 py-1 text-[11px] font-black text-text-muted">{children}</span>;
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
-  return <div className="rounded-[8px] border border-dashed border-[#CBD5E1] p-5 text-center text-sm font-bold text-[#647181]">{children}</div>;
+  return <div className="rounded-[8px] border border-dashed border-border p-5 text-center text-sm font-bold text-text-muted">{children}</div>;
 }

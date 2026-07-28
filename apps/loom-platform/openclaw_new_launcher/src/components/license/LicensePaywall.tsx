@@ -15,49 +15,49 @@ const STATUS_COPY: Record<LicenseGateStatus, { eyebrow: string; title: string; a
     eyebrow: '正在检查授权',
     title: '正在核验这台电脑的商业授权',
     action: '检查通常只需要几秒，超时后会显示可处理的原因。',
-    tone: 'border-[#9db8ae] bg-[#edf5f2] text-[#16483d]',
+    tone: 'border-info bg-info-soft text-info-ink',
   },
   authorized: {
     eyebrow: '授权有效',
     title: '商业能力已经解锁',
     action: '正在进入工作台。',
-    tone: 'border-[#7ec9b0] bg-[#e5f7f0] text-[#075f4b]',
+    tone: 'border-status-success bg-status-success-soft text-status-success-ink',
   },
   unauthorized: {
     eyebrow: '等待激活',
     title: '输入授权码后进入获客工作台',
     action: '授权码会绑定当前电脑，激活后重启仍然有效。',
-    tone: 'border-[#d2b96f] bg-[#fff8df] text-[#6e5310]',
+    tone: 'border-status-warning bg-status-warning-soft text-status-warning-ink',
   },
   expired: {
     eyebrow: '授权已到期',
     title: '续费或更换授权码后继续使用',
     action: '本机数据不会删除，重新激活后可继续进入工作台。',
-    tone: 'border-[#e5a45d] bg-[#fff2e3] text-[#81410b]',
+    tone: 'border-status-warning bg-status-warning-soft text-status-warning-ink',
   },
   disabled: {
     eyebrow: '授权已停用',
     title: '请联系服务方核对授权状态',
     action: '可以复制机器码或导出脱敏诊断，便于售后定位。',
-    tone: 'border-[#dd8792] bg-[#fff0f2] text-[#8c2535]',
+    tone: 'border-status-danger bg-status-danger-soft text-status-danger-ink',
   },
   device_mismatch: {
     eyebrow: '设备不匹配',
     title: '当前电脑尚未绑定这份授权',
     action: '复制本机机器码，联系服务方重新绑定或更换授权码。',
-    tone: 'border-[#d6a073] bg-[#fff3e8] text-[#76431c]',
+    tone: 'border-status-warning bg-status-warning-soft text-status-warning-ink',
   },
   offline_grace: {
     eyebrow: '离线授权可用',
     title: '本机签名有效，授权服务暂时离线',
     action: '可以继续使用；网络恢复后建议重新检查授权状态。',
-    tone: 'border-[#7cb6c1] bg-[#eaf7fa] text-[#165765]',
+    tone: 'border-info bg-info-soft text-info-ink',
   },
   service_error: {
     eyebrow: '授权服务暂不可用',
     title: '没有卡死，可以重试或导出诊断',
     action: '请检查网络和 Bridge 状态；没有有效本机授权时不会进入核心功能。',
-    tone: 'border-[#d78c96] bg-[#fff0f2] text-[#842d3b]',
+    tone: 'border-status-danger bg-status-danger-soft text-status-danger-ink',
   },
 };
 
@@ -257,15 +257,15 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
       data-license-status={effectiveStatus}
       data-license-scope={scope}
       data-phone-matrix-license-gate={phoneMatrixScope || undefined}
-      className="h-full min-h-0 flex-1 overflow-y-auto bg-[#edf2ef] text-[#17221e]"
+      className="h-full min-h-0 flex-1 overflow-y-auto bg-app-bg text-text"
     >
       <div className="mx-auto grid min-h-full w-full max-w-[1440px] grid-cols-1 md:grid-cols-[minmax(0,1.08fr)_minmax(350px,0.92fr)]">
-        <section className="flex min-h-[390px] flex-col justify-between bg-[#08242b] px-6 py-8 text-white sm:px-10 lg:min-h-full lg:px-14 lg:py-12">
+        <section className="flex min-h-[390px] flex-col justify-between bg-surface-deeper px-6 py-8 text-white sm:px-10 lg:min-h-full lg:px-14 lg:py-12">
           <div>
             <div className="flex items-center gap-3">
               <LoomLogoMark className="h-11 w-11 border border-white/10" />
               <div>
-                <div className="text-[12px] font-bold uppercase text-[#7ce3bd]">
+                <div className="text-[12px] font-bold uppercase text-info">
                   {phoneMatrixScope ? 'Phone Matrix Access' : 'Commercial Access'}
                 </div>
                 <div className="mt-1 text-[15px] font-black">{APP_DISPLAY_NAME}</div>
@@ -273,7 +273,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
             </div>
 
             <div className="mt-10 max-w-[680px]">
-              <p className="text-[13px] font-bold text-[#7ce3bd]">
+              <p className="text-[13px] font-bold text-info">
                 {phoneMatrixScope ? '手机连接与矩阵控制' : 'AI 矩阵获客商业版'}
               </p>
               <h1 className="mt-3 max-w-[620px] text-[34px] font-black leading-[1.16] sm:text-[42px]">
@@ -305,7 +305,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
         </section>
 
         <section className="flex items-center px-5 py-8 sm:px-10 lg:px-12">
-          <div className="w-full border border-[#cad7d1] bg-white p-5 shadow-[0_18px_55px_rgba(21,48,40,0.11)] sm:p-7">
+          <div className="w-full rounded-[8px] border border-border bg-surface p-5 shadow-elevation-medium sm:p-7">
             <div className={`border px-4 py-3 ${copy.tone}`}>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -320,7 +320,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
             </div>
 
             <form className="mt-6" onSubmit={activateLicense}>
-              <label htmlFor="commercial-license-code" className="text-[12px] font-black text-[#34564c]">
+              <label htmlFor="commercial-license-code" className="text-[12px] font-black text-text">
                 商业授权码
               </label>
               <div className="mt-2 flex flex-col gap-2 sm:flex-row">
@@ -333,38 +333,38 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                   autoComplete="off"
                   spellCheck={false}
                   placeholder="请输入服务方提供的授权码"
-                  className="h-11 min-w-0 flex-1 border border-[#aebfb8] bg-[#fbfdfc] px-3 text-[14px] font-semibold outline-none transition focus:border-[#08745d] focus:ring-2 focus:ring-[#08745d]/15"
+                  className="h-11 min-w-0 flex-1 rounded-[6px] border border-border-strong bg-input px-3 text-[14px] font-semibold text-text outline-none transition placeholder:text-text-subtle focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
                 />
                 <button
                   data-license-activate
                   type="submit"
                   disabled={activating || isLicenseChecking}
-                  className="h-11 shrink-0 bg-[#075f4b] px-5 text-[13px] font-black text-white transition hover:bg-[#064c3d] disabled:cursor-not-allowed disabled:opacity-55"
+                  className="h-11 shrink-0 rounded-[6px] bg-accent px-5 text-[13px] font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
                 >
                   {activating ? '激活中...' : phoneMatrixScope ? '激活手机矩阵' : '激活并进入'}
                 </button>
               </div>
             </form>
 
-            <div className="mt-5 grid grid-cols-2 border-l border-t border-[#d9e2de] text-[12px]">
-              <div className="min-w-0 border-b border-r border-[#d9e2de] p-3">
-                <div className="font-bold text-[#6a7d75]">当前套餐</div>
-                <div className="mt-1 truncate font-black text-[#1d332b]">{plan}</div>
+            <div className="mt-5 grid grid-cols-2 border-l border-t border-border text-[12px]">
+              <div className="min-w-0 border-b border-r border-border p-3">
+                <div className="font-bold text-text-muted">当前套餐</div>
+                <div className="mt-1 truncate font-black text-text">{plan}</div>
               </div>
-              <div className="min-w-0 border-b border-r border-[#d9e2de] p-3">
-                <div className="font-bold text-[#6a7d75]">到期时间</div>
-                <div className="mt-1 truncate font-black text-[#1d332b]">{displayDate(expires)}</div>
+              <div className="min-w-0 border-b border-r border-border p-3">
+                <div className="font-bold text-text-muted">到期时间</div>
+                <div className="mt-1 truncate font-black text-text">{displayDate(expires)}</div>
               </div>
-              <div className="col-span-2 min-w-0 border-b border-r border-[#d9e2de] p-3" data-license-install-id>
-                <div className="font-bold text-[#6a7d75]">本机机器码 / 安装 ID</div>
-                <div className="mt-1 break-all font-mono text-[11px] font-bold text-[#1d332b]">
+              <div className="col-span-2 min-w-0 border-b border-r border-border p-3" data-license-install-id>
+                <div className="font-bold text-text-muted">本机机器码 / 安装 ID</div>
+                <div className="mt-1 break-all font-mono text-[11px] font-bold text-text">
                   {machineId || '等待 Bridge 返回本机标识'}
                 </div>
               </div>
             </div>
 
             {actionError || gateError ? (
-              <div className="mt-4 border border-[#e3a3ac] bg-[#fff2f4] px-3 py-2.5 text-[12px] font-bold leading-5 text-[#8a2838]" role="alert">
+              <div className="mt-4 rounded-[6px] border border-status-danger bg-status-danger-soft px-3 py-2.5 text-[12px] font-bold leading-5 text-status-danger-ink" role="alert" aria-live="assertive">
                 {actionError || gateError}
               </div>
             ) : null}
@@ -374,7 +374,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                 data-license-copy-install-id
                 type="button"
                 onClick={copyInstallId}
-                className="h-10 border border-[#bac8c2] bg-white px-3 text-[12px] font-black text-[#24483e] hover:bg-[#f1f6f4]"
+                className="h-10 rounded-[6px] border border-border-strong bg-surface px-3 text-[12px] font-black text-text hover:bg-hover"
               >
                 复制机器码
               </button>
@@ -382,7 +382,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                 type="button"
                 onClick={() => void refreshAccess()}
                 disabled={isLicenseChecking}
-                className="h-10 border border-[#bac8c2] bg-white px-3 text-[12px] font-black text-[#24483e] hover:bg-[#f1f6f4] disabled:opacity-55"
+                className="h-10 rounded-[6px] border border-border-strong bg-surface px-3 text-[12px] font-black text-text hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
               >
                 {isLicenseChecking ? '检查中...' : '重新检查'}
               </button>
@@ -391,18 +391,18 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                 type="button"
                 onClick={exportDiagnostics}
                 disabled={diagnosing}
-                className="col-span-2 h-10 border border-[#bac8c2] bg-white px-3 text-[12px] font-black text-[#24483e] hover:bg-[#f1f6f4] disabled:opacity-55 lg:col-span-1"
+                className="col-span-2 h-10 rounded-[6px] border border-border-strong bg-surface px-3 text-[12px] font-black text-text hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text lg:col-span-1"
               >
                 {diagnosing ? '导出中...' : '导出脱敏诊断'}
               </button>
             </div>
 
-            <div className="mt-6 flex flex-col gap-2 border-t border-[#d9e2de] pt-5 sm:flex-row">
+            <div className="mt-6 flex flex-col gap-2 border-t border-border pt-5 sm:flex-row">
               <button
                 data-license-purchase-link
                 type="button"
                 onClick={() => openCommercialLink(licenseGate.purchaseUrl)}
-                className="h-10 flex-1 bg-[#d9b45c] px-4 text-[12px] font-black text-[#2b2517] hover:bg-[#cda647]"
+                className="h-10 flex-1 rounded-[6px] border border-status-warning bg-status-warning-soft px-4 text-[12px] font-black text-status-warning-ink hover:brightness-95"
               >
                 购买或续费授权
               </button>
@@ -410,7 +410,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                 data-license-support-link
                 type="button"
                 onClick={() => openCommercialLink(licenseGate.supportUrl)}
-                className="h-10 flex-1 border border-[#075f4b] bg-white px-4 text-[12px] font-black text-[#075f4b] hover:bg-[#edf7f3]"
+                className="h-10 flex-1 rounded-[6px] border border-info bg-surface px-4 text-[12px] font-black text-info hover:bg-info-soft"
               >
                 联系服务支持
               </button>
@@ -422,13 +422,13 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                 type="button"
                 onClick={() => void onEmergencyStop()}
                 disabled={emergencyStopping}
-                className="mt-2 h-10 w-full border border-[#c64c5f] bg-white px-4 text-[12px] font-black text-[#9a2738] hover:bg-[#fff1f3] disabled:cursor-not-allowed disabled:opacity-55"
+                className="mt-2 h-10 w-full rounded-[6px] border border-status-danger bg-surface px-4 text-[12px] font-black text-status-danger hover:bg-status-danger-soft disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
               >
                 {emergencyStopping ? '正在停止全部手机任务...' : '紧急停止全部手机任务'}
               </button>
             ) : null}
 
-            <p className="mt-4 text-[11px] font-medium leading-5 text-[#75847e]">
+            <p className="mt-4 text-[11px] font-medium leading-5 text-text-muted">
               {phoneMatrixScope
                 ? '授权范围仅限手机连接、手机任务、矩阵控制与相关素材传输；急停和脱敏诊断始终保留。'
                 : '真实发布、评论、私信、加好友和加微仍默认经过草稿、人工确认、白名单、频控与日志留痕。'}
