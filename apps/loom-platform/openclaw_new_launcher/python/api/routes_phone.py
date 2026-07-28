@@ -22,9 +22,13 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request as UrlRequest, urlopen
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import Request
 from starlette.concurrency import run_in_threadpool
 
@@ -137,8 +141,37 @@ _PHONE_USB_PORT_SCAN_RETRYABLE_STATUSES = {
     "phone_port_mismatch",
     "secure_identity_unsupported",
 }
+_PHONE_PAIRING_RESPONSE_MAX_BYTES = 32 * 1024
+_PHONE_PAIRING_SECRET_KEYS = {
+    "apikey",
+    "apitoken",
+    "launchersecret",
+    "phonetoken",
+    "secret",
+    "token",
+}
+_PHONE_PAIRING_PROTOCOL_VERSION = "3"
+_PHONE_PAIRING_ENCRYPTION_ALGORITHM = "AES-256-GCM-HKDF-SHA256"
+_PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS = 5
+_PHONE_PAIRING_CONFIRMATION_RETRY_DELAYS_MS = (5_000, 30_000, 120_000, 300_000, 900_000)
+_PHONE_PAIRING_CONFIRMATION_TIMEOUT_SEC = 3
 
 OPENCLAW_ROOT = Path(__file__).resolve().parents[2]
+
+
+class PhonePairingError(ValueError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        status_code: int = 400,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.status_code = status_code
 
 
 def _phone_store_path(ctx) -> str:
@@ -291,12 +324,24 @@ def _public_device(device: dict) -> dict:
     token = str(device.get("token") or "").strip()
     launcher_id = str(device.get("launcherId") or "").strip()
     launcher_secret = str(device.get("launcherSecret") or "").strip()
+    paired = bool(launcher_id and launcher_secret)
+    confirmation_pending = bool(device.get("pairingConfirmationPending"))
+    confirmed = bool(device.get("pairingConfirmed", paired)) and not confirmation_pending
+    confirmation_status = _clip(device.get("pairingConfirmationStatus"), 240)
+    if not confirmation_status:
+        if confirmation_pending:
+            confirmation_status = "桌面凭据已安全保存；手机暂未确认，旧凭据仍保留。"
+        elif confirmed:
+            confirmation_status = "手机已确认新凭据。"
     public = {
         "id": str(device.get("id") or "").strip(),
         "name": str(device.get("name") or "").strip(),
         "baseUrl": str(device.get("baseUrl") or "").strip().rstrip("/"),
         "tokenAvailable": bool(token),
-        "paired": bool(launcher_id and launcher_secret),
+        "paired": paired,
+        "confirmed": confirmed,
+        "confirmationPending": confirmation_pending,
+        "confirmationStatus": confirmation_status,
         "album": str(device.get("album") or "").strip(),
         "lastSeenAt": str(device.get("lastSeenAt") or "").strip(),
     }
@@ -346,6 +391,604 @@ def _public_adb_doctor(result: dict) -> dict:
         if key in result:
             public[key] = result[key]
     return public
+
+
+def _parse_phone_pairing_input(body: dict) -> dict:
+    for raw_key, value in body.items():
+        normalized_key = re.sub(r"[^a-z0-9]", "", str(raw_key).lower())
+        if normalized_key in _PHONE_PAIRING_SECRET_KEYS and str(value or "").strip():
+            raise ValueError("配对信息不能包含长期凭据，请在手机上刷新配对码后重新复制。")
+
+    payload_text = _clip(body.get("payload") or body.get("pairingPayload"), 4097)
+    params: dict[str, str] = {}
+    if payload_text:
+        if len(payload_text) > 4096:
+            raise ValueError("配对信息过长，请在手机上刷新后重新复制。")
+        parsed = urlparse(payload_text)
+        if parsed.scheme.lower() != "lumi" or parsed.netloc.lower() != "pair":
+            raise ValueError("配对信息格式不正确，请从手机“与 LOOM 配对”页面重新复制。")
+        parsed_query = parse_qs(parsed.query, keep_blank_values=True)
+        for raw_key, values in parsed_query.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", raw_key.lower())
+            if normalized_key in _PHONE_PAIRING_SECRET_KEYS:
+                raise ValueError("配对信息包含不允许的长期凭据，请在手机上刷新配对码。")
+            params[raw_key.lower()] = str(values[0] if values else "").strip()
+        if params.get("v") not in {"2", _PHONE_PAIRING_PROTOCOL_VERSION}:
+            raise ValueError("手机配对协议版本不兼容，请升级手机端 App。")
+
+    base_url_value = params.get("b") or body.get("baseUrl") or body.get("address") or ""
+    base_url = _normalize_url(base_url_value) if str(base_url_value).strip() else ""
+    usb_serial = _clip(body.get("usbSerial") or body.get("serial"), 120)
+    transport_hint = _clip(params.get("x") or body.get("transportHint"), 16).lower()
+    parsed_host = urlparse(base_url).hostname or ""
+    use_usb = bool(
+        usb_serial
+        or transport_hint == "usb"
+        or parsed_host in {"127.0.0.1", "localhost", "::1"}
+    )
+    if not base_url and not usb_serial:
+        raise ValueError("请粘贴手机完整配对信息；USB 配对可只填写 6 位配对码。")
+    code = str(params.get("c") or body.get("code") or "").strip()
+    bootstrap_secret = str(params.get("k") or "").strip().lower()
+    session_id = _clip(params.get("s") or body.get("sessionId"), 128)
+    device_instance_id = _clip(
+        params.get("d") or body.get("deviceInstanceId"),
+        160,
+    )
+    if use_usb:
+        if not re.fullmatch(r"\d{6}", code):
+            raise ValueError("USB 配对请输入手机上显示的 6 位配对码。")
+    else:
+        if (
+            not payload_text
+            or params.get("v") != _PHONE_PAIRING_PROTOCOL_VERSION
+            or not re.fullmatch(r"[0-9a-f]{64}", bootstrap_secret)
+            or not session_id
+            or not device_instance_id
+        ):
+            raise ValueError("局域网配对必须粘贴手机生成的完整配对信息；6 位配对码仅用于 USB。")
+        code = ""
+    return {
+        "baseUrl": base_url,
+        "sessionId": session_id,
+        "code": code,
+        "bootstrapSecret": bootstrap_secret,
+        "deviceInstanceId": device_instance_id,
+        "deviceName": _clip(params.get("n") or body.get("name"), 80),
+        "transportHint": "usb" if use_usb else "lan",
+        "usbSerial": usb_serial,
+    }
+
+
+def _derive_phone_pairing_key(
+    bootstrap_secret_hex: str,
+    session_id: str,
+    nonce: str,
+) -> bytes:
+    try:
+        bootstrap_secret = bytes.fromhex(bootstrap_secret_hex)
+    except ValueError as exc:
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机配对密钥格式无效，请重新扫码。",
+            status_code=409,
+        ) from exc
+    if len(bootstrap_secret) != 32:
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机配对密钥强度不足，请重新扫码。",
+            status_code=409,
+        )
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=session_id.encode("utf-8"),
+        info=f"LOOM-PHONE-PAIRING-V3\n{nonce}".encode("utf-8"),
+    ).derive(bootstrap_secret)
+
+
+def _phone_pairing_response_aad(
+    session_id: str,
+    nonce: str,
+    device_instance_id: str,
+    launcher_id: str,
+) -> bytes:
+    return "\n".join((
+        "LOOM-PAIR-RESPONSE-V3",
+        session_id,
+        nonce,
+        device_instance_id,
+        launcher_id,
+    )).encode("utf-8")
+
+
+def _decrypt_phone_pairing_credentials(
+    data: dict,
+    *,
+    bootstrap_secret_hex: str,
+    expected_session_id: str,
+    expected_nonce: str,
+    expected_device_instance_id: str,
+    expected_launcher_id: str,
+) -> dict:
+    if (
+        str(data.get("sessionId") or "") != expected_session_id
+        or str(data.get("nonce") or "") != expected_nonce
+        or str(data.get("deviceInstanceId") or "") != expected_device_instance_id
+        or str(data.get("launcherId") or "") != expected_launcher_id
+    ):
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机配对响应身份不一致，旧连接未被修改。",
+            status_code=409,
+        )
+    encrypted = data.get("encryptedCredentials")
+    if (
+        not isinstance(encrypted, dict)
+        or encrypted.get("algorithm") != _PHONE_PAIRING_ENCRYPTION_ALGORITHM
+    ):
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机未返回受保护的配对凭据，旧连接未被修改。",
+            status_code=409,
+        )
+    try:
+        iv = bytes.fromhex(str(encrypted.get("iv") or ""))
+        ciphertext = bytes.fromhex(str(encrypted.get("ciphertext") or ""))
+        if len(iv) != 12 or len(ciphertext) < 17:
+            raise ValueError("invalid AES-GCM envelope")
+        plaintext = AESGCM(
+            _derive_phone_pairing_key(
+                bootstrap_secret_hex,
+                expected_session_id,
+                expected_nonce,
+            )
+        ).decrypt(
+            iv,
+            ciphertext,
+            _phone_pairing_response_aad(
+                expected_session_id,
+                expected_nonce,
+                expected_device_instance_id,
+                expected_launcher_id,
+            ),
+        )
+        credentials = json.loads(plaintext.decode("utf-8"))
+    except (InvalidTag, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机配对密文校验失败，旧连接未被修改。请重新扫码。",
+            retryable=True,
+            status_code=409,
+        ) from exc
+    if not isinstance(credentials, dict):
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机返回的配对凭据无效，旧连接未被修改。",
+            status_code=409,
+        )
+    return credentials
+
+
+def _claim_phone_pairing_over_http(
+    base_url: str,
+    pairing: dict,
+    *,
+    launcher_id: str,
+    launcher_name: str,
+    timeout_sec: int = 8,
+) -> dict:
+    parsed_host = urlparse(_normalize_url(base_url)).hostname or ""
+    use_usb = bool(
+        pairing.get("transportHint") == "usb"
+        or parsed_host in {"127.0.0.1", "localhost", "::1"}
+    )
+    session_id = str(pairing.get("sessionId") or "")
+    device_instance_id = str(pairing.get("deviceInstanceId") or "")
+    nonce = ""
+    request_data = {
+        "sessionId": session_id,
+        "deviceInstanceId": device_instance_id,
+        "launcherId": launcher_id,
+        "launcherName": launcher_name,
+        "transport": "usb" if use_usb else "lan",
+    }
+    if use_usb:
+        request_data["code"] = str(pairing.get("code") or "")
+    else:
+        bootstrap_secret_hex = str(pairing.get("bootstrapSecret") or "")
+        if (
+            not session_id
+            or not device_instance_id
+            or not re.fullmatch(r"[0-9a-f]{64}", bootstrap_secret_hex)
+        ):
+            raise PhonePairingError(
+                "phone_pairing_input_invalid",
+                "局域网配对信息不完整，请重新扫码。",
+                retryable=True,
+                status_code=409,
+            )
+        nonce = secrets.token_hex(24)
+        proof_input = "\n".join((
+            "LOOM-PAIR-CLAIM-V3",
+            session_id,
+            nonce,
+            device_instance_id,
+            launcher_id,
+        ))
+        request_data.update({
+            "nonce": nonce,
+            "proof": hmac.new(
+                bytes.fromhex(bootstrap_secret_hex),
+                proof_input.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest(),
+        })
+    request_body = json.dumps(
+        request_data,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = UrlRequest(
+        f"{_normalize_url(base_url)}/api/lumi/security/bootstrap/claim",
+        data=request_body,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_sec) as response:
+            payload_bytes = response.read(_PHONE_PAIRING_RESPONSE_MAX_BYTES + 1)
+            status_code = int(getattr(response, "status", 200) or 200)
+    except HTTPError as exc:
+        status_code = int(getattr(exc, "code", 0) or 0)
+        payload_bytes = exc.read(_PHONE_PAIRING_RESPONSE_MAX_BYTES + 1)
+    except (URLError, TimeoutError, OSError) as exc:
+        raise PhonePairingError(
+            "phone_pairing_lan_unreachable",
+            "无法连接手机配对服务。请确认手机端配对页面保持打开，并检查 USB 或局域网连接。",
+            retryable=True,
+            status_code=409,
+        ) from exc
+    if len(payload_bytes) > _PHONE_PAIRING_RESPONSE_MAX_BYTES:
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机返回的配对数据异常，已拒绝保存。",
+            status_code=409,
+        )
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise PhonePairingError(
+            "phone_pairing_endpoint_unavailable",
+            "当前端口不是手机配对服务，请检查手机端 App。",
+            retryable=True,
+            status_code=409,
+        ) from exc
+    if status_code in {404, 405}:
+        raise PhonePairingError(
+            "phone_pairing_endpoint_unavailable",
+            "手机端版本不支持安全配对，请升级手机端 App。",
+            status_code=409,
+        )
+    if status_code >= 400 or not isinstance(payload, dict) or payload.get("success") is not True:
+        code = str(payload.get("errorCode") or "phone_pairing_code_invalid")
+        message = str(payload.get("message") or payload.get("error") or "手机配对失败，请刷新配对码后重试。")
+        raise PhonePairingError(
+            code,
+            message,
+            retryable=bool(payload.get("retryable")),
+            status_code=429 if code == "phone_pairing_rate_limited" else 409,
+        )
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    if not use_usb:
+        credentials = _decrypt_phone_pairing_credentials(
+            data,
+            bootstrap_secret_hex=str(pairing.get("bootstrapSecret") or ""),
+            expected_session_id=session_id,
+            expected_nonce=nonce,
+            expected_device_instance_id=device_instance_id,
+            expected_launcher_id=launcher_id,
+        )
+        data = {**data, **credentials}
+    required = ("phoneToken", "launcherId", "launcherSecret", "deviceInstanceId")
+    if any(not str(data.get(key) or "").strip() for key in required):
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机返回的配对凭据不完整，旧连接未被修改。",
+            retryable=True,
+            status_code=409,
+        )
+    if len(str(data["phoneToken"])) < 48 or len(str(data["launcherSecret"])) < 48:
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机返回的配对凭据强度不足，旧连接未被修改。",
+            status_code=409,
+        )
+    return data
+
+
+def _phone_pairing_signed_headers(
+    method: str,
+    path: str,
+    body: bytes,
+    *,
+    launcher_id: str,
+    launcher_secret: str,
+) -> dict[str, str]:
+    timestamp = str(int(time.time() * 1000))
+    nonce = secrets.token_urlsafe(24)
+    body_hash = hashlib.sha256(body).hexdigest()
+    signature_input = "\n".join((method, path, timestamp, nonce, body_hash))
+    signature = base64.urlsafe_b64encode(
+        hmac.new(
+            launcher_secret.encode("utf-8"),
+            signature_input.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii").rstrip("=")
+    return {
+        "Accept": "application/json",
+        "X-LUMI-LAUNCHER-ID": launcher_id,
+        "X-LUMI-TIMESTAMP": timestamp,
+        "X-LUMI-NONCE": nonce,
+        "X-LUMI-BODY-SHA256": body_hash,
+        "X-LUMI-SIGNATURE": signature,
+    }
+
+
+def _verify_phone_pairing_hmac(
+    base_url: str,
+    *,
+    launcher_id: str,
+    launcher_secret: str,
+    timeout_sec: int = 8,
+) -> dict:
+    path = "/api/lumi/security/status"
+    request = UrlRequest(
+        f"{_normalize_url(base_url)}{path}",
+        headers=_phone_pairing_signed_headers(
+            "GET",
+            path,
+            b"",
+            launcher_id=launcher_id,
+            launcher_secret=launcher_secret,
+        ),
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=timeout_sec) as response:
+            payload_bytes = response.read(_PHONE_PAIRING_RESPONSE_MAX_BYTES + 1)
+            status_code = int(getattr(response, "status", 200) or 200)
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机安全通道验证失败，旧连接未被修改。请刷新配对码后重试。",
+            retryable=True,
+            status_code=409,
+        ) from exc
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机安全通道返回异常，旧连接未被修改。",
+            status_code=409,
+        ) from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if (
+        status_code >= 400
+        or payload.get("success") is not True
+        or not isinstance(data, dict)
+        or str(data.get("launcherId") or "") != launcher_id
+    ):
+        raise PhonePairingError(
+            "phone_pairing_credential_invalid",
+            "手机安全通道校验未通过，旧连接未被修改。",
+            status_code=409,
+        )
+    return data
+
+
+def _confirm_phone_pairing_persisted(
+    base_url: str,
+    *,
+    launcher_id: str,
+    launcher_secret: str,
+    timeout_sec: int = 8,
+) -> dict:
+    path = "/api/lumi/security/bootstrap/confirm"
+    request_body = b"{}"
+    headers = _phone_pairing_signed_headers(
+        "POST",
+        path,
+        request_body,
+        launcher_id=launcher_id,
+        launcher_secret=launcher_secret,
+    )
+    headers["Content-Type"] = "application/json"
+    request = UrlRequest(
+        f"{_normalize_url(base_url)}{path}",
+        data=request_body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_sec) as response:
+            payload_bytes = response.read(_PHONE_PAIRING_RESPONSE_MAX_BYTES + 1)
+            status_code = int(getattr(response, "status", 200) or 200)
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise PhonePairingError(
+            "phone_pairing_confirmation_pending",
+            "桌面凭据已保存，手机端确认暂未完成；旧连接仍然保留。",
+            retryable=True,
+            status_code=409,
+        ) from exc
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise PhonePairingError(
+            "phone_pairing_confirmation_pending",
+            "桌面凭据已保存，手机端确认返回异常；旧连接仍然保留。",
+            retryable=True,
+            status_code=409,
+        ) from exc
+    if status_code >= 400 or not isinstance(payload, dict) or payload.get("success") is not True:
+        raise PhonePairingError(
+            "phone_pairing_confirmation_pending",
+            "桌面凭据已保存，手机端确认未完成；旧连接仍然保留。",
+            retryable=True,
+            status_code=409,
+        )
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _phone_pairing_confirmation_patch(
+    *,
+    confirmed: bool,
+    attempts: int,
+    now_ms: int,
+) -> dict:
+    safe_attempts = max(0, min(int(attempts), _PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS))
+    if confirmed:
+        return {
+            "pairingConfirmed": True,
+            "pairingConfirmationPending": False,
+            "pairingConfirmationAttempts": safe_attempts,
+            "pairingConfirmationLastAttemptAt": now_ms,
+            "pairingConfirmationNextRetryAt": 0,
+            "pairingConfirmationStatus": "手机已确认新凭据，旧凭据已安全清理。",
+        }
+    exhausted = safe_attempts >= _PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS
+    delay_index = max(0, min(safe_attempts - 1, len(_PHONE_PAIRING_CONFIRMATION_RETRY_DELAYS_MS) - 1))
+    next_retry_at = 0 if exhausted else now_ms + _PHONE_PAIRING_CONFIRMATION_RETRY_DELAYS_MS[delay_index]
+    status = (
+        "手机暂未确认，旧凭据仍保留。自动重试已达到上限；"
+        "请保持手机配对服务在线后重新配对。"
+        if exhausted
+        else (
+            "桌面凭据已安全保存；手机暂未确认，旧凭据仍保留。"
+            f"LOOM 将自动重试（{safe_attempts}/{_PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS}）。"
+        )
+    )
+    return {
+        "pairingConfirmed": False,
+        "pairingConfirmationPending": True,
+        "pairingConfirmationAttempts": safe_attempts,
+        "pairingConfirmationLastAttemptAt": now_ms,
+        "pairingConfirmationNextRetryAt": next_retry_at,
+        "pairingConfirmationStatus": status,
+    }
+
+
+def _retry_pending_phone_pairing_confirmations(
+    ctx,
+    *,
+    force: bool = False,
+    now_ms: int | None = None,
+    max_devices: int = 4,
+    device_id: str = "",
+) -> dict:
+    store = _load_store(ctx)
+    devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    target_device_id = _normalize_device_id(device_id, "")
+    attempted_devices = 0
+    changed = False
+    next_devices: list[dict] = []
+
+    for raw_device in devices:
+        device = {**raw_device}
+        pending = bool(device.get("pairingConfirmationPending"))
+        attempts = max(0, int(device.get("pairingConfirmationAttempts") or 0))
+        next_retry_at = max(0, int(device.get("pairingConfirmationNextRetryAt") or 0))
+        matches_target = (
+            not target_device_id
+            or _normalize_device_id(device.get("id"), "") == target_device_id
+        )
+        can_attempt = (
+            pending
+            and matches_target
+            and attempts < _PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS
+            and attempted_devices < max(1, int(max_devices))
+            and (force or next_retry_at <= current_ms)
+        )
+        if not can_attempt:
+            next_devices.append(device)
+            continue
+
+        attempted_devices += 1
+        next_attempt = attempts + 1
+        confirmed = False
+        try:
+            result = _confirm_phone_pairing_persisted(
+                str(device.get("baseUrl") or ""),
+                launcher_id=str(device.get("launcherId") or ""),
+                launcher_secret=str(device.get("launcherSecret") or ""),
+                timeout_sec=_PHONE_PAIRING_CONFIRMATION_TIMEOUT_SEC,
+            )
+            confirmed = bool(result.get("confirmed", True))
+        except PhonePairingError as exc:
+            ctx.append_log(
+                f"[phone-pairing] confirmation pending for "
+                f"{_normalize_device_id(device.get('id'))} "
+                f"({next_attempt}/{_PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS}, {exc.code})"
+            )
+        except Exception:
+            ctx.append_log(
+                f"[phone-pairing] confirmation retry failed for "
+                f"{_normalize_device_id(device.get('id'))} "
+                f"({next_attempt}/{_PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS})"
+            )
+
+        device.update(
+            _phone_pairing_confirmation_patch(
+                confirmed=confirmed,
+                attempts=next_attempt,
+                now_ms=current_ms,
+            )
+        )
+        changed = True
+        if confirmed:
+            ctx.append_log(
+                f"[phone-pairing] confirmation completed for "
+                f"{_normalize_device_id(device.get('id'))}"
+            )
+        next_devices.append(device)
+
+    next_store = {**store, "devices": next_devices}
+    if changed:
+        try:
+            _write_phone_store(ctx, next_store)
+        except Exception:
+            # The new credentials were already persisted before confirmation.
+            # A stale pending flag is safe and the idempotent confirm will retry.
+            ctx.append_log("[phone-pairing] confirmation state persistence deferred")
+    return next_store
+
+
+def _public_phone_pairing_result(result: dict) -> dict:
+    confirmation_pending = bool(result.get("confirmationPending"))
+    confirmed = bool(result.get("confirmed", result.get("ok", True))) and not confirmation_pending
+    return {
+        "ok": bool(result.get("ok", True)),
+        "state": (
+            "confirmation_pending"
+            if result.get("ok", True) and confirmation_pending
+            else "connected"
+            if result.get("ok", True)
+            else str(result.get("state") or "failed")
+        ),
+        "confirmed": confirmed,
+        "confirmationPending": confirmation_pending,
+        "confirmationStatus": _clip(result.get("confirmationStatus"), 240),
+        "deviceInstanceId": _clip(result.get("deviceInstanceId"), 160),
+        "deviceName": _clip(result.get("deviceName"), 80),
+        "connectionMode": _clip(result.get("connectionMode"), 16),
+        "baseUrl": _clip(result.get("baseUrl"), 512),
+        "pairedAt": result.get("pairedAt"),
+    }
 
 
 def _probe_phone_tunnel(
@@ -3341,7 +3984,7 @@ def _phone_cli_failure_message(stdout: str, stderr: str) -> str:
     if "task_busy" in text or "busy" in text or "已有任务" in text:
         return "APKClaw 正在执行其他任务，请稍后重试。"
     if "signature" in text or "unauthorized" in text or "forbidden" in text or "403" in text:
-        return "已连接到手机端 APKClaw，但连接令牌无效或已经变更。请重新复制并保存 LAN Config 中的当前连接令牌。"
+        return "已连接到手机端 APKClaw，但安全凭据已经失效。请在手机端生成新的配对码并重新配对。"
     if "device_offline" in text or "econnrefused" in text or "fetch failed" in text or "offline" in text:
         return "无法连接手机端 APKClaw，请确认手机和电脑在同一网络，且 APKClaw 已启动。"
     return "手机任务执行失败，请检查手机连接和诊断日志"
@@ -4247,7 +4890,7 @@ def _upsert_device(store: dict, body: dict) -> dict:
     base_url = _normalize_url(requested_base_url or existing.get("baseUrl") or "")
     token = _clip(body.get("token"), 4096) or str(existing.get("token") or "").strip()
     if not token:
-        raise ValueError("请输入 APKClaw 连接令牌")
+        raise ValueError("请先使用手机端生成的配对码完成配对")
     next_device = {
         **existing,
         "id": device_id,
@@ -4548,7 +5191,19 @@ def register_phone_routes(app, ctx) -> None:
             with suppress(asyncio.CancelledError):
                 await task
 
+    async def retry_pending_phone_pairing_confirmations_on_startup() -> None:
+        try:
+            await run_in_threadpool(
+                _retry_pending_phone_pairing_confirmations,
+                ctx,
+                force=True,
+                max_devices=4,
+            )
+        except Exception:
+            ctx.append_log("[phone-pairing] startup confirmation retry deferred")
+
     app.router.on_startup.append(reconcile_usb_transport_on_startup)
+    app.router.on_startup.append(retry_pending_phone_pairing_confirmations_on_startup)
     app.router.on_startup.append(start_saved_usb_transport_restore)
     app.router.on_shutdown.append(stop_saved_usb_transport_restore)
 
@@ -4557,6 +5212,7 @@ def register_phone_routes(app, ctx) -> None:
         path = request.url.path.rstrip("/")
         serializes_transport = (
             path.startswith("/api/phone/usb/")
+            or path.startswith("/api/phone/pairing/")
             or path == "/api/phone/config"
             or path == "/api/phone/adb-doctor"
             or (
@@ -4576,7 +5232,18 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_config(request: Request):
         if error := ctx.auth_error(request):
             return error
-        store = _load_store(ctx)
+        if request.method == "GET":
+            try:
+                store = await run_in_threadpool(
+                    _retry_pending_phone_pairing_confirmations,
+                    ctx,
+                    max_devices=1,
+                )
+            except Exception:
+                ctx.append_log("[phone-pairing] scheduled confirmation retry deferred")
+                store = _load_store(ctx)
+        else:
+            store = _load_store(ctx)
         return ctx.fastapi_json(_public_store(store))
 
     @app.post("/api/phone/config/device")
@@ -4594,6 +5261,279 @@ def register_phone_routes(app, ctx) -> None:
         with _PHONE_EVENT_SYNC_LOCK:
             _PHONE_EVENT_SYNC_DISABLED_DEVICE_IDS.discard(selected_id)
         public["eventSync"] = _ensure_phone_event_syncs_for_saved_devices(ctx, device_ids=[selected_id])
+        return ctx.fastapi_json(public)
+
+    @app.post("/api/phone/pairing/claim")
+    async def phone_pairing_claim(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        try:
+            pairing = _parse_phone_pairing_input(body)
+        except ValueError as exc:
+            return ctx.fastapi_json({
+                "error": str(exc),
+                "code": "phone_pairing_input_invalid",
+                "retryable": True,
+            }, 400)
+
+        original_store = _load_store(ctx)
+        devices = [item for item in original_store.get("devices", []) if isinstance(item, dict)]
+        device_id = _normalize_device_id(
+            body.get("id")
+            or body.get("deviceId")
+            or original_store.get("selectedDeviceId")
+            or "phone-1"
+        )
+        existing = next(
+            (item for item in devices if _normalize_device_id(item.get("id")) == device_id),
+            {},
+        )
+        launcher_id = _clip(existing.get("launcherId"), 80) or f"loom-desktop-{secrets.token_hex(8)}"
+        launcher_name = _clip(body.get("launcherName") or "LOOM", 80)
+        requested_name = _clip(
+            body.get("name") or pairing.get("deviceName") or existing.get("name") or "Android Phone",
+            80,
+        )
+        parsed_host = urlparse(str(pairing.get("baseUrl") or "")).hostname or ""
+        use_usb = bool(
+            pairing.get("usbSerial")
+            or pairing.get("transportHint") == "usb"
+            or parsed_host in {"127.0.0.1", "localhost", "::1"}
+        )
+        active_base_url = str(pairing.get("baseUrl") or "")
+        connection: dict = {}
+        claim_data: dict = {}
+        identity: dict = {}
+        transaction: dict | None = None
+        prepared_store = original_store
+
+        try:
+            if use_usb:
+                local_port = _reserve_usb_local_port()
+                transaction = _usb_cleanup_transaction(
+                    device_id=device_id,
+                    operation="pair",
+                    serial=pairing.get("usbSerial"),
+                    local_port=local_port,
+                )
+                prepared_store = _store_with_usb_transaction(original_store, transaction)
+                _write_phone_store(ctx, prepared_store)
+                last_error: PhonePairingError | None = None
+                for remote_port in _PHONE_USB_REMOTE_PORTS:
+                    connection = await run_in_threadpool(
+                        ctx.get_process_svc().phone_adb_forward,
+                        serial=pairing.get("usbSerial") or None,
+                        local_port=local_port,
+                        remote_port=remote_port,
+                    )
+                    if not connection.get("ok"):
+                        status_text = " ".join((
+                            str(connection.get("status") or ""),
+                            str(connection.get("message") or ""),
+                        ))
+                        code = (
+                            "phone_pairing_usb_unauthorized"
+                            if "unauthorized" in status_text.lower()
+                            else "phone_pairing_usb_unavailable"
+                        )
+                        raise PhonePairingError(
+                            code,
+                            str(connection.get("message") or "USB 手机不可用，请检查数据线和 USB 调试授权。"),
+                            retryable=True,
+                            status_code=409,
+                        )
+                    active_base_url = _normalize_url(connection.get("baseUrl"))
+                    try:
+                        claim_data = await run_in_threadpool(
+                            _claim_phone_pairing_over_http,
+                            active_base_url,
+                            pairing,
+                            launcher_id=launcher_id,
+                            launcher_name=launcher_name,
+                        )
+                    except PhonePairingError as exc:
+                        last_error = exc
+                        await run_in_threadpool(
+                            ctx.get_process_svc().phone_adb_forward_remove,
+                            serial=_clip(connection.get("serial"), 120),
+                            local_port=int(connection.get("localPort") or local_port),
+                        )
+                        if exc.code == "phone_pairing_endpoint_unavailable":
+                            continue
+                        raise
+                    identity = await run_in_threadpool(
+                        _probe_phone_tunnel,
+                        active_base_url,
+                        str(claim_data.get("phoneToken") or ""),
+                        8,
+                        str(claim_data.get("deviceInstanceId") or ""),
+                        int(claim_data.get("listeningPort") or remote_port),
+                    )
+                    if not identity.get("ok"):
+                        raise PhonePairingError(
+                            "phone_pairing_credential_invalid",
+                            "手机身份校验未通过，旧连接未被修改。请刷新配对码后重试。",
+                            retryable=True,
+                            status_code=409,
+                        )
+                    await run_in_threadpool(
+                        _verify_phone_pairing_hmac,
+                        active_base_url,
+                        launcher_id=str(claim_data.get("launcherId") or ""),
+                        launcher_secret=str(claim_data.get("launcherSecret") or ""),
+                    )
+                    break
+                if not claim_data:
+                    raise last_error or PhonePairingError(
+                        "phone_pairing_endpoint_unavailable",
+                        "未在 USB 手机上找到配对服务，请保持手机配对页面打开后重试。",
+                        retryable=True,
+                        status_code=409,
+                    )
+            else:
+                claim_data = await run_in_threadpool(
+                    _claim_phone_pairing_over_http,
+                    active_base_url,
+                    pairing,
+                    launcher_id=launcher_id,
+                    launcher_name=launcher_name,
+                )
+                identity = await run_in_threadpool(
+                    _probe_phone_tunnel,
+                    active_base_url,
+                    str(claim_data.get("phoneToken") or ""),
+                    8,
+                    str(claim_data.get("deviceInstanceId") or ""),
+                    int(claim_data.get("listeningPort") or _DEFAULT_PHONE_PORT),
+                )
+                if not identity.get("ok"):
+                    raise PhonePairingError(
+                        "phone_pairing_credential_invalid",
+                        "手机身份校验未通过，旧连接未被修改。请刷新配对码后重试。",
+                        retryable=True,
+                        status_code=409,
+                    )
+                await run_in_threadpool(
+                    _verify_phone_pairing_hmac,
+                    active_base_url,
+                    launcher_id=str(claim_data.get("launcherId") or ""),
+                    launcher_secret=str(claim_data.get("launcherSecret") or ""),
+                )
+
+            next_device = {
+                **existing,
+                "id": device_id,
+                "name": requested_name,
+                "baseUrl": active_base_url,
+                "token": str(claim_data.get("phoneToken") or ""),
+                "launcherId": str(claim_data.get("launcherId") or ""),
+                "launcherSecret": str(claim_data.get("launcherSecret") or ""),
+                "deviceInstanceId": str(claim_data.get("deviceInstanceId") or ""),
+                "album": _clip(body.get("album") or existing.get("album") or "LOOM", 80),
+                "connectionMode": "usb" if use_usb else "lan",
+                "pairedAt": claim_data.get("pairedAt"),
+                **_phone_pairing_confirmation_patch(
+                    confirmed=False,
+                    attempts=0,
+                    now_ms=int(time.time() * 1000),
+                ),
+            }
+            if use_usb:
+                next_device.update({
+                    "adbSerial": _clip(connection.get("serial"), 120),
+                    "adbLocalPort": int(connection.get("localPort") or 0),
+                    "adbRemotePort": int(connection.get("remotePort") or claim_data.get("listeningPort") or _DEFAULT_PHONE_PORT),
+                    "usbIdentityVerified": True,
+                })
+                lan_base_url = str(pairing.get("baseUrl") or "")
+                if (urlparse(lan_base_url).hostname or "") not in {"127.0.0.1", "localhost", "::1"}:
+                    next_device["lanBaseUrl"] = _normalize_url(lan_base_url)
+
+            next_devices = [
+                next_device if _normalize_device_id(item.get("id")) == device_id else item
+                for item in devices
+            ]
+            if not existing:
+                next_devices.append(next_device)
+            store_without_transaction = (
+                _store_without_usb_transaction(prepared_store, transaction["id"])
+                if transaction
+                else prepared_store
+            )
+            next_store = {
+                **store_without_transaction,
+                "selectedDeviceId": device_id,
+                "devices": next_devices,
+            }
+            _write_phone_store(ctx, next_store)
+            ctx.append_log(
+                f"[phone-pairing] desktop credentials persisted for {device_id}; "
+                "confirming phone"
+            )
+            next_store = await run_in_threadpool(
+                _retry_pending_phone_pairing_confirmations,
+                ctx,
+                force=True,
+                max_devices=1,
+                device_id=device_id,
+            )
+        except PhonePairingError as exc:
+            if connection.get("ok"):
+                await run_in_threadpool(
+                    ctx.get_process_svc().phone_adb_forward_remove,
+                    serial=_clip(connection.get("serial"), 120),
+                    local_port=int(connection.get("localPort") or 0),
+                )
+            if transaction:
+                try:
+                    _write_phone_store(ctx, original_store)
+                except Exception:
+                    ctx.append_log("[phone-pairing] failed to restore pairing transaction metadata")
+            return ctx.fastapi_json({
+                "error": str(exc),
+                "code": exc.code,
+                "retryable": exc.retryable,
+            }, exc.status_code)
+        except Exception:
+            if connection.get("ok"):
+                await run_in_threadpool(
+                    ctx.get_process_svc().phone_adb_forward_remove,
+                    serial=_clip(connection.get("serial"), 120),
+                    local_port=int(connection.get("localPort") or 0),
+                )
+            if transaction:
+                with suppress(Exception):
+                    _write_phone_store(ctx, original_store)
+            return ctx.fastapi_json({
+                "error": "手机配对未完成，旧连接已保留。请刷新配对码后重试。",
+                "code": "phone_pairing_failed",
+                "retryable": True,
+            }, 500)
+
+        with _PHONE_EVENT_SYNC_LOCK:
+            _PHONE_EVENT_SYNC_DISABLED_DEVICE_IDS.discard(device_id)
+        public = _public_store(next_store)
+        confirmed_device = next(
+            (
+                item
+                for item in public.get("devices", [])
+                if _normalize_device_id(item.get("id"), "") == device_id
+            ),
+            {},
+        )
+        public["eventSync"] = _ensure_phone_event_syncs_for_saved_devices(ctx, device_ids=[device_id])
+        public["pairing"] = _public_phone_pairing_result({
+            "ok": True,
+            "confirmed": confirmed_device.get("confirmed"),
+            "confirmationPending": confirmed_device.get("confirmationPending"),
+            "confirmationStatus": confirmed_device.get("confirmationStatus"),
+            "deviceInstanceId": claim_data.get("deviceInstanceId"),
+            "deviceName": requested_name,
+            "connectionMode": "usb" if use_usb else "lan",
+            "baseUrl": active_base_url,
+            "pairedAt": claim_data.get("pairedAt"),
+        })
         return ctx.fastapi_json(public)
 
     @app.delete("/api/phone/config/device/{device_id}")

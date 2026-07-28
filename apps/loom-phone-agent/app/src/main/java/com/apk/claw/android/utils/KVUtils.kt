@@ -247,8 +247,13 @@ object KVUtils {
 
     // ==================== API Token ====================
     private const val KEY_API_TOKEN = "KEY_API_TOKEN"
+    private const val KEY_PREVIOUS_API_TOKEN = "KEY_PREVIOUS_API_TOKEN"
+    private const val KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL = "KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL"
     fun getApiToken(): String = getString(KEY_API_TOKEN, "")
     fun setApiToken(value: String) = putString(KEY_API_TOKEN, value)
+    fun getPreviousApiToken(): String = getString(KEY_PREVIOUS_API_TOKEN, "")
+    fun getPreviousPhoneCredentialValidUntil(): Long =
+        getLong(KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL, 0L)
 
     // ==================== Stable phone installation identity ====================
     private const val KEY_LUMI_DEVICE_INSTANCE_ID = "KEY_LUMI_DEVICE_INSTANCE_ID"
@@ -292,6 +297,8 @@ object KVUtils {
     private const val KEY_LUMI_LAUNCHER_NAME = "KEY_LUMI_LAUNCHER_NAME"
     private const val KEY_LUMI_LAUNCHER_SECRET = "KEY_LUMI_LAUNCHER_SECRET"
     private const val KEY_LUMI_LAUNCHER_PAIRED_AT = "KEY_LUMI_LAUNCHER_PAIRED_AT"
+    private const val KEY_PREVIOUS_LUMI_LAUNCHER_ID = "KEY_PREVIOUS_LUMI_LAUNCHER_ID"
+    private const val KEY_PREVIOUS_LUMI_LAUNCHER_SECRET = "KEY_PREVIOUS_LUMI_LAUNCHER_SECRET"
 
     fun getLumiLauncherId(): String = getString(KEY_LUMI_LAUNCHER_ID, "")
     fun setLumiLauncherId(value: String) = putString(KEY_LUMI_LAUNCHER_ID, value)
@@ -301,6 +308,66 @@ object KVUtils {
     fun setLumiLauncherSecret(value: String) = putString(KEY_LUMI_LAUNCHER_SECRET, value)
     fun getLumiLauncherPairedAt(): Long = getLong(KEY_LUMI_LAUNCHER_PAIRED_AT, 0L)
     fun setLumiLauncherPairedAt(value: Long) = putLong(KEY_LUMI_LAUNCHER_PAIRED_AT, value)
+    fun getPreviousLumiLauncherId(): String = getString(KEY_PREVIOUS_LUMI_LAUNCHER_ID, "")
+    fun getPreviousLumiLauncherSecret(): String = getString(KEY_PREVIOUS_LUMI_LAUNCHER_SECRET, "")
+
+    @Synchronized
+    fun promotePhonePairingCredentials(
+        phoneToken: String,
+        launcherId: String,
+        launcherName: String,
+        launcherSecret: String,
+        pairedAt: Long,
+        previousValidUntil: Long
+    ) {
+        val previousToken = getApiToken()
+        val previousLauncherId = getLumiLauncherId()
+        val previousLauncherSecret = getLumiLauncherSecret()
+        val pendingUnconfirmedPairing =
+            getPreviousPhoneCredentialValidUntil() == Long.MAX_VALUE &&
+                getPreviousApiToken().isNotBlank()
+        if (!pendingUnconfirmedPairing) {
+            if (previousToken.isNotBlank()) {
+                putString(KEY_PREVIOUS_API_TOKEN, previousToken)
+            } else {
+                remove(KEY_PREVIOUS_API_TOKEN)
+            }
+            if (previousLauncherId.isNotBlank() && previousLauncherSecret.isNotBlank()) {
+                putString(KEY_PREVIOUS_LUMI_LAUNCHER_ID, previousLauncherId)
+                putString(KEY_PREVIOUS_LUMI_LAUNCHER_SECRET, previousLauncherSecret)
+            } else {
+                remove(KEY_PREVIOUS_LUMI_LAUNCHER_ID, KEY_PREVIOUS_LUMI_LAUNCHER_SECRET)
+            }
+        }
+        putLong(KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL, previousValidUntil)
+        setApiToken(phoneToken)
+        setLumiLauncherId(launcherId)
+        setLumiLauncherName(launcherName)
+        setLumiLauncherSecret(launcherSecret)
+        setLumiLauncherPairedAt(pairedAt)
+        sync()
+    }
+
+    @Synchronized
+    fun confirmPhonePairingCredentials(launcherId: String): Boolean {
+        if (launcherId.isBlank() || launcherId != getLumiLauncherId()) return false
+        clearPreviousPhoneCredentials()
+        sync()
+        return true
+    }
+
+    fun clearPreviousPhoneCredentials() = remove(
+        KEY_PREVIOUS_API_TOKEN,
+        KEY_PREVIOUS_LUMI_LAUNCHER_ID,
+        KEY_PREVIOUS_LUMI_LAUNCHER_SECRET,
+        KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL
+    )
+
+    fun clearExpiredPreviousPhoneCredentials(now: Long = System.currentTimeMillis()) {
+        if (getPreviousPhoneCredentialValidUntil() > now) return
+        clearPreviousPhoneCredentials()
+    }
+
     fun clearLumiLauncherPairing() = remove(
         KEY_LUMI_LAUNCHER_ID,
         KEY_LUMI_LAUNCHER_NAME,

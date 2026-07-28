@@ -154,7 +154,7 @@
     <string name="menu_telegram">Telegram</string>
     <string name="menu_wechat">WeChat</string>
     <string name="menu_lan_config">LAN Config</string>
-    <string name="menu_api_token">API Token</string>
+    <string name="menu_pc_pairing">Pair with LOOM</string>
     <string name="menu_publish_relay">Publish Relay</string>
     <string name="menu_floating_circle_size">Floating Ball Size</string>
     <string name="menu_floating_click_enabled">Clickable and draggable overlay</string>
@@ -167,16 +167,21 @@
     <string name="lan_config_stopped">Off</string>
     <string name="lan_config_no_wifi">Please connect to Wi-Fi or enable phone hotspot</string>
 
-    <!-- API Token Config -->
-    <string name="api_token_config_title">API Token Configuration</string>
-    <string name="api_token_config_tip">Token is required for external HTTP API access. Generate or enter your own token.</string>
-    <string name="api_token_config_token">Token</string>
-    <string name="api_token_config_hint">Enter custom token or use generated</string>
-    <string name="api_token_config_generate">Generate Random</string>
-    <string name="api_token_config_saved">API Token saved</string>
-    <string name="api_token_config_required">Please enter or generate a token</string>
-    <string name="api_token_status_set">Token set</string>
-    <string name="api_token_status_unset">Not set</string>
+    <!-- LOOM pairing -->
+    <string name="pc_pairing_title">Pair with LOOM</string>
+    <string name="pc_pairing_tip_usb">For USB pairing, enter the 6-digit code in LOOM or copy the full pairing payload. Long-lived credentials are never shown.</string>
+    <string name="pc_pairing_tip_lan">For LAN pairing, scan or paste the full pairing payload in LOOM. The 6-digit code is USB-only, and long-lived credentials are never shown.</string>
+    <string name="pc_pairing_code">USB only: 6-digit pairing code</string>
+    <string name="pc_pairing_expiry">Expires in %1$d seconds</string>
+    <string name="pc_pairing_refresh">Refresh pairing payload</string>
+    <string name="pc_pairing_copy">Copy pairing payload</string>
+    <string name="pc_pairing_expired">Pairing payload expired. Refresh it to continue.</string>
+    <string name="pc_pairing_copied">Pairing payload copied</string>
+    <string name="pc_pairing_server_failed">Phone connection service failed to start. Return and retry.</string>
+    <string name="pc_pairing_usb_ready">USB pairing is ready. Connect this phone to the PC and enter the code in LOOM.</string>
+    <string name="pc_pairing_lan_ready">LAN pairing is ready. Scan or copy the payload in LOOM.</string>
+    <string name="pc_pairing_status_paired">Paired</string>
+    <string name="pc_pairing_status_unpaired">Not paired</string>
 
     <!-- Publish Relay Config -->
     <string name="publish_relay_config_title">Publish Relay</string>

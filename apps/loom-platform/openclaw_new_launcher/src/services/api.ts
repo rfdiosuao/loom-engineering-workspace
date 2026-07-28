@@ -1202,6 +1202,9 @@ export interface PhoneDeviceSummary {
   baseUrl: string;
   tokenAvailable: boolean;
   paired?: boolean;
+  confirmed?: boolean;
+  confirmationPending?: boolean;
+  confirmationStatus?: string;
   album?: string;
   lastSeenAt?: string;
   connectionMode?: 'lan' | 'usb';
@@ -1212,6 +1215,18 @@ export interface PhoneConfigSnapshot {
   selectedDeviceId: string;
   configured: boolean;
   devices: PhoneDeviceSummary[];
+  pairing?: {
+    ok: boolean;
+    state: string;
+    confirmed?: boolean;
+    confirmationPending?: boolean;
+    confirmationStatus?: string;
+    deviceInstanceId?: string;
+    deviceName?: string;
+    connectionMode?: 'lan' | 'usb';
+    baseUrl?: string;
+    pairedAt?: number;
+  };
 }
 
 export interface PhoneUsbConnectionResponse {
@@ -1251,9 +1266,17 @@ export const phoneApi = {
     deviceId?: string;
     name?: string;
     baseUrl: string;
-    token?: string;
     selectedDeviceId?: string;
   }): Promise<PhoneConfigSnapshot> => api('/api/phone/config/device', 'POST', params),
+  claimPairing: (params: {
+    id?: string;
+    deviceId?: string;
+    name?: string;
+    payload?: string;
+    baseUrl?: string;
+    code: string;
+    usbSerial?: string;
+  }): Promise<PhoneConfigSnapshot> => api('/api/phone/pairing/claim', 'POST', params),
   deleteDevice: (deviceId: string): Promise<PhoneConfigSnapshot> =>
     api(`/api/phone/config/device/${encodeURIComponent(deviceId)}`, 'DELETE'),
   usbDevices: (): Promise<PhoneAdbDevicesResponse> => api('/api/phone/usb/devices'),

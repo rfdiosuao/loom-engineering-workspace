@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/colorBgSecondary"
+    android:orientation="vertical">
+
+    <com.apk.claw.android.widget.CommonToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="56pt" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipToPadding="false"
+        android:paddingHorizontal="16pt"
+        android:paddingTop="16pt"
+        android:paddingBottom="24pt">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tvTip"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="4pt"
+                android:paddingBottom="16pt"
+                android:text="@string/pc_pairing_tip_lan"
+                android:textColor="@color/colorTextSecondary"
+                android:textSize="14pt" />
+
+            <androidx.cardview.widget.CardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/colorContainerBrighten"
+                app:cardCornerRadius="12pt"
+                app:cardElevation="1pt">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical"
+                    android:padding="20pt">
+
+                    <LinearLayout
+                        android:id="@+id/pairingCodeSection"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_horizontal"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/pc_pairing_code"
+                            android:textColor="@color/colorTextSecondary"
+                            android:textSize="13pt"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/tvPairingCode"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8pt"
+                            android:fontFamily="monospace"
+                            android:letterSpacing="0.12"
+                            android:text="------"
+                            android:textColor="@color/colorTextPrimary"
+                            android:textIsSelectable="true"
+                            android:textSize="34pt"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/tvPairingExpiry"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8pt"
+                        android:textColor="@color/colorTextTertiary"
+                        android:textSize="12pt" />
+
+                    <ImageView
+                        android:id="@+id/ivPairingQr"
+                        android:layout_width="220pt"
+                        android:layout_height="220pt"
+                        android:layout_marginTop="18pt"
+                        android:contentDescription="@string/cd_qr_code"
+                        android:scaleType="fitCenter" />
+
+                    <TextView
+                        android:id="@+id/tvPairingStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14pt"
+                        android:gravity="center"
+                        android:textColor="@color/colorTextSecondary"
+                        android:textSize="13pt" />
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+
+            <TextView
+                android:id="@+id/tvPairingPayload"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16pt"
+                android:background="@color/colorContainerBrighten"
+                android:fontFamily="monospace"
+                android:padding="14pt"
+                android:textColor="@color/colorTextSecondary"
+                android:textIsSelectable="true"
+                android:textSize="11pt" />
+
+            <com.apk.claw.android.widget.KButton
+                android:id="@+id/btnCopy"
+                android:layout_width="match_parent"
+                android:layout_height="48pt"
+                android:layout_marginTop="16pt"
+                android:text="@string/pc_pairing_copy"
+                android:textSize="16pt" />
+
+            <com.apk.claw.android.widget.KButton
+                android:id="@+id/btnGenerate"
+                android:layout_width="match_parent"
+                android:layout_height="48pt"
+                android:layout_marginTop="12pt"
+                android:text="@string/pc_pairing_refresh"
+                android:textSize="16pt"
+                app:btnBackground="@color/colorContainerBase"
+                app:btnTextColor="@color/colorTextPrimary" />
+
+        </LinearLayout>
+    </ScrollView>
+
+</LinearLayout>

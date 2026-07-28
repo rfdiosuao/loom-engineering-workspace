@@ -24,19 +24,19 @@ class PhoneDemoPageContractTests(unittest.TestCase):
         self.assertIn("? (selectedMatrixDevice.online ? 'online' : 'offline')", source)
         self.assertIn("const connectionVerified =", source)
 
-    def test_phone_demo_keeps_minimal_connection_config_entry(self) -> None:
+    def test_phone_demo_uses_short_lived_pairing_without_visible_permanent_token(self) -> None:
         with open(PHONE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("手机连接配置", source)
-        self.assertIn("手机 IP", source)
-        self.assertIn("只使用 USB 时可留空", source)
+        self.assertIn("配对码", source)
+        self.assertIn("配对信息", source)
+        self.assertIn("与手机配对", source)
         self.assertIn("displayPhoneAddress", source)
-        self.assertIn("连接令牌", source)
-        self.assertIn("保存并检测", source)
-        self.assertIn("phoneApi.saveDevice", source)
+        self.assertIn("phoneApi.claimPairing", source)
         self.assertIn("tokenAvailable", source)
-        self.assertIn("setPhoneToken('')", source)
+        self.assertNotIn("value={phoneToken}", source)
+        self.assertNotIn("placeholder={tokenAvailable ? '已保存，留空沿用' : '手机端连接令牌'}", source)
 
     def test_phone_demo_exposes_multi_phone_add_and_select_flow(self) -> None:
         with open(PHONE_PAGE, "r", encoding="utf-8") as handle:
@@ -152,7 +152,7 @@ class PhoneDemoPageContractTests(unittest.TestCase):
 
         self.assertIn("const canUsePhone", source)
         self.assertIn("!canUsePhone", source)
-        self.assertIn("请先保存手机连接令牌", source)
+        self.assertIn("请先与手机完成配对", source)
 
     def test_phone_demo_exposes_bridge_owned_model_sync_action(self) -> None:
         with open(PHONE_PAGE, "r", encoding="utf-8") as handle:
@@ -170,9 +170,11 @@ class PhoneDemoPageContractTests(unittest.TestCase):
         self.assertIn("PhoneConfigSnapshot", source)
         self.assertIn("config: ()", source)
         self.assertIn("saveDevice", source)
+        self.assertIn("claimPairing", source)
         self.assertIn("syncModel", source)
         self.assertIn("api('/api/phone/config')", source)
         self.assertIn("api('/api/phone/config/device', 'POST'", source)
+        self.assertIn("api('/api/phone/pairing/claim', 'POST'", source)
         self.assertIn("api('/api/phone/sync-model', 'POST')", source)
 
     def test_phone_demo_exposes_safe_and_full_agent_task_modes(self) -> None:

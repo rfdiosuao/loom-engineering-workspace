@@ -9,10 +9,8 @@ import com.apk.claw.android.R
 import com.apk.claw.android.channel.ChannelManager
 import com.apk.claw.android.floating.FloatingCircleManager
 import com.apk.claw.android.server.ConfigServerManager
-import com.apk.claw.android.server.PcPairingReadinessPolicy
 import com.apk.claw.android.server.TokenValidator
 import com.apk.claw.android.utils.KVUtils
-import com.apk.claw.android.widget.QRCodeDialog
 import com.apk.claw.android.utils.XLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,7 +46,7 @@ class SettingsViewModel : ViewModel() {
         val discordBotToken = KVUtils.getDiscordBotToken().isNotEmpty()
         val telegramBotToken = KVUtils.getTelegramBotToken().isNotEmpty()
         val wechatBotToken = KVUtils.getWechatBotToken().isNotEmpty()
-        val apiTokenSet = TokenValidator.isTokenConfigured()
+        val phonePaired = TokenValidator.isTokenConfigured()
         val map = mapOf(
             MenuAction.LLM_CONFIG.name to SettingValue.Text(if (KVUtils.hasLlmConfig()) KVUtils.getLlmModelName() else ClawApplication.instance.getString(R.string.common_unconfigured)),
             MenuAction.DINGDING.name to SettingValue.Text(ClawApplication.instance.getString(if (dingtalkAppKey && dingtalkAppSecret) R.string.common_bound else R.string.common_unbound)),
@@ -57,7 +55,7 @@ class SettingsViewModel : ViewModel() {
             MenuAction.DISCORD.name to SettingValue.Text(ClawApplication.instance.getString(if (discordBotToken) R.string.common_bound else R.string.common_unbound)),
             MenuAction.TELEGRAM.name to SettingValue.Text(ClawApplication.instance.getString(if (telegramBotToken) R.string.common_bound else R.string.common_unbound)),
             MenuAction.WECHAT.name to SettingValue.Text(ClawApplication.instance.getString(if (wechatBotToken) R.string.common_bound else R.string.common_unbound)),
-            MenuAction.API_TOKEN.name to SettingValue.Text(ClawApplication.instance.getString(if (apiTokenSet) R.string.api_token_status_set else R.string.api_token_status_unset)),
+            MenuAction.PC_PAIRING.name to SettingValue.Text(ClawApplication.instance.getString(if (phonePaired) R.string.pc_pairing_status_paired else R.string.pc_pairing_status_unpaired)),
             MenuAction.LAN_CONFIG.name to SettingValue.Text(getLanConfigTrailingText()),
             MenuAction.PUBLISH_RELAY.name to SettingValue.Text(getPublishRelayTrailingText()),
             MenuAction.FLOATING_CLICK.name to SettingValue.Switch(FloatingCircleManager.isFloatingClickEnabled()),
@@ -299,94 +297,16 @@ class SettingsViewModel : ViewModel() {
     }
 
     /**
-     * 用 ZXing 将文本编码为二维码 Bitmap
-     */
-    private fun generateQrBitmap(content: String, size: Int): android.graphics.Bitmap? {
-        return try {
-            val hints = mapOf(
-                com.google.zxing.EncodeHintType.MARGIN to 1,
-                com.google.zxing.EncodeHintType.CHARACTER_SET to "UTF-8"
-            )
-            val matrix = com.google.zxing.qrcode.QRCodeWriter()
-                .encode(content, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints)
-            val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.RGB_565)
-            for (x in 0 until size) {
-                for (y in 0 until size) {
-                    bitmap.setPixel(x, y, if (matrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
-                }
-            }
-            bitmap
-        } catch (e: Exception) {
-            XLog.e("SettingsViewModel", "生成二维码失败", e)
-            null
-        }
-    }
-
-    /**
      * 菜单动作枚举
      */
     enum class MenuAction {
         DINGDING, FEISHU, QQ, DISCORD, TELEGRAM, WECHAT,
-        API_TOKEN,
-        LAN_CONFIG,
         PC_PAIRING,
+        LAN_CONFIG,
         LLM_CONFIG,
         PUBLISH_RELAY,
         FLOATING_CLICK,
         FLOATING_SIZE
     }
 
-    /**
-     * 电脑配对：把本机局域网地址 + 控制台 Token 编码成配对码 + 二维码，
-     * 让电脑端 LumiClaw「手机控制台 → 扫码配对」一次性填好，免去手动输 IP/端口/Token。
-     */
-    fun showPcPairingQr(context: Context) {
-        try {
-            val ip = com.apk.claw.android.server.ConfigServerManager.getLanIpAddress(context)
-            if (ip.isNullOrBlank()) {
-                Toast.makeText(context, "未连接 WiFi/局域网，无法生成配对码", Toast.LENGTH_LONG).show()
-                return
-            }
-            val token = com.apk.claw.android.utils.KVUtils.getApiToken()
-            if (token.isBlank()) {
-                Toast.makeText(context, "请先在「API Token」里设置控制台令牌", Toast.LENGTH_LONG).show()
-                return
-            }
-            if (!ConfigServerManager.isRunning()) {
-                val started = ConfigServerManager.start(context)
-                if (started) {
-                    KVUtils.setConfigServerEnabled(true)
-                    updateTrailingText(MenuAction.LAN_CONFIG.name, getLanConfigTrailingText())
-                }
-            }
-            val readiness = PcPairingReadinessPolicy.evaluate(
-                lanIp = ip,
-                tokenConfigured = TokenValidator.isTokenConfigured(),
-                serverRunning = ConfigServerManager.isRunning(),
-                serverPort = ConfigServerManager.getPort()
-            )
-            if (!readiness.ready) {
-                Toast.makeText(context, readiness.message, Toast.LENGTH_LONG).show()
-                updateTrailingText(MenuAction.LAN_CONFIG.name, getLanConfigTrailingText())
-                return
-            }
-            val baseUrl = readiness.baseUrl
-            val name = android.os.Build.MODEL ?: "APKClaw"
-            val enc = { s: String -> java.net.URLEncoder.encode(s, "UTF-8") }
-            val code = "lumi://pair?b=${enc(baseUrl)}&t=${enc(token)}&n=${enc(name)}"
-            val bmp = generateQrBitmap(code, 560)
-            if (bmp == null) {
-                Toast.makeText(context, "二维码生成失败", Toast.LENGTH_SHORT).show()
-                return
-            }
-            QRCodeDialog.show(
-                context = context,
-                title = "电脑配对",
-                subtitle = "在电脑 LumiClaw「手机控制台」点「新增」，把下面这串配对码粘进「配对码」框即可：\n\n$code",
-                qrBitmap = bmp
-            )
-        } catch (e: Exception) {
-            Toast.makeText(context, "生成配对码失败：${e.message}", Toast.LENGTH_SHORT).show()
-        }
-    }
 }

@@ -53,17 +53,17 @@ export const MatrixTaskDrawer: React.FC<MatrixTaskDrawerProps> = ({
         <div className="mt-5 space-y-4">
           <label className="block text-[10px] font-bold text-text-muted">
             模板 ID（留空为直接任务）
-            <input value={templateId} onChange={(event) => onTemplateIdChange(event.target.value)} className="mt-1.5 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text outline-none focus:border-[var(--color-focus)] focus:ring-2 focus:ring-[var(--color-focus-soft)]" />
+            <input value={templateId} onChange={(event) => onTemplateIdChange(event.target.value)} className="mt-1.5 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text outline-none focus:border-focus focus:ring-2 focus:ring-focus-soft" />
           </label>
           <label className="block text-[10px] font-bold text-text-muted">
             执行模式
-            <select value={mode} onChange={(event) => onModeChange(event.target.value as MatrixExecutionMode)} className="mt-1.5 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text focus:border-[var(--color-focus)] focus:ring-2 focus:ring-[var(--color-focus-soft)]">
+            <select value={mode} onChange={(event) => onModeChange(event.target.value as MatrixExecutionMode)} className="mt-1.5 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text focus:border-focus focus:ring-2 focus:ring-focus-soft">
               <option value="observe">只读观察</option><option value="safe">安全控制</option><option value="full">完整控制</option>
             </select>
           </label>
           <label className="block text-[10px] font-bold text-text-muted">
             执行档位
-            <select value={profile} onChange={(event) => onProfileChange(event.target.value as MatrixExecutionProfile)} className="mt-1.5 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text focus:border-[var(--color-focus)] focus:ring-2 focus:ring-[var(--color-focus-soft)]">
+            <select value={profile} onChange={(event) => onProfileChange(event.target.value as MatrixExecutionProfile)} className="mt-1.5 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text focus:border-focus focus:ring-2 focus:ring-focus-soft">
               <option value="fast">快速</option><option value="standard">标准</option><option value="deep">深度</option>
             </select>
           </label>
@@ -90,7 +90,7 @@ export const MatrixTaskDrawer: React.FC<MatrixTaskDrawerProps> = ({
             <img src={PHONE_AGENT_QR_SRC} alt="手机端 App 下载二维码" className="h-16 w-16 shrink-0 rounded-[6px] bg-white p-1" />
             <div className="min-w-0 flex-1">
               <h3 className="text-xs font-black text-text">手机端 App</h3>
-              <p className="mt-1 text-[10px] leading-4 text-text-muted">安装后在手机页保存设备地址和令牌，即可加入矩阵。</p>
+              <p className="mt-1 text-[10px] leading-4 text-text-muted">安装后在手机页通过完整配对信息或 USB 一次性配对码安全加入矩阵。</p>
               <div className="mt-2 flex gap-2">
                 <a href={PHONE_AGENT_APK_URL} target="_blank" rel="noreferrer" className="rounded-[6px] border border-info bg-info-soft px-2 py-1 text-[10px] font-bold text-info-ink">下载 APK</a>
                 <button type="button" onClick={() => void copyPhoneAgentUrl()} className="rounded-[6px] border border-border px-2 py-1 text-[10px] font-bold text-text hover:bg-hover">复制链接</button>
