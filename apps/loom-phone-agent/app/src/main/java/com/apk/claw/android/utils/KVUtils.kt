@@ -50,6 +50,7 @@ object KVUtils {
     fun init(context: Context) {
         MMKV.initialize(context)
         mmkv = MMKV.defaultMMKV()
+        PhoneCredentialVault.init(context)
     }
 
     // ==================== String ====================
@@ -130,6 +131,7 @@ object KVUtils {
 
     fun clear() {
         mmkv.clearAll()
+        PhoneCredentialVault.clear()
     }
 
     fun getAllKeys(): Array<String> {
@@ -249,11 +251,31 @@ object KVUtils {
     private const val KEY_API_TOKEN = "KEY_API_TOKEN"
     private const val KEY_PREVIOUS_API_TOKEN = "KEY_PREVIOUS_API_TOKEN"
     private const val KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL = "KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL"
-    fun getApiToken(): String = getString(KEY_API_TOKEN, "")
-    fun setApiToken(value: String) = putString(KEY_API_TOKEN, value)
-    fun getPreviousApiToken(): String = getString(KEY_PREVIOUS_API_TOKEN, "")
-    fun getPreviousPhoneCredentialValidUntil(): Long =
-        getLong(KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL, 0L)
+    fun getApiToken(): String = PhoneCredentialVault.get(
+        KEY_API_TOKEN,
+        migratePlaintext = { getString(KEY_API_TOKEN, "") },
+        clearPlaintext = { remove(KEY_API_TOKEN) },
+    )
+    fun setApiToken(value: String): Boolean {
+        val stored = PhoneCredentialVault.put(KEY_API_TOKEN, value)
+        if (stored) remove(KEY_API_TOKEN)
+        return stored
+    }
+    fun getPreviousApiToken(): String = PhoneCredentialVault.get(
+        KEY_PREVIOUS_API_TOKEN,
+        migratePlaintext = { getString(KEY_PREVIOUS_API_TOKEN, "") },
+        clearPlaintext = { remove(KEY_PREVIOUS_API_TOKEN) },
+    )
+    fun getPreviousPhoneCredentialValidUntil(): Long = PhoneCredentialVault.get(
+        KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL,
+        migratePlaintext = {
+            getLong(KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL, 0L)
+                .takeIf { it > 0L }
+                ?.toString()
+                .orEmpty()
+        },
+        clearPlaintext = { remove(KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL) },
+    ).toLongOrNull() ?: 0L
 
     // ==================== Stable phone installation identity ====================
     private const val KEY_LUMI_DEVICE_INSTANCE_ID = "KEY_LUMI_DEVICE_INSTANCE_ID"
@@ -300,16 +322,52 @@ object KVUtils {
     private const val KEY_PREVIOUS_LUMI_LAUNCHER_ID = "KEY_PREVIOUS_LUMI_LAUNCHER_ID"
     private const val KEY_PREVIOUS_LUMI_LAUNCHER_SECRET = "KEY_PREVIOUS_LUMI_LAUNCHER_SECRET"
 
-    fun getLumiLauncherId(): String = getString(KEY_LUMI_LAUNCHER_ID, "")
-    fun setLumiLauncherId(value: String) = putString(KEY_LUMI_LAUNCHER_ID, value)
+    fun getLumiLauncherId(): String = PhoneCredentialVault.get(
+        KEY_LUMI_LAUNCHER_ID,
+        migratePlaintext = { getString(KEY_LUMI_LAUNCHER_ID, "") },
+        clearPlaintext = { remove(KEY_LUMI_LAUNCHER_ID) },
+    )
+    fun setLumiLauncherId(value: String): Boolean {
+        val stored = PhoneCredentialVault.put(KEY_LUMI_LAUNCHER_ID, value)
+        if (stored) remove(KEY_LUMI_LAUNCHER_ID)
+        return stored
+    }
     fun getLumiLauncherName(): String = getString(KEY_LUMI_LAUNCHER_NAME, "")
     fun setLumiLauncherName(value: String) = putString(KEY_LUMI_LAUNCHER_NAME, value)
-    fun getLumiLauncherSecret(): String = getString(KEY_LUMI_LAUNCHER_SECRET, "")
-    fun setLumiLauncherSecret(value: String) = putString(KEY_LUMI_LAUNCHER_SECRET, value)
+    fun getLumiLauncherSecret(): String = PhoneCredentialVault.get(
+        KEY_LUMI_LAUNCHER_SECRET,
+        migratePlaintext = { getString(KEY_LUMI_LAUNCHER_SECRET, "") },
+        clearPlaintext = { remove(KEY_LUMI_LAUNCHER_SECRET) },
+    )
+    fun setLumiLauncherSecret(value: String): Boolean {
+        val stored = PhoneCredentialVault.put(KEY_LUMI_LAUNCHER_SECRET, value)
+        if (stored) remove(KEY_LUMI_LAUNCHER_SECRET)
+        return stored
+    }
+    fun setLumiLauncherPairing(launcherId: String, launcherSecret: String): Boolean {
+        val stored = PhoneCredentialVault.putAll(
+            mapOf(
+                KEY_LUMI_LAUNCHER_ID to launcherId,
+                KEY_LUMI_LAUNCHER_SECRET to launcherSecret,
+            ),
+        )
+        if (stored) {
+            remove(KEY_LUMI_LAUNCHER_ID, KEY_LUMI_LAUNCHER_SECRET)
+        }
+        return stored
+    }
     fun getLumiLauncherPairedAt(): Long = getLong(KEY_LUMI_LAUNCHER_PAIRED_AT, 0L)
     fun setLumiLauncherPairedAt(value: Long) = putLong(KEY_LUMI_LAUNCHER_PAIRED_AT, value)
-    fun getPreviousLumiLauncherId(): String = getString(KEY_PREVIOUS_LUMI_LAUNCHER_ID, "")
-    fun getPreviousLumiLauncherSecret(): String = getString(KEY_PREVIOUS_LUMI_LAUNCHER_SECRET, "")
+    fun getPreviousLumiLauncherId(): String = PhoneCredentialVault.get(
+        KEY_PREVIOUS_LUMI_LAUNCHER_ID,
+        migratePlaintext = { getString(KEY_PREVIOUS_LUMI_LAUNCHER_ID, "") },
+        clearPlaintext = { remove(KEY_PREVIOUS_LUMI_LAUNCHER_ID) },
+    )
+    fun getPreviousLumiLauncherSecret(): String = PhoneCredentialVault.get(
+        KEY_PREVIOUS_LUMI_LAUNCHER_SECRET,
+        migratePlaintext = { getString(KEY_PREVIOUS_LUMI_LAUNCHER_SECRET, "") },
+        clearPlaintext = { remove(KEY_PREVIOUS_LUMI_LAUNCHER_SECRET) },
+    )
 
     @Synchronized
     fun promotePhonePairingCredentials(
@@ -323,27 +381,43 @@ object KVUtils {
         val previousToken = getApiToken()
         val previousLauncherId = getLumiLauncherId()
         val previousLauncherSecret = getLumiLauncherSecret()
+        val previousTokenBeforePromotion = getPreviousApiToken()
+        val previousLauncherIdBeforePromotion = getPreviousLumiLauncherId()
+        val previousLauncherSecretBeforePromotion = getPreviousLumiLauncherSecret()
+        val previousValidUntilBeforePromotion = getPreviousPhoneCredentialValidUntil()
         val pendingUnconfirmedPairing =
-            getPreviousPhoneCredentialValidUntil() == Long.MAX_VALUE &&
-                getPreviousApiToken().isNotBlank()
-        if (!pendingUnconfirmedPairing) {
-            if (previousToken.isNotBlank()) {
-                putString(KEY_PREVIOUS_API_TOKEN, previousToken)
-            } else {
-                remove(KEY_PREVIOUS_API_TOKEN)
-            }
-            if (previousLauncherId.isNotBlank() && previousLauncherSecret.isNotBlank()) {
-                putString(KEY_PREVIOUS_LUMI_LAUNCHER_ID, previousLauncherId)
-                putString(KEY_PREVIOUS_LUMI_LAUNCHER_SECRET, previousLauncherSecret)
-            } else {
-                remove(KEY_PREVIOUS_LUMI_LAUNCHER_ID, KEY_PREVIOUS_LUMI_LAUNCHER_SECRET)
-            }
+            previousValidUntilBeforePromotion > System.currentTimeMillis() &&
+                previousTokenBeforePromotion.isNotBlank()
+        val rollbackToken =
+            if (pendingUnconfirmedPairing) previousTokenBeforePromotion else previousToken
+        val rollbackLauncherId =
+            if (pendingUnconfirmedPairing) previousLauncherIdBeforePromotion else previousLauncherId
+        val rollbackLauncherSecret =
+            if (pendingUnconfirmedPairing) previousLauncherSecretBeforePromotion else previousLauncherSecret
+        val rollbackValidUntil = if (
+            rollbackToken.isNotBlank() &&
+            rollbackLauncherId.isNotBlank() &&
+            rollbackLauncherSecret.isNotBlank()
+        ) {
+            if (pendingUnconfirmedPairing) previousValidUntilBeforePromotion else previousValidUntil
+        } else {
+            0L
         }
-        putLong(KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL, previousValidUntil)
-        setApiToken(phoneToken)
-        setLumiLauncherId(launcherId)
+        check(
+            PhoneCredentialVault.putAll(
+                mapOf(
+                    KEY_API_TOKEN to phoneToken,
+                    KEY_LUMI_LAUNCHER_ID to launcherId,
+                    KEY_LUMI_LAUNCHER_SECRET to launcherSecret,
+                    KEY_PREVIOUS_API_TOKEN to rollbackToken,
+                    KEY_PREVIOUS_LUMI_LAUNCHER_ID to rollbackLauncherId,
+                    KEY_PREVIOUS_LUMI_LAUNCHER_SECRET to rollbackLauncherSecret,
+                    KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL to
+                        rollbackValidUntil.takeIf { it > 0L }?.toString().orEmpty(),
+                ),
+            ),
+        ) { "Unable to persist encrypted phone pairing credentials" }
         setLumiLauncherName(launcherName)
-        setLumiLauncherSecret(launcherSecret)
         setLumiLauncherPairedAt(pairedAt)
         sync()
     }
@@ -356,22 +430,36 @@ object KVUtils {
         return true
     }
 
-    fun clearPreviousPhoneCredentials() = remove(
-        KEY_PREVIOUS_API_TOKEN,
-        KEY_PREVIOUS_LUMI_LAUNCHER_ID,
-        KEY_PREVIOUS_LUMI_LAUNCHER_SECRET,
-        KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL
-    )
+    fun clearPreviousPhoneCredentials() {
+        PhoneCredentialVault.remove(
+            KEY_PREVIOUS_API_TOKEN,
+            KEY_PREVIOUS_LUMI_LAUNCHER_ID,
+            KEY_PREVIOUS_LUMI_LAUNCHER_SECRET,
+            KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL,
+        )
+        remove(
+            KEY_PREVIOUS_API_TOKEN,
+            KEY_PREVIOUS_LUMI_LAUNCHER_ID,
+            KEY_PREVIOUS_LUMI_LAUNCHER_SECRET,
+            KEY_PREVIOUS_PHONE_CREDENTIAL_VALID_UNTIL,
+        )
+    }
 
     fun clearExpiredPreviousPhoneCredentials(now: Long = System.currentTimeMillis()) {
         if (getPreviousPhoneCredentialValidUntil() > now) return
         clearPreviousPhoneCredentials()
     }
 
-    fun clearLumiLauncherPairing() = remove(
-        KEY_LUMI_LAUNCHER_ID,
-        KEY_LUMI_LAUNCHER_NAME,
-        KEY_LUMI_LAUNCHER_SECRET,
-        KEY_LUMI_LAUNCHER_PAIRED_AT
-    )
+    fun clearLumiLauncherPairing() {
+        remove(
+            KEY_LUMI_LAUNCHER_ID,
+            KEY_LUMI_LAUNCHER_NAME,
+            KEY_LUMI_LAUNCHER_SECRET,
+            KEY_LUMI_LAUNCHER_PAIRED_AT,
+        )
+        PhoneCredentialVault.remove(
+            KEY_LUMI_LAUNCHER_ID,
+            KEY_LUMI_LAUNCHER_SECRET,
+        )
+    }
 }

@@ -243,9 +243,15 @@ object LumiSecurityController {
             System.currentTimeMillis()
         }
 
-        KVUtils.setLumiLauncherId(launcherId)
+        if (!KVUtils.setLumiLauncherPairing(launcherId, secret)) {
+            return jsonElementResponse(
+                NanoHTTPD.Response.Status.INTERNAL_ERROR,
+                false,
+                null,
+                "Unable to persist launcher pairing"
+            )
+        }
         KVUtils.setLumiLauncherName(launcherName)
-        KVUtils.setLumiLauncherSecret(secret)
         KVUtils.setLumiLauncherPairedAt(pairedAt)
 
         XLog.i(TAG, "Launcher paired: id=$launcherId, name=$launcherName")
@@ -309,12 +315,18 @@ object LumiSecurityController {
                 "Missing Lumi security headers"
             )
         }
-        val secret = when {
-            launcherId == storedLauncherId -> storedSecret
-            previousValid && launcherId == previousLauncherId -> previousSecret
-            else -> ""
+        val candidateSecrets = buildList {
+            if (launcherId == storedLauncherId && storedSecret.isNotBlank()) add(storedSecret)
+            if (
+                previousValid &&
+                launcherId == previousLauncherId &&
+                previousSecret.isNotBlank() &&
+                previousSecret != storedSecret
+            ) {
+                add(previousSecret)
+            }
         }
-        if (secret.isBlank()) {
+        if (candidateSecrets.isEmpty()) {
             XLog.w(TAG, "Unknown Lumi launcher id: $launcherId")
             return jsonElementResponse(
                 NanoHTTPD.Response.Status.FORBIDDEN,
@@ -364,8 +376,10 @@ object LumiSecurityController {
             nonce,
             bodyHash
         ).joinToString("\n")
-        val expected = hmacBase64Url(secret, signatureInput)
-        if (!constantTimeEquals(signature, expected)) {
+        val signatureMatches = candidateSecrets.any { secret ->
+            constantTimeEquals(signature, hmacBase64Url(secret, signatureInput))
+        }
+        if (!signatureMatches) {
             XLog.w(TAG, "Invalid Lumi signature from ${session.remoteIpAddress}")
             return jsonElementResponse(
                 NanoHTTPD.Response.Status.FORBIDDEN,

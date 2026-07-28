@@ -296,7 +296,7 @@ export const ModelsPage: React.FC = () => {
   const busyOverlayTitle = loading ? '正在读取模型' : sourceMode === 'custom' ? '正在应用第三方配置' : '正在同步模型';
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-surface">
+    <div data-models-page className="flex h-full flex-col overflow-hidden bg-app-bg">
       <BusyOverlay active={loading || busy} title={busyOverlayTitle} detail={`${APP_DISPLAY_NAME} 正在读取或写入模型配置。`} />
       <header className="shrink-0 border-b border-border/70 bg-surface px-8 py-7">
         <div className="flex items-end justify-between gap-6">
@@ -315,7 +315,7 @@ export const ModelsPage: React.FC = () => {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-7">
         <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <section className="rounded-[20px] border border-border/80 bg-surface-alt/30 p-6">
+          <section className="rounded-[8px] border border-border/80 bg-surface-alt/30 p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-black text-text">模型来源</h2>
@@ -434,14 +434,14 @@ const SourceModeButton: React.FC<React.ButtonHTMLAttributes<HTMLButtonElement> &
   <button
     type="button"
     className={`rounded-[11px] px-4 py-2 text-sm font-black transition ${
-      active ? 'bg-accent text-accent-ink shadow-[0_10px_22px_rgba(8,60,49,0.18)]' : 'text-text-muted hover:bg-hover hover:text-text'
+      active ? 'bg-accent text-accent-ink shadow-elevation-low' : 'text-text-muted hover:bg-hover hover:text-text'
     } ${className}`}
     {...props}
   />
 );
 
 const SummaryPanel: React.FC<{ title: string; values?: string[]; selected: string }> = ({ title, values = [], selected }) => (
-  <div className="rounded-[20px] border border-border/80 bg-surface-alt/30 p-5">
+  <div className="rounded-[8px] border border-border/80 bg-surface-alt/30 p-5">
     <div className="flex items-center justify-between gap-3">
       <h2 className="text-base font-black text-text">{title}</h2>
       <span className="rounded-full border border-border/70 bg-surface/35 px-3 py-1 text-xs font-bold text-text-muted">{values.length}</span>

@@ -82,12 +82,17 @@ try {
             Copy-Item -LiteralPath $sourcePath -Destination $stagedPath
         }
 
-        (Get-Item -LiteralPath $stagedPath).LastWriteTime = [DateTime]::ParseExact(
-            [string]$property.Value,
-            "yyyy-MM-ddTHH:mm:ss",
-            [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::None
-        )
+        $entryTimestamp = if ($property.Value -is [DateTime]) {
+            [DateTime]$property.Value
+        } else {
+            [DateTime]::ParseExact(
+                [string]$property.Value,
+                "yyyy-MM-ddTHH:mm:ss",
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::None
+            )
+        }
+        (Get-Item -LiteralPath $stagedPath).LastWriteTime = $entryTimestamp
     }
 
     $StagedPackageScript = Join-Path $StagingDir "scripts\package.ps1"

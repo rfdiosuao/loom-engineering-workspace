@@ -1174,7 +1174,7 @@ export const PhoneDemoPage: React.FC = () => {
                 : '正在处理手机任务';
 
   return (
-    <div className="h-full overflow-y-auto bg-app-bg">
+    <div data-phone-page className="h-full overflow-y-auto bg-app-bg">
       <BusyOverlay
         active={Boolean(busy)}
         title={busyOverlayTitle}

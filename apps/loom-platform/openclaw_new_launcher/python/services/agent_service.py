@@ -1045,15 +1045,7 @@ class AgentService:
                 ],
             }
             signature = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            if signature != str(link.get("lastSignature") or ""):
-                event_type = f"matrix.{status}" if status in TERMINAL_MATRIX_STATUSES else "matrix.progress"
-                self.event_bus.publish(
-                    data["sessionId"],
-                    event_type,
-                    topic="matrix.campaign",
-                    entity_id=campaign_id,
-                    data=data,
-                )
+            should_publish = signature != str(link.get("lastSignature") or "")
             if status in TERMINAL_MATRIX_STATUSES:
                 self._persist_matrix_terminal_intent(
                     session_id=data["sessionId"],
@@ -1069,6 +1061,15 @@ class AgentService:
                 else:
                     current["lastSignature"] = signature
                     current["missingPolls"] = 0
+            if should_publish:
+                event_type = f"matrix.{status}" if status in TERMINAL_MATRIX_STATUSES else "matrix.progress"
+                self.event_bus.publish(
+                    data["sessionId"],
+                    event_type,
+                    topic="matrix.campaign",
+                    entity_id=campaign_id,
+                    data=data,
+                )
             if status in TERMINAL_MATRIX_STATUSES:
                 self._queue_matrix_terminal_resume(
                     session_id=data["sessionId"],

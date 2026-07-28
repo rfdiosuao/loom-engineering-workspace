@@ -6,7 +6,7 @@ const BASELINE_CONTROL_COUNTS: Record<string, number> = {
   agents: 15,
   creative: 19,
   acquisition: 10,
-  phone: 22,
+  phone: 25,
   workbench: 11,
   agent: 7,
   license: 6,

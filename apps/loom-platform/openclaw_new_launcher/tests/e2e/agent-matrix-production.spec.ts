@@ -360,7 +360,7 @@ test('central agent creates a durable conversation and sends a frozen device sco
   await navigateTo(audit, 'agent');
 
   const main = appMain(page);
-  await expect(main.getByText('麓鸣原生智能体', { exact: true })).toBeVisible();
+  await expect(main.getByRole('heading', { name: '中枢智能体' })).toBeVisible();
   await expect(main.getByText('模型已就绪', { exact: true })).toBeVisible();
   await expect(main.getByLabel('运行时')).toHaveCount(0);
   const beforeCreate = await markCalls(audit);
@@ -487,7 +487,7 @@ test('agent sends with native runtime plus bounded readable attachments only', a
   await navigateTo(audit, 'agent');
 
   const main = appMain(page);
-  await expect(main.getByText('麓鸣原生智能体', { exact: true })).toBeVisible();
+  await expect(main.getByRole('heading', { name: '中枢智能体' })).toBeVisible();
   await expect(main.getByText('模型已就绪', { exact: true })).toBeVisible();
   await expect(main.getByLabel('运行时')).toHaveCount(0);
   await main.getByLabel('消息内容').fill('读取附件');
@@ -564,7 +564,7 @@ test('matrix confirmation is scoped to the current dispatch inputs and supported
 
   const target = main.getByRole('checkbox', { name: '任务目标' });
   await target.check();
-  await main.getByPlaceholder('输入要在已选设备上执行的真实任务').fill('发布审核任务');
+  await main.getByRole('textbox', { name: '矩阵任务' }).fill('发布审核任务');
   await main.getByRole('button', { name: '高级参数' }).click();
   const drawer = main.locator('[data-matrix-task-drawer]');
   const confirmation = drawer.getByRole('checkbox');
@@ -589,7 +589,7 @@ test('matrix confirmation is scoped to the current dispatch inputs and supported
   await confirmation.check();
   await drawer.getByRole('button', { name: '完成' }).click();
 
-  await main.getByPlaceholder('输入要在已选设备上执行的真实任务').fill('发布更新后的审核任务');
+  await main.getByRole('textbox', { name: '矩阵任务' }).fill('发布更新后的审核任务');
   await main.getByRole('button', { name: '高级参数' }).click();
   await expect(confirmation).not.toBeChecked();
   await confirmation.check();

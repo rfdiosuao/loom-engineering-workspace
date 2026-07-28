@@ -73,7 +73,10 @@ class CliPhoneRuntimeConfigTests(unittest.TestCase):
                     "devices": [{
                         "id": "phone-secure",
                         "baseUrl": "http://127.0.0.1:9527",
-                        "token": {"__loomSecret": "dpapi", "value": "encrypted"},
+                        "token": {"__loomSecret": "dpapi", "value": "encrypted-token"},
+                        "launcherId": "loom-desktop-secure",
+                        "launcherSecret": {"__loomSecret": "dpapi", "value": "encrypted-launcher-secret"},
+                        "deviceInstanceId": "lumi-phone-secure",
                     }],
                 }
             }
@@ -109,7 +112,13 @@ class CliPhoneRuntimeConfigTests(unittest.TestCase):
                 captured["env"] = kwargs["env"]
                 return SimpleNamespace(returncode=0, stdout="{}", stderr="")
 
-            with patch("api.routes_phone.unprotect_secret", return_value="plain-token"), patch(
+            def unprotect(value):
+                return {
+                    "encrypted-token": "plain-token",
+                    "encrypted-launcher-secret": "plain-launcher-secret",
+                }[value["value"]]
+
+            with patch("api.routes_phone.unprotect_secret", side_effect=unprotect), patch(
                 "api.routes_cli.subprocess.run", side_effect=fake_run
             ):
                 response = __import__("asyncio").run(handler(request))
@@ -122,7 +131,9 @@ class CliPhoneRuntimeConfigTests(unittest.TestCase):
 
             runtime = json.loads(captured["env"]["LOOM_PHONE_RUNTIME_CONFIG_JSON"])
             self.assertEqual(runtime["devices"][0]["token"], "plain-token")
+            self.assertEqual(runtime["devices"][0]["launcherSecret"], "plain-launcher-secret")
             self.assertNotIn("plain-token", json.dumps(jobs.get(job_id), ensure_ascii=False))
+            self.assertNotIn("plain-launcher-secret", json.dumps(jobs.get(job_id), ensure_ascii=False))
 
 
 if __name__ == "__main__":

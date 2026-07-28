@@ -72,7 +72,9 @@ object TokenValidator {
      * 设置新的内部手机连接凭据。
      */
     fun setToken(token: String) {
-        KVUtils.setApiToken(token)
+        check(KVUtils.setApiToken(token)) {
+            "Unable to persist encrypted phone credential"
+        }
         XLog.i(TAG, "Phone credential updated")
     }
 
@@ -87,7 +89,9 @@ object TokenValidator {
      * 清除 Token
      */
     fun clearToken() {
-        KVUtils.setApiToken("")
+        check(KVUtils.setApiToken("")) {
+            "Unable to clear encrypted phone credential"
+        }
         XLog.i(TAG, "Phone credential cleared")
     }
 

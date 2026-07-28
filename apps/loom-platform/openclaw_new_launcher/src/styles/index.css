@@ -536,11 +536,11 @@ main > div[data-phone-matrix-access-granted] {
 }
 
 .loom-matrix-shell {
-  background: var(--color-surface-deeper);
+  background: var(--color-app-bg);
 }
 
 .loom-matrix-shell header {
-  background: var(--color-surface-deeper);
+  background: var(--color-surface);
   backdrop-filter: none;
 }
 
@@ -552,15 +552,15 @@ main > div[data-phone-matrix-access-granted] {
 .loom-matrix-workers,
 .loom-matrix-stream,
 .loom-matrix-shell section[data-matrix-phone-app-download] {
-  border-color: var(--color-border-strong);
-  background: var(--color-surface-deep);
+  border-color: var(--color-border);
+  background: var(--color-surface-alt);
   box-shadow: var(--elevation-low);
 }
 
 .loom-matrix-composer select,
 .loom-matrix-composer textarea {
-  border-color: var(--color-border-strong);
-  background: var(--color-surface-deeper);
+  border-color: var(--color-border);
+  background: var(--color-surface);
 }
 
 .matrix-live-feed-row {

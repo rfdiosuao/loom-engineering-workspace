@@ -321,9 +321,6 @@ export const ToastContainer: React.FC = () => {
   return (
     <div
       data-toast-container
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
       className="pointer-events-none fixed right-5 flex w-[min(560px,calc(100vw-2.5rem))] flex-col gap-2"
       style={{
         top: TITLEBAR_HEIGHT_PX + TOAST_SAFE_GAP_PX,

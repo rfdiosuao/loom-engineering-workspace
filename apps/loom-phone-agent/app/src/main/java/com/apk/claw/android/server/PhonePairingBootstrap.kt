@@ -19,8 +19,12 @@ import javax.crypto.spec.SecretKeySpec
  */
 object PhonePairingBootstrap {
     const val DEFAULT_TTL_MS = 5 * 60_000L
+    internal const val PENDING_CREDENTIAL_VALID_UNTIL = Long.MAX_VALUE
     private const val MAX_ATTEMPTS_PER_REMOTE = 5
     private const val MAX_TOTAL_ATTEMPTS = 12
+    private const val MAX_ATTEMPTS_PER_SOURCE_WINDOW = 8
+    private const val SOURCE_ATTEMPT_WINDOW_MS = 10 * 60_000L
+    private const val MAX_SOURCE_WINDOWS = 64
     private const val MAX_SESSIONS = 8
     private const val PROTOCOL_VERSION = "3"
     private const val CLAIM_DOMAIN = "LOOM-PAIR-CLAIM-V3"
@@ -87,8 +91,14 @@ object PhonePairingBootstrap {
         var claimed: Boolean = false
     )
 
+    private data class SourceAttemptWindow(
+        var startedAt: Long,
+        var failedAttempts: Int = 0
+    )
+
     private val random = SecureRandom()
     private val sessions = LinkedHashMap<String, PairingSession>()
+    private val sourceAttemptWindows = LinkedHashMap<String, SourceAttemptWindow>()
     private var clock: () -> Long = { System.currentTimeMillis() }
     private var credentialPromoter: (Credentials, Long) -> Unit = ::promoteCredentials
 
@@ -141,19 +151,41 @@ object PhonePairingBootstrap {
     @Synchronized
     fun claim(request: ClaimRequest, remoteAddress: String): ClaimResult {
         val now = clock()
+        prune(now)
         val transport = request.transport.trim().lowercase()
+        val remoteKey = normalizeRemoteAddress(remoteAddress)
+        if (isSourceRateLimited(remoteKey, now)) {
+            return rateLimitedError()
+        }
+        if (transport !in setOf("usb", "lan")) {
+            recordSourceFailure(remoteKey, now)
+            return pairingError(
+                "phone_pairing_transport_invalid",
+                "配对通道无效，请重新发起配对。"
+            )
+        }
         val requestedSession = request.sessionId.trim()
         val session = when {
             requestedSession.isNotEmpty() -> sessions[requestedSession]
             transport == "usb" -> sessions.values
-                .filter { !it.claimed && it.expiresAt > now && it.code == request.code.trim() }
+                .filter {
+                    !it.claimed &&
+                        it.expiresAt > now &&
+                        it.transportHint == "usb" &&
+                        it.code == request.code.trim()
+                }
                 .maxByOrNull { it.expiresAt }
             else -> null
-        } ?: return pairingError(
-            "phone_pairing_code_invalid",
-            "配对信息无效，请在手机上刷新后重试。",
-            retryable = true
-        )
+        }
+        if (session == null) {
+            recordSourceFailure(remoteKey, now)
+            return sourceInvalidOrLimited(
+                remoteKey,
+                now,
+                "phone_pairing_code_invalid",
+                "配对信息无效，请在手机上刷新后重试。"
+            )
+        }
 
         if (session.claimed) {
             return pairingError(
@@ -177,28 +209,38 @@ object PhonePairingBootstrap {
             )
         }
 
-        val remoteKey = normalizeRemoteAddress(remoteAddress)
-        if (isRateLimited(session, remoteKey)) {
-            return pairingError(
-                "phone_pairing_rate_limited",
-                "配对尝试次数过多，请在手机上刷新配对信息后重试。",
-                retryable = true
+        if (transport != session.transportHint) {
+            recordFailure(session, remoteKey, now)
+            return invalidOrLimited(
+                session,
+                remoteKey,
+                now,
+                "phone_pairing_transport_invalid",
+                "配对通道与手机生成的配对信息不一致，请重新发起配对。"
             )
+        }
+        if (isRateLimited(session, remoteKey)) {
+            return rateLimitedError()
         }
 
         when (transport) {
             "usb" -> {
                 if (!isLoopback(remoteKey)) {
-                    return pairingError(
+                    recordFailure(session, remoteKey, now)
+                    return invalidOrLimited(
+                        session,
+                        remoteKey,
+                        now,
                         "phone_pairing_transport_invalid",
                         "6 位配对码仅允许通过 USB 本机通道使用。"
                     )
                 }
                 if (!constantTimeEquals(request.code.trim(), session.code)) {
-                    recordFailure(session, remoteKey)
+                    recordFailure(session, remoteKey, now)
                     return invalidOrLimited(
                         session,
                         remoteKey,
+                        now,
                         "phone_pairing_code_invalid",
                         "配对码不正确，请检查后重试。"
                     )
@@ -207,10 +249,11 @@ object PhonePairingBootstrap {
             "lan" -> {
                 val nonce = request.nonce.trim()
                 if (!nonce.matches(Regex("[A-Za-z0-9_-]{16,128}"))) {
-                    recordFailure(session, remoteKey)
+                    recordFailure(session, remoteKey, now)
                     return invalidOrLimited(
                         session,
                         remoteKey,
+                        now,
                         "phone_pairing_request_invalid",
                         "配对请求无效，请重新扫码。"
                     )
@@ -232,19 +275,16 @@ object PhonePairingBootstrap {
                     )
                 )
                 if (!constantTimeEquals(request.proof.trim().lowercase(), expectedProof)) {
-                    recordFailure(session, remoteKey)
+                    recordFailure(session, remoteKey, now)
                     return invalidOrLimited(
                         session,
                         remoteKey,
+                        now,
                         "phone_pairing_proof_invalid",
                         "配对校验失败，请重新扫码。"
                     )
                 }
             }
-            else -> return pairingError(
-                "phone_pairing_transport_invalid",
-                "配对通道无效，请重新发起配对。"
-            )
         }
 
         val launcherId = sanitizeId(request.launcherId).ifBlank { "loom-${randomHex(8)}" }
@@ -255,7 +295,7 @@ object PhonePairingBootstrap {
             launcherSecret = randomHex(32),
             pairedAt = now
         )
-        credentialPromoter(credentials, Long.MAX_VALUE)
+        credentialPromoter(credentials, PENDING_CREDENTIAL_VALID_UNTIL)
         session.claimed = true
         if (transport == "usb") {
             return ClaimResult(
@@ -293,6 +333,7 @@ object PhonePairingBootstrap {
     @Synchronized
     internal fun resetForTests() {
         sessions.clear()
+        sourceAttemptWindows.clear()
         clock = { System.currentTimeMillis() }
         credentialPromoter = ::promoteCredentials
     }
@@ -383,26 +424,71 @@ object PhonePairingBootstrap {
             (session.failedAttemptsByRemote[remoteKey] ?: 0) >= MAX_ATTEMPTS_PER_REMOTE
     }
 
-    private fun recordFailure(session: PairingSession, remoteKey: String) {
+    private fun recordFailure(session: PairingSession, remoteKey: String, now: Long) {
         session.failedAttempts += 1
         session.failedAttemptsByRemote[remoteKey] =
             (session.failedAttemptsByRemote[remoteKey] ?: 0) + 1
+        recordSourceFailure(remoteKey, now)
     }
 
     private fun invalidOrLimited(
         session: PairingSession,
         remoteKey: String,
+        now: Long,
         code: String,
         message: String
     ): ClaimResult {
-        return if (isRateLimited(session, remoteKey)) {
-            pairingError(
-                "phone_pairing_rate_limited",
-                "配对尝试次数过多，请在手机上刷新配对信息后重试。",
-                retryable = true
-            )
+        return if (isRateLimited(session, remoteKey) || isSourceRateLimited(remoteKey, now)) {
+            rateLimitedError()
         } else {
             pairingError(code, message, retryable = true)
+        }
+    }
+
+    private fun sourceInvalidOrLimited(
+        remoteKey: String,
+        now: Long,
+        code: String,
+        message: String
+    ): ClaimResult {
+        return if (isSourceRateLimited(remoteKey, now)) {
+            rateLimitedError()
+        } else {
+            pairingError(code, message, retryable = true)
+        }
+    }
+
+    private fun rateLimitedError() = pairingError(
+        "phone_pairing_rate_limited",
+        "配对尝试次数过多，请稍后刷新配对信息后重试。",
+        retryable = true
+    )
+
+    private fun isSourceRateLimited(remoteKey: String, now: Long): Boolean {
+        val window = sourceAttemptWindows[remoteKey] ?: return false
+        if (now - window.startedAt >= SOURCE_ATTEMPT_WINDOW_MS) {
+            sourceAttemptWindows.remove(remoteKey)
+            return false
+        }
+        return window.failedAttempts >= MAX_ATTEMPTS_PER_SOURCE_WINDOW
+    }
+
+    private fun recordSourceFailure(remoteKey: String, now: Long) {
+        val current = sourceAttemptWindows[remoteKey]
+        val window = if (
+            current == null ||
+            now - current.startedAt >= SOURCE_ATTEMPT_WINDOW_MS
+        ) {
+            SourceAttemptWindow(startedAt = now).also {
+                sourceAttemptWindows[remoteKey] = it
+            }
+        } else {
+            current
+        }
+        window.failedAttempts += 1
+        while (sourceAttemptWindows.size > MAX_SOURCE_WINDOWS) {
+            val firstKey = sourceAttemptWindows.keys.firstOrNull() ?: break
+            sourceAttemptWindows.remove(firstKey)
         }
     }
 
@@ -422,6 +508,12 @@ object PhonePairingBootstrap {
         while (iterator.hasNext()) {
             val session = iterator.next().value
             if (session.expiresAt + DEFAULT_TTL_MS < now) iterator.remove()
+        }
+        val sourceIterator = sourceAttemptWindows.entries.iterator()
+        while (sourceIterator.hasNext()) {
+            if (now - sourceIterator.next().value.startedAt >= SOURCE_ATTEMPT_WINDOW_MS) {
+                sourceIterator.remove()
+            }
         }
     }
 

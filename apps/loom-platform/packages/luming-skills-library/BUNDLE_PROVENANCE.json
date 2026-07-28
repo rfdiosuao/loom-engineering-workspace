@@ -1,13 +1,14 @@
 {
   "schema": "loom.skill_bundle_provenance.v1",
-  "version": "2026.07.21",
-  "archive": "luming-skills-library-20260721.zip",
-  "sha256": "36D03E43FEA6102AA6FEE96E7B91004FABAE45C6E40C5C3FC8D933F30DD03CA7",
+  "version": "2026.07.29",
+  "archive": "luming-skills-library-20260729.zip",
+  "sha256": "7C51BE892D5D233B4DE81CC18EFB32561553580AF3E21838A91D0ADCE9358743",
   "entryTimestamps": {
-    "manifest.json": "2026-07-21T15:43:34",
+    "manifest.json": "2026-07-29T01:20:00",
     "README.md": "2026-07-21T15:43:34",
-    "scripts/install.ps1": "2026-07-21T15:43:34",
-    "scripts/package.ps1": "2026-07-16T01:51:26",
+    "scripts/deterministic_zip.py": "2026-07-29T02:15:00",
+    "scripts/install.ps1": "2026-07-29T02:00:00",
+    "scripts/package.ps1": "2026-07-29T02:15:00",
     "scripts/validate.ps1": "2026-07-16T01:51:26",
     "skills/luming-phone-agent/agents/openai.yaml": "2026-07-20T15:49:48",
     "skills/luming-phone-agent/examples/self-check-blocked.json": "2026-07-16T01:51:26",
@@ -31,6 +32,6 @@
     "skills/luming-phone-agent/schemas/recipe.schema.json": "2026-07-16T01:51:26",
     "skills/luming-phone-agent/schemas/recipe-index.schema.json": "2026-07-16T01:51:26",
     "skills/luming-phone-agent/scripts/sync_recipe.py": "2026-07-16T01:51:26",
-    "skills/luming-phone-agent/SKILL.md": "2026-07-20T16:29:06"
+    "skills/luming-phone-agent/SKILL.md": "2026-07-29T01:20:00"
   }
 }

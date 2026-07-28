@@ -891,7 +891,12 @@ def _write_audit(paths: AppPaths, tool: str, args: Json, permission: str, ok: bo
         "durationMs": round(duration_ms, 2),
         "error": error,
     }
-    append_audit_record("mcp-audit.jsonl", record)
+    try:
+        append_audit_record("mcp-audit.jsonl", record)
+    except Exception:
+        # Match the CLI boundary: a full or temporarily unavailable audit
+        # volume must not replace a successfully computed MCP response.
+        return
 
 
 def _param_summary(args: Json) -> Json:

@@ -46,6 +46,9 @@
 - Credential rotation is transactional: existing credentials remain valid until the desktop has persisted and verified the new credentials and confirms the pairing. Failed or abandoned pairing cannot disconnect an existing device.
 - USB and LAN use the same saved device identity and execution channel.
 - Recovery is bounded and observable: reconnect uses backoff plus a finite retry budget, preserves the last verified identity, and reports actionable USB/LAN/authentication error codes instead of a generic “connection failed”.
+- Pairing has one user-facing entrypoint: the phone's **与 LOOM 配对** page and the desktop's **手机连接** page. Legacy Skills, prompts and docs must never request a phone URL, port or permanent token.
+- Reconnect is per-device and non-blocking. One unreachable phone cannot freeze the Phone, Matrix or Agent UI or delay healthy phones.
+- The controlled acceptance target is >= 98% first-pair success, >= 99% restart recovery, P95 recovery <= 15 seconds, and zero false-online states.
 
 State machine:
 
@@ -87,6 +90,7 @@ UI rules:
 
 - No raw business hex values in React components.
 - No module-specific primary palettes.
+- Major modules use `app-bg` for the canvas, `surface` for headers/work areas and `surface-alt` for secondary panels. Dark surfaces are reserved for actual device screens, terminals and the branded splash.
 - Status always includes text or an icon, never color only.
 - Actions taking over 300ms show immediate progress.
 - Error regions use `role="alert"` or `aria-live`.
@@ -132,6 +136,7 @@ Current-computer validation:
 - Start an isolated Bridge on alternate ports.
 - Create, expire, replay and successfully claim pairing codes.
 - Verify existing protected phone config migration without touching the installed LOOM data.
+- Verify USB/LAN first-pair, restart recovery, USB unplug/replug, LAN address drift and one unreachable phone alongside one healthy phone.
 - Complete an Agent read-only run, an internal write run and a cancelled tool run.
 - Restart the isolated app and verify session continuity and phone recovery state.
 - Capture Playwright screenshots at 960x640, 1200x800 and 1440x900 for all major modules.

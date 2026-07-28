@@ -7,7 +7,6 @@ Known repository-level exceptions include:
 | Path or component | License | Notes |
 | --- | --- | --- |
 | `apps/loom-phone-agent` upstream ApkClaw/Agent Phone portions | Apache License 2.0 | The existing [`apps/loom-phone-agent/LICENSE`](apps/loom-phone-agent/LICENSE) and retained notices apply to upstream portions. LOOM-owned modifications and the combined LOOM product are offered under the LOOM dual-license model to the extent the LOOM copyright holder has the right to do so. |
-| `apps/loom-phone-agent/skills/*` files that declare `license: MIT` | MIT License | Their file-level metadata remains authoritative. |
 | Gradle wrapper files and bundled dependency metadata | Their stated upstream licenses | Existing headers and notices remain intact. |
 | npm, Cargo, Gradle, Python, and other external dependencies | Their respective upstream licenses | Dependency declarations do not relicense those projects under AGPL-3.0. |
 
