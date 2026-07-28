@@ -55,7 +55,10 @@ class PhonePairingBootstrapTest {
 
         assertTrue(first.success)
         assertEquals(1, promoted.size)
-        assertEquals(Long.MAX_VALUE, previousCredentialDeadlines.single())
+        assertEquals(
+            PhonePairingBootstrap.PENDING_CREDENTIAL_VALID_UNTIL,
+            previousCredentialDeadlines.single()
+        )
         assertNull(first.credentials)
         assertEquals("AES-256-GCM-HKDF-SHA256", first.encryptedCredentials!!.algorithm)
         assertFalse(first.encryptedCredentials!!.ciphertext.contains(promoted.single().phoneToken))
@@ -129,6 +132,49 @@ class PhonePairingBootstrapTest {
         assertTrue(usb.credentials!!.phoneToken.length >= 48)
         assertTrue(usb.credentials!!.launcherSecret.length >= 48)
         assertNotEquals(usb.credentials!!.phoneToken, usb.credentials!!.launcherSecret)
+    }
+
+    @Test
+    fun unknown_usb_codes_are_source_limited_before_session_lookup() {
+        val session = PhonePairingBootstrap.createSession(
+            baseUrl = "http://127.0.0.1:19527",
+            deviceInstanceId = "lumi-phone-a",
+            deviceName = "Pixel",
+            transportHint = "usb"
+        )
+        val wrongCode = if (session.code == "000000") "000001" else "000000"
+
+        var result: PhonePairingBootstrap.ClaimResult? = null
+        repeat(PhonePairingBootstrapTestConstants.SOURCE_LIMIT_ATTEMPTS) {
+            result = PhonePairingBootstrap.claim(
+                PhonePairingBootstrap.ClaimRequest(
+                    sessionId = "",
+                    code = wrongCode,
+                    nonce = "",
+                    proof = "",
+                    transport = "usb",
+                    deviceInstanceId = "",
+                    launcherId = "loom-desktop-a",
+                    launcherName = "LOOM"
+                ),
+                remoteAddress = "127.0.0.1"
+            )
+        }
+
+        assertEquals("phone_pairing_rate_limited", result!!.errorCode)
+        assertTrue(promoted.isEmpty())
+    }
+
+    @Test
+    fun lan_session_cannot_be_downgraded_to_usb_code_claim() {
+        val session = createLanSession()
+        val result = PhonePairingBootstrap.claim(
+            usbClaim(session),
+            remoteAddress = "127.0.0.1"
+        )
+
+        assertEquals("phone_pairing_transport_invalid", result.errorCode)
+        assertTrue(promoted.isEmpty())
     }
 
     @Test
@@ -214,4 +260,8 @@ class PhonePairingBootstrapTest {
 
     private fun ByteArray.toHex(): String =
         joinToString("") { "%02x".format(it.toInt() and 0xff) }
+}
+
+private object PhonePairingBootstrapTestConstants {
+    const val SOURCE_LIMIT_ATTEMPTS = 8
 }

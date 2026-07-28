@@ -211,7 +211,7 @@ class AcquisitionTemplateCloudSyncContractTests(unittest.TestCase):
     def test_ui_contract_exposes_template_cloud_sync(self) -> None:
         page_path = os.path.join(REPO_ROOT, "src", "components", "acquisition", "AcquisitionWorkbenchPage.tsx")
         skill_library_path = os.path.join(
-            REPO_ROOT, "public", "skills", "luming-skills-library-20260721.zip"
+            REPO_ROOT, "public", "skills", "luming-skills-library-20260729.zip"
         )
         api_path = os.path.join(REPO_ROOT, "src", "services", "api.ts")
 

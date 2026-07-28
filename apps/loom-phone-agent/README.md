@@ -51,7 +51,7 @@
 | 🔄 **流程固化** | 成功的流程自动保存为模板，下次直接执行，节省 Token |
 | 🔌 **HTTP API** | RESTful 接口，支持远程调用和第三方集成 |
 | 🤝 **Agent 集成** | 与 Hermes Agent CLI 等外部 Agent 工具无缝配合，AI 控制手机 |
-| 🔐 **Token 认证** | 安全的 API 访问控制，防止未授权调用 |
+| 🔐 **安全配对** | 短期配对码建立连接，长期凭据由 LOOM 与手机自动保管 |
 | 📸 **截图 & UI分析** | 实时截图、UI树解析，Agent 理解屏幕内容 |
 | 🎯 **精准操作** | 点击、滑动、输入、长按等手势操作 |
 | 🖼️ **图片导入相册** | PC / Lumi 启动器可通过 HTTP API 上传图片，手机端保存到相册并触发图库刷新 |
@@ -102,24 +102,25 @@ Base URL:   https://api.openai.com/v1（或其他服务商）
 Model Name: gpt-4o（或其他模型）
 ```
 
-### Step 4: 配置 API Token
+### Step 4: 与 LOOM 配对
 
-进入 Settings → API Token：
+1. 手机进入 Settings → 与 LOOM 配对。
+2. USB 连接时，在电脑 LOOM 的“手机连接”页输入手机显示的 6 位配对码。
+3. 局域网连接时，在 LOOM 扫码或粘贴完整配对信息。
 
-- 点击 **"随机生成"** 或输入自定义 Token
-- 保存 Token（用于 Hermes 调用认证）
+配对信息短期有效且只能使用一次。长期连接凭据由 LOOM 与手机自动生成并安全保存，用户无需查看、复制或维护。
 
-### Step 5: 开启 LAN Config
+### Step 5: 检查连接
 
-进入 Settings → LAN Config → 开启
-
-设备会显示 HTTP 地址，如 `http://192.168.1.100:9527`
+回到 LOOM 的“手机连接”页等待自动检测。已配对设备会优先恢复 USB 转发或上次验证过的局域网地址；地址变化、USB 未授权和凭据失效会显示不同的中文修复提示。
 
 ---
 
-## 📡 HTTP API
+## 📡 HTTP API（内部开发协议）
 
-所有 `/api/agent/*`、`/api/tool/*`、`/api/media/*` 请求需要携带 `X-AGENT-PHONE-TOKEN` Header。旧版 `X-APKCLAW-TOKEN` 仍保留兼容。
+普通用户和外部 Agent 不需要配置本节内容，应通过 LOOM 配对并调用 LOOM CLI/MCP。以下端点只用于协议维护、自动化测试和 LOOM 内部传输；认证凭据由配对流程托管，不是用户配置。
+
+内部接口认证由 LOOM 配对流程自动完成。普通用户不应复制请求头、查看长期凭据或让外部 Agent 直连手机端口。
 
 ### 🖼️ Media API
 
@@ -129,15 +130,7 @@ Model Name: gpt-4o（或其他模型）
 |------|------|------|
 | `/api/media/import_image` | POST | 上传 PNG/JPEG/WebP 图片并保存到手机相册 |
 
-请求示例：
-
-```bash
-curl -X POST "http://192.168.1.100:9527/api/media/import_image" \
-  -H "X-AGENT-PHONE-TOKEN: your-token" \
-  -F "file=@D:/images/lumi-output.png" \
-  -F "album=Lumi" \
-  -F "filename=lumi-output.png"
-```
+在 LOOM“创作”或“本地素材库”中选择素材和目标设备即可传输；Agent 应调用 LOOM CLI/MCP 的素材传输能力。LOOM 会解析已配对设备、处理认证、重试和逐设备结果。
 
 响应示例：
 
@@ -158,7 +151,7 @@ curl -X POST "http://192.168.1.100:9527/api/media/import_image" \
 }
 ```
 
-实现说明：手机端 HTTP Server 接收 `multipart/form-data`，校验图片类型与大小后，通过 Android `MediaStore` 写入 `Pictures/Lumi`，再触发媒体库刷新。Android 10+ 使用分区存储的 `MediaStore` 流程，Android 9 兼容传统外部存储写入。接口沿用 `X-AGENT-PHONE-TOKEN` / `X-APKCLAW-TOKEN` 认证，单文件最大 32 MB。
+实现说明：手机端 HTTP Server 接收 LOOM 内部传输请求，校验图片类型与大小后，通过 Android `MediaStore` 写入 `Pictures/Lumi`，再触发媒体库刷新。Android 10+ 使用分区存储的 `MediaStore` 流程，Android 9 兼容传统外部存储写入。内部认证凭据由配对流程托管，单文件最大 32 MB。
 
 ### 🧠 Agent API（推荐）
 
@@ -170,14 +163,9 @@ curl -X POST "http://192.168.1.100:9527/api/media/import_image" \
 | `/api/agent/status` | GET | 检查 Agent 状态 |
 | `/api/agent/cancel_task` | POST | 取消正在执行的任务 |
 
-#### 执行任务示例
+#### 执行任务
 
-```bash
-curl -X POST "http://192.168.1.100:9527/api/agent/execute_task" \
-  -H "X-AGENT-PHONE-TOKEN: your-token" \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "打开微信，给张三发消息说你好"}'
-```
+在 LOOM 智能体或矩阵工作台中选择设备并输入自然语言任务。外部 Agent 通过 LOOM CLI/MCP 下发，不能绕过 LOOM 直接调用手机端口。
 
 **响应（任务完成后返回）：**
 ```json
@@ -194,12 +182,7 @@ curl -X POST "http://192.168.1.100:9527/api/agent/execute_task" \
 
 #### 检查状态
 
-```bash
-curl -s "http://192.168.1.100:9527/api/agent/status" \
-  -H "X-AGENT-PHONE-TOKEN: your-token"
-
-# 返回: {"success":true,"data":{"taskRunning":false,"agentInitialized":true,"llmConfigured":true,"accessibilityRunning":true}}
-```
+LOOM 手机连接页、矩阵工作台和 CLI/MCP 会返回同一份设备状态，并区分在线、锁屏、未授权、地址变化和执行中等状态。
 
 ### 🔄 Workflow Template API（流程固化）
 
@@ -230,16 +213,7 @@ curl -s "http://192.168.1.100:9527/api/agent/status" \
 
 #### 执行任务（优先使用模板）
 
-```bash
-curl -X POST "http://192.168.1.100:9527/api/agent/execute_task" \
-  -H "X-AGENT-PHONE-TOKEN: your-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "微信给王五发消息说你好",
-    "use_template": true,
-    "template_params": {"contact_name": "王五", "message": "你好"}
-  }'
-```
+LOOM 根据任务语义自动匹配已验证模板；没有可靠模板时才进入 Agent 规划。模板参数、设备范围和执行模式由 LOOM 统一传递。
 
 **参数说明：**
 - `use_template`: 是否优先使用模板（默认 true）
@@ -248,42 +222,15 @@ curl -X POST "http://192.168.1.100:9527/api/agent/execute_task" \
 
 #### 手动创建模板
 
-```bash
-curl -X POST "http://192.168.1.100:9527/api/workflow/create" \
-  -H "X-AGENT-PHONE-TOKEN: your-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "微信发消息",
-    "description": "打开微信给联系人发送消息",
-    "taskPattern": "微信.*发消息",
-    "keywords": ["微信", "发消息", "发送"],
-    "appName": "微信",
-    "steps": [
-      {"toolName": "open_app", "paramsTemplate": {"package_name": "com.tencent.mm"}, "description": "打开微信", "waitFor": 2000},
-      {"toolName": "tap", "paramsTemplate": {"x": 540, "y": 150}, "description": "点击搜索框"},
-      {"toolName": "input_text", "paramsTemplate": {"text": "${contact_name}"}, "description": "输入联系人名"},
-      {"toolName": "tap", "paramsTemplate": {"x": 540, "y": 300}, "description": "点击联系人"},
-      {"toolName": "input_text", "paramsTemplate": {"text": "${message}"}, "description": "输入消息"},
-      {"toolName": "tap", "paramsTemplate": {"x": 900, "y": 1800}, "description": "点击发送"}
-    ]
-  }'
-```
+模板属于内部执行资产，应通过 LOOM 的模板管理与调试流程创建、验证和发布，避免未经验证的坐标脚本进入生产任务。
 
 #### 查看所有模板
 
-```bash
-curl -s "http://192.168.1.100:9527/api/workflow/templates" \
-  -H "X-AGENT-PHONE-TOKEN: your-token"
-```
+在 LOOM 模板管理或 CLI/MCP 只读能力中查看。
 
 #### 执行指定模板
 
-```bash
-curl -X POST "http://192.168.1.100:9527/api/workflow/execute" \
-  -H "X-AGENT-PHONE-TOKEN: your-token" \
-  -H "Content-Type: application/json" \
-  -d '{"templateId": "xxx", "params": {"contact_name": "张三", "message": "你好"}}'
-```
+由 LOOM 绑定明确设备和参数后执行，并保留运行审计、取消与失败恢复信息。
 
 ### 🔧 Tool API（底层控制）
 
@@ -303,51 +250,26 @@ curl -X POST "http://192.168.1.100:9527/api/workflow/execute" \
 | `/api/tool/get_installed_apps` | GET | - | 获取已安装应用列表 |
 | `/api/tool/list` | GET | - | 获取所有可用工具 |
 
-#### 截图示例
+#### 截图
 
-```bash
-curl -s "http://192.168.1.100:9527/api/tool/screenshot" \
-  -H "X-AGENT-PHONE-TOKEN: your-token"
-
-# 返回 base64 编码的 PNG 图片
-```
+通过 LOOM 手机连接页、矩阵工作台或 CLI/MCP 截图能力获取；LOOM 负责并发限制、超时预算、缓存和设备级错误。
 
 ---
 
-## 🔗 Hermes Integration
+## 🔗 LOOM Agent Integration
 
 ### 安装 Skill
 
 ```bash
-# 克隆仓库
-git clone https://github.com/rfdiosuao/lumiapkclaw.git agent-phone
-
-# 复制 Skill 到 Hermes（推荐使用 phone-master 完整版）
-cp -r agent-phone/skills/phone-master ~/.hermes/skills/
+# 在 LOOM 的“Agent 接入”页安装统一 Skill
+# 或从 LOOM 官方 Skill 包安装 luming-phone-agent
 ```
 
-### 配置 Hermes
+### 唯一手机 Skill
 
-编辑 `~/.hermes/config.yaml`：
+`luming-phone-agent` 是唯一对外手机 Skill。Codex、Claude Code、OpenCode、Hermes 和其他 Agent 都通过 LOOM CLI/MCP 调用它，不直连手机 HTTP 端口，也不保存手机地址或长期凭据。
 
-```yaml
-skills:
-  config:
-    phone:
-      url: "http://192.168.1.100:9527"
-      token: "your-api-token"
-```
-
-### 可用 Skills
-
-| Skill | 功能 | 推荐程度 |
-|-------|------|----------|
-| **`phone-master`** | 🌟 **完整版** - 智能任务+模板系统+精确控制+错误恢复 | **推荐使用** |
-| `phone-agent` | 智能任务执行 + 验证确认 | 日常任务 |
-| `android-agent` | 自然语言任务执行 | 基础版 |
-| `android-control` | 底层工具精确控制 | 手动坐标操作 |
-
-**推荐使用 `phone-master`** - 它整合了所有功能，包含：
+它包含：
 - 🧠 自然语言智能执行
 - 🔄 流程模板系统（零Token秒执行）
 - 🔧 精确坐标控制
@@ -360,7 +282,7 @@ skills:
 ```
 你: "帮我用微信给老王发消息说今天加班晚点回去"
 
-Hermes → 调用 phone-master Skill → 检查状态
+Agent → 调用 luming-phone-agent → 通过 LOOM CLI/MCP 检查状态
       → 匹配模板（如有）或 Agent 执行
       → 打开微信 → 搜索老王 → 发送消息
       → 截图验证 → 返回结果: "消息已发送"
@@ -383,108 +305,26 @@ Hermes → 调用 phone-master Skill → 检查状态
 
 ## 🌐 兼容其他 AI 工具
 
-**理论上任何能发送 HTTP 请求的 AI 工具都能使用本项目！**
-
-核心协议很简单：`REST API + Token 认证`，只需要发送 HTTP POST 请求即可控制手机。
+任何支持 CLI 或 MCP 的 Agent 都能通过 LOOM 使用手机能力。对外集成应调用 LOOM CLI/MCP；手机 REST 认证属于 LOOM 内部传输协议，不应成为用户或第三方 Agent 的配置项。
 
 ### 已验证兼容的工具
 
 | 工具 | 状态 | 集成方式 |
 |------|------|----------|
-| **Hermes Agent** | ✅ 已适配 | Skill + config.yaml |
-| **Claude Code** | ✅ 可用 | curl 命令 或 自定义 Skill |
-| **Cursor IDE** | ✅ 可用 | MCP Server / HTTP 调用 |
-| **Coze / Dify** | ✅ 可用 | HTTP API 工作流节点 |
-| **Python 脚本** | ✅ 可用 | requests 库 |
-| **Shell/Bash** | ✅ 可用 | curl 命令 |
-| **n8n / Zapier** | ✅ 可用 | HTTP Request 节点 |
+| **Codex** | ✅ 已适配 | LOOM MCP / CLI + `luming-phone-agent` |
+| **Claude Code** | ✅ 已适配 | LOOM MCP / CLI + `luming-phone-agent` |
+| **OpenCode** | ✅ 已适配 | LOOM MCP / CLI + `luming-phone-agent` |
+| **Hermes Agent** | ✅ 已适配 | LOOM CLI + `luming-phone-agent` |
+| 其他支持 MCP/CLI 的 Agent | 可接入 | 读取 LOOM 能力目录后调用，不直连手机 |
 
-### Claude Code 示例
+### 接入边界
 
-```bash
-# 直接在 Claude Code 中执行
-curl -X POST "http://192.168.1.100:9527/api/agent/execute_task" \
-  -H "X-AGENT-PHONE-TOKEN: your-token" \
-  -H "Content-Type: application/json; charset=utf-8" \
-  --data-binary '{"prompt": "打开微信"}'
-```
+1. 先在 LOOM “手机连接”页完成配对。
+2. Agent 读取 LOOM 的 CLI/MCP 能力目录。
+3. Agent 调用 LOOM 手机能力并传入任务和设备范围。
+4. LOOM 负责设备发现、认证、重连、审计和错误翻译。
 
-### Python 示例
-
-```python
-import requests
-
-def control_phone(prompt, url="http://192.168.1.100:9527", token="your-token"):
-    response = requests.post(
-        f"{url}/api/agent/execute_task",
-        headers={
-            "X-AGENT-PHONE-TOKEN": token,
-            "Content-Type": "application/json; charset=utf-8"
-        },
-        json={"prompt": prompt}
-    )
-    return response.json()
-
-# 使用
-result = control_phone("打开淘宝，搜索蓝牙耳机")
-print(result)
-```
-
-### Cursor IDE 示例
-
-在 Cursor 中可以使用 MCP Server 或直接 curl：
-
-```typescript
-// TypeScript/Node.js
-const response = await fetch('http://192.168.1.100:9527/api/agent/execute_task', {
-  method: 'POST',
-  headers: {
-    'X-AGENT-PHONE-TOKEN': 'your-token',
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({ prompt: '打开抖音刷两个视频' })
-});
-const result = await response.json();
-```
-
-### Coze/Dify 工作流
-
-在 Coze 或 Dify 中添加 **HTTP Request** 节点：
-
-```
-节点配置:
-- URL: http://192.168.1.100:9527/api/agent/execute_task
-- Method: POST
-- Headers: 
-    X-AGENT-PHONE-TOKEN: your-token
-    Content-Type: application/json
-- Body: {"prompt": "{{用户输入}}"}
-```
-
-### 如何为你的工具适配
-
-只需要实现两个步骤：
-
-**1. 检查状态**
-```bash
-GET /api/agent/status
-Header: X-AGENT-PHONE-TOKEN: your-token
-
-返回: {"success":true,"data":{"taskRunning":false,...}}
-```
-
-**2. 发送任务**
-```bash
-POST /api/agent/execute_task
-Header: X-AGENT-PHONE-TOKEN: your-token
-Header: Content-Type: application/json; charset=utf-8
-Body: {"prompt": "你的任务描述"}
-```
-
-就这么简单！根据你的工具特性，可以：
-- 写一个 Skill/Plugin 封装这些 API 调用
-- 直接在工作流中使用 HTTP Request 节点
-- 用脚本语言（Python/JS）调用
+第三方 Agent 不应写入自己的 `.codex` 目录冒充 Codex，也不应保存手机 URL、端口、认证 Header 或长期凭据。
 
 ---
 
@@ -538,8 +378,8 @@ Body: {"prompt": "你的任务描述"}
 │                         外部调用方                                   │
 │   Hermes Agent  │  Python脚本  │  其他 HTTP 客户端                   │
 └──────────────────────┬──────────────────────────────────────────────┘
-                       │ HTTP Request (X-AGENT-PHONE-TOKEN)
-                       │ POST /api/agent/execute_task {"prompt":"..."}
+                       │ LOOM CLI / MCP（已配对设备范围）
+                       │ 任务、素材与状态请求
                        ▼
               ┌─────────────────────┐
               │  HTTP API Server    │  NanoHTTPD @ Port 9527
@@ -623,19 +463,12 @@ agent-phone/
 │   └── ui/                      # 界面
 │       ├── home/                # 首页
 │       ├── settings/            # 设置页
-│       │   ├── ApiTokenConfigActivity.kt  # Token 配置
+│       │   ├── PcPairingActivity.kt       # LOOM 安全配对
 │       │   └── LlmConfigActivity.kt       # LLM 配置
 │       └── splash/              # 启动页
 │
-├── skills/                      # Hermes Skills
-│   ├── phone-master/            # ⭐ 完整版 Skill（推荐）
-│   │   └── SKILL.md
-│   ├── phone-agent/             # 智能任务 Skill
-│   │   └── SKILL.md
-│   ├── android-agent/           # Agent 任务 Skill
-│   │   └── SKILL.md
-│   └── android-control/         # 底层工具 Skill
-│       └── SKILL.md
+├── ../loom-platform/packages/luming-skills-library/
+│   └── skills/luming-phone-agent/  # 唯一统一手机 Skill
 │
 └── README.md
 ```

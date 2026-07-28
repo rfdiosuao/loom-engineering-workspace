@@ -4,12 +4,12 @@ export const MCP_CONFIG_PATH = '<宿主官方 MCP 配置文件>';
 export const MCP_SERVER_PATH = '${LOOM_CLI_DIR}/loom_mcp.py';
 export const LUMING_SKILL_LIBRARY_PATH = '${AGENT_SKILLS_DIR}/luming-phone-agent/SKILL.md';
 export const LUMING_SKILL_LIBRARY_URL =
-  'https://loom.heang.top/downloads/luming-skills-library-20260721-36D03E43.zip';
+  'https://loom.heang.top/downloads/luming-skills-library-20260729-7C51BE89.zip';
 export const LUMING_SKILL_LIBRARY_FALLBACK_URL =
-  'https://raw.githubusercontent.com/rfdiosuao/loom-release-channel/main/skills/luming-skills-library-20260721.zip';
-export const LUMING_SKILL_LIBRARY_BUNDLED_URL = '/skills/luming-skills-library-20260721.zip';
+  'https://raw.githubusercontent.com/rfdiosuao/loom-release-channel/main/skills/luming-skills-library-20260729.zip';
+export const LUMING_SKILL_LIBRARY_BUNDLED_URL = '/skills/luming-skills-library-20260729.zip';
 export const LUMING_SKILL_LIBRARY_SHA256 =
-  '36D03E43FEA6102AA6FEE96E7B91004FABAE45C6E40C5C3FC8D933F30DD03CA7';
+  '7C51BE892D5D233B4DE81CC18EFB32561553580AF3E21838A91D0ADCE9358743';
 
 export const CLI_SMOKE = '"${LOOM_PYTHON}" -B "${LOOM_CLI}" doctor --json';
 export const MCP_SMOKE = '"${LOOM_PYTHON}" -B "${LOOM_CLI_DIR}/loom_mcp.py"';

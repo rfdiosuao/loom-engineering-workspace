@@ -175,15 +175,7 @@ Agent 遵循 **观察 → 思考 → 行动 → 验证** 协议：
 
 这个能力用于 Lumi 启动器或其他 PC 端工具把 AI 生图结果直接推送到手机图库。电脑端拿到图片文件后，通过 APKClaw 的局域网 HTTP API 上传；手机端校验图片格式和大小，使用 `MediaStore` 写入 `Pictures/Lumi`，并触发系统媒体库刷新。这样用户无需手动传文件，AI 生图结果会直接出现在手机相册里。
 
-请求示例：
-
-```bash
-curl -X POST "http://<设备IP>:9527/api/media/import_image" \
-  -H "X-AGENT-PHONE-TOKEN: your-token" \
-  -F "file=@D:/images/lumi-output.png" \
-  -F "album=Lumi" \
-  -F "filename=lumi-output.png"
-```
+普通用户在 LOOM“创作”或“本地素材库”中选择素材与目标设备；外部 Agent 使用 LOOM CLI/MCP 的素材传输能力。设备地址、内部认证、逐设备重试和传输结果均由 LOOM 托管，不需要复制请求头或维护长期 Token。
 
 响应示例：
 
@@ -209,7 +201,7 @@ curl -X POST "http://<设备IP>:9527/api/media/import_image" \
 - Android 10+ 走 `MediaStore.Images.Media` 和 `RELATIVE_PATH=Pictures/Lumi`，兼容分区存储。
 - Android 9 走传统外部存储目录并调用媒体扫描。
 - 只允许 `image/png`、`image/jpeg`、`image/webp`，单文件最大 32 MB。
-- 保持与现有 API Token 认证一致，避免局域网内未授权上传。
+- 复用 LOOM 配对后自动保存的内部凭据，用户无需查看或填写长期 Token，同时避免局域网内未授权上传。
 
 ## 项目结构
 

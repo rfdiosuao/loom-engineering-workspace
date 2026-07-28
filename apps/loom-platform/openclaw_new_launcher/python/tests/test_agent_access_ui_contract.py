@@ -25,7 +25,7 @@ class AgentAccessUiContractTests(unittest.TestCase):
         return self._page() + "\n" + self._prompt_module()
 
     def _bundled_library_path(self) -> str:
-        return os.path.join(ROOT, "public", "skills", "luming-skills-library-20260721.zip")
+        return os.path.join(ROOT, "public", "skills", "luming-skills-library-20260729.zip")
 
     def _bundled_library_text(self) -> str:
         with zipfile.ZipFile(self._bundled_library_path()) as archive:
@@ -69,7 +69,7 @@ class AgentAccessUiContractTests(unittest.TestCase):
         self.assertIn("LUMING_SKILL_LIBRARY_PATH", page)
         self.assertIn("LUMING_SKILL_LIBRARY_URL", page)
         self.assertIn("LUMING_SKILL_LIBRARY_SHA256", page)
-        self.assertIn("luming-skills-library-20260721.zip", page)
+        self.assertIn("luming-skills-library-20260729.zip", page)
         self.assertIn("luming-phone-agent", page)
         self.assertNotIn("LOOM_COMMAND_BRAIN_SKILL_URLS", page)
         self.assertNotIn("LUMING_ACQUISITION_SKILL_URLS", page)
@@ -115,7 +115,7 @@ class AgentAccessUiContractTests(unittest.TestCase):
         prompt = self._prompt_module()
         domestic_url = (
             "https://loom.heang.top/downloads/"
-            "luming-skills-library-20260721-36D03E43.zip"
+            "luming-skills-library-20260729-7C51BE89.zip"
         )
         github_url = "https://raw.githubusercontent.com/rfdiosuao/loom-release-channel/"
 

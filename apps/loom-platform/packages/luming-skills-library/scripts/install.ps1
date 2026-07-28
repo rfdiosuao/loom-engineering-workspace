@@ -68,6 +68,19 @@ function Assert-DirectChildPath {
   }
 }
 
+function Get-FileSha256 {
+  param([string]$Path)
+
+  $stream = [IO.File]::OpenRead($Path)
+  $algorithm = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "")
+  } finally {
+    $algorithm.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function Get-FileManifest {
   param([string]$Root)
 
@@ -77,7 +90,7 @@ function Get-FileManifest {
   )
   Get-ChildItem -LiteralPath $rootPath -Recurse -File -Force | ForEach-Object {
     $relativePath = $_.FullName.Substring($rootPath.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
-    $manifest.Add($relativePath, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)
+    $manifest.Add($relativePath, (Get-FileSha256 -Path $_.FullName))
   }
   return $manifest
 }

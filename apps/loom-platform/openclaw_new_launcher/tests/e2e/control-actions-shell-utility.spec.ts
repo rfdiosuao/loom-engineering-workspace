@@ -14,7 +14,7 @@ import { AUDIT_DIAGNOSTICS } from './support/mock-responses';
 
 test.beforeEach(async ({ audit }) => {
   await audit.registerRoute('POST', '/api/phone/usb/reconcile', {
-    value: { ok: true, count: 0, results: [] },
+    value: { ok: true, recovered: 0, pending: [] },
   });
   await audit.openAuthorizedShell();
 });

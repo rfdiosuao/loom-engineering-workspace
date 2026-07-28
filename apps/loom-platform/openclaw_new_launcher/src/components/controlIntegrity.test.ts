@@ -101,6 +101,48 @@ test('Matrix phone selection and focus keep a visible semantic ring width', () =
   assert.doesNotMatch(source, /\? 'ring-focus'/);
 });
 
+test('major workbenches share the canonical canvas and surface color hierarchy', () => {
+  const styles = readSource('../styles/index.css');
+  const matrixTheme = sourceBlock(styles, '.loom-matrix-shell {', '.matrix-live-feed-row {');
+  const acquisition = readSource('./acquisition/AcquisitionWorkbenchPage.tsx');
+  const agent = readSource('./agent/AgentWorkbenchPage.tsx');
+  const creative = readSource('./creative/CreativeMediaPage.tsx');
+  const diagnostics = readSource('./diagnostics/DiagnosticsPage.tsx');
+  const models = readSource('./models/ModelsPage.tsx');
+
+  assert.match(matrixTheme, /\.loom-matrix-shell\s*\{\s*background:\s*var\(--color-app-bg\)/);
+  assert.match(matrixTheme, /\.loom-matrix-shell header\s*\{\s*background:\s*var\(--color-surface\)/);
+  assert.match(matrixTheme, /background:\s*var\(--color-surface-alt\)/);
+  assert.doesNotMatch(matrixTheme, /background:\s*var\(--color-surface-deep(?:er)?\)/);
+
+  assert.match(acquisition, /data-acquisition-hero/);
+  assert.match(acquisition, /bg-surface-alt/);
+  assert.match(acquisition, /: 'border-border bg-surface text-accent'/);
+  assert.match(acquisition, /type StatusTone = 'neutral' \| 'info' \| 'success' \| 'warning' \| 'danger'/);
+  assert.match(acquisition, /<StatusPill tone=/);
+  assert.doesNotMatch(acquisition, /border-info bg-info-soft text-info-ink/);
+  assert.doesNotMatch(acquisition, /data-acquisition-overview[\s\S]{0,500}bg-surface-deep/);
+  assert.doesNotMatch(acquisition, /data-acquisition-overview[\s\S]{0,900}text-white/);
+  assert.match(agent, /bg-app-bg/);
+  assert.match(creative, /data-creative-media-page[^>]+bg-app-bg/);
+  assert.match(diagnostics, /data-diagnostics-page[^>]+bg-app-bg/);
+  assert.doesNotMatch(diagnostics, /bg-black/);
+  assert.doesNotMatch(diagnostics, /rgba\(79,112,95,0\.45\)/);
+  assert.match(models, /data-models-page[^>]+bg-app-bg/);
+  assert.doesNotMatch(models, /rounded-\[20px\]/);
+  assert.doesNotMatch(creative, /rounded-\[10px\]/);
+});
+
+test('toast notifications expose one live region per message', () => {
+  const common = readSource('./common/index.tsx');
+  const container = sourceBlock(common, 'data-toast-container', '{toasts.map');
+
+  assert.doesNotMatch(container, /role=/);
+  assert.doesNotMatch(container, /aria-live=/);
+  assert.match(common, /role=\{toast\.type === 'error' \? 'alert' : 'status'\}/);
+  assert.match(common, /aria-live=\{toast\.type === 'error' \? 'assertive' : 'polite'\}/);
+});
+
 test('unavailable capabilities render as non-interactive status rows', () => {
   const markup = renderToStaticMarkup(React.createElement(CapabilityCenterPage));
 
@@ -222,8 +264,8 @@ test('shared modal, confirmation, and toast controls expose accessibility contra
   assert.match(confirmation, /ref=\{dialogPanelRef\}/);
   assert.match(confirmation, /data-confirm-cancel/);
   assert.match(confirmation, /previouslyFocusedElementRef/);
-  assert.match(toast, /role="status"/);
-  assert.match(toast, /aria-live="polite"/);
+  assert.match(toast, /role=\{toast\.type === 'error' \? 'alert' : 'status'\}/);
+  assert.match(toast, /aria-live=\{toast\.type === 'error' \? 'assertive' : 'polite'\}/);
   assert.match(toast, /aria-atomic="true"/);
   assert.ok(toast.includes('aria-label={`关闭通知：${toast.message}`}'));
 });

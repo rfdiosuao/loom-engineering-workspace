@@ -82,37 +82,39 @@ $files = @(
   }
 ) | Sort-Object FullName
 
-Add-Type -AssemblyName System.IO.Compression
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-$archiveStream = [IO.File]::Open(
-  $zipPath,
-  [IO.FileMode]::CreateNew,
-  [IO.FileAccess]::Write,
-  [IO.FileShare]::None
-)
+$zipWriter = Join-Path $scriptsRoot "deterministic_zip.py"
+if (-not (Test-Path -LiteralPath $zipWriter -PathType Leaf)) {
+  throw "Deterministic ZIP writer is missing: $zipWriter"
+}
+$entryManifestPath = Join-Path $OutputDir (".luming-skills-package-" + [Guid]::NewGuid().ToString("N") + ".json")
 try {
-  $archive = [IO.Compression.ZipArchive]::new(
-    $archiveStream,
-    [IO.Compression.ZipArchiveMode]::Create,
-    $false
-  )
-  try {
+  $entryManifest = @(
     foreach ($file in $files) {
       $relativePath = $file.FullName.Substring($repoRootPath.Length).TrimStart([char[]]@('\', '/'))
-      $entryName = $relativePath.Replace('\', '/')
-      [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-        $archive,
-        $file.FullName,
-        $entryName,
-        [IO.Compression.CompressionLevel]::Optimal
-      ) | Out-Null
+      [pscustomobject]@{
+        source = $file.FullName
+        entry = $relativePath.Replace('\', '/')
+        timestamp = $file.LastWriteTime.ToString(
+          "yyyy-MM-ddTHH:mm:ss",
+          [Globalization.CultureInfo]::InvariantCulture
+        )
+      }
     }
-  } finally {
-    $archive.Dispose()
+  )
+  [IO.File]::WriteAllText(
+    $entryManifestPath,
+    ($entryManifest | ConvertTo-Json -Depth 3),
+    [Text.UTF8Encoding]::new($false)
+  )
+
+  & python $zipWriter --entries $entryManifestPath --output $zipPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Deterministic Skill package writer failed with exit code $LASTEXITCODE"
   }
 } finally {
-  $archiveStream.Dispose()
+  if (Test-Path -LiteralPath $entryManifestPath -PathType Leaf) {
+    Remove-Item -LiteralPath $entryManifestPath -Force
+  }
 }
 
 Get-Item -LiteralPath $zipPath | Select-Object FullName, Length, LastWriteTime

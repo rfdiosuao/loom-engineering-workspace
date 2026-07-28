@@ -2731,7 +2731,7 @@ def _argv_summary(argv: list[str]) -> list[str]:
             summary.append("***")
             redact_next = False
             continue
-        if lowered in {"--bridge-token", "--token", "--api-key", "--password", "--secret"}:
+        if lowered in {"--bridge-token", "--token", "--api-token", "--api-key", "--password", "--secret"}:
             summary.append(item)
             redact_next = True
             continue

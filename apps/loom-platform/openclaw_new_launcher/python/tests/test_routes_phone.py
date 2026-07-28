@@ -42,16 +42,54 @@ from api.routes_phone import (
     _phone_payload_failure,
     _phone_runtime_config_json,
     _phone_status_request_timeout_ms,
+    _normalize_url,
     _probe_phone_tunnel,
     _public_store,
     _run_phone_process_with_matrix_stream,
     _sanitize_cli_output,
+    _write_phone_store,
     register_phone_routes,
 )
 from core.paths import AppPaths
 from core.storage import read_json
 from core.wire_config import WireService
 from services.jobs import JobManager
+
+
+def _secure_phone_device(
+    device_id: str,
+    *,
+    base_url: str = "http://192.168.1.88:9527",
+    token: object = "paired-phone-token",
+    name: str | None = None,
+    **extra,
+) -> dict:
+    return {
+        "id": device_id,
+        "name": name or device_id,
+        "baseUrl": base_url,
+        "token": token,
+        "launcherId": f"loom-{device_id}",
+        "launcherSecret": f"launcher-secret-{device_id}",
+        "deviceInstanceId": f"lumi-{device_id}",
+        "pairingConfirmed": True,
+        **extra,
+    }
+
+
+def _seed_secure_phone(
+    storage: dict[str, dict],
+    base_path: str,
+    device_id: str = "phone-a",
+    **device_fields,
+) -> dict:
+    path = os.path.join(base_path, "phone-agents.json")
+    store = storage.setdefault(path, {"selectedDeviceId": device_id, "devices": []})
+    store["selectedDeviceId"] = store.get("selectedDeviceId") or device_id
+    store.setdefault("devices", []).append(
+        _secure_phone_device(device_id, **device_fields)
+    )
+    return store
 
 
 class PhoneRouteSnapshotTests(unittest.TestCase):
@@ -919,8 +957,16 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 )
 
             logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-auto",
+                name="Phone Auto",
+                base_url="http://192.168.1.88:9527",
+            )
             app = FastAPI()
-            ctx = _test_context(temp_dir, JobManager(logs.append), logs)
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
             register_phone_routes(app, ctx)
             client = TestClient(app)
 
@@ -930,7 +976,6 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     "deviceId": "phone-auto",
                     "name": "Phone Auto",
                     "baseUrl": "192.168.1.88",
-                    "token": "test-token",
                 },
             )
             status = client.get("/api/phone/events/status?deviceId=phone-auto")
@@ -961,18 +1006,22 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             with patch("api.routes_phone.protect_secret", side_effect=protect), patch(
                 "api.routes_phone.unprotect_secret", side_effect=unprotect
             ):
-                saved = client.post(
-                    "/api/phone/config/device",
-                    json={
-                        "deviceId": "phone-secure",
-                        "name": "Secure Phone",
-                        "baseUrl": "192.168.1.88",
-                        "token": "plain-phone-token",
+                _write_phone_store(
+                    ctx,
+                    {
+                        "selectedDeviceId": "phone-secure",
+                        "devices": [
+                            _secure_phone_device(
+                                "phone-secure",
+                                name="Secure Phone",
+                                base_url="http://192.168.1.88:9527",
+                                token="plain-phone-token",
+                            )
+                        ],
                     },
                 )
                 loaded = client.get("/api/phone/config")
 
-            self.assertEqual(saved.status_code, 200)
             self.assertEqual(loaded.status_code, 200)
             self.assertTrue(loaded.json()["devices"][0]["tokenAvailable"])
             stored = next(value for key, value in storage.items() if key.endswith("phone-agents.json"))
@@ -1003,19 +1052,19 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 },
             )
             ctx.get_process_svc = lambda: process
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                name="Phone A",
+                base_url="http://192.168.1.88:9527",
+                token="plain-phone-token",
+            )
             app = FastAPI()
             register_phone_routes(app, ctx)
             client = TestClient(app)
 
-            saved = client.post(
-                "/api/phone/config/device",
-                json={
-                    "deviceId": "phone-a",
-                    "name": "Phone A",
-                    "baseUrl": "192.168.1.88",
-                    "token": "plain-phone-token",
-                },
-            )
+            saved = client.get("/api/phone/config")
             with patch(
                 "api.routes_phone._probe_phone_tunnel",
                 return_value={"ok": True, "status": "verified", "version": "6.60"},
@@ -1059,18 +1108,19 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     "status": "disconnected",
                 },
             )
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                name="USB Phone",
+                base_url="",
+                token="plain-phone-token",
+            )
             app = FastAPI()
             register_phone_routes(app, ctx)
             client = TestClient(app)
 
-            saved = client.post(
-                "/api/phone/config/device",
-                json={
-                    "deviceId": "phone-a",
-                    "name": "USB Phone",
-                    "token": "plain-phone-token",
-                },
-            )
+            saved = client.get("/api/phone/config")
             with patch(
                 "api.routes_phone._probe_phone_tunnel",
                 return_value={"ok": True, "status": "verified", "deviceInstanceId": "lumi-phone-a"},
@@ -1133,21 +1183,16 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     or {"ok": True, "status": "disconnected"}
                 ),
             )
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                base_url="http://192.168.1.88:9527",
+                token="phone-a-token",
+            )
             app = FastAPI()
             register_phone_routes(app, ctx)
             client = TestClient(app)
-            self.assertEqual(
-                client.post(
-                    "/api/phone/config/device",
-                    json={
-                        "deviceId": "phone-a",
-                        "baseUrl": "192.168.1.88",
-                        "token": "phone-a-token",
-                    },
-                ).status_code,
-                200,
-            )
-
             with patch("api.routes_phone._probe_phone_tunnel", side_effect=probe):
                 response = client.post(
                     "/api/phone/usb/connect",
@@ -1174,6 +1219,10 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                         "baseUrl": "http://127.0.0.1:19527",
                         "lanBaseUrl": "http://192.168.1.88:9527",
                         "token": "plain-phone-token",
+                        "launcherId": "loom-phone-a",
+                        "launcherSecret": "launcher-secret-phone-a",
+                        "deviceInstanceId": "lumi-phone-a",
+                        "pairingConfirmed": True,
                         "connectionMode": "usb",
                         "adbSerial": "adb-phone-a",
                         "adbLocalPort": 19527,
@@ -1571,18 +1620,18 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     or {"ok": True, "status": "disconnected"}
                 ),
             )
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                name="Phone A",
+                base_url="http://192.168.1.88:9527",
+                token="phone-a-token",
+            )
             app = FastAPI()
             register_phone_routes(app, ctx)
             client = TestClient(app)
-            saved = client.post(
-                "/api/phone/config/device",
-                json={
-                    "deviceId": "phone-a",
-                    "name": "Phone A",
-                    "baseUrl": "192.168.1.88",
-                    "token": "phone-a-token",
-                },
-            )
+            saved = client.get("/api/phone/config")
             self.assertEqual(saved.status_code, 200)
 
             with patch(
@@ -1625,17 +1674,17 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     or {"ok": True, "status": "disconnected"}
                 ),
             )
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                base_url="http://192.168.1.88:9527",
+                token="phone-a-token",
+            )
             app = FastAPI()
             register_phone_routes(app, ctx)
             client = TestClient(app)
-            saved = client.post(
-                "/api/phone/config/device",
-                json={
-                    "deviceId": "phone-a",
-                    "baseUrl": "192.168.1.88",
-                    "token": "phone-a-token",
-                },
-            )
+            saved = client.get("/api/phone/config")
             self.assertEqual(saved.status_code, 200)
 
             with patch(
@@ -1676,20 +1725,16 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 }
 
             ctx.get_process_svc = lambda: SimpleNamespace(phone_adb_forward=forward)
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                base_url="http://192.168.1.88:9527",
+                token="phone-a-token",
+            )
             app = FastAPI()
             register_phone_routes(app, ctx)
             client = TestClient(app)
-            self.assertEqual(
-                client.post(
-                    "/api/phone/config/device",
-                    json={
-                        "deviceId": "phone-a",
-                        "baseUrl": "192.168.1.88",
-                        "token": "phone-a-token",
-                    },
-                ).status_code,
-                200,
-            )
 
             response = client.post(
                 "/api/phone/usb/connect",
@@ -1767,6 +1812,9 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                             "id": "usb-phone",
                             "baseUrl": "http://127.0.0.1:19527",
                             "token": "usb-secret",
+                            "launcherId": "loom-usb-phone",
+                            "launcherSecret": "launcher-secret-usb-phone",
+                            "deviceInstanceId": "lumi-usb-phone",
                             "connectionMode": "usb",
                             "usbIdentityVerified": False,
                         },
@@ -1774,6 +1822,9 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                             "id": "lan-phone",
                             "baseUrl": "http://192.168.1.88:9527",
                             "token": "lan-secret",
+                            "launcherId": "loom-lan-phone",
+                            "launcherSecret": "launcher-secret-lan-phone",
+                            "deviceInstanceId": "lumi-lan-phone",
                             "connectionMode": "lan",
                         },
                     ],
@@ -1998,7 +2049,8 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 loaded = client.get("/api/phone/config")
 
             self.assertEqual(loaded.status_code, 200)
-            self.assertTrue(loaded.json()["configured"])
+            self.assertFalse(loaded.json()["configured"])
+            self.assertTrue(loaded.json()["devices"][0]["legacyUnpaired"])
             self.assertNotIn("legacy-token", json.dumps(storage[path], ensure_ascii=False))
 
     def test_phone_config_delete_removes_credentials_and_live_matrix_card(self) -> None:
@@ -2007,14 +2059,16 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             storage: dict[str, dict] = {}
             app = FastAPI()
             ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            for device_id in ("phone-a", "phone-b"):
+                _seed_secure_phone(
+                    storage,
+                    temp_dir,
+                    device_id,
+                    base_url="http://127.0.0.1:19527",
+                    token=f"token-{device_id}",
+                )
             register_phone_routes(app, ctx)
             client = TestClient(app)
-            for device_id in ("phone-a", "phone-b"):
-                response = client.post(
-                    "/api/phone/config/device",
-                    json={"id": device_id, "baseUrl": "127.0.0.1:19527", "token": f"token-{device_id}"},
-                )
-                self.assertEqual(response.status_code, 200)
 
             from core.phone_matrix import MatrixControlPlane
 
@@ -2248,6 +2302,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                         "token": "secret-token",
                         "launcherId": "loom-test",
                         "launcherSecret": "secret-pairing",
+                        "deviceInstanceId": "lumi-pixel-01",
                     }
                 ],
             }
@@ -2336,6 +2391,9 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                         "name": "Secure Phone",
                         "baseUrl": "http://127.0.0.1:19527",
                         "token": {"__loomSecret": "dpapi", "value": "encrypted-token"},
+                        "launcherId": "loom-phone-secure",
+                        "launcherSecret": {"__loomSecret": "dpapi", "value": "encrypted-launcher-secret"},
+                        "deviceInstanceId": "lumi-phone-secure",
                     }],
                 }
             }
@@ -2664,7 +2722,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(job["result"]["metrics"]["taskCount"], 3)
             self.assertEqual(job["result"]["metrics"]["queueDepth"], 1)
 
-    def test_phone_config_device_saves_token_without_returning_secret(self) -> None:
+    def test_phone_config_device_rejects_direct_long_lived_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []
             storage: dict[str, dict] = {}
@@ -2685,70 +2743,41 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 400)
             payload = response.json()
-            self.assertTrue(payload["configured"])
-            self.assertEqual(payload["selectedDeviceId"], "pixel-01")
-            self.assertEqual(payload["devices"][0]["baseUrl"], "http://127.0.0.1:18080")
-            self.assertTrue(payload["devices"][0]["tokenAvailable"])
-            self.assertNotIn("token", payload["devices"][0])
-            self.assertNotIn("launcherSecret", payload["devices"][0])
-            self.assertNotIn("secret-token", str(payload))
+            self.assertIn("配对码", payload["error"])
+            self.assertFalse(any(key.endswith("phone-agents.json") for key in storage))
 
-            stored = next(value for key, value in storage.items() if key.endswith("phone-agents.json"))
-            protected_token = stored["devices"][0]["token"]
-            self.assertIsInstance(protected_token, dict)
-            self.assertEqual(protected_token["__loomSecret"], "dpapi")
-            self.assertNotIn("secret-token", str(stored))
-            self.assertNotIn("secret-pairing", str(stored))
+    def test_phone_config_marks_token_only_legacy_device_unpaired(self) -> None:
+        payload = _public_store(
+            {
+                "selectedDeviceId": "legacy-phone",
+                "devices": [
+                    {
+                        "id": "legacy-phone",
+                        "name": "Legacy Phone",
+                        "baseUrl": "http://127.0.0.1:19527",
+                        "token": "legacy-token",
+                    }
+                ],
+            }
+        )
 
-    def test_phone_config_device_accepts_ip_only_and_defaults_port(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            logs: list[str] = []
-            app = FastAPI()
-            ctx = _test_context(temp_dir, JobManager(logs.append), logs)
-            register_phone_routes(app, ctx)
-            client = TestClient(app)
+        self.assertFalse(payload["configured"])
+        self.assertFalse(payload["devices"][0]["paired"])
+        self.assertTrue(payload["devices"][0]["legacyUnpaired"])
 
-            response = client.post(
-                "/api/phone/config/device",
-                json={"id": "phone-1", "baseUrl": "192.168.1.78", "token": "secret-token"},
-            )
+    def test_phone_config_normalizes_ip_only_and_defaults_port(self) -> None:
+        self.assertEqual(_normalize_url("192.168.1.78"), "http://192.168.1.78:9527")
 
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["devices"][0]["baseUrl"], "http://192.168.1.78:9527")
+    def test_phone_config_normalizes_host_port_without_scheme(self) -> None:
+        self.assertEqual(_normalize_url("127.0.0.1:18080"), "http://127.0.0.1:18080")
 
-    def test_phone_config_device_accepts_host_port_without_scheme(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            logs: list[str] = []
-            app = FastAPI()
-            ctx = _test_context(temp_dir, JobManager(logs.append), logs)
-            register_phone_routes(app, ctx)
-            client = TestClient(app)
-
-            response = client.post(
-                "/api/phone/config/device",
-                json={"id": "phone-1", "baseUrl": "127.0.0.1:18080", "token": "secret-token"},
-            )
-
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["devices"][0]["baseUrl"], "http://127.0.0.1:18080")
-
-    def test_phone_config_device_cleans_common_paste_mistakes(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            logs: list[str] = []
-            app = FastAPI()
-            ctx = _test_context(temp_dir, JobManager(logs.append), logs)
-            register_phone_routes(app, ctx)
-            client = TestClient(app)
-
-            response = client.post(
-                "/api/phone/config/device",
-                json={"id": "phone-1", "baseUrl": " http:/192。168。1。78：9527／api/device/status ", "token": "secret-token"},
-            )
-
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["devices"][0]["baseUrl"], "http://192.168.1.78:9527")
+    def test_phone_config_normalizer_cleans_common_paste_mistakes(self) -> None:
+        self.assertEqual(
+            _normalize_url(" http:/192。168。1。78：9527／api/device/status "),
+            "http://192.168.1.78:9527",
+        )
 
     def test_phone_sync_model_route_runs_through_job_manager_without_secret_echo(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2810,6 +2839,9 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                                 "id": "phone-1",
                                 "baseUrl": "http://127.0.0.1:9527",
                                 "token": "secret-phone-token",
+                                "launcherId": "loom-phone-1",
+                                "launcherSecret": "launcher-secret-phone-1",
+                                "deviceInstanceId": "lumi-phone-1",
                             }
                         ],
                     },
@@ -2942,6 +2974,9 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                         "name": "Secure Phone",
                         "baseUrl": "http://127.0.0.1:19527",
                         "token": {"__loomSecret": "dpapi", "value": "encrypted-token"},
+                        "launcherId": "loom-phone-secure",
+                        "launcherSecret": {"__loomSecret": "dpapi", "value": "encrypted-launcher-secret"},
+                        "deviceInstanceId": "lumi-phone-secure",
                     }],
                 }
             }

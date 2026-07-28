@@ -105,9 +105,14 @@ LOOM 在下一阶段统一对外定义为：
 | --- | --- |
 | 用户手工查看或输入永久手机 `apiToken` | 0 |
 | 同局域网首次配对步骤 | <= 3 步 |
+| 单一用户配对入口 | 手机“与 LOOM 配对” + 电脑“手机连接”，旧 Token/直连 Skill 入口为 0 |
 | 配对码有效期 | <= 5 分钟、一次性使用 |
+| 首次配对成功率 | >= 98%（受控 USB/LAN 各 100 次） |
 | 已配对设备重启后自动恢复 | >= 99% 自动化与受控环境 |
+| 已配对设备恢复耗时 | P95 <= 15 秒；失败不得阻塞页面操作 |
+| 手机地址变化后自动修复 | >= 95%（受控同网段地址漂移） |
 | 断线后可行动错误分类 | 100% 已知错误 |
+| 在线状态假阳性 | 0；只有目标设备真实探测成功才显示在线 |
 | 配对码、长期令牌和 HMAC 密钥进入日志或前端响应 | 0 |
 | LAN 明文请求或响应包含配对码、长期令牌或 HMAC 密钥 | 0 |
 
@@ -663,6 +668,9 @@ git commit -m "feat: add actionable redacted reliability diagnostics"
 - Modify: `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/ui/settings/SettingsViewModel.kt`
 - Modify: `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/server/LumiSecurityController.kt`
 - Modify: `apps/loom-phone-agent/app/src/main/res/values-zh/strings.xml`
+- Modify: `apps/loom-phone-agent/README.md`
+- Modify: `apps/loom-phone-agent/README_CN.md`
+- Modify: `apps/loom-platform/packages/luming-skills-library/skills/luming-phone-agent/SKILL.md`
 - Modify: `docs/runbooks/agent-reliability-release-gates.md`
 - Modify: `apps/loom-platform/openclaw_new_launcher/python/core/phone_matrix.py`
 - Modify: `apps/loom-platform/openclaw_new_launcher/python/api/routes_matrix.py`
@@ -685,13 +693,17 @@ git commit -m "feat: add actionable redacted reliability diagnostics"
 
 - [ ] **Step 3: 自动发现与恢复**
 
-优先恢复已保存 USB 转发和 LAN 地址；地址变化或 HMAC 配对失效时执行有界修复，不无限重试。错误必须区分未配对、配对码过期、配对码错误、手机不可达、USB 未授权、LAN 不同网段和凭据失效。
+优先恢复已保存 USB 转发和 LAN 地址；地址变化或 HMAC 配对失效时执行有界修复，不无限重试。恢复在后台进行，不能冻结手机连接页、Matrix 或 Agent 输入框。每台设备独立退避、独立超时、独立熔断，单台慢手机不得拖慢其他设备。错误必须区分未配对、配对码过期、配对码错误、手机不可达、USB 未授权、LAN 不同网段和凭据失效。
 
 - [ ] **Step 4: 保持单一执行通道**
 
 手机连接页、Matrix、原生 Agent、CLI 和 MCP 必须继续复用现有 Bridge/phone daemon 能力，禁止新增旁路端口。
 
-- [ ] **Step 5: 增加回归门禁**
+- [ ] **Step 5: 删除冲突的旧接入方式**
+
+手机 README、Agent 接入提示词和发布的 Skill 只描述“与 LOOM 配对”。移除要求用户填写手机 URL、端口或永久 Token 的旧 Skill；开发协议文档可以说明内部认证，但不得把内部凭据变成用户配置。模型 API Key/Token 属于模型服务配置，必须与手机配对凭据保持不同名称、不同页面和不同存储边界。
+
+- [ ] **Step 6: 增加回归门禁**
 
 Run:
 
@@ -703,11 +715,15 @@ cd ..\..\..\loom-phone-agent
 
 Expected: PASS；覆盖过期、重放、错误码限流、重复领取、兼容迁移、USB/LAN 恢复、LAN 密文交换、密文篡改拒绝和密钥脱敏。
 
-- [ ] **Step 6: 固定恢复条件**
+- [ ] **Step 7: 固定真实连接验收**
+
+在 Windows 10/11 分别完成全新配对、覆盖升级、电脑重启、手机重启、USB 拔插、USB 未授权、LAN IP 变化、Wi-Fi 短暂断开和凭据轮换。记录每个场景的成功率、恢复耗时、重试次数、最终错误码和是否需要用户操作；不得用模拟路由代替实体手机证据。
+
+- [ ] **Step 8: 固定矩阵恢复条件**
 
 恢复矩阵功能开发前必须完成 10 台实体手机、2 小时、任务/截图/急停/恢复综合 soak，并保存 P50、P95、失败率和误超时率。
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```powershell
 git add apps/loom-platform/openclaw_new_launcher apps/loom-phone-agent docs/runbooks/agent-reliability-release-gates.md
@@ -737,7 +753,7 @@ git commit -m "feat: replace visible phone tokens with secure pairing"
 
 - [ ] **Step 2: 移除模块私有主色**
 
-安装、智能体、创作、手机、矩阵、模型和诊断页面不再直接声明业务十六进制颜色。品牌色只用于主操作和选中态，状态色只表达状态。
+安装、智能体、创作、手机、矩阵、模型、获客和诊断页面不再直接声明业务十六进制颜色。所有主页面使用 `app-bg` 画布，页头和工作区使用 `surface`，次级面板使用 `surface-alt`；只有真实手机画面、终端和品牌启动场景允许使用深色表面。品牌色只用于主操作和选中态，状态色只表达状态。
 
 - [ ] **Step 3: 统一反馈**
 

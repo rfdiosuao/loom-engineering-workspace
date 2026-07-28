@@ -320,11 +320,19 @@ def _normalize_device_id(value: object, fallback: str = "phone-1") -> str:
     return text or fallback
 
 
+def _is_securely_paired_device(device: object) -> bool:
+    if not isinstance(device, dict):
+        return False
+    return all(
+        str(device.get(field) or "").strip()
+        for field in ("token", "launcherId", "launcherSecret", "deviceInstanceId")
+    )
+
+
 def _public_device(device: dict) -> dict:
     token = str(device.get("token") or "").strip()
-    launcher_id = str(device.get("launcherId") or "").strip()
-    launcher_secret = str(device.get("launcherSecret") or "").strip()
-    paired = bool(launcher_id and launcher_secret)
+    paired = _is_securely_paired_device(device)
+    legacy_unpaired = bool(token and not paired)
     confirmation_pending = bool(device.get("pairingConfirmationPending"))
     confirmed = bool(device.get("pairingConfirmed", paired)) and not confirmation_pending
     confirmation_status = _clip(device.get("pairingConfirmationStatus"), 240)
@@ -339,6 +347,7 @@ def _public_device(device: dict) -> dict:
         "baseUrl": str(device.get("baseUrl") or "").strip().rstrip("/"),
         "tokenAvailable": bool(token),
         "paired": paired,
+        "legacyUnpaired": legacy_unpaired,
         "confirmed": confirmed,
         "confirmationPending": confirmation_pending,
         "confirmationStatus": confirmation_status,
@@ -362,7 +371,7 @@ def _public_store(store: dict) -> dict:
     return {
         "selectedDeviceId": selected,
         "devices": [_public_device(item) for item in devices],
-        "configured": any(str(item.get("baseUrl") or "").strip() and str(item.get("token") or "").strip() for item in devices),
+        "configured": any(str(item.get("baseUrl") or "").strip() and _is_securely_paired_device(item) for item in devices),
     }
 
 
@@ -421,7 +430,7 @@ def _parse_phone_pairing_input(body: dict) -> dict:
     usb_serial = _clip(body.get("usbSerial") or body.get("serial"), 120)
     transport_hint = _clip(params.get("x") or body.get("transportHint"), 16).lower()
     parsed_host = urlparse(base_url).hostname or ""
-    use_usb = bool(
+    uses_usb_connection = bool(
         usb_serial
         or transport_hint == "usb"
         or parsed_host in {"127.0.0.1", "localhost", "::1"}
@@ -435,18 +444,20 @@ def _parse_phone_pairing_input(body: dict) -> dict:
         params.get("d") or body.get("deviceInstanceId"),
         160,
     )
-    if use_usb:
+    has_proof_payload = bool(
+        payload_text
+        and params.get("v") == _PHONE_PAIRING_PROTOCOL_VERSION
+        and re.fullmatch(r"[0-9a-f]{64}", bootstrap_secret)
+        and session_id
+        and device_instance_id
+    )
+    uses_code_proof = not has_proof_payload
+    if uses_code_proof:
+        if not uses_usb_connection:
+            raise ValueError("局域网配对必须粘贴手机生成的完整配对信息；6 位配对码仅用于 USB。")
         if not re.fullmatch(r"\d{6}", code):
             raise ValueError("USB 配对请输入手机上显示的 6 位配对码。")
     else:
-        if (
-            not payload_text
-            or params.get("v") != _PHONE_PAIRING_PROTOCOL_VERSION
-            or not re.fullmatch(r"[0-9a-f]{64}", bootstrap_secret)
-            or not session_id
-            or not device_instance_id
-        ):
-            raise ValueError("局域网配对必须粘贴手机生成的完整配对信息；6 位配对码仅用于 USB。")
         code = ""
     return {
         "baseUrl": base_url,
@@ -455,7 +466,10 @@ def _parse_phone_pairing_input(body: dict) -> dict:
         "bootstrapSecret": bootstrap_secret,
         "deviceInstanceId": device_instance_id,
         "deviceName": _clip(params.get("n") or body.get("name"), 80),
-        "transportHint": "usb" if use_usb else "lan",
+        # Proof mode is independent from network transport. A LAN payload can
+        # be carried through an ADB loopback tunnel without downgrading to a
+        # six-digit code.
+        "transportHint": "usb" if uses_code_proof else "lan",
         "usbSerial": usb_serial,
     }
 
@@ -578,11 +592,7 @@ def _claim_phone_pairing_over_http(
     launcher_name: str,
     timeout_sec: int = 8,
 ) -> dict:
-    parsed_host = urlparse(_normalize_url(base_url)).hostname or ""
-    use_usb = bool(
-        pairing.get("transportHint") == "usb"
-        or parsed_host in {"127.0.0.1", "localhost", "::1"}
-    )
+    use_usb = pairing.get("transportHint") == "usb"
     session_id = str(pairing.get("sessionId") or "")
     device_instance_id = str(pairing.get("deviceInstanceId") or "")
     nonce = ""
@@ -4225,6 +4235,8 @@ def _phone_runtime_config_json(ctx) -> str:
     for item in store.get("devices", []):
         if not isinstance(item, dict):
             continue
+        if not _is_securely_paired_device(item):
+            continue
         if (
             str(item.get("connectionMode") or "").strip().lower() == "usb"
             and item.get("usbIdentityVerified") is not True
@@ -4800,7 +4812,7 @@ def _configured_phone_device_count(ctx) -> int:
         for device in devices
         if isinstance(device, dict)
         and str(device.get("baseUrl") or "").strip()
-        and str(device.get("token") or "").strip()
+        and _is_securely_paired_device(device)
     )
 
 
@@ -4886,17 +4898,17 @@ def _upsert_device(store: dict, body: dict) -> dict:
     raw_id = body.get("id") or body.get("deviceId") or body.get("name") or "phone-1"
     device_id = _normalize_device_id(raw_id)
     existing = next((item for item in devices if str(item.get("id") or "").strip() == device_id), {})
+    if any(body.get(field) not in (None, "") for field in ("token", "launcherId", "launcherSecret", "deviceInstanceId")):
+        raise ValueError("长期凭据不能手动写入，请使用手机端生成的配对码完成配对")
+    if not _is_securely_paired_device(existing):
+        raise ValueError("该手机尚未安全配对，请使用手机端生成的配对码完成配对")
     requested_base_url = body.get("baseUrl") or body.get("phoneUrl")
     base_url = _normalize_url(requested_base_url or existing.get("baseUrl") or "")
-    token = _clip(body.get("token"), 4096) or str(existing.get("token") or "").strip()
-    if not token:
-        raise ValueError("请先使用手机端生成的配对码完成配对")
     next_device = {
         **existing,
         "id": device_id,
         "name": _clip(body.get("name") or existing.get("name") or "Android Phone", 80),
         "baseUrl": base_url,
-        "token": token,
         "album": _clip(body.get("album") or existing.get("album") or "LOOM", 80),
     }
     if str(existing.get("connectionMode") or "").strip().lower() == "usb":
@@ -4904,8 +4916,6 @@ def _upsert_device(store: dict, body: dict) -> dict:
         if requested_base_url:
             next_device["lanBaseUrl"] = base_url
         next_device["baseUrl"] = active_base_url
-        if body.get("token") and token != str(existing.get("token") or "").strip():
-            next_device["usbIdentityVerified"] = False
     replaced = False
     next_devices: list[dict] = []
     for item in devices:
@@ -5232,18 +5242,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_config(request: Request):
         if error := ctx.auth_error(request):
             return error
-        if request.method == "GET":
-            try:
-                store = await run_in_threadpool(
-                    _retry_pending_phone_pairing_confirmations,
-                    ctx,
-                    max_devices=1,
-                )
-            except Exception:
-                ctx.append_log("[phone-pairing] scheduled confirmation retry deferred")
-                store = _load_store(ctx)
-        else:
-            store = _load_store(ctx)
+        # Configuration reads must remain local and immediate. Confirmation
+        # retries run after pairing and through background lifecycle hooks;
+        # an unreachable phone must never stall opening the phone page.
+        store = _load_store(ctx)
         return ctx.fastapi_json(_public_store(store))
 
     @app.post("/api/phone/config/device")
@@ -5289,7 +5291,9 @@ def register_phone_routes(app, ctx) -> None:
             (item for item in devices if _normalize_device_id(item.get("id")) == device_id),
             {},
         )
-        launcher_id = _clip(existing.get("launcherId"), 80) or f"loom-desktop-{secrets.token_hex(8)}"
+        # Every rotation gets a distinct identity so the phone can keep the
+        # old HMAC identity valid until the new credential is confirmed.
+        launcher_id = f"loom-desktop-{secrets.token_hex(8)}"
         launcher_name = _clip(body.get("launcherName") or "LOOM", 80)
         requested_name = _clip(
             body.get("name") or pairing.get("deviceName") or existing.get("name") or "Android Phone",

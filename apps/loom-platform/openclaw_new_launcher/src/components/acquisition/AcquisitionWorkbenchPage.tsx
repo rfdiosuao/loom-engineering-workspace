@@ -118,6 +118,23 @@ function matrixDeviceStatus(device: MatrixDeviceSummary): string {
 }
 
 type FeishuLoginGuideState = { loginUrl?: string; userCode?: string; qrAscii?: string };
+type StatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+
+function matrixStatusTone(error: string, counts: ReturnType<typeof countMatrixDevices>): StatusTone {
+  if (error) return 'danger';
+  if (counts.failed > 0) return 'warning';
+  if (counts.total === 0) return 'neutral';
+  if (counts.online === counts.total) return 'success';
+  return 'info';
+}
+
+function feishuStatusTone(status?: FeishuStatus): StatusTone {
+  if (status?.lastSync?.syncStatus === 'sync_failed' || status?.lastSync?.syncError) return 'danger';
+  if (status?.connected) return 'success';
+  if (!status?.cliInstalled) return 'neutral';
+  if (!status?.auth?.loggedIn && !status?.auth?.botReady) return 'warning';
+  return 'info';
+}
 
 function createQrDataUri(value?: string): string {
   if (!value) return '';
@@ -292,16 +309,16 @@ export const AcquisitionWorkbenchPage = () => {
           data-acquisition-matrix-overview
           className="rounded-[8px] border border-border bg-surface p-4 shadow-elevation-low"
         >
-          <div className="rounded-[8px] border border-border-strong bg-surface-deep p-4 text-white shadow-elevation-medium">
+          <div data-acquisition-hero className="rounded-[8px] border border-border bg-surface-alt p-4 shadow-elevation-low">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-[11px] font-black tracking-[0.18em] text-white/75">获客总览</div>
-                <h1 className="mt-2 text-[28px] font-black leading-9 sm:text-[34px] sm:leading-10">多台手机矩阵获客总控</h1>
-                <p className="mt-2 max-w-[820px] break-words text-sm font-semibold leading-6 text-white/75">
+                <div className="text-[11px] font-black tracking-[0.18em] text-accent">获客总览</div>
+                <h1 className="mt-2 text-[28px] font-black leading-9 text-text sm:text-[34px] sm:leading-10">多台手机矩阵获客总控</h1>
+                <p className="mt-2 max-w-[820px] break-words text-sm font-semibold leading-6 text-text-muted">
                   把手机 Agent、线索判断、AI 跟进草稿、人工确认和飞书沉淀放在同一个执行面。数字来自本机真实状态，没有演示流。
                 </p>
               </div>
-              <Button variant="quiet" onClick={() => void refresh()} className="w-full !rounded-[8px] !border-white/30 !bg-white !text-accent sm:w-auto">
+              <Button variant="quiet" onClick={() => void refresh()} className="w-full !rounded-[8px] sm:w-auto">
                 刷新总览
               </Button>
             </div>
@@ -330,7 +347,9 @@ export const AcquisitionWorkbenchPage = () => {
             <section data-matrix-device-summary className="min-h-[160px] rounded-[8px] border border-border bg-surface-alt p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-black">矩阵设备</h3>
-                <StatusPill>{matrixError ? '矩阵状态待刷新' : `${matrixCounts.total} 台设备`}</StatusPill>
+                <StatusPill tone={matrixStatusTone(matrixError, matrixCounts)}>
+                  {matrixError ? '矩阵状态待刷新' : `${matrixCounts.total} 台设备`}
+                </StatusPill>
               </div>
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
                 {matrixStatus.devices.slice(0, 4).map((device) => (
@@ -339,7 +358,7 @@ export const AcquisitionWorkbenchPage = () => {
                 {matrixStatus.devices.length === 0 ? <Empty>暂无手机接入，绑定手机后这里会显示真实矩阵状态</Empty> : null}
               </div>
               {matrixStatus.devices.length > 4 ? (
-                <div className="mt-2 text-[11px] font-black text-info">另有 {matrixStatus.devices.length - 4} 台设备已接入</div>
+                <div className="mt-2 text-[11px] font-black text-accent">另有 {matrixStatus.devices.length - 4} 台设备已接入</div>
               ) : null}
             </section>
             <OverviewPanel marker="data-acquisition-lead-pool" title="线索池" empty="暂无线索">
@@ -376,13 +395,13 @@ export const AcquisitionWorkbenchPage = () => {
         >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] font-black tracking-[0.18em] text-info">线索沉淀出口</div>
+              <div className="text-[11px] font-black tracking-[0.18em] text-accent">线索沉淀出口</div>
               <h2 className="mt-1 text-xl font-black">飞书多维表格</h2>
               <p className="mt-1 max-w-[780px] break-words text-sm font-semibold leading-6 text-text-muted">
                 绑定后，Codex 写入的线索会同步到飞书多维表格；失败会留在本地队列，方便重试和审计。
               </p>
             </div>
-            <StatusPill>飞书同步：{feishuStatusLabel(feishu)}</StatusPill>
+            <StatusPill tone={feishuStatusTone(feishu)}>飞书同步：{feishuStatusLabel(feishu)}</StatusPill>
           </div>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
@@ -419,7 +438,7 @@ export const AcquisitionWorkbenchPage = () => {
         <section data-acquisition-agent-prompt className="rounded-[8px] border border-border bg-surface p-4 shadow-elevation-low">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] font-black tracking-[0.18em] text-info">AI 执行入口</div>
+              <div className="text-[11px] font-black tracking-[0.18em] text-accent">AI 执行入口</div>
               <h2 className="mt-1 text-xl font-black">AI 接入提示词</h2>
               <p className="mt-1 max-w-[780px] break-words text-sm font-semibold leading-6 text-text-muted">
                 复制给 Codex 或其他 Agent 后，它会读取获客任务，调用手机 Agent，回收线索日志，并把确认后的线索写入飞书。
@@ -487,8 +506,8 @@ function FeishuQrPanel({ guide }: { guide: FeishuLoginGuideState }) {
 
 function Metric({ label, value, desc, tone = 'default' }: { label: string; value: React.ReactNode; desc: React.ReactNode; tone?: 'default' | 'warn' }) {
   const toneClass = tone === 'warn'
-    ? 'border-status-danger bg-status-danger-soft text-status-danger-ink'
-    : 'border-info bg-info-soft text-info-ink';
+    ? 'border-status-warning bg-status-warning-soft text-status-warning-ink'
+    : 'border-border bg-surface text-accent';
   return (
     <div className={`min-w-0 rounded-[8px] border p-3 ${toneClass}`}>
       <div className="text-[11px] font-black text-text-muted">{label}</div>
@@ -500,9 +519,9 @@ function Metric({ label, value, desc, tone = 'default' }: { label: string; value
 
 function CapabilityStep({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="min-w-0 rounded-[8px] border border-white/15 bg-white/5 p-3">
-      <div className="truncate text-sm font-black text-white">{label}</div>
-      <div className="mt-1 truncate text-xs font-bold text-white/70">{value}</div>
+    <div className="min-w-0 rounded-[8px] border border-border bg-surface p-3">
+      <div className="truncate text-sm font-black text-text">{label}</div>
+      <div className="mt-1 truncate text-xs font-bold text-text-muted">{value}</div>
     </div>
   );
 }
@@ -564,8 +583,22 @@ function Mini({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function StatusPill({ children }: { children: React.ReactNode }) {
-  return <span className="rounded-[8px] border border-info bg-info-soft px-3 py-2 text-xs font-black text-info-ink">{children}</span>;
+function StatusPill({ children, tone }: { children: React.ReactNode; tone: StatusTone }) {
+  const toneClass: Record<StatusTone, string> = {
+    neutral: 'border-border bg-surface text-text-muted',
+    info: 'border-info-border bg-info-soft text-info-ink',
+    success: 'border-status-success bg-status-success-soft text-status-success-ink',
+    warning: 'border-status-warning bg-status-warning-soft text-status-warning-ink',
+    danger: 'border-status-danger bg-status-danger-soft text-status-danger-ink',
+  };
+  return (
+    <span
+      data-status-tone={tone}
+      className={`rounded-[8px] border px-3 py-2 text-xs font-black ${toneClass[tone]}`}
+    >
+      {children}
+    </span>
+  );
 }
 
 function Badge({ children }: { children: React.ReactNode }) {

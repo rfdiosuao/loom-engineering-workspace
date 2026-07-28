@@ -401,7 +401,7 @@ export const LicensePage: React.FC = () => {
       <div
         data-account-subscription-page
         data-white-label-layout="account-subscription"
-        className="loom-white-page flex h-full flex-col overflow-hidden bg-surface text-text"
+        className="loom-white-page flex h-full flex-col overflow-hidden bg-app-bg text-text"
       >
         <BusyOverlay
           active={busy}
@@ -409,7 +409,7 @@ export const LicensePage: React.FC = () => {
           detail={`${APP_DISPLAY_NAME} 正在连接模型服务。`}
         />
 
-        <header className="shrink-0 border-b border-border px-8 py-7">
+        <header className="shrink-0 border-b border-border bg-surface px-8 py-7">
           <div className="text-sm font-black text-accent">模型账户</div>
           <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
             <div>

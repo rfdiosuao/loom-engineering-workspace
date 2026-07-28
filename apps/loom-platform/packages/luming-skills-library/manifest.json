@@ -1,18 +1,22 @@
 {
   "name": "luming-skills-library",
   "displayName": "麓鸣 Skills Library",
-  "version": "2026.07.21",
+  "version": "2026.07.29",
   "schema": "loom.skills.library.v2",
-  "updatedAt": "2026-07-21",
+  "updatedAt": "2026-07-29",
   "skillsRoot": "skills",
   "replaces": [
+    "android-agent",
+    "android-control",
     "loom-adb-forward-proxy-bypass",
     "loom-command-brain",
     "luming-acquisition-agent",
     "luming-boss-resume-screening",
     "luming-matrix-supervisor-loop",
     "luming-phone-scenario-builder",
-    "luming-scenario-skill-writer"
+    "luming-scenario-skill-writer",
+    "phone-agent",
+    "phone-master"
   ],
   "skills": [
     {

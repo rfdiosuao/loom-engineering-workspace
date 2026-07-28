@@ -28,6 +28,16 @@ PHONE_TOKEN = "phone-token-" + ("a" * 64)
 LAUNCHER_SECRET = "launcher-secret-" + ("b" * 64)
 APPS_DIR = Path(__file__).resolve().parents[4]
 PHONE_AGENT_DIR = APPS_DIR / "loom-phone-agent" / "app" / "src" / "main"
+PHONE_AGENT_REPO = APPS_DIR / "loom-phone-agent"
+UNIFIED_PHONE_SKILL = (
+    APPS_DIR
+    / "loom-platform"
+    / "packages"
+    / "luming-skills-library"
+    / "skills"
+    / "luming-phone-agent"
+    / "SKILL.md"
+)
 
 
 def _derive_key(secret_hex: str, session_id: str, nonce: str) -> bytes:
@@ -426,6 +436,69 @@ class PhonePairingContractTests(unittest.TestCase):
         self.assertIn("pc_pairing_tip_lan", activity)
         self.assertIn("R.drawable.ic_pc_pairing", pairing_block)
         self.assertNotIn("R.drawable.ic_api_token", pairing_block)
+
+    def test_user_onboarding_exposes_pairing_instead_of_manual_phone_tokens(self) -> None:
+        readme = (PHONE_AGENT_REPO / "README.md").read_text(encoding="utf-8")
+        readme_cn = (PHONE_AGENT_REPO / "README_CN.md").read_text(encoding="utf-8")
+        unified_skill = UNIFIED_PHONE_SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("Step 4: 与 LOOM 配对", readme)
+        self.assertIn("配对码", readme)
+        self.assertIn("LOOM CLI/MCP", unified_skill)
+        self.assertIn("配对", unified_skill)
+        for obsolete in (
+            "Settings → API Token",
+            "配置 API Token",
+            "your-api-token",
+            "your-token",
+            "your-token-here",
+            "prompt: API Token",
+            "X-AGENT-PHONE-TOKEN",
+            "X-APKCLAW-TOKEN",
+        ):
+            self.assertNotIn(obsolete, readme)
+            self.assertNotIn(obsolete, readme_cn)
+            self.assertNotIn(obsolete, unified_skill)
+
+        legacy_skills = list((PHONE_AGENT_REPO / "skills").glob("*/SKILL.md"))
+        self.assertEqual(
+            [],
+            legacy_skills,
+            "legacy direct-token phone Skills must not remain as a competing entrypoint",
+        )
+
+    def test_phone_long_lived_credentials_use_android_keystore_with_plaintext_migration(self) -> None:
+        vault_path = (
+            PHONE_AGENT_DIR
+            / "java/com/apk/claw/android/utils/PhoneCredentialVault.kt"
+        )
+        self.assertTrue(vault_path.is_file(), "phone credential vault must exist")
+        vault = vault_path.read_text(encoding="utf-8")
+        kv = (
+            PHONE_AGENT_DIR / "java/com/apk/claw/android/utils/KVUtils.kt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("AndroidKeyStore", vault)
+        self.assertIn("AES/GCM/NoPadding", vault)
+        self.assertIn("KeyProperties.PURPOSE_ENCRYPT", vault)
+        self.assertIn("migratePlaintext", vault)
+        self.assertIn("PhoneCredentialVault.init(context)", kv)
+        self.assertRegex(kv, r"PhoneCredentialVault\.get\(\s*KEY_API_TOKEN")
+        self.assertIn("KEY_API_TOKEN to phoneToken", kv)
+        self.assertRegex(
+            kv,
+            r"PhoneCredentialVault\.get\(\s*KEY_LUMI_LAUNCHER_SECRET",
+        )
+        self.assertIn("KEY_LUMI_LAUNCHER_SECRET to launcherSecret", kv)
+        self.assertIn("PhoneCredentialVault.putAll(", kv)
+        self.assertNotIn(
+            "fun getApiToken(): String = getString(KEY_API_TOKEN",
+            kv,
+        )
+        self.assertNotIn(
+            "fun setApiToken(value: String) = putString(KEY_API_TOKEN",
+            kv,
+        )
 
 
 if __name__ == "__main__":

@@ -70,7 +70,7 @@ export const AgentAccessPage = () => {
   const oneShotAgentPrompt = buildOneShotAgentPrompt(mcpJson);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-surface">
+    <div data-agent-access-page className="flex h-full flex-col overflow-hidden bg-app-bg">
       <header className="shrink-0 border-b border-border/70 bg-surface px-8 py-7">
         <div className="text-[11px] font-bold tracking-[0.18em] text-accent">AGENT ACCESS</div>
         <h1 className="mt-2 text-[30px] font-black leading-tight text-text">Agent 接入</h1>

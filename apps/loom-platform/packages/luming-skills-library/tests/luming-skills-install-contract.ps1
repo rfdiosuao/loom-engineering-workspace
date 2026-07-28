@@ -9,13 +9,17 @@ $stateRoot = Join-Path $tempRoot "phone-agent-state"
 $unifiedSkillName = "luming-phone-agent"
 $reparsePaths = [Collections.Generic.List[string]]::new()
 $legacyNames = @(
+  "android-agent",
+  "android-control",
   "loom-adb-forward-proxy-bypass",
   "loom-command-brain",
   "luming-acquisition-agent",
   "luming-boss-resume-screening",
   "luming-matrix-supervisor-loop",
   "luming-phone-scenario-builder",
-  "luming-scenario-skill-writer"
+  "luming-scenario-skill-writer",
+  "phone-agent",
+  "phone-master"
 )
 
 function Get-FileManifest {
