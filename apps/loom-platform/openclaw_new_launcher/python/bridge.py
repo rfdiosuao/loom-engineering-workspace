@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from typing import Callable
+from typing import Callable, Mapping
 from urllib.parse import urlparse
 
 # Ensure the python package root is on sys.path
@@ -198,11 +198,29 @@ def _shutdown_agent_service() -> dict:
     global _agent_service
     with _agent_service_lock:
         service = _agent_service
-        _agent_service = None
-    if service is None:
-        return {"stopped": False, "drained": True}
-    service.shutdown()
-    return {"stopped": True, "drained": True}
+        if service is None:
+            return {
+                "stopped": False,
+                "drained": True,
+                "unfinishedRuns": 0,
+                "unfinishedWorkers": 0,
+                "outcomeIndeterminate": False,
+                "executionMayContinue": False,
+            }
+        raw_result = service.shutdown()
+        result = dict(raw_result) if isinstance(raw_result, Mapping) else {
+            "stopped": True,
+            "drained": True,
+        }
+        result.setdefault("stopped", bool(result.get("drained")))
+        result.setdefault("drained", bool(result.get("stopped")))
+        result.setdefault("unfinishedRuns", 0)
+        result.setdefault("unfinishedWorkers", 0)
+        result.setdefault("outcomeIndeterminate", not bool(result["drained"]))
+        result.setdefault("executionMayContinue", not bool(result["drained"]))
+        if result["drained"] and _agent_service is service:
+            _agent_service = None
+        return result
 
 
 def _get_bridge_identity() -> dict:

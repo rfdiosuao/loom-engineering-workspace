@@ -28,7 +28,7 @@ _LOCKS_GUARD = threading.Lock()
 _LOCKS: Dict[str, threading.RLock] = {}
 _PROCESS_LOCKS: Dict[str, "_InterProcessFileLock"] = {}
 _REDACTED = "[REDACTED]"
-_REMOVABLE_RUN_FIELDS = frozenset({"error", "completedAt"})
+_REMOVABLE_RUN_FIELDS = frozenset({"controlState", "error", "completedAt"})
 _SENSITIVE_KEYS = {
     "apikey",
     "authorization",

@@ -2584,9 +2584,14 @@ class AgentOrchestratorTests(unittest.TestCase):
 
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(failures, [])
-                expected = "paused" if action == "pause" else "cancelled"
-                self.assertEqual(outcomes[0]["run"]["status"], expected)
-                self.assertEqual(repository.get_run("run-tool-race")["status"], expected)
+                self.assertEqual(outcomes[0]["run"]["status"], "failed")
+                stored = repository.get_run("run-tool-race")
+                self.assertEqual(stored["status"], "failed")
+                self.assertEqual(
+                    stored["error"]["code"],
+                    "capability_cancelled_indeterminate",
+                )
+                self.assertTrue(stored["error"]["outcomeIndeterminate"])
                 self.assertFalse({"running", "completed"}.intersection(status_changes[status_marker:]))
 
     def test_restart_recovery_terminalizes_inflight_tool_without_repeating_it(self) -> None:
@@ -3104,7 +3109,8 @@ class AgentOrchestratorTests(unittest.TestCase):
             events = bus.replay("session-1")
             messages = repository.page_messages("session-1")["messages"]
 
-        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["status"], "running")
+        self.assertEqual(cancelled["controlState"], "cancel_requested")
         self.assertEqual(outcome["run"]["status"], "cancelled")
         self.assertEqual(stored["status"], "cancelled")
         self.assertEqual(messages, [])
@@ -3165,9 +3171,12 @@ class AgentOrchestratorTests(unittest.TestCase):
             stored = repository.get_run("run-tool-race", session_id="session-1")
 
         self.assertEqual(waiting["status"], "waiting_approval")
-        self.assertEqual(paused["status"], "paused")
-        self.assertEqual(outcome["result"]["run"]["status"], "paused")
-        self.assertEqual(stored["status"], "paused")
+        self.assertEqual(paused["status"], "running")
+        self.assertEqual(paused["controlState"], "pause_requested")
+        self.assertEqual(outcome["result"]["run"]["status"], "failed")
+        self.assertEqual(stored["status"], "failed")
+        self.assertEqual(stored["error"]["code"], "capability_cancelled_indeterminate")
+        self.assertTrue(stored["error"]["outcomeIndeterminate"])
 
     def test_pause_signal_reaches_the_inflight_capability_executor(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
@@ -3234,8 +3243,11 @@ class AgentOrchestratorTests(unittest.TestCase):
             self.assertTrue(cancellation_observed.wait(timeout=0.5))
             worker.join(timeout=1)
             self.assertFalse(worker.is_alive())
+            stored = repository.get_run("run-cooperative-pause")
 
-        self.assertEqual(paused["status"], "paused")
+        self.assertEqual(paused["status"], "running")
+        self.assertEqual(paused["controlState"], "pause_requested")
+        self.assertEqual(stored["status"], "paused")
 
     def test_cancel_signal_reaches_the_inflight_capability_executor(self) -> None:
         from core.agent_capabilities import CapabilityRegistry
@@ -3302,8 +3314,90 @@ class AgentOrchestratorTests(unittest.TestCase):
             self.assertTrue(cancellation_observed.wait(timeout=0.5))
             worker.join(timeout=1)
             self.assertFalse(worker.is_alive())
+            stored = repository.get_run("run-cooperative-cancel")
 
-        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["status"], "running")
+        self.assertEqual(cancelled["controlState"], "cancel_requested")
+        self.assertEqual(stored["status"], "cancelled")
+
+    def test_non_cooperative_side_effect_is_never_reported_as_safely_paused_or_cancelled(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        for action in ("pause", "cancel"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as root:
+                started = threading.Event()
+                release = threading.Event()
+                runtime = ScriptedRuntime([
+                    {
+                        "toolCalls": [{
+                            "toolCallId": f"call-non-cooperative-{action}",
+                            "name": "loom.matrix.dispatch",
+                            "input": {"prompt": "perform one external action"},
+                        }]
+                    },
+                ])
+
+                def non_cooperative_side_effect(_payload):
+                    started.set()
+                    release.wait(2)
+                    return {"campaignId": f"campaign-{action}", "status": "running"}
+
+                repository, bus, registry, policy, _calls = self._dependencies(
+                    root,
+                    runtime,
+                    operation=non_cooperative_side_effect,
+                    approval_mode="weak",
+                )
+                orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+                orchestrator.queue_run("session-1", run_id=f"run-non-cooperative-{action}")
+                outcome: dict[str, dict] = {}
+                worker = threading.Thread(
+                    target=lambda: outcome.setdefault(
+                        "run",
+                        orchestrator.execute_run(
+                            "session-1",
+                            f"run-non-cooperative-{action}",
+                            {"prompt": "perform one external action", "targets": {"allOnline": True}},
+                        ),
+                    )
+                )
+                worker.start()
+                self.assertTrue(started.wait(timeout=1))
+
+                try:
+                    requested = getattr(orchestrator, f"{action}_run")(
+                        f"run-non-cooperative-{action}",
+                        session_id="session-1",
+                    )
+                    self.assertEqual(requested["status"], "running")
+                    self.assertEqual(requested["controlState"], f"{action}_requested")
+                    self.assertFalse(requested["error"]["recoverable"])
+                    self.assertTrue(requested["error"]["outcomeIndeterminate"])
+                    self.assertTrue(requested["error"]["executionMayContinue"])
+
+                    worker.join(timeout=1)
+                    self.assertFalse(worker.is_alive())
+                    stored = repository.get_run(f"run-non-cooperative-{action}", session_id="session-1")
+                    events = bus.replay("session-1")
+
+                    self.assertEqual(outcome["run"]["status"], "failed")
+                    self.assertEqual(stored["status"], "failed")
+                    self.assertEqual(stored["error"]["code"], "capability_cancelled_indeterminate")
+                    self.assertFalse(stored["error"]["recoverable"])
+                    self.assertTrue(stored["error"]["outcomeIndeterminate"])
+                    self.assertTrue(stored["error"]["executionMayContinue"])
+                    self.assertFalse(stored["executionState"]["retryable"])
+                    tool_failed = next(event for event in events if event["type"] == "tool.failed")
+                    self.assertEqual(
+                        tool_failed["data"]["error"]["code"],
+                        "capability_cancelled_indeterminate",
+                    )
+                    self.assertTrue(tool_failed["data"]["error"]["executionMayContinue"])
+                    terminal_event = "run.paused" if action == "pause" else "run.cancelled"
+                    self.assertNotIn(terminal_event, [event["type"] for event in events])
+                finally:
+                    release.set()
+                    registry.drain_workers(timeout=1)
 
     def test_resume_never_replays_an_inflight_side_effecting_tool(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
@@ -3361,7 +3455,10 @@ class AgentOrchestratorTests(unittest.TestCase):
             )
             worker.start()
             self.assertTrue(started.wait(timeout=1))
-            orchestrator.pause_run("run-side-effect-resume", session_id="session-1")
+            pause_requested = orchestrator.pause_run(
+                "run-side-effect-resume",
+                session_id="session-1",
+            )
 
             resumed = orchestrator.resume_run(
                 "run-side-effect-resume",
@@ -3375,11 +3472,15 @@ class AgentOrchestratorTests(unittest.TestCase):
             worker.join(timeout=2)
 
             self.assertFalse(worker.is_alive())
+            stored = repository.get_run("run-side-effect-resume", session_id="session-1")
 
         self.assertEqual(call_count, 1)
-        self.assertEqual(resumed["status"], "failed")
-        self.assertEqual(resumed["error"]["code"], "agent_inflight_side_effect_unknown")
-        self.assertTrue(resumed["error"]["outcomeIndeterminate"])
+        self.assertEqual(pause_requested["status"], "running")
+        self.assertEqual(pause_requested["controlState"], "pause_requested")
+        self.assertEqual(resumed["status"], "running")
+        self.assertEqual(stored["status"], "failed")
+        self.assertEqual(stored["error"]["code"], "capability_cancelled_indeterminate")
+        self.assertTrue(stored["error"]["outcomeIndeterminate"])
 
     def test_queued_matrix_child_pauses_the_run_instead_of_false_completion(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator

@@ -158,6 +158,35 @@ def test_agent_shutdown_uses_the_existing_service_without_lazy_creation() -> Non
     assert service.calls == [("shutdown", None)]
 
 
+def test_agent_shutdown_preserves_incomplete_drain_flags() -> None:
+    service = FakeAgentService()
+
+    def incomplete_shutdown():
+        return {
+            "stopped": False,
+            "drained": False,
+            "unfinishedRuns": 1,
+            "unfinishedWorkers": 1,
+            "outcomeIndeterminate": True,
+            "executionMayContinue": True,
+            "code": "agent_shutdown_incomplete",
+            "message": "仍有执行可能继续",
+            "retryable": False,
+        }
+
+    service.shutdown = incomplete_shutdown
+    client, _service = _client(service)
+
+    response = client.post("/api/agent/shutdown")
+
+    assert response.status_code == 200
+    assert response.json()["drained"] is False
+    assert response.json()["unfinishedRuns"] == 1
+    assert response.json()["unfinishedWorkers"] == 1
+    assert response.json()["executionMayContinue"] is True
+    assert response.json()["code"] == "agent_shutdown_incomplete"
+
+
 def test_sync_agent_service_calls_do_not_block_the_event_loop() -> None:
     async def scenario() -> float:
         started = time.monotonic()

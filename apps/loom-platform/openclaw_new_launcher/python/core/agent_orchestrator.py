@@ -187,6 +187,11 @@ class AgentOrchestrator:
         run = self.repository.get_run(run_id, session_id=session_id)
         if run.get("status") in TERMINAL_STATUSES:
             return run
+        if run.get("status") in {"queued", "waiting_approval"}:
+            reconciled = self._reconcile_matrix_terminal_intents(session_id, run, cancellation_token=None)
+            if reconciled is not None:
+                return reconciled
+            run = self.repository.get_run(run_id, session_id=session_id)
         previous_status = str(run.get("status") or "")
         checkpoint = _load_checkpoint(run.get("checkpoint"))
         pending_approval = checkpoint.get("pendingApproval")
@@ -209,7 +214,7 @@ class AgentOrchestrator:
         )
         control = self._control(run_id, reset=run.get("status") == "paused")
         if control.action == "cancel" or control.cancel.is_set() and control.action == "cancel":
-            return self.cancel_run(run_id, session_id=session_id)
+            return self._finish_control_request(session_id, run_id, control)
 
         checkpoint = _load_checkpoint(run.get("checkpoint"))
         _capture_request_scope(checkpoint, run, request)
@@ -485,11 +490,11 @@ class AgentOrchestrator:
                         checkpoint,
                     )
                 except CapabilityError as exc:
-                    if control.action in {"pause", "cancel"}:
+                    error_flags = _capability_error_flags(exc)
+                    if control.action in {"pause", "cancel"} and not _outcome_is_indeterminate(error_flags):
                         return self._finish_control_request(session_id, run_id, control)
                     code = getattr(exc, "code", "tool_failed")
                     recoverable = getattr(exc, "recoverable", False)
-                    error_flags = _capability_error_flags(exc)
                     error = {
                         "code": code,
                         "message": str(exc),
@@ -629,23 +634,69 @@ class AgentOrchestrator:
         )
 
     def pause_run(self, run_id: str, *, session_id: str | None = None) -> Json:
+        return self._request_control(run_id, "pause", session_id=session_id)
+
+    def _request_control(
+        self,
+        run_id: str,
+        action: str,
+        *,
+        session_id: str | None = None,
+        force_pending: bool = False,
+    ) -> Json:
+        if action not in {"pause", "cancel"}:
+            raise ValueError(f"invalid run control action: {action}")
         with self._lock:
             run = self.repository.get_run(run_id, session_id=session_id)
             if run.get("status") in TERMINAL_STATUSES:
                 return run
             session_id = str(run["sessionId"])
             control = self._control(run_id)
-            control.action = "pause"
+            control.action = action
             control.cancel.set()
-            updated = self.repository.update_run_releasing_lease(
-                run_id,
-                {
-                    "status": "paused",
-                    "executionState": _execution_state("planning", retryable=True),
-                },
-                session_id=session_id,
-            )
-        self._emit(session_id, run_id, "run.paused", {"checkpoint": updated.get("checkpoint")})
+            checkpoint = _load_checkpoint(run.get("checkpoint"))
+            active_execution = bool(_run_lease_id(checkpoint)) and run.get("status") == "running"
+            if force_pending or active_execution:
+                in_flight = checkpoint.get("inFlightToolCall")
+                error = {
+                    "code": f"agent_{action}_pending",
+                    "message": (
+                        "暂停请求已发送，正在等待当前执行器确认停止；在确认前外部操作可能仍在继续，请勿直接重试。"
+                        if action == "pause"
+                        else "取消请求已发送，正在等待当前执行器及关联任务确认停止；在确认前外部操作可能仍在继续，请勿直接重试。"
+                    ),
+                    "recoverable": False,
+                    "outcomeIndeterminate": bool(isinstance(in_flight, Mapping) and in_flight),
+                    "executionMayContinue": True,
+                }
+                phase = str((run.get("executionState") or {}).get("phase") or "planning")
+                if phase not in {"planning", "tool"}:
+                    phase = "planning"
+                updated = self.repository.update_run(
+                    run_id,
+                    {
+                        "status": "running",
+                        "controlState": f"{action}_requested",
+                        "executionState": _execution_state(phase),
+                        "error": error,
+                    },
+                    session_id=session_id,
+                )
+                event_type = f"run.{action}_requested"
+                event_data = {
+                    "status": "running",
+                    "controlState": updated["controlState"],
+                    "error": error,
+                }
+            else:
+                updated = self._finalize_control_request(session_id, run_id, action)
+                event_type = f"run.{action}d" if action == "pause" else "run.cancelled"
+                event_data = (
+                    {"checkpoint": updated.get("checkpoint")}
+                    if action == "pause"
+                    else {}
+                )
+        self._emit(session_id, run_id, event_type, event_data)
         return updated
 
     def resume_run(
@@ -738,26 +789,19 @@ class AgentOrchestrator:
         )
         return self.execute_run(session_id, run_id, request)
 
-    def cancel_run(self, run_id: str, *, session_id: str | None = None) -> Json:
-        with self._lock:
-            run = self.repository.get_run(run_id, session_id=session_id)
-            if run.get("status") in TERMINAL_STATUSES:
-                return run
-            session_id = str(run["sessionId"])
-            control = self._control(run_id)
-            control.action = "cancel"
-            control.cancel.set()
-            updated = self.repository.update_run_releasing_lease(
-                run_id,
-                {
-                    "status": "cancelled",
-                    "completedAt": _utc_now(),
-                    "executionState": _execution_state("terminal"),
-                },
-                session_id=session_id,
-            )
-        self._emit(session_id, run_id, "run.cancelled", {})
-        return updated
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        session_id: str | None = None,
+        force_pending: bool = False,
+    ) -> Json:
+        return self._request_control(
+            run_id,
+            "cancel",
+            session_id=session_id,
+            force_pending=force_pending,
+        )
 
     def resolve_approval(
         self,
@@ -903,10 +947,12 @@ class AgentOrchestrator:
             }
             if in_flight:
                 changes["completedAt"] = _utc_now()
+                changes["controlState"] = "outcome_indeterminate"
             updated = self.repository.update_run_releasing_lease(
                 run["runId"],
                 changes,
                 session_id=run["sessionId"],
+                remove_fields=() if in_flight else ("controlState",),
             )
             if in_flight and isinstance(tool_call, Mapping):
                 self._emit(
@@ -1556,6 +1602,7 @@ class AgentOrchestrator:
         checkpoint: Json,
         *,
         cancellation_token: Any | None = None,
+        terminal_intents: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> Json | None:
         raw_pending = checkpoint.get("pendingChildOperations")
         pending = [dict(item) for item in raw_pending if isinstance(item, Mapping)] if isinstance(raw_pending, list) else []
@@ -1571,24 +1618,31 @@ class AgentOrchestrator:
                 child["needsAttention"] = True
                 remaining.append(child)
                 continue
-            try:
-                status_result = self.capabilities.execute(
-                    "loom.matrix.status",
-                    {"campaignId": campaign_id},
-                    cancellation_token=cancellation_token,
-                )
-                status = _matrix_campaign_status(status_result, campaign_id)
-                failure_detail = _matrix_campaign_failure_detail(status_result, campaign_id)
-            except CapabilityError as exc:
-                if _signal_is_set(cancellation_token):
-                    return self.repository.get_run(run_id, session_id=session_id)
-                child["needsAttention"] = True
-                child["verificationError"] = {
-                    "code": str(getattr(exc, "code", "agent_child_verification_failed")),
-                    "message": str(redact_sensitive(str(exc)))[:500],
-                }
-                remaining.append(child)
-                continue
+            intent = terminal_intents.get(campaign_id) if terminal_intents is not None else None
+            if isinstance(intent, Mapping):
+                status = _normalize_operation_status(intent.get("status"))
+                failure_detail = str(
+                    redact_sensitive(str(intent.get("failureDetail") or ""))
+                )[:300]
+            else:
+                try:
+                    status_result = self.capabilities.execute(
+                        "loom.matrix.status",
+                        {"campaignId": campaign_id},
+                        cancellation_token=cancellation_token,
+                    )
+                    status = _matrix_campaign_status(status_result, campaign_id)
+                    failure_detail = _matrix_campaign_failure_detail(status_result, campaign_id)
+                except CapabilityError as exc:
+                    if _signal_is_set(cancellation_token):
+                        return self.repository.get_run(run_id, session_id=session_id)
+                    child["needsAttention"] = True
+                    child["verificationError"] = {
+                        "code": str(getattr(exc, "code", "agent_child_verification_failed")),
+                        "message": str(redact_sensitive(str(exc)))[:500],
+                    }
+                    remaining.append(child)
+                    continue
 
             child["status"] = status or str(child.get("status") or "pending")
             if status in PENDING_CHILD_STATUSES or not status:
@@ -1711,6 +1765,48 @@ class AgentOrchestrator:
         )
         for event_type, event_data in completed_events:
             self._emit(session_id, run_id, event_type, event_data)
+        return None
+
+    def _reconcile_matrix_terminal_intents(
+        self,
+        session_id: str,
+        run: Mapping[str, Any],
+        *,
+        cancellation_token: Any | None,
+    ) -> Json | None:
+        raw_intents = run.get("matrixTerminalIntents")
+        intents = {
+            str(item.get("campaignId") or ""): dict(item)
+            for item in raw_intents
+            if isinstance(item, Mapping) and str(item.get("campaignId") or "")
+        } if isinstance(raw_intents, list) else {}
+        if not intents:
+            return None
+        checkpoint = _load_checkpoint(run.get("checkpoint"))
+        result = self._refresh_pending_children(
+            session_id,
+            str(run["runId"]),
+            checkpoint,
+            cancellation_token=cancellation_token,
+            terminal_intents=intents,
+        )
+        pending_campaign_ids = {
+            str(item.get("campaignId") or "")
+            for item in checkpoint.get("pendingChildOperations", [])
+            if isinstance(item, Mapping) and str(item.get("campaignId") or "")
+        }
+        remaining_intents = [
+            intent
+            for campaign_id, intent in intents.items()
+            if campaign_id in pending_campaign_ids
+        ]
+        self.repository.update_run(
+            str(run["runId"]),
+            {"matrixTerminalIntents": remaining_intents},
+            session_id=session_id,
+        )
+        if result is not None:
+            return self.repository.get_run(str(run["runId"]), session_id=session_id)
         return None
 
     def _reuse_completed_tool_result(
@@ -1966,21 +2062,28 @@ class AgentOrchestrator:
     ) -> Json:
         error = {"code": str(code), "message": str(redact_sensitive(message))[:500], "recoverable": bool(recoverable)}
         error.update(dict(error_flags or {}))
+        outcome_indeterminate = _outcome_is_indeterminate(error)
         with self._lock:
             control = self._control(run_id)
-            if control.cancel.is_set():
+            if control.cancel.is_set() and not outcome_indeterminate:
                 return self._finish_control_request(session_id, run_id, control)
+            changes = {
+                "status": "failed",
+                "completedAt": _utc_now(),
+                "executionState": _execution_state(
+                    "terminal",
+                    retryable=bool(recoverable) and not outcome_indeterminate,
+                ),
+                "checkpoint": _dump_checkpoint(checkpoint),
+                "error": error,
+            }
+            if outcome_indeterminate:
+                changes["controlState"] = "outcome_indeterminate"
             run = self._update_claimed_run(
                 session_id,
                 run_id,
                 checkpoint,
-                {
-                    "status": "failed",
-                    "completedAt": _utc_now(),
-                    "executionState": _execution_state("terminal", retryable=bool(recoverable)),
-                    "checkpoint": _dump_checkpoint(checkpoint),
-                    "error": error,
-                },
+                changes,
                 release_lease=True,
             )
         try:
@@ -1991,7 +2094,7 @@ class AgentOrchestrator:
                 {
                     "executionState": _execution_state(
                         "terminal",
-                        retryable=bool(recoverable),
+                        retryable=bool(recoverable) and not outcome_indeterminate,
                         degraded=True,
                     )
                 },
@@ -2020,9 +2123,43 @@ class AgentOrchestrator:
         )
 
     def _finish_control_request(self, session_id: str, run_id: str, control: _RunControl) -> Json:
-        if control.action == "pause":
-            return self.repository.get_run(run_id, session_id=session_id)
-        return self.cancel_run(run_id, session_id=session_id)
+        action = "pause" if control.action == "pause" else "cancel"
+        with self._lock:
+            run = self.repository.get_run(run_id, session_id=session_id)
+            if run.get("status") in TERMINAL_STATUSES:
+                return run
+            updated = self._finalize_control_request(session_id, run_id, action)
+        if action == "pause":
+            self._emit(
+                session_id,
+                run_id,
+                "run.paused",
+                {"checkpoint": updated.get("checkpoint")},
+            )
+        else:
+            self._emit(session_id, run_id, "run.cancelled", {})
+        return updated
+
+    def _finalize_control_request(self, session_id: str, run_id: str, action: str) -> Json:
+        if action == "pause":
+            changes = {
+                "status": "paused",
+                "executionState": _execution_state("planning", retryable=True),
+            }
+            remove_fields = ("controlState", "error", "completedAt")
+        else:
+            changes = {
+                "status": "cancelled",
+                "completedAt": _utc_now(),
+                "executionState": _execution_state("terminal"),
+            }
+            remove_fields = ("controlState", "error")
+        return self.repository.update_run_releasing_lease(
+            run_id,
+            changes,
+            session_id=session_id,
+            remove_fields=remove_fields,
+        )
 
     def _emit(
         self,
@@ -2427,6 +2564,10 @@ def _capability_error_flags(exc: BaseException) -> Json:
         "outcomeIndeterminate": bool(getattr(exc, "outcome_indeterminate", False)),
         "executionMayContinue": bool(getattr(exc, "execution_may_continue", False)),
     }
+
+
+def _outcome_is_indeterminate(flags: Mapping[str, Any]) -> bool:
+    return bool(flags.get("outcomeIndeterminate") or flags.get("executionMayContinue"))
 
 
 def _capture_request_scope(

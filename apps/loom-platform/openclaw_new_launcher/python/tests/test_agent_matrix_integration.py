@@ -91,17 +91,44 @@ class AgentMatrixIntegrationTests(unittest.TestCase):
                 )
                 run = outcome["run"]
 
-                self.assertEqual(run["status"], "completed")
+                self.assertEqual(run["status"], "paused")
+                self.assertEqual(run["error"]["code"], "agent_child_operation_pending")
                 self.assertEqual(len(run["campaignIds"]), 1)
                 campaign_id = run["campaignIds"][0]
                 status = matrix.status()
-                self.assertTrue(any(item.get("campaignId") == campaign_id for item in status["campaigns"]))
+                campaign = next(
+                    item
+                    for item in status["campaigns"]
+                    if item.get("campaignId") == campaign_id
+                )
+                device_tasks = [
+                    task
+                    for mission in campaign.get("missions", [])
+                    for task in mission.get("deviceTasks", [])
+                ]
+                self.assertEqual(len(device_tasks), 2)
+                for task in device_tasks:
+                    result = matrix.record_result(
+                        task["deviceTaskId"],
+                        ok=True,
+                        duration_ms=10,
+                    )
+                    self.assertTrue(result["ok"])
+
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    run = service.get_run(run["runId"])
+                    if run["status"] in {"completed", "failed"}:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(run["status"], "completed")
 
                 events = service.events_after(session_id=session["sessionId"], after_seq=0)
                 attachment = next(item for item in events if item["type"] == "matrix.attached")
                 self.assertEqual(attachment["topic"], "matrix.campaign")
                 self.assertEqual(attachment["entityId"], campaign_id)
                 self.assertEqual(attachment["data"]["counts"]["total"], 2)
+                self.assertIn("matrix.succeeded", [item["type"] for item in events])
                 self.assertTrue(any(node["kind"] == "matrix" for node in service.get_trace(run["runId"])["trace"]))
             finally:
                 service.shutdown()

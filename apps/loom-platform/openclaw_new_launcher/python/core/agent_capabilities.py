@@ -706,6 +706,8 @@ class CapabilityRegistry:
         self._discovery_lock = threading.RLock()
         self._discovery_cache: dict[str, Capability] | None = None
         self._discovery_cache_expires_at = 0.0
+        self._worker_lock = threading.RLock()
+        self._workers: set[threading.Thread] = set()
 
     def list_capabilities(self, *, available_only: bool = False) -> list[Json]:
         capabilities = list(self._capabilities(available_only=available_only).values())
@@ -740,19 +742,24 @@ class CapabilityRegistry:
         supports_cancellation = _accepts_cancellation_token(capability.executor)
 
         def run() -> None:
-            with state.lock:
-                if token.cancelled:
-                    state.done.set()
-                    return
-                state.invocation_started = True
             try:
-                state.result = _invoke_executor(capability.executor, data, token, supports_cancellation)
-            except BaseException as exc:
-                state.error = exc
+                with state.lock:
+                    if token.cancelled:
+                        state.done.set()
+                        return
+                    state.invocation_started = True
+                try:
+                    state.result = _invoke_executor(capability.executor, data, token, supports_cancellation)
+                except BaseException as exc:
+                    state.error = exc
             finally:
                 state.done.set()
+                with self._worker_lock:
+                    self._workers.discard(threading.current_thread())
 
         worker = threading.Thread(target=run, name="loom-capability", daemon=True)
+        with self._worker_lock:
+            self._workers.add(worker)
         worker.start()
         deadline = time.monotonic() + capability.timeout_sec
         cancelled_by_run = False
@@ -782,7 +789,7 @@ class CapabilityRegistry:
                 )
             raise CapabilityExecutionError(
                 "capability_cancelled_indeterminate",
-                f"Capability cancellation outcome is indeterminate: {name}",
+                f"能力取消结果不确定，外部操作可能已经发生或仍在继续，请先核验目标状态且不要直接重试：{name}",
                 recoverable=False,
                 outcome_indeterminate=True,
                 execution_may_continue=not settled,
@@ -842,6 +849,26 @@ class CapabilityRegistry:
                 outcome_indeterminate=True,
             ) from exc
         return safe_result
+
+    def unfinished_worker_count(self) -> int:
+        with self._worker_lock:
+            return sum(worker.is_alive() for worker in self._workers)
+
+    def drain_workers(self, *, timeout: float = 0.0) -> int:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._worker_lock:
+                workers = [worker for worker in self._workers if worker.is_alive()]
+            if not workers:
+                return 0
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return len(workers)
+            for worker in workers:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                worker.join(min(remaining, 0.05))
 
     def validate_input(
         self,
