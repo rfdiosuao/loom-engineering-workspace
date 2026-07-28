@@ -109,6 +109,7 @@ LOOM 在下一阶段统一对外定义为：
 | 已配对设备重启后自动恢复 | >= 99% 自动化与受控环境 |
 | 断线后可行动错误分类 | 100% 已知错误 |
 | 配对码、长期令牌和 HMAC 密钥进入日志或前端响应 | 0 |
+| LAN 明文请求或响应包含配对码、长期令牌或 HMAC 密钥 | 0 |
 
 ### 2.5 全局 UI 一致性
 
@@ -676,7 +677,7 @@ git commit -m "feat: add actionable redacted reliability diagnostics"
 
 - [ ] **Step 1: 固定安全协议**
 
-手机生成 6 位配对码和不含永久令牌的二维码载荷，默认 5 分钟过期、一次性使用、错误次数受限。电脑继续作为现有 USB/LAN 客户端，通过手机 ConfigServer 领取随机长期凭据；不让手机访问电脑回环 Bridge，也不新增电脑 LAN 监听。配对码只用于交换随机长期凭据，不直接成为 API Token；长期凭据不进入 UI、日志、URL、命令行和普通 API 响应。
+手机生成 6 位配对码和不含永久令牌的二维码载荷，默认 5 分钟过期、一次性使用、错误次数受限。电脑继续作为现有 USB/LAN 客户端，通过手机 ConfigServer 领取随机长期凭据；不让手机访问电脑回环 Bridge，也不新增电脑 LAN 监听。6 位人工配对码只允许用于 ADB 转发后的 USB 回环通道；LAN 完整配对载荷必须携带一次性高熵引导密钥，请求只发送基于该密钥的证明，长期凭据使用该密钥派生的 AES-GCM 密钥加密返回。配对码和引导密钥只用于交换随机长期凭据，不直接成为 API Token；长期凭据不进入 UI、日志、URL、命令行和普通 API 响应，也不得以明文穿过 LAN。
 
 - [ ] **Step 2: 实现兼容迁移**
 
@@ -700,7 +701,7 @@ cd ..\..\..\loom-phone-agent
 .\gradlew.bat test
 ```
 
-Expected: PASS；覆盖过期、重放、错误码限流、重复领取、兼容迁移、USB/LAN 恢复和密钥脱敏。
+Expected: PASS；覆盖过期、重放、错误码限流、重复领取、兼容迁移、USB/LAN 恢复、LAN 密文交换、密文篡改拒绝和密钥脱敏。
 
 - [ ] **Step 6: 固定恢复条件**
 
@@ -767,7 +768,7 @@ git commit -m "refactor: unify loom visual language across modules"
 - Modify: `apps/loom-platform/docs/LOOM_RELEASE_TEST_AND_DEMO_CHECKLIST.md`
 
 **Interfaces:**
-- Consumes: Tasks 1-9 的自动化与真实环境证据。
+- Consumes: Tasks 1-10 的自动化与真实环境证据。
 - Produces: `2.4.0` 发布决定和灰度监控指标。
 
 - [ ] **Step 1: 运行工作区门禁**
