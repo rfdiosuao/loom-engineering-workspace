@@ -676,7 +676,7 @@ git commit -m "feat: add actionable redacted reliability diagnostics"
 
 - [ ] **Step 1: 固定安全协议**
 
-电脑生成 6 位配对码，默认 5 分钟过期、一次性使用、错误次数受限。配对码只用于交换随机长期凭据，不直接成为 API Token；长期凭据不进入 UI、日志、URL、命令行和普通 API 响应。
+手机生成 6 位配对码和不含永久令牌的二维码载荷，默认 5 分钟过期、一次性使用、错误次数受限。电脑继续作为现有 USB/LAN 客户端，通过手机 ConfigServer 领取随机长期凭据；不让手机访问电脑回环 Bridge，也不新增电脑 LAN 监听。配对码只用于交换随机长期凭据，不直接成为 API Token；长期凭据不进入 UI、日志、URL、命令行和普通 API 响应。
 
 - [ ] **Step 2: 实现兼容迁移**
 

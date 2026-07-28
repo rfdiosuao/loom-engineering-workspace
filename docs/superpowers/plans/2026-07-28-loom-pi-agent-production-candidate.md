@@ -38,9 +38,10 @@
 
 ### C. Phone Pairing And Recovery
 
-- Desktop creates a cryptographically random six-digit code with a five-minute TTL.
+- The phone creates a cryptographically random six-digit code and a QR/paste payload with a five-minute TTL. The payload may contain the phone address and device identity, but never a permanent credential.
 - Pairing codes are single-use, attempt-limited and bound to a pairing session.
-- The phone claims the code and exchanges device identity plus transport metadata for a random long-lived credential.
+- The desktop remains the client and claims the code from the phone over the existing USB/LAN ConfigServer path. The phone returns random long-lived phone and launcher credentials only after the claim succeeds.
+- The phone never connects to the loopback-only desktop Bridge, and the Bridge is not exposed on the LAN for pairing.
 - Permanent credentials remain protected by DPAPI on Windows and private app storage/keystore on Android.
 - Existing token configurations migrate in place; old credentials remain until the new pairing is verified.
 - USB and LAN use the same saved device identity and execution channel.
