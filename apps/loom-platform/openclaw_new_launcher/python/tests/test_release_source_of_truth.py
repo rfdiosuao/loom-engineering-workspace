@@ -13,6 +13,8 @@ PLATFORM_ROOT = os.path.dirname(LAUNCHER_ROOT)
 MONOREPO_ROOT = os.path.dirname(os.path.dirname(PLATFORM_ROOT))
 CI_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "platform-ci.yml")
 RELEASE_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "platform-release.yml")
+PHONE_CI_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "phone-ci.yml")
+WORKSPACE_CI_WORKFLOW = os.path.join(MONOREPO_ROOT, ".github", "workflows", "workspace-ci.yml")
 CI_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "ci-check.ps1")
 SMOKE_SCRIPT = os.path.join(PLATFORM_ROOT, "scripts", "smoke-test-tauri-nsis.ps1")
 PROTECTED_TAURI_CONFIG = os.path.join(LAUNCHER_ROOT, "src-tauri", "tauri.protected.conf.json")
@@ -264,15 +266,25 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn("cargo test", source)
 
     def test_ci_uses_node_24_compatible_official_actions(self) -> None:
-        source = read_text(CI_WORKFLOW)
-        self.assertIn("actions/checkout@v5", source)
-        self.assertIn("actions/setup-node@v5", source)
-        self.assertIn("actions/setup-python@v6", source)
-        self.assertIn("actions/cache@v5", source)
-        self.assertNotIn("actions/checkout@v4", source)
-        self.assertNotIn("actions/setup-node@v4", source)
-        self.assertNotIn("actions/setup-python@v5", source)
-        self.assertNotIn("actions/cache@v4", source)
+        checkout_workflows = (
+            CI_WORKFLOW,
+            RELEASE_WORKFLOW,
+            PHONE_CI_WORKFLOW,
+            WORKSPACE_CI_WORKFLOW,
+        )
+        for path in checkout_workflows:
+            source = read_text(path)
+            self.assertIn("actions/checkout@v7", source, path)
+            self.assertNotRegex(source, r"actions/checkout@v[1-6]\b", path)
+
+        for path in (CI_WORKFLOW, RELEASE_WORKFLOW):
+            source = read_text(path)
+            self.assertIn("actions/setup-node@v7", source, path)
+            self.assertIn("actions/setup-python@v7", source, path)
+            self.assertIn("actions/cache@v5", source, path)
+            self.assertNotRegex(source, r"actions/setup-node@v[1-6]\b", path)
+            self.assertNotRegex(source, r"actions/setup-python@v[1-6]\b", path)
+            self.assertNotRegex(source, r"actions/cache@v[1-4]\b", path)
 
     def test_ci_artifact_guard_rejects_new_files_without_deleting_release_history(self) -> None:
         source = read_text(CI_WORKFLOW)
