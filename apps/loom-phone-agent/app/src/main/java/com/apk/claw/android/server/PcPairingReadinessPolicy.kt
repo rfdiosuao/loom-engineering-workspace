@@ -21,7 +21,7 @@ object PcPairingReadinessPolicy {
                 baseUrl = "",
                 transportHint = "",
                 errorCode = "config_server_not_running",
-                message = "手机连接服务尚未启动，请返回后重试。",
+                message = "手机连接服务尚未启动，请在手机端打开 LAN Config/电脑配对并启动连接服务后重试。",
                 retryable = true
             )
         }

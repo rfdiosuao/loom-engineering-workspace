@@ -12,6 +12,7 @@ import com.apk.claw.android.server.ConfigServerManager
 import com.apk.claw.android.server.TokenValidator
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
+import com.apk.claw.android.widget.QRCodeDialog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -294,6 +295,38 @@ class SettingsViewModel : ViewModel() {
     sealed class SettingValue {
         data class Text(val text: String) : SettingValue()
         data class Switch(val isOn: Boolean) : SettingValue()
+    }
+
+    /**
+     * 用 ZXing 将文本编码为二维码 Bitmap。
+     */
+    private fun generateQrBitmap(content: String, size: Int): android.graphics.Bitmap? {
+        return try {
+            val hints = mapOf(
+                com.google.zxing.EncodeHintType.MARGIN to 1,
+                com.google.zxing.EncodeHintType.CHARACTER_SET to "UTF-8"
+            )
+            val matrix = com.google.zxing.qrcode.QRCodeWriter()
+                .encode(content, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints)
+            val bitmap = android.graphics.Bitmap.createBitmap(
+                size,
+                size,
+                android.graphics.Bitmap.Config.RGB_565
+            )
+            for (x in 0 until size) {
+                for (y in 0 until size) {
+                    bitmap.setPixel(
+                        x,
+                        y,
+                        if (matrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                    )
+                }
+            }
+            bitmap
+        } catch (e: Exception) {
+            XLog.e("SettingsViewModel", "生成二维码失败", e)
+            null
+        }
     }
 
     /**
