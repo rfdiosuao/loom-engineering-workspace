@@ -3,7 +3,13 @@ import { Button, FieldLabel, Input, Loading, showToast } from '../common';
 import { imageApi, videoApi, parseErrorText, mediaApi, waitForJob, type MediaConfigSnapshot } from '../../services/api';
 import { storyboardApi } from '../../services/storyboardApi';
 import { STORYBOARD_STEPS } from './storyboardSteps';
-import type { StoryboardProject, StoryboardSelections, StoryboardShot } from './storyboardTypes';
+import type {
+  AssetKind,
+  StoryboardGeneratedAsset,
+  StoryboardProject,
+  StoryboardSelections,
+  StoryboardShot,
+} from './storyboardTypes';
 import {
   emptyProject, loadProjectsIndex, loadProject, saveProject, deleteProject as deleteProjectEntry,
 } from './projectStore';
@@ -12,6 +18,7 @@ import { StoryboardScriptPanel } from './StoryboardScriptPanel';
 import { StoryboardShotsPanel } from './StoryboardShotsPanel';
 import { StoryboardAssetPanel } from './StoryboardAssetPanel';
 import { StoryboardVideoPanel } from './StoryboardVideoPanel';
+import { mergeGeneratedAsset, shotNumbersFor } from './storyboardViewModel';
 
 const OptionGroups = React.lazy(() => import('./StoryboardOptionGroups').then((m) => ({ default: m.StoryboardOptionGroups })));
 
@@ -19,6 +26,10 @@ function assetKindFor(module: string): '人物图' | '产品图' | '场景图' {
   if (module === '模块六') return '人物图';
   if (module === '模块七') return '产品图';
   return '场景图';
+}
+
+interface GeneratedImageJobResult {
+  files?: Array<{ path?: string; filename?: string }>;
 }
 
 function parseShotsJson(text: string): StoryboardShot[] {
@@ -54,6 +65,7 @@ export const StoryboardWorkbench: React.FC = () => {
   const [entries, setEntries] = React.useState<Array<{ projectId: string; title: string; updatedAt: string }>>([]);
   const [entriesLoading, setEntriesLoading] = React.useState(true);
   const [project, setProject] = React.useState<StoryboardProject | null>(null);
+  const projectRef = React.useRef<StoryboardProject | null>(null);
   const [activeStepId, setActiveStepId] = React.useState(0);
   const [mediaConfig, setMediaConfig] = React.useState<MediaConfigSnapshot | null>(null);
   const [generatingStage, setGeneratingStage] = React.useState<'script' | 'storyboard' | 'videoPrompt' | null>(null);
@@ -87,7 +99,10 @@ export const StoryboardWorkbench: React.FC = () => {
   const selectProject = React.useCallback(async (projectId: string) => {
     try {
       const loaded = await loadProject(projectId);
-      if (loaded) setProject(loaded);
+      if (loaded) {
+        projectRef.current = loaded;
+        setProject(loaded);
+      }
     } catch (error) {
       showToast(parseErrorText(error) || '读取项目失败', 'error');
     }
@@ -96,12 +111,14 @@ export const StoryboardWorkbench: React.FC = () => {
   const createProject = React.useCallback(async () => {
     const fresh = emptyProject();
     await saveProject(fresh);
+    projectRef.current = fresh;
     setProject(fresh);
     setActiveStepId(0);
     await refreshEntries();
   }, [refreshEntries]);
 
   const persist = React.useCallback(async (next: StoryboardProject) => {
+    projectRef.current = next;
     setProject(next);
     try {
       await saveProject(next);
@@ -118,7 +135,10 @@ export const StoryboardWorkbench: React.FC = () => {
 
   const removeProject = React.useCallback(async (projectId: string) => {
     await deleteProjectEntry(projectId);
-    if (project?.projectId === projectId) setProject(null);
+    if (project?.projectId === projectId) {
+      projectRef.current = null;
+      setProject(null);
+    }
     await refreshEntries();
   }, [project, refreshEntries]);
 
@@ -156,10 +176,16 @@ export const StoryboardWorkbench: React.FC = () => {
     }
   }, [project, persist]);
 
-  const submitAssetImage = React.useCallback(async (prompt: string, reference: { requestValue: string } | null) => {
+  const submitAssetImage = React.useCallback(async (
+    prompt: string,
+    reference: { requestValue: string } | null,
+    shotNum: number,
+    kind: AssetKind,
+    silent = false,
+  ): Promise<boolean> => {
     if (!mediaConfig?.image?.baseUrl || !mediaConfig?.image?.hasApiKey) {
       showToast('请先在「生图」tab 配置生图模型', 'error');
-      return;
+      return false;
     }
     try {
       const { jobId } = await imageApi.submit({
@@ -171,12 +197,29 @@ export const StoryboardWorkbench: React.FC = () => {
         editImagePath: reference?.requestValue,
         source: 'storyboard',
       });
-      await waitForJob(jobId, { timeoutMs: 10 * 60 * 1000 });
-      showToast('图片生成完成，结果已存入媒体库', 'success');
+      const job = await waitForJob<GeneratedImageJobResult>(jobId, { timeoutMs: 10 * 60 * 1000 });
+      const file = job.result?.files?.find((item) => Boolean(item.path));
+      const current = projectRef.current;
+      if (!file?.path || !current) {
+        if (!silent) showToast('图片已生成，但未返回可保存的本地文件', 'error');
+        return false;
+      }
+      const asset: StoryboardGeneratedAsset = {
+        shotNum,
+        kind,
+        path: file.path,
+        filename: file.filename,
+        createdAt: new Date().toISOString(),
+      };
+      const generatedAssets = mergeGeneratedAsset(current.generatedAssets || [], asset);
+      await persist({ ...current, generatedAssets });
+      if (!silent) showToast(`镜头 ${shotNum} ${kind}已生成并保存`, 'success');
+      return true;
     } catch (error) {
-      showToast(parseErrorText(error) || '图片生成失败', 'error');
+      if (!silent) showToast(parseErrorText(error) || `镜头 ${shotNum} ${kind}生成失败`, 'error');
+      return false;
     }
-  }, [mediaConfig]);
+  }, [mediaConfig, persist]);
 
   const submitVideo = React.useCallback(async (prompt: string) => {
     if (!project) return;
@@ -322,6 +365,10 @@ export const StoryboardWorkbench: React.FC = () => {
                   <StoryboardAssetPanel
                     kind={assetKindFor(step.module)}
                     prompts={project.assetPrompts[assetKindFor(step.module)]}
+                    shotNumbers={shotNumbersFor(project.storyboard.shots, assetKindFor(step.module))}
+                    generatedAssets={(project.generatedAssets || []).filter(
+                      (asset) => asset.kind === assetKindFor(step.module),
+                    )}
                     referenceValues={(project.assetReferences?.[assetKindFor(step.module)]) || []}
                     imageConfigReady={imageReady}
                     onReferencesChange={(values) => {
@@ -343,6 +390,8 @@ export const StoryboardWorkbench: React.FC = () => {
                   videoConfigReady={videoReady}
                   videoPath={project.videoResult?.path}
                   videoFilename={project.videoResult?.filename}
+                  shots={project.storyboard.shots}
+                  generatedAssets={project.generatedAssets || []}
                   onPromptChange={(content) => { setProject({ ...project, videoPrompt: { content } }); }}
                   onSave={async (content) => { await saveProject({ ...project, videoPrompt: { content } }); }}
                   onGeneratePrompt={() => generate('videoPrompt') as Promise<string | null>}
