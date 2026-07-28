@@ -545,7 +545,7 @@ export const LicensePage: React.FC = () => {
   return (
     <div
       data-account-subscription-page
-      className="relative h-full overflow-hidden bg-app-bg text-text"
+      className="relative h-full overflow-y-auto overflow-x-hidden bg-app-bg text-text"
     >
       <BusyOverlay
         active={busy}
@@ -585,7 +585,7 @@ export const LicensePage: React.FC = () => {
 
       <div className="absolute inset-0 bg-overlay backdrop-blur-[2px]" />
 
-      <div className="relative z-10 flex h-full items-center justify-center px-6 py-8">
+      <div className="relative z-10 flex min-h-full items-start justify-center px-6 py-8 lg:items-center">
         <section className="w-full max-w-[440px] rounded-[8px] border border-border-strong bg-surface-deeper p-8 text-white shadow-elevation-high">
           <div className="mb-7 flex items-start justify-between gap-4">
             <div className="flex min-w-0 gap-4">

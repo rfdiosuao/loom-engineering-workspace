@@ -96,6 +96,24 @@ test('light and dark semantic text pairs meet WCAG AA for normal text', () => {
   }
 });
 
+test('danger and success solid button hover states meet WCAG AA in both themes', () => {
+  const commonSource = readFileSync(new URL('../components/common/index.tsx', import.meta.url), 'utf8');
+
+  for (const [themeName, theme] of [['light', LIGHT_THEME], ['dark', DARK_THEME]] as const) {
+    for (const status of ['danger', 'success'] as const) {
+      const ratio = contrastRatio(theme.colors.accent_ink, theme.colors[status]);
+      assert.ok(
+        ratio >= 4.5,
+        `${themeName} accent_ink/${status} solid hover contrast is ${ratio.toFixed(2)}:1`,
+      );
+    }
+  }
+
+  assert.match(commonSource, /danger:[^\n]+hover:bg-status-danger hover:text-accent-ink/);
+  assert.match(commonSource, /success:[^\n]+hover:bg-status-success hover:text-accent-ink/);
+  assert.doesNotMatch(commonSource, /(?:danger|success):[^\n]+hover:text-white/);
+});
+
 test('UI high-risk reliability gates include the color artifact and contrast contract', () => {
   const manifest = JSON.parse(readFileSync(
     new URL('../../../../../packages/contracts/reliability-gates.v1.json', import.meta.url),

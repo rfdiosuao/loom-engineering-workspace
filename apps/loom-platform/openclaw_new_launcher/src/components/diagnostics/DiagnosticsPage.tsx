@@ -20,7 +20,7 @@ const toneMap: Record<DiagnosticStatus, {
 }> = {
   ok: {
     label: '正常',
-    dot: 'bg-status-success shadow-[0_0_12px_rgba(22,199,132,0.55)]',
+    dot: 'bg-status-success',
     badge: 'border-status-success/30 bg-status-success/10 text-status-success',
     panel: 'border-status-success/25 bg-status-success/10',
   },
@@ -32,7 +32,7 @@ const toneMap: Record<DiagnosticStatus, {
   },
   fail: {
     label: '阻塞',
-    dot: 'bg-status-danger shadow-[0_0_12px_rgba(255,77,109,0.55)]',
+    dot: 'bg-status-danger',
     badge: 'border-status-danger/30 bg-status-danger/10 text-status-danger',
     panel: 'border-status-danger/25 bg-status-danger/10',
   },

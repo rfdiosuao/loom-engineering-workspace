@@ -1,16 +1,16 @@
 import { expect, test } from './support/audit-fixture';
 
 const WORKBENCHES = [
-  { key: 'agents', ready: '[data-agent-page-scroll]', root: '[data-white-label-layout="installer"]' },
-  { key: 'acquisition', ready: '[data-acquisition-workbench]', root: '[data-acquisition-workbench]' },
-  { key: 'phone', ready: '[data-phone-page]', root: '[data-phone-page]' },
-  { key: 'workbench', ready: '[data-matrix-command-bar]', root: '[data-white-label-layout="phone-matrix"]' },
-  { key: 'agent', ready: '[data-agent-workbench]', root: '[data-agent-workbench]' },
-  { key: 'creative', ready: '[data-creative-media-page]', root: '[data-creative-media-page]' },
-  { key: 'license', ready: '[data-account-subscription-page]', root: '[data-account-subscription-page]' },
-  { key: 'agentAccess', ready: '[data-agent-access-page]', root: '[data-agent-access-page]' },
-  { key: 'models', ready: '[data-models-page]', root: '[data-models-page]' },
-  { key: 'diagnostics', ready: '[data-diagnostics-page]', root: '[data-diagnostics-page]' },
+  { key: 'agents', ready: '[data-agent-page-scroll]', root: '[data-white-label-layout="installer"]', region: '[data-agent-page-scroll]' },
+  { key: 'acquisition', ready: '[data-acquisition-workbench]', root: '[data-acquisition-workbench]', region: '[data-acquisition-hero]' },
+  { key: 'phone', ready: '[data-phone-page]', root: '[data-phone-page]', region: '[data-phone-page] header' },
+  { key: 'workbench', ready: '[data-matrix-command-bar]', root: '[data-white-label-layout="phone-matrix"]', region: '[data-matrix-command-bar]' },
+  { key: 'agent', ready: '[data-agent-workbench]', root: '[data-agent-workbench]', region: '[data-agent-workbench] main' },
+  { key: 'creative', ready: '[data-creative-media-page]', root: '[data-creative-media-page]', region: '[data-creative-media-page] header' },
+  { key: 'license', ready: '[data-account-subscription-page]', root: '[data-account-subscription-page]', region: '[data-account-subscription-page] header' },
+  { key: 'agentAccess', ready: '[data-agent-access-page]', root: '[data-agent-access-page]', region: '[data-agent-access-page] header' },
+  { key: 'models', ready: '[data-models-page]', root: '[data-models-page]', region: '[data-models-page] header' },
+  { key: 'diagnostics', ready: '[data-diagnostics-page]', root: '[data-diagnostics-page]', region: '[data-diagnostics-page] > .bg-surface' },
 ] as const;
 
 test.beforeEach(async ({ audit, page }) => {
@@ -19,15 +19,34 @@ test.beforeEach(async ({ audit, page }) => {
   await expect(page.locator('[data-loom-splash]')).toBeHidden({ timeout: 12_000 });
 });
 
-test('major workbenches share semantic canvas and surfaces in light and dark themes', async ({ audit, page }, testInfo) => {
+test('major workbenches share semantic canvas, surfaces, and unclipped controls in light and dark themes', async ({ audit, page }) => {
   test.setTimeout(90_000);
 
   for (const theme of ['light', 'dark'] as const) {
     await page.evaluate(async (nextTheme) => {
-      const [{ useAppStore }, themeRuntime] = await Promise.all([
-        import('/src/stores/appStore.ts'),
-        import('/src/theme/default.ts'),
+      const storePath = '/src/stores/appStore.ts';
+      const themePath = '/src/theme/default.ts';
+      const [storeModule, themeModule] = await Promise.all([
+        import(storePath),
+        import(themePath),
       ]);
+      const { useAppStore } = storeModule as {
+        useAppStore: {
+          getState: () => {
+            themeConfig?: unknown;
+            setThemeMode: (mode: 'light' | 'dark') => void;
+            setThemeConfig: (config: { navItems: unknown }) => void;
+            setNavItems: (items: unknown) => void;
+          };
+        };
+      };
+      const themeRuntime = themeModule as {
+        DEFAULT_THEME: unknown;
+        buildRuntimeTheme: (config: unknown, mode: 'light' | 'dark') => { navItems: unknown };
+        persistThemeMode: (mode: 'light' | 'dark') => void;
+        normalizeNavItems: (items: unknown) => unknown;
+        applyThemeToCssVars: (config: { navItems: unknown }) => void;
+      };
       const state = useAppStore.getState();
       const runtimeTheme = themeRuntime.buildRuntimeTheme(
         state.themeConfig ?? themeRuntime.DEFAULT_THEME,
@@ -45,40 +64,59 @@ test('major workbenches share semantic canvas and surfaces in light and dark the
       await test.step(`${theme}-${workbench.key}`, async () => {
         await audit.navigateTo({ key: workbench.key, readySelector: workbench.ready });
         const root = page.locator(workbench.root).first();
+        const region = page.locator(workbench.region).first();
         await expect(root).toBeVisible();
+        await expect(region).toBeVisible();
 
-        const metrics = await root.evaluate((element) => {
+        const metrics = await root.evaluate((element, regionSelector) => {
           const box = element.getBoundingClientRect();
-          const surface = element.querySelector<HTMLElement>(
-            '[class*="bg-surface"], [class*="bg-input"]',
-          );
+          const region = document.querySelector<HTMLElement>(regionSelector);
+          const rootStyle = getComputedStyle(element);
+          const regionStyle = region ? getComputedStyle(region) : null;
+          const semanticBackgroundClass = region
+            ? [...region.classList].find((name) => /^bg-(?:app-bg|surface(?:-(?:alt|deep|deeper))?|input)(?:\/\d+)?$/.test(name)) || ''
+            : '';
+          const visibleActions = [...element.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary',
+          )].filter((action) => {
+            const actionBox = action.getBoundingClientRect();
+            const style = getComputedStyle(action);
+            return style.display !== 'none' && style.visibility !== 'hidden'
+              && actionBox.width > 0 && actionBox.height > 0;
+          });
+          const clippedActions = visibleActions.filter((action) => {
+            const actionBox = action.getBoundingClientRect();
+            return action.scrollWidth > action.clientWidth + 2
+              || actionBox.left < box.left - 1
+              || actionBox.right > box.right + 1;
+          }).map((action) => action.getAttribute('aria-label') || action.textContent?.trim() || action.tagName);
           return {
-            background: getComputedStyle(element).backgroundColor,
+            background: rootStyle.backgroundColor,
             expectedBackground: getComputedStyle(document.body).backgroundColor,
-            surfaceBackground: surface ? getComputedStyle(surface).backgroundColor : '',
+            appBackgroundToken: getComputedStyle(document.documentElement).getPropertyValue('--color-app-bg').trim(),
+            regionBackground: regionStyle?.backgroundColor || '',
+            semanticBackgroundClass,
             rootOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
             bodyOverflow: document.body.scrollWidth - document.body.clientWidth,
+            hiddenScrollableRoot: rootStyle.overflowY === 'hidden' && element.scrollHeight > element.clientHeight + 2,
+            clippedActions,
             left: box.left,
             right: box.right,
-            bottom: box.bottom,
             width: window.innerWidth,
-            height: window.innerHeight,
           };
-        });
+        }, workbench.region);
 
         expect(metrics.background).toBe(metrics.expectedBackground);
-        expect(metrics.surfaceBackground).not.toBe('');
-        expect(metrics.surfaceBackground).not.toBe('rgba(0, 0, 0, 0)');
+        expect(metrics.appBackgroundToken).not.toBe('');
+        expect(metrics.regionBackground).not.toBe('');
+        expect(metrics.regionBackground).not.toBe('rgba(0, 0, 0, 0)');
+        expect(metrics.semanticBackgroundClass).not.toBe('');
         expect(metrics.rootOverflow).toBeLessThanOrEqual(0);
         expect(metrics.bodyOverflow).toBeLessThanOrEqual(0);
+        expect(metrics.hiddenScrollableRoot).toBe(false);
+        expect(metrics.clippedActions).toEqual([]);
         expect(metrics.left).toBeGreaterThanOrEqual(0);
         expect(metrics.right).toBeLessThanOrEqual(metrics.width);
-        expect(metrics.bottom).toBeLessThanOrEqual(metrics.height);
-
-        await page.screenshot({
-          path: testInfo.outputPath(`${theme}-${workbench.key}-color-cohesion.png`),
-          fullPage: false,
-        });
       });
     }
   }

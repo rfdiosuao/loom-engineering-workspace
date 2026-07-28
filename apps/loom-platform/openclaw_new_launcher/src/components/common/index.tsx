@@ -12,8 +12,8 @@ export const Button: React.FC<ButtonProps> = ({ variant = 'default', children, c
   const base = 'min-h-10 rounded-[8px] px-4 py-2 text-sm font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:border-border disabled:bg-disabled disabled:text-disabled disabled:shadow-none';
   const variants: Record<string, string> = {
     primary: 'border border-accent bg-accent text-accent-ink shadow-elevation-low hover:bg-accent-hover',
-    danger: 'border border-status-danger bg-status-danger-soft text-status-danger-ink hover:bg-status-danger hover:text-white',
-    success: 'border border-status-success bg-status-success-soft text-status-success-ink hover:bg-status-success hover:text-white',
+    danger: 'border border-status-danger bg-status-danger-soft text-status-danger-ink hover:bg-status-danger hover:text-accent-ink',
+    success: 'border border-status-success bg-status-success-soft text-status-success-ink hover:bg-status-success hover:text-accent-ink',
     quiet: 'border border-border bg-surface text-text-muted hover:bg-hover hover:text-text',
     default: 'border border-border bg-surface-alt text-text hover:bg-hover',
   };
@@ -58,9 +58,65 @@ export const Modal: React.FC<{
   onClose: () => void;
   title?: string;
   children: React.ReactNode;
-}> = ({ isOpen, onClose, title, children }) => {
+  panelClassName?: string;
+}> = ({ isOpen, onClose, title, children, panelClassName = '' }) => {
   const titleId = React.useId();
+  const dialogPanelRef = React.useRef<HTMLDivElement>(null);
+  const previouslyFocusedElementRef = React.useRef<HTMLElement | null>(null);
+
+  React.useEffect(() => {
+    if (!isOpen) return undefined;
+
+    previouslyFocusedElementRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const focusFrame = window.requestAnimationFrame(() => {
+      const firstFocusable = dialogPanelRef.current?.querySelector<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      (firstFocusable || dialogPanelRef.current)?.focus();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      const previouslyFocused = previouslyFocusedElementRef.current;
+      previouslyFocusedElementRef.current = null;
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
+
+  const handleModalKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const focusableElements = Array.from(dialogPanelRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? []);
+    if (focusableElements.length === 0) {
+      event.preventDefault();
+      dialogPanelRef.current?.focus();
+      return;
+    }
+
+    const firstElement = focusableElements[0];
+    const lastElement = focusableElements[focusableElements.length - 1];
+    const activeElement = document.activeElement;
+    if (event.shiftKey && (activeElement === firstElement || !dialogPanelRef.current?.contains(activeElement))) {
+      event.preventDefault();
+      lastElement.focus();
+    } else if (!event.shiftKey && (activeElement === lastElement || !dialogPanelRef.current?.contains(activeElement))) {
+      event.preventDefault();
+      firstElement.focus();
+    }
+  };
+
   const modal = (
     <div
       data-viewport-modal
@@ -78,19 +134,21 @@ export const Modal: React.FC<{
         overflow: 'hidden',
         overscrollBehavior: 'contain',
       }}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') onClose();
-      }}
+      onKeyDown={handleModalKeyDown}
     >
       <button
         type="button"
         data-modal-backdrop
+        tabIndex={-1}
         aria-label={title ? `关闭${title}` : '关闭对话框'}
         onClick={onClose}
         className="absolute inset-0 h-full w-full bg-overlay backdrop-blur-sm"
       />
       <div
-        className="relative max-h-[min(82dvh,720px)] w-full max-w-lg overflow-auto rounded-[8px] border border-border-strong bg-surface p-6 shadow-elevation-high"
+        ref={dialogPanelRef}
+        data-modal-panel
+        tabIndex={-1}
+        className={`relative max-h-[min(82dvh,720px)] w-full max-w-lg overflow-auto rounded-[8px] border border-border-strong bg-surface p-6 shadow-elevation-high ${panelClassName}`}
       >
         {title && (
           <div className="mb-4 flex items-center justify-between">
