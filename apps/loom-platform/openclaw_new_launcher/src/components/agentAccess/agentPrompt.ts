@@ -1,15 +1,17 @@
-import { APP_DISPLAY_NAME } from '../../version';
+import { APP_DISPLAY_NAME, APP_VERSION } from '../../version';
 
 export const MCP_CONFIG_PATH = '<宿主官方 MCP 配置文件>';
 export const MCP_SERVER_PATH = '${LOOM_CLI_DIR}/loom_mcp.py';
 export const LUMING_SKILL_LIBRARY_PATH = '${AGENT_SKILLS_DIR}/luming-phone-agent/SKILL.md';
+export const LUMING_SKILL_LIBRARY_BUNDLED_FILE_NAME =
+  'luming-skills-library-20260729.zip';
 export const LUMING_SKILL_LIBRARY_URL =
-  'https://loom.heang.top/downloads/luming-skills-library-20260729-7C51BE89.zip';
+  `https://gitee.com/rfdiosuao/lumi/releases/download/v${APP_VERSION}/${LUMING_SKILL_LIBRARY_BUNDLED_FILE_NAME}`;
 export const LUMING_SKILL_LIBRARY_FALLBACK_URL =
-  'https://raw.githubusercontent.com/rfdiosuao/loom-release-channel/main/skills/luming-skills-library-20260729.zip';
-export const LUMING_SKILL_LIBRARY_BUNDLED_URL = '/skills/luming-skills-library-20260729.zip';
+  `https://github.com/rfdiosuao/loom-engineering-workspace/releases/download/v${APP_VERSION}/${LUMING_SKILL_LIBRARY_BUNDLED_FILE_NAME}`;
+export const LUMING_SKILL_LIBRARY_BUNDLED_PATH = '${BUNDLED_SKILL_PATH}';
 export const LUMING_SKILL_LIBRARY_SHA256 =
-  '7C51BE892D5D233B4DE81CC18EFB32561553580AF3E21838A91D0ADCE9358743';
+  '77096F186C88EA2043B193285D327BA5FCEB1992A62A2E406421F5E7C2B61773';
 
 export const CLI_SMOKE = '"${LOOM_PYTHON}" -B "${LOOM_CLI}" doctor --json';
 export const MCP_SMOKE = '"${LOOM_PYTHON}" -B "${LOOM_CLI_DIR}/loom_mcp.py"';
@@ -83,8 +85,8 @@ export function buildOneShotAgentPrompt(mcpJson: string) {
 1. 按身份边界识别 HOST_KIND、HOST_CAPABILITIES 和 ACCESS_MODE，并报告判定证据。无法可靠识别宿主时保持 unknown；有 shell 时仍可完成 CLI 只读接入，没有本地工具时诚实进入 instructions-only。
 2. 自动发现 LOOM CLI：优先 LOOM_CLI；否则在常见安装目录和当前工作区寻找 _up_/python/loom_cli.py、python/loom_cli.py 或 openclaw_new_launcher/python/loom_cli.py。Windows 常见根目录包括 %LOCALAPPDATA%\\LOOM、%ProgramFiles%\\LOOM、D:\\LOOM、C:\\LOOM；macOS 包括 /Applications/LOOM.app/Contents/Resources 和 ~/Library/Application Support/LOOM。
 3. 用发现到的 Python 执行 doctor --json。以后以 data.paths.pythonExe、cliPath、mcpPath、npmRoot 和 adbPath 为准，不猜路径。
-4. 下载 BEGIN_SKILL_LIBRARY 中唯一的统一 Skill 压缩包。依次尝试国内 cloudUrl、GitHub fallbackUrl；在 LOOM 页面内执行且云端均不可用时使用 bundledUrl。无论使用哪个来源，下载后都必须校验 SHA256，不一致立即停止，不安装。
-5. 解压到临时目录并读取 manifest.json 与 luming-phone-agent/SKILL.md。只有 HOST_KIND=codex|claude-code|codebuddy 且官方 Skill 目录已按宿主适配表确定时，Windows 才可执行 scripts/install.ps1 -Destination "<官方 Skill 目录>"；macOS/Linux 按 manifest.json 原子复制到同一明确目录。安装器必须显式传 -Destination，禁止无参数运行。只移除 manifest.replaces 精确列出的旧 Skill，保留所有无关 Skill，不清空 skills 目录。
+4. 从 doctor.data.paths.cliPath 取绝对路径，令 LOOM_CLI_DIR 为其父目录，再只检查 ../public/skills/<bundledFileName> 这一条受控候选路径；解析成功后保存为 BUNDLED_SKILL_PATH。BUNDLED_SKILL_PATH 必须是绝对路径、必须是普通文件且文件名必须精确等于 bundledFileName，禁止递归扫描磁盘。依次尝试国内 cloudUrl、GitHub fallbackUrl；云端均不可用时直接读取 BUNDLED_SKILL_PATH。若当前宿主沙箱不能直接读取该文件，只允许通过宿主已批准的文件工具把这一个文件复制到当前会话临时目录，再把副本的绝对路径作为 BUNDLED_SKILL_PATH。无论使用哪个来源，读取或下载后都必须校验 SHA256，不一致立即停止，不安装。
+5. 解压到临时目录并读取 manifest.json 与 luming-phone-agent/SKILL.md。只有 HOST_KIND=codex|claude-code|codebuddy 且官方 Skill 目录已按宿主适配表确定时，Windows 才可执行 scripts/install.ps1 -Destination "<官方 Skill 目录>"；macOS/Linux 按 manifest.json 原子复制到同一明确目录。安装器必须显式传 -Destination，禁止无参数运行。只有旧目录同时位于 manifest.replaces 且具备匹配的 LOOM 所有权标记与安装状态时才可移除；用户或第三方同名目录必须保留，不清空 skills 目录。
 6. HOST_KIND=workbuddy 时优先调用官方 Skill 导入工具；工具不可用就保留已校验 ZIP 供界面上传，不直接写任何猜测目录。HOST_KIND=unknown 时只读取临时 Skill，不持久化。其他宿主确认 ${LUMING_SKILL_LIBRARY_PATH} 存在后读取它。
 7. 如果当前宿主支持 MCP，把 BEGIN_MCP_JSON 到 END_MCP_JSON 合并到宿主官方配置，保留其他 MCP server，并把占位符替换为 doctor 返回的绝对路径。WorkBuddy 默认写 <项目目录>/.workbuddy/mcp.json；Codex、Claude Code、CodeBuddy 必须遵循各自已确认的官方配置位置；unknown 不写配置。
 8. 如果命令行找不到 adb，不要要求用户另装 Android SDK：使用 doctor.data.paths.adbPath；为当前子进程设置 LOOM_ADB，并把其目录加入当前 PATH。不要修改用户全局 PATH。
@@ -103,7 +105,8 @@ BEGIN_SKILL_LIBRARY
 name: luming-phone-agent
 cloudUrl: ${LUMING_SKILL_LIBRARY_URL}
 fallbackUrl: ${LUMING_SKILL_LIBRARY_FALLBACK_URL}
-bundledUrl: ${LUMING_SKILL_LIBRARY_BUNDLED_URL}
+bundledFileName: ${LUMING_SKILL_LIBRARY_BUNDLED_FILE_NAME}
+bundledPath: ${LUMING_SKILL_LIBRARY_BUNDLED_PATH}
 sha256: ${LUMING_SKILL_LIBRARY_SHA256}
 installer: scripts/install.ps1
 installedPathTemplate: ${LUMING_SKILL_LIBRARY_PATH}

@@ -51,6 +51,19 @@ function Get-ManifestSkills {
 }
 
 $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "manifest.json") | ConvertFrom-Json
+$provenance = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "BUNDLE_PROVENANCE.json") |
+  ConvertFrom-Json
+if ([string]$provenance.version -cne [string]$manifest.version) {
+  throw "Bundle provenance version does not match manifest: $($provenance.version) != $($manifest.version)"
+}
+$stamp = ([string]$manifest.version) -replace '[^0-9]', ''
+if ($stamp.Length -ne 8) {
+  throw "Skill Library version must resolve to an eight-digit package stamp: $($manifest.version)"
+}
+$expectedArchiveName = "luming-skills-library-$stamp.zip"
+if ([string]$provenance.archive -cne $expectedArchiveName) {
+  throw "Bundle provenance archive does not match manifest: $($provenance.archive) != $expectedArchiveName"
+}
 $manifestSkills = Get-ManifestSkills -Manifest $manifest
 $scriptsRoot = Join-Path $repoRoot "scripts"
 $candidateRoots = @($scriptsRoot) + @($manifestSkills | ForEach-Object { $_.FullName })
@@ -66,8 +79,7 @@ if ($forbiddenArtifacts.Count -ne 0) {
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
-$stamp = Get-Date -Format "yyyyMMdd"
-$zipPath = Join-Path $OutputDir "luming-skills-library-$stamp.zip"
+$zipPath = Join-Path $OutputDir ([string]$provenance.archive)
 if (Test-Path -LiteralPath $zipPath) {
   Remove-Item -LiteralPath $zipPath -Force
 }

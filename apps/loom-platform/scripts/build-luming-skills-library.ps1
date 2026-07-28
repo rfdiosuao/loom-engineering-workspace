@@ -43,9 +43,9 @@ if ($ExpectedHash -notmatch '^[0-9A-F]{64}$') {
 }
 
 if (-not $SkipValidation) {
-    & $ValidateScript -Validator $RepositoryValidator | Out-Null
+    $validationResult = @(& $ValidateScript -Validator $RepositoryValidator)
     if (-not $?) {
-        throw "Skill Library validation failed"
+        throw "Skill Library validation failed: $($validationResult -join "`n")"
     }
 }
 
@@ -63,6 +63,33 @@ $TextExtensions = @(".json", ".md", ".ps1", ".py", ".toml", ".txt", ".yaml", ".y
 $Utf8NoBom = [Text.UTF8Encoding]::new($false)
 try {
     New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
+
+    $expectedEntries = @(
+        "README.md"
+        "manifest.json"
+        Get-ChildItem -LiteralPath (Join-Path $SourceDir "scripts") -Recurse -File |
+            ForEach-Object {
+                $_.FullName.Substring($SourceDir.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
+            }
+        foreach ($manifestSkill in @($Manifest.skills)) {
+            $skillRoot = Join-Path $SourceDir ([string]$manifestSkill.path)
+            Get-ChildItem -LiteralPath $skillRoot -Recurse -File |
+                ForEach-Object {
+                    $_.FullName.Substring($SourceDir.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
+                }
+        }
+    ) | Sort-Object -Unique
+    $provenanceEntries = @($BundleProvenance.entryTimestamps.PSObject.Properties.Name | Sort-Object -Unique)
+    $missingFromProvenance = @($expectedEntries | Where-Object { $provenanceEntries -cnotcontains $_ })
+    $staleProvenanceEntries = @($provenanceEntries | Where-Object { $expectedEntries -cnotcontains $_ })
+    if ($missingFromProvenance.Count -ne 0 -or $staleProvenanceEntries.Count -ne 0) {
+        throw (
+            "Bundle provenance entry set differs from package sources. Missing: " +
+            ($missingFromProvenance -join ", ") +
+            "; stale: " +
+            ($staleProvenanceEntries -join ", ")
+        )
+    }
 
     foreach ($property in $BundleProvenance.entryTimestamps.PSObject.Properties) {
         $entryName = [string]$property.Name
@@ -95,6 +122,12 @@ try {
         (Get-Item -LiteralPath $stagedPath).LastWriteTime = $entryTimestamp
     }
 
+    # package.ps1 validates provenance but deliberately excludes it from the ZIP
+    # to avoid a self-referential archive hash.
+    Copy-Item `
+        -LiteralPath $BundleProvenancePath `
+        -Destination (Join-Path $StagingDir "BUNDLE_PROVENANCE.json")
+
     $StagedPackageScript = Join-Path $StagingDir "scripts\package.ps1"
     & $StagedPackageScript -OutputDir $OutputDir | Out-Null
     if (-not $?) {
@@ -106,14 +139,7 @@ try {
     }
 }
 
-$RawArchive = Join-Path $OutputDir ("luming-skills-library-" + (Get-Date -Format "yyyyMMdd") + ".zip")
 $GeneratedArchive = Join-Path $OutputDir $ArchiveName
-if ($RawArchive -cne $GeneratedArchive) {
-    if (Test-Path -LiteralPath $GeneratedArchive -PathType Leaf) {
-        Remove-Item -LiteralPath $GeneratedArchive -Force
-    }
-    Move-Item -LiteralPath $RawArchive -Destination $GeneratedArchive
-}
 if (-not (Test-Path -LiteralPath $GeneratedArchive -PathType Leaf)) {
     throw "Expected Skill Library archive was not generated: $GeneratedArchive"
 }
