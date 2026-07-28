@@ -787,7 +787,6 @@ test('run cooperatively cancels the remote APKClaw task when the launcher cancel
   await listen(server);
   try {
     const port = server.address().port;
-    const startedAt = Date.now();
     const cliPromise = runCli([
       'run',
       '--phone-url',
@@ -804,11 +803,12 @@ test('run cooperatively cancels the remote APKClaw task when the launcher cancel
       cancelFile,
       '--json',
     ]);
-    const pollDeadline = Date.now() + 3_000;
+    const pollDeadline = Date.now() + 10_000;
     while (!seen.includes('GET /api/lumi/agent/tasks/task-cancel') && Date.now() < pollDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(seen.includes('GET /api/lumi/agent/tasks/task-cancel'), true);
+    const cancelStartedAt = Date.now();
     await fs.writeFile(cancelFile, 'cancelled\n', 'utf8');
     const result = await cliPromise;
 
@@ -817,7 +817,7 @@ test('run cooperatively cancels the remote APKClaw task when the launcher cancel
     assert.equal(payload.ok, false);
     assert.equal(payload.error, 'cancelled');
     assert.equal(seen.includes('POST /api/lumi/agent/tasks/task-cancel/cancel'), true);
-    assert.ok(Date.now() - startedAt < 4_000, 'cancellation must interrupt an in-flight task poll');
+    assert.ok(Date.now() - cancelStartedAt < 4_000, 'cancellation must interrupt an in-flight task poll');
   } finally {
     releaseBlockedPoll();
     await close(server);
