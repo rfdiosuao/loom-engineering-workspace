@@ -99,6 +99,31 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
         run: powershell -ExecutionPolicy Bypass -File scripts\verify-version-consistency.ps1 -TagName $env:RELEASE_TAG
 
+      - name: Build and verify bundled Skill library
+        run: |
+          $buildOutput = @(
+            & powershell -NoProfile -ExecutionPolicy Bypass `
+              -File apps\loom-platform\scripts\build-luming-skills-library.ps1
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw "Skill Library build failed with exit code $LASTEXITCODE"
+          }
+          $build = ($buildOutput | Select-Object -Last 1) | ConvertFrom-Json
+          & powershell -NoProfile -ExecutionPolicy Bypass `
+            -File apps\loom-platform\scripts\build-luming-skills-library.ps1 `
+            -VerifyOnly `
+            -SkipValidation | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bundled Skill Library verification failed with exit code $LASTEXITCODE"
+          }
+          $archive = (
+            Resolve-Path -LiteralPath (
+              Join-Path "apps\loom-platform\openclaw_new_launcher\public\skills" ([string]$build.archive)
+            )
+          ).Path
+          "LOOM_SKILL_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LOOM_SKILL_SHA256=$([string]$build.sha256)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build frontend
         working-directory: apps/loom-platform/openclaw_new_launcher
         run: npm run build
@@ -354,6 +379,18 @@ jobs:
               Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $artifactDir $_.Name) -Force
             }
 
+          if (-not (Test-Path -LiteralPath $env:LOOM_SKILL_ARCHIVE -PathType Leaf)) {
+            throw "Bundled Skill Library release asset is missing: $env:LOOM_SKILL_ARCHIVE"
+          }
+          $skillHash = (Get-FileHash -LiteralPath $env:LOOM_SKILL_ARCHIVE -Algorithm SHA256).Hash
+          if ($skillHash -cne $env:LOOM_SKILL_SHA256) {
+            throw "Bundled Skill Library hash changed before release: $skillHash"
+          }
+          Copy-Item `
+            -LiteralPath $env:LOOM_SKILL_ARCHIVE `
+            -Destination (Join-Path $artifactDir (Split-Path -Leaf $env:LOOM_SKILL_ARCHIVE)) `
+            -Force
+
           foreach ($file in (Get-ChildItem -LiteralPath $artifactDir -File | Where-Object { $_.Name -notlike "*.sha256.txt" })) {
             $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName
             "$($hash.Hash)  $($file.Name)" | Set-Content -LiteralPath "$($file.FullName).sha256.txt" -Encoding ASCII
@@ -432,7 +469,7 @@ jobs:
             -TagName $env:RELEASE_TAG `
             -Name $releaseName `
             -Body $releaseBody `
-            -Assets @($manifestPath) `
+            -Assets @($manifestPath, $env:LOOM_SKILL_ARCHIVE) `
             -PruneDesktopReleases
 
           $jobs = @(
@@ -466,10 +503,48 @@ jobs:
             $jobs | Remove-Job -Force
           }
 
-          $expectedAssets = @($manifestPath) + @($parts)
+          $expectedAssets = @($manifestPath, $env:LOOM_SKILL_ARCHIVE) + @($parts)
           & $publisher `
             -TagName $env:RELEASE_TAG `
             -Name $releaseName `
             -Body $releaseBody `
             -Assets $expectedAssets `
             -VerifyOnly
+
+      - name: Verify published Skill mirrors
+        working-directory: apps/loom-platform
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          $archiveName = Split-Path -Leaf $env:LOOM_SKILL_ARCHIVE
+          $urls = @(
+            "https://gitee.com/rfdiosuao/lumi/releases/download/$env:RELEASE_TAG/$archiveName",
+            "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$archiveName"
+          )
+          foreach ($url in $urls) {
+            $download = Join-Path $env:RUNNER_TEMP ("skill-mirror-" + [Guid]::NewGuid().ToString("N") + ".zip")
+            try {
+              $lastError = $null
+              for ($attempt = 1; $attempt -le 5; $attempt += 1) {
+                try {
+                  Invoke-WebRequest -Uri $url -OutFile $download -MaximumRedirection 10
+                  $lastError = $null
+                  break
+                } catch {
+                  $lastError = $_
+                  if ($attempt -lt 5) {
+                    Start-Sleep -Seconds (5 * $attempt)
+                  }
+                }
+              }
+              if ($null -ne $lastError) {
+                throw "Published Skill mirror is unavailable: $url. $($lastError.Exception.Message)"
+              }
+              $hash = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash
+              if ($hash -cne $env:LOOM_SKILL_SHA256) {
+                throw "Published Skill mirror hash mismatch: $url returned $hash"
+              }
+            } finally {
+              Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
+            }
+          }

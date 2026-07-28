@@ -103,6 +103,9 @@ jobs:
       - name: Build bundled Skill library
         run: powershell -NoProfile -ExecutionPolicy Bypass -File apps\loom-platform\scripts\build-luming-skills-library.ps1
 
+      - name: Verify bundled Skill library
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File apps\loom-platform\scripts\build-luming-skills-library.ps1 -VerifyOnly -SkipValidation
+
       - name: Build frontend
         working-directory: apps/loom-platform/openclaw_new_launcher
         run: npm run build

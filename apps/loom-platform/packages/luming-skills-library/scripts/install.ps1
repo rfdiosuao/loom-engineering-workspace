@@ -68,6 +68,19 @@ function Assert-DirectChildPath {
   }
 }
 
+function Get-FileSha256 {
+  param([string]$Path)
+
+  $stream = [IO.File]::OpenRead($Path)
+  $algorithm = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "")
+  } finally {
+    $algorithm.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function Get-FileManifest {
   param([string]$Root)
 
@@ -77,7 +90,7 @@ function Get-FileManifest {
   )
   Get-ChildItem -LiteralPath $rootPath -Recurse -File -Force | ForEach-Object {
     $relativePath = $_.FullName.Substring($rootPath.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
-    $manifest.Add($relativePath, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)
+    $manifest.Add($relativePath, (Get-FileSha256 -Path $_.FullName))
   }
   return $manifest
 }
@@ -189,6 +202,338 @@ function Invoke-RollbackStep {
   }
 }
 
+function Read-JsonDocument {
+  param(
+    [string]$Path,
+    [string]$Context
+  )
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return $null
+  }
+  try {
+    return Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
+  } catch {
+    throw "$Context is not valid JSON: $Path. $($_.Exception.Message)"
+  }
+}
+
+function Enter-InstallLock {
+  param(
+    [string]$Path,
+    [int]$TimeoutSeconds = 30
+  )
+
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  while ($true) {
+    try {
+      return [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+      )
+    } catch [IO.IOException] {
+      if ([DateTime]::UtcNow -ge $deadline) {
+        throw "Timed out waiting for another LOOM Skill installation to finish: $Path"
+      }
+      Start-Sleep -Milliseconds 100
+    }
+  }
+}
+
+function Test-MatchingOwnerMarker {
+  param(
+    [string]$Target,
+    [string]$SkillName,
+    [string]$InstallId
+  )
+
+  $marker = Read-JsonDocument `
+    -Path (Join-Path $Target ".loom-skill-owner.json") `
+    -Context "LOOM Skill ownership marker"
+  return (
+    $null -ne $marker -and
+    [string]$marker.schema -ceq "loom.skills.owner.v1" -and
+    [string]$marker.package -ceq "luming-skills-library" -and
+    [string]$marker.skill -ceq $SkillName -and
+    [string]$marker.installId -ceq $InstallId
+  )
+}
+
+function Test-OwnedSkillTarget {
+  param(
+    [string]$Target,
+    [string]$SkillName,
+    [object]$InstallState,
+    [string]$Destination,
+    [string]$MigrationMetadataPath,
+    [switch]$AllowUnifiedMigration
+  )
+
+  if (
+    $null -ne $InstallState -and
+    [string]$InstallState.schema -ceq "loom.skills.install_state.v1" -and
+    [string]$InstallState.package -ceq "luming-skills-library" -and
+    [StringComparer]::OrdinalIgnoreCase.Equals(
+      (Get-NormalizedPath -Path ([string]$InstallState.destination)),
+      $Destination
+    )
+  ) {
+    $ownedEntry = @(
+      @($InstallState.ownedSkills) |
+        Where-Object { [string]$_.name -ceq $SkillName } |
+        Select-Object -First 1
+    )
+    if (
+      $ownedEntry.Count -eq 1 -and
+      (Test-MatchingOwnerMarker `
+        -Target $Target `
+        -SkillName $SkillName `
+        -InstallId ([string]$ownedEntry[0].markerId))
+    ) {
+      return $true
+    }
+  }
+
+  if ($AllowUnifiedMigration -and $null -eq $InstallState) {
+    $migration = Read-JsonDocument `
+      -Path $MigrationMetadataPath `
+      -Context "Legacy LOOM Skill source metadata"
+    if (
+      $null -ne $migration -and
+      [string]$migration.schema -ceq "loom.phone-agent.source.v1" -and
+      [IO.Path]::IsPathRooted([string]$migration.installedSkillRoot) -and
+      [StringComparer]::OrdinalIgnoreCase.Equals(
+        (Get-NormalizedPath -Path ([string]$migration.installedSkillRoot)),
+        $Target
+      )
+    ) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+function Merge-RecipeTree {
+  param(
+    [string]$SourceSkillRoot,
+    [string]$CandidateSkillRoot
+  )
+
+  $sourceRecipes = Join-Path $SourceSkillRoot "recipes"
+  if (-not (Test-Path -LiteralPath $sourceRecipes -PathType Container)) {
+    return
+  }
+  $candidateRecipes = Join-Path $CandidateSkillRoot "recipes"
+  New-Item -ItemType Directory -Force -Path $candidateRecipes | Out-Null
+  Get-ChildItem -LiteralPath $sourceRecipes -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $candidateRecipes -Recurse -Force
+  }
+}
+
+function Assert-ManagedSkillIntegrity {
+  param(
+    [string]$Source,
+    [string]$Candidate,
+    [string]$Context
+  )
+
+  if (-not (Test-Path -LiteralPath $Candidate -PathType Container)) {
+    throw "$Context is missing: $Candidate"
+  }
+  $sourcePath = Get-NormalizedPath -Path $Source
+  $candidatePath = Get-NormalizedPath -Path $Candidate
+  Get-ChildItem -LiteralPath $sourcePath -Recurse -File -Force | ForEach-Object {
+    $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
+    if ($relativePath.StartsWith("recipes/", [StringComparison]::Ordinal)) {
+      return
+    }
+    $candidateFile = Join-Path $candidatePath ($relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar))
+    if (-not (Test-Path -LiteralPath $candidateFile -PathType Leaf)) {
+      throw "$Context is missing package file: $relativePath"
+    }
+    if ((Get-FileSha256 -Path $_.FullName) -cne (Get-FileSha256 -Path $candidateFile)) {
+      throw "$Context SHA256 does not match the package for: $relativePath"
+    }
+  }
+}
+
+function Invoke-HardExitInjection {
+  param([string]$Point)
+
+  if ($env:LUMING_SKILLS_INSTALL_HARD_EXIT_AT -ceq $Point) {
+    [Environment]::Exit(91)
+  }
+}
+
+function Remove-StaleInstallTransactions {
+  param(
+    [string]$Destination,
+    [string]$StateRoot
+  )
+
+  foreach ($root in @($Destination, $StateRoot)) {
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+      continue
+    }
+    Get-ChildItem -LiteralPath $root -Directory -Force |
+      Where-Object { $_.Name -like ".luming-skills-install-*" } |
+      ForEach-Object { Remove-OwnedTarget -Path $_.FullName }
+  }
+}
+
+function Recover-InstallTransaction {
+  param(
+    [string]$JournalPath,
+    [string]$Destination,
+    [string]$StateRoot,
+    [string]$DurableSourceTarget,
+    [string]$InstallStatePath,
+    [string]$SourceMetadataPath,
+    [string[]]$AllowedDestinationNames
+  )
+
+  $journal = Read-JsonDocument -Path $JournalPath -Context "LOOM Skill install transaction"
+  if ($null -eq $journal) {
+    return $false
+  }
+  if (
+    [string]$journal.schema -cne "loom.skills.install_transaction.v1" -or
+    -not [StringComparer]::OrdinalIgnoreCase.Equals(
+      (Get-NormalizedPath -Path ([string]$journal.destination)),
+      $Destination
+    ) -or
+    -not [StringComparer]::OrdinalIgnoreCase.Equals(
+      (Get-NormalizedPath -Path ([string]$journal.stateRoot)),
+      $StateRoot
+    )
+  ) {
+    throw "Refusing to recover a Skill transaction for another destination or state root"
+  }
+
+  $transactionRoot = Get-NormalizedPath -Path ([string]$journal.transactionRoot)
+  $stateTransactionRoot = Get-NormalizedPath -Path ([string]$journal.stateTransactionRoot)
+  if (
+    (Split-Path -Leaf $transactionRoot) -notlike ".luming-skills-install-*" -or
+    (Split-Path -Leaf $stateTransactionRoot) -notlike ".luming-skills-install-*"
+  ) {
+    throw "Skill transaction directory name is invalid"
+  }
+  Assert-DirectChildPath `
+    -Parent $Destination `
+    -Child $transactionRoot `
+    -ExpectedName (Split-Path -Leaf $transactionRoot)
+  Assert-DirectChildPath `
+    -Parent $StateRoot `
+    -Child $stateTransactionRoot `
+    -ExpectedName (Split-Path -Leaf $stateTransactionRoot)
+
+  if ([string]$journal.phase -cne "committed") {
+    $records = @($journal.records)
+    [array]::Reverse($records)
+    foreach ($record in $records) {
+      $target = Get-NormalizedPath -Path ([string]$record.target)
+      $backup = Get-NormalizedPath -Path ([string]$record.backup)
+      $kind = [string]$record.kind
+      $name = [string]$record.name
+      $priorExisted = [bool]$record.priorExisted
+
+      if ($kind -in @("legacy", "managed")) {
+        if ($AllowedDestinationNames -cnotcontains $name) {
+          throw "Skill transaction contains an unexpected destination target: $name"
+        }
+        $expectedTarget = Get-NormalizedPath -Path (Join-Path $Destination $name)
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($target, $expectedTarget)) {
+          throw "Skill transaction destination target does not match its declared name: $name"
+        }
+        if (-not (Test-IsSameOrChildPath -Path $backup -Parent $transactionRoot)) {
+          throw "Skill transaction backup escapes its destination transaction root: $backup"
+        }
+      } elseif ($kind -ceq "source") {
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($target, $DurableSourceTarget)) {
+          throw "Skill transaction durable source target is invalid"
+        }
+        if (-not (Test-IsSameOrChildPath -Path $backup -Parent $stateTransactionRoot)) {
+          throw "Skill transaction source backup escapes its state transaction root"
+        }
+      } elseif ($kind -in @("install-state", "source-metadata")) {
+        $expectedTarget = if ($kind -ceq "install-state") { $InstallStatePath } else { $SourceMetadataPath }
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($target, $expectedTarget)) {
+          throw "Skill transaction metadata target is invalid: $kind"
+        }
+        if (-not (Test-IsSameOrChildPath -Path $backup -Parent $stateTransactionRoot)) {
+          throw "Skill transaction metadata backup escapes its state transaction root"
+        }
+      } else {
+        throw "Skill transaction record kind is invalid: $kind"
+      }
+
+      $backupExists = Test-Path -LiteralPath $backup
+      $targetExists = Test-Path -LiteralPath $target
+      if ($kind -ceq "legacy") {
+        if ($backupExists -and $targetExists) {
+          throw "Cannot recover legacy Skill because both target and backup exist: $name"
+        }
+        if ($backupExists) {
+          Move-Item -LiteralPath $backup -Destination $target
+        }
+        continue
+      }
+
+      if ($kind -ceq "managed" -and $targetExists) {
+        if (Test-MatchingOwnerMarker `
+          -Target $target `
+          -SkillName $name `
+          -InstallId ([string]$journal.installId)
+        ) {
+          Remove-OwnedTarget -Path $target
+          $targetExists = $false
+        } elseif ($backupExists -or -not $priorExisted) {
+          throw "Cannot recover managed Skill because the target ownership changed: $name"
+        }
+      }
+
+      if ($kind -in @("source", "install-state", "source-metadata")) {
+        if ($backupExists -and $targetExists) {
+          Remove-OwnedTarget -Path $target
+          $targetExists = $false
+        } elseif (-not $priorExisted -and $targetExists) {
+          Remove-OwnedTarget -Path $target
+          $targetExists = $false
+        }
+      }
+
+      if ($backupExists) {
+        if (Test-Path -LiteralPath $target) {
+          throw "Cannot restore Skill transaction backup because the target exists: $target"
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Move-Item -LiteralPath $backup -Destination $target
+      }
+    }
+  }
+
+  if (Test-Path -LiteralPath $transactionRoot) {
+    Remove-OwnedTarget -Path $transactionRoot
+  }
+  if (Test-Path -LiteralPath $stateTransactionRoot) {
+    Remove-OwnedTarget -Path $stateTransactionRoot
+  }
+  $durableSourceParent = Split-Path -Parent $DurableSourceTarget
+  if (
+    (Test-Path -LiteralPath $durableSourceParent -PathType Container) -and
+    @(Get-ChildItem -LiteralPath $durableSourceParent -Force).Count -eq 0
+  ) {
+    Remove-Item -LiteralPath $durableSourceParent -Force
+  }
+  if (Test-Path -LiteralPath $JournalPath) {
+    Remove-OwnedTarget -Path $JournalPath
+  }
+  return $true
+}
+
 if ([string]::IsNullOrWhiteSpace($Destination)) {
   throw "Destination is required. Detect the current Agent host and pass its official Skills directory explicitly; never guess .codex."
 }
@@ -262,211 +607,280 @@ foreach ($replacedSkillName in $replacedSkillNames) {
 
 $destinationExisted = Test-Path -LiteralPath $destinationPath
 New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
-$transactionName = ".luming-skills-install-$([guid]::NewGuid().ToString('N'))"
-$transactionRoot = Get-NormalizedPath -Path (Join-Path $destinationPath $transactionName)
-Assert-DirectChildPath -Parent $destinationPath -Child $transactionRoot -ExpectedName $transactionName
-$stagingRoot = Join-Path $transactionRoot "staged"
-$destinationBackupRoot = Join-Path $transactionRoot "backups"
-
-$metadataPath = Join-Path $stateRootPath "source.json"
 $stateRootExisted = Test-Path -LiteralPath $stateRootPath
-$stateTransactionRoot = $null
-$metadataBackupPath = $null
-$metadataWasBackedUp = $false
-$metadataMutationStarted = $false
-$managedBackups = @()
-$replacementBackups = @()
-$installedTargets = @()
-$installed = @()
-$removed = @()
-$sourceMetadata = $null
-
+New-Item -ItemType Directory -Force -Path $stateRootPath | Out-Null
+$lockPath = Join-Path $stateRootPath "install.lock"
+$journalPath = Join-Path $stateRootPath "install-transaction.json"
+$installStatePath = Join-Path $stateRootPath "install-state.json"
+$metadataPath = Join-Path $stateRootPath "source.json"
+$durableSourceParent = Get-NormalizedPath -Path (Join-Path $stateRootPath "source")
+$durableSourceTarget = Get-NormalizedPath -Path (Join-Path $durableSourceParent $sourceSkills[0].Name)
+Assert-DirectChildPath `
+  -Parent $durableSourceParent `
+  -Child $durableSourceTarget `
+  -ExpectedName $sourceSkills[0].Name
+$installLock = $null
 try {
-  New-Item -ItemType Directory -Path $transactionRoot | Out-Null
-  New-Item -ItemType Directory -Path $stagingRoot | Out-Null
-  New-Item -ItemType Directory -Path $destinationBackupRoot | Out-Null
-
-  foreach ($sourceSkill in $sourceSkills) {
-    Copy-Item -LiteralPath $sourceSkill.FullName -Destination $stagingRoot -Recurse -Force
-    $stagedSkill = Join-Path $stagingRoot $sourceSkill.Name
-    Assert-DirectoryParity `
-      -Source $sourceSkill.FullName `
-      -Candidate $stagedSkill `
-      -Context "Staged Skill $($sourceSkill.Name)"
+  $installLock = Enter-InstallLock -Path $lockPath
+  $allowedDestinationNames = @($sourceSkills.Name) + @($replacedSkillNames)
+  $recovered = Recover-InstallTransaction `
+    -JournalPath $journalPath `
+    -Destination $destinationPath `
+    -StateRoot $stateRootPath `
+    -DurableSourceTarget $durableSourceTarget `
+    -InstallStatePath $installStatePath `
+    -SourceMetadataPath $metadataPath `
+    -AllowedDestinationNames $allowedDestinationNames
+  if (-not $recovered) {
+    Remove-StaleInstallTransactions -Destination $destinationPath -StateRoot $stateRootPath
   }
 
-  # Hide every legacy target before exposing the replacement, so this run never adds a sixth triggerable Skill.
+  $installState = Read-JsonDocument -Path $installStatePath -Context "LOOM Skill install state"
+  $ownedReplacementTargets = @()
+  $skippedUnowned = @()
   foreach ($replacedSkillName in $replacedSkillNames) {
     $replacementTarget = Get-NormalizedPath -Path (Join-Path $destinationPath $replacedSkillName)
-    Assert-DirectChildPath -Parent $destinationPath -Child $replacementTarget -ExpectedName $replacedSkillName
-    if (Test-Path -LiteralPath $replacementTarget) {
-      $replacementBackup = Join-Path $destinationBackupRoot $replacedSkillName
-      Move-Item -LiteralPath $replacementTarget -Destination $replacementBackup
-      $replacementBackups += [pscustomobject]@{ Target = $replacementTarget; Backup = $replacementBackup }
-      $removed += $replacedSkillName
+    if (-not (Test-Path -LiteralPath $replacementTarget)) {
+      continue
     }
-    Invoke-FailureInjection -Point "legacy-removal"
+    if (Test-OwnedSkillTarget `
+      -Target $replacementTarget `
+      -SkillName $replacedSkillName `
+      -InstallState $installState `
+      -Destination $destinationPath `
+      -MigrationMetadataPath $metadataPath
+    ) {
+      $ownedReplacementTargets += [pscustomobject]@{
+        Name = $replacedSkillName
+        Target = $replacementTarget
+      }
+    } else {
+      $skippedUnowned += $replacedSkillName
+    }
   }
 
+  $managedTargets = @()
   foreach ($sourceSkill in $sourceSkills) {
     $target = Get-NormalizedPath -Path (Join-Path $destinationPath $sourceSkill.Name)
-    Assert-DirectChildPath -Parent $destinationPath -Child $target -ExpectedName $sourceSkill.Name
-    if (Test-Path -LiteralPath $target) {
-      $managedBackup = Join-Path $destinationBackupRoot $sourceSkill.Name
-      Move-Item -LiteralPath $target -Destination $managedBackup
-      $managedBackups += [pscustomobject]@{ Target = $target; Backup = $managedBackup }
+    $targetExists = Test-Path -LiteralPath $target
+    if (
+      $targetExists -and
+      -not (Test-OwnedSkillTarget `
+        -Target $target `
+        -SkillName $sourceSkill.Name `
+        -InstallState $installState `
+        -Destination $destinationPath `
+        -MigrationMetadataPath $metadataPath `
+        -AllowUnifiedMigration)
+    ) {
+      throw "Refusing to replace unowned Skill directory: $target"
+    }
+    $managedTargets += [pscustomobject]@{
+      Name = $sourceSkill.Name
+      Source = $sourceSkill.FullName
+      Target = $target
+      PriorExisted = $targetExists
     }
   }
 
-  foreach ($sourceSkill in $sourceSkills) {
-    $stagedSkill = Join-Path $stagingRoot $sourceSkill.Name
-    $target = Get-NormalizedPath -Path (Join-Path $destinationPath $sourceSkill.Name)
-    Move-Item -LiteralPath $stagedSkill -Destination $target
-    $installedTargets += $target
-    Assert-DirectoryParity `
-      -Source $sourceSkill.FullName `
-      -Candidate $target `
-      -Context "Installed Skill $($sourceSkill.Name)"
-    $installed += $sourceSkill.Name
+  $installId = [guid]::NewGuid().ToString("N")
+  $transactionName = ".luming-skills-install-$installId"
+  $transactionRoot = Get-NormalizedPath -Path (Join-Path $destinationPath $transactionName)
+  $stateTransactionRoot = Get-NormalizedPath -Path (Join-Path $stateRootPath $transactionName)
+  Assert-DirectChildPath -Parent $destinationPath -Child $transactionRoot -ExpectedName $transactionName
+  Assert-DirectChildPath -Parent $stateRootPath -Child $stateTransactionRoot -ExpectedName $transactionName
+  $stagingRoot = Join-Path $transactionRoot "staged"
+  $destinationBackupRoot = Join-Path $transactionRoot "backups"
+  $stateStagingRoot = Join-Path $stateTransactionRoot "staged"
+  $stateBackupRoot = Join-Path $stateTransactionRoot "backups"
+  New-Item -ItemType Directory -Force -Path $stagingRoot, $destinationBackupRoot, $stateStagingRoot, $stateBackupRoot | Out-Null
+
+  $ownerMarker = [ordered]@{
+    schema = "loom.skills.owner.v1"
+    package = "luming-skills-library"
+    skill = $sourceSkills[0].Name
+    installId = $installId
+    version = [string]$libraryManifest.version
+  }
+  foreach ($managedTarget in $managedTargets) {
+    Copy-Item -LiteralPath $managedTarget.Source -Destination $stagingRoot -Recurse -Force
+    $stagedSkill = Join-Path $stagingRoot $managedTarget.Name
+    if (Test-Path -LiteralPath $durableSourceTarget -PathType Container) {
+      Merge-RecipeTree -SourceSkillRoot $durableSourceTarget -CandidateSkillRoot $stagedSkill
+    }
+    if ($managedTarget.PriorExisted) {
+      Merge-RecipeTree -SourceSkillRoot $managedTarget.Target -CandidateSkillRoot $stagedSkill
+    }
+    Write-AtomicJson -Path (Join-Path $stagedSkill ".loom-skill-owner.json") -Document $ownerMarker
+    Assert-ManagedSkillIntegrity `
+      -Source $managedTarget.Source `
+      -Candidate $stagedSkill `
+      -Context "Staged Skill $($managedTarget.Name)"
+
+    $stagedSource = Join-Path $stateStagingRoot $managedTarget.Name
+    Copy-Item -LiteralPath $stagedSkill -Destination $stateStagingRoot -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $stagedSource ".loom-skill-owner.json") -Force
+    Assert-ManagedSkillIntegrity `
+      -Source $managedTarget.Source `
+      -Candidate $stagedSource `
+      -Context "Staged durable source $($managedTarget.Name)"
   }
 
-  if (-not (Test-Path -LiteralPath $stateRootPath)) {
-    New-Item -ItemType Directory -Path $stateRootPath | Out-Null
+  $records = @()
+  foreach ($ownedReplacement in $ownedReplacementTargets) {
+    $records += [ordered]@{
+      kind = "legacy"
+      name = $ownedReplacement.Name
+      target = $ownedReplacement.Target
+      backup = Get-NormalizedPath -Path (Join-Path $destinationBackupRoot $ownedReplacement.Name)
+      priorExisted = $true
+    }
   }
-  $stateTransactionName = ".luming-skills-install-$([guid]::NewGuid().ToString('N'))"
-  $stateTransactionRoot = Get-NormalizedPath -Path (Join-Path $stateRootPath $stateTransactionName)
-  Assert-DirectChildPath -Parent $stateRootPath -Child $stateTransactionRoot -ExpectedName $stateTransactionName
-  New-Item -ItemType Directory -Path $stateTransactionRoot | Out-Null
-  $metadataBackupPath = Join-Path $stateTransactionRoot "source.json"
-  if (Test-Path -LiteralPath $metadataPath) {
-    Move-Item -LiteralPath $metadataPath -Destination $metadataBackupPath
-    $metadataWasBackedUp = $true
+  foreach ($managedTarget in $managedTargets) {
+    $records += [ordered]@{
+      kind = "managed"
+      name = $managedTarget.Name
+      target = $managedTarget.Target
+      backup = Get-NormalizedPath -Path (Join-Path $destinationBackupRoot $managedTarget.Name)
+      priorExisted = [bool]$managedTarget.PriorExisted
+    }
   }
+  $records += [ordered]@{
+    kind = "source"
+    name = $sourceSkills[0].Name
+    target = $durableSourceTarget
+    backup = Get-NormalizedPath -Path (Join-Path $stateBackupRoot "source")
+    priorExisted = [bool](Test-Path -LiteralPath $durableSourceTarget)
+  }
+  $records += [ordered]@{
+    kind = "install-state"
+    name = "install-state.json"
+    target = $installStatePath
+    backup = Get-NormalizedPath -Path (Join-Path $stateBackupRoot "install-state.json")
+    priorExisted = [bool](Test-Path -LiteralPath $installStatePath)
+  }
+  $records += [ordered]@{
+    kind = "source-metadata"
+    name = "source.json"
+    target = $metadataPath
+    backup = Get-NormalizedPath -Path (Join-Path $stateBackupRoot "source.json")
+    priorExisted = [bool](Test-Path -LiteralPath $metadataPath)
+  }
+  $journal = [ordered]@{
+    schema = "loom.skills.install_transaction.v1"
+    phase = "prepared"
+    installId = $installId
+    destination = $destinationPath
+    stateRoot = $stateRootPath
+    transactionRoot = $transactionRoot
+    stateTransactionRoot = $stateTransactionRoot
+    records = $records
+  }
+  Write-AtomicJson -Path $journalPath -Document $journal
 
-  $sourceMetadata = [ordered]@{
-    schema = "loom.phone-agent.source.v1"
-    sourceSkillRoot = $sourceSkills[0].FullName
-    installedSkillRoot = Get-NormalizedPath -Path (Join-Path $destinationPath $sourceSkills[0].Name)
-  }
-  $metadataMutationStarted = $true
-  Invoke-FailureInjection -Point "metadata-write"
-  Write-AtomicJson -Path $metadataPath -Document $sourceMetadata
-} catch {
-  $operationError = $_.Exception.Message
-  $rollbackErrors = [Collections.Generic.List[string]]::new()
+  try {
+    $journal.phase = "mutating"
+    Write-AtomicJson -Path $journalPath -Document $journal
+    foreach ($record in @($records | Where-Object { $_.kind -ceq "legacy" })) {
+      Move-Item -LiteralPath $record.target -Destination $record.backup
+      Invoke-FailureInjection -Point "legacy-removal"
+    }
+    foreach ($record in @($records | Where-Object { $_.kind -ceq "managed" })) {
+      if ($record.priorExisted) {
+        Move-Item -LiteralPath $record.target -Destination $record.backup
+      }
+      Invoke-HardExitInjection -Point "after-managed-backup"
+    }
+    $sourceRecord = @($records | Where-Object { $_.kind -ceq "source" })[0]
+    if ($sourceRecord.priorExisted) {
+      Move-Item -LiteralPath $sourceRecord.target -Destination $sourceRecord.backup
+    }
+    foreach ($record in @($records | Where-Object { $_.kind -in @("install-state", "source-metadata") })) {
+      if ($record.priorExisted) {
+        Move-Item -LiteralPath $record.target -Destination $record.backup
+      }
+    }
 
-  if ($metadataMutationStarted) {
-    Invoke-RollbackStep -Description "remove new metadata" -Errors $rollbackErrors -Action {
-      if (Test-Path -LiteralPath $metadataPath) {
-        Remove-OwnedTarget -Path $metadataPath
-      }
+    foreach ($managedTarget in $managedTargets) {
+      Move-Item `
+        -LiteralPath (Join-Path $stagingRoot $managedTarget.Name) `
+        -Destination $managedTarget.Target
+      Assert-ManagedSkillIntegrity `
+        -Source $managedTarget.Source `
+        -Candidate $managedTarget.Target `
+        -Context "Installed Skill $($managedTarget.Name)"
     }
-  }
-  if ($metadataWasBackedUp) {
-    Invoke-RollbackStep -Description "restore metadata" -Errors $rollbackErrors -Action {
-      if (-not (Test-Path -LiteralPath $metadataPath)) {
-        Move-Item -LiteralPath $metadataBackupPath -Destination $metadataPath
-      } else {
-        throw "metadata target already exists: $metadataPath"
-      }
-    }
-  }
+    New-Item -ItemType Directory -Force -Path $durableSourceParent | Out-Null
+    Move-Item `
+      -LiteralPath (Join-Path $stateStagingRoot $sourceSkills[0].Name) `
+      -Destination $durableSourceTarget
 
-  foreach ($installedTarget in $installedTargets) {
-    Invoke-RollbackStep -Description "remove installed Skill $([IO.Path]::GetFileName($installedTarget))" -Errors $rollbackErrors -Action {
-      if (Test-Path -LiteralPath $installedTarget) {
-        Remove-OwnedTarget -Path $installedTarget
-      }
+    Invoke-FailureInjection -Point "metadata-write"
+    $sourceMetadata = [ordered]@{
+      schema = "loom.phone-agent.source.v1"
+      sourceSkillRoot = $durableSourceTarget
+      installedSkillRoot = $managedTargets[0].Target
     }
-  }
-  foreach ($managedBackup in $managedBackups) {
-    Invoke-RollbackStep -Description "restore managed Skill $([IO.Path]::GetFileName($managedBackup.Target))" -Errors $rollbackErrors -Action {
-      if (-not (Test-Path -LiteralPath $managedBackup.Target)) {
-        Move-Item -LiteralPath $managedBackup.Backup -Destination $managedBackup.Target
-      } else {
-        throw "managed target already exists: $($managedBackup.Target)"
-      }
-    }
-  }
-  foreach ($replacementBackup in $replacementBackups) {
-    Invoke-RollbackStep -Description "restore replacement Skill $([IO.Path]::GetFileName($replacementBackup.Target))" -Errors $rollbackErrors -Action {
-      if (-not (Test-Path -LiteralPath $replacementBackup.Target)) {
-        Move-Item -LiteralPath $replacementBackup.Backup -Destination $replacementBackup.Target
-      } else {
-        throw "replacement target already exists: $($replacementBackup.Target)"
-      }
-    }
-  }
-
-  if ($rollbackErrors.Count -eq 0) {
-    Invoke-RollbackStep -Description "clean destination transaction" -Errors $rollbackErrors -Action {
-      if (Test-Path -LiteralPath $transactionRoot) {
-        Remove-OwnedTarget -Path $transactionRoot
-      }
-    }
-    Invoke-RollbackStep -Description "clean metadata transaction" -Errors $rollbackErrors -Action {
-      if ($stateTransactionRoot -and (Test-Path -LiteralPath $stateTransactionRoot)) {
-        Remove-OwnedTarget -Path $stateTransactionRoot
-      }
-    }
-    if (-not $stateRootExisted) {
-      Invoke-RollbackStep -Description "restore absent StateRoot" -Errors $rollbackErrors -Action {
-        if ((Test-Path -LiteralPath $stateRootPath) -and
-            @(Get-ChildItem -LiteralPath $stateRootPath -Force).Count -eq 0) {
-          Remove-Item -LiteralPath $stateRootPath -Force
+    $newInstallState = [ordered]@{
+      schema = "loom.skills.install_state.v1"
+      package = "luming-skills-library"
+      version = [string]$libraryManifest.version
+      installId = $installId
+      destination = $destinationPath
+      sourceSkillRoot = $durableSourceTarget
+      ownedSkills = @(
+        foreach ($managedTarget in $managedTargets) {
+          [ordered]@{
+            name = $managedTarget.Name
+            markerId = $installId
+          }
         }
-      }
+      )
     }
-    if (-not $destinationExisted) {
-      Invoke-RollbackStep -Description "restore absent destination" -Errors $rollbackErrors -Action {
-        if ((Test-Path -LiteralPath $destinationPath) -and
-            @(Get-ChildItem -LiteralPath $destinationPath -Force).Count -eq 0) {
-          Remove-Item -LiteralPath $destinationPath -Force
-        }
-      }
+    Write-AtomicJson -Path $installStatePath -Document $newInstallState
+    Write-AtomicJson -Path $metadataPath -Document $sourceMetadata
+
+    $journal.phase = "committed"
+    Write-AtomicJson -Path $journalPath -Document $journal
+  } catch {
+    $operationError = $_.Exception.Message
+    try {
+      Recover-InstallTransaction `
+        -JournalPath $journalPath `
+        -Destination $destinationPath `
+        -StateRoot $stateRootPath `
+        -DurableSourceTarget $durableSourceTarget `
+        -InstallStatePath $installStatePath `
+        -SourceMetadataPath $metadataPath `
+        -AllowedDestinationNames $allowedDestinationNames | Out-Null
+    } catch {
+      throw "Installation failed: $operationError. Recovery failed: $($_.Exception.Message). Journal preserved at: $journalPath"
     }
+    throw "Installation failed and was recovered: $operationError"
   }
 
-  if ($rollbackErrors.Count -ne 0) {
-    $recoverableBackups = (@($transactionRoot) + @($stateTransactionRoot | Where-Object { $_ })) -join "; "
-    throw "Installation failed: $operationError. Rollback also failed: $($rollbackErrors -join '; '). Recoverable backups were preserved at: $recoverableBackups"
-  }
-  throw "Installation failed and was rolled back: $operationError"
-}
-
-$cleanupErrors = [Collections.Generic.List[string]]::new()
-try {
   Invoke-FailureInjection -Point "cleanup-state"
-  if ($stateTransactionRoot -and (Test-Path -LiteralPath $stateTransactionRoot)) {
+  if (Test-Path -LiteralPath $stateTransactionRoot) {
     Remove-OwnedTarget -Path $stateTransactionRoot
   }
-} catch {
-  $cleanupErrors.Add("clean metadata transaction: $($_.Exception.Message)")
-}
+  Invoke-FailureInjection -Point "cleanup-destination"
+  if (Test-Path -LiteralPath $transactionRoot) {
+    Remove-OwnedTarget -Path $transactionRoot
+  }
+  if (Test-Path -LiteralPath $journalPath) {
+    Remove-OwnedTarget -Path $journalPath
+  }
 
-# Once cleanup begins, the new installation is committed. Never roll it back after deleting a backup.
-if ($cleanupErrors.Count -eq 0) {
-  try {
-    Invoke-FailureInjection -Point "cleanup-destination"
-    if (Test-Path -LiteralPath $transactionRoot) {
-      Remove-OwnedTarget -Path $transactionRoot
-    }
-  } catch {
-    $cleanupErrors.Add("clean destination transaction: $($_.Exception.Message)")
+  [pscustomobject]@{
+    destination = $Destination
+    installed = @($managedTargets.Name)
+    removed = @($ownedReplacementTargets.Name)
+    skippedUnowned = @($skippedUnowned)
+    recoveredPreviousTransaction = [bool]$recovered
+    sourceMetadata = $sourceMetadata
+  } | ConvertTo-Json -Depth 6
+} finally {
+  if ($null -ne $installLock) {
+    $installLock.Dispose()
   }
 }
-
-if ($cleanupErrors.Count -ne 0) {
-  $preservedTransactions = @(
-    $transactionRoot
-    if ($stateTransactionRoot -and (Test-Path -LiteralPath $stateTransactionRoot)) { $stateTransactionRoot }
-  ) -join "; "
-  throw "Installation committed, but transaction cleanup failed: $($cleanupErrors -join '; '). The installed state was preserved; cleanup residue remains at: $preservedTransactions"
-}
-
-[pscustomobject]@{
-  destination = $Destination
-  installed = $installed
-  removed = $removed
-  sourceMetadata = $sourceMetadata
-} | ConvertTo-Json -Depth 4

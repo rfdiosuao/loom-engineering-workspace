@@ -51,6 +51,19 @@ function Get-ManifestSkills {
 }
 
 $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "manifest.json") | ConvertFrom-Json
+$provenance = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "BUNDLE_PROVENANCE.json") |
+  ConvertFrom-Json
+if ([string]$provenance.version -cne [string]$manifest.version) {
+  throw "Bundle provenance version does not match manifest: $($provenance.version) != $($manifest.version)"
+}
+$stamp = ([string]$manifest.version) -replace '[^0-9]', ''
+if ($stamp.Length -ne 8) {
+  throw "Skill Library version must resolve to an eight-digit package stamp: $($manifest.version)"
+}
+$expectedArchiveName = "luming-skills-library-$stamp.zip"
+if ([string]$provenance.archive -cne $expectedArchiveName) {
+  throw "Bundle provenance archive does not match manifest: $($provenance.archive) != $expectedArchiveName"
+}
 $manifestSkills = Get-ManifestSkills -Manifest $manifest
 $scriptsRoot = Join-Path $repoRoot "scripts"
 $candidateRoots = @($scriptsRoot) + @($manifestSkills | ForEach-Object { $_.FullName })
@@ -66,8 +79,7 @@ if ($forbiddenArtifacts.Count -ne 0) {
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
-$stamp = Get-Date -Format "yyyyMMdd"
-$zipPath = Join-Path $OutputDir "luming-skills-library-$stamp.zip"
+$zipPath = Join-Path $OutputDir ([string]$provenance.archive)
 if (Test-Path -LiteralPath $zipPath) {
   Remove-Item -LiteralPath $zipPath -Force
 }
@@ -82,37 +94,39 @@ $files = @(
   }
 ) | Sort-Object FullName
 
-Add-Type -AssemblyName System.IO.Compression
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-$archiveStream = [IO.File]::Open(
-  $zipPath,
-  [IO.FileMode]::CreateNew,
-  [IO.FileAccess]::Write,
-  [IO.FileShare]::None
-)
+$zipWriter = Join-Path $scriptsRoot "deterministic_zip.py"
+if (-not (Test-Path -LiteralPath $zipWriter -PathType Leaf)) {
+  throw "Deterministic ZIP writer is missing: $zipWriter"
+}
+$entryManifestPath = Join-Path $OutputDir (".luming-skills-package-" + [Guid]::NewGuid().ToString("N") + ".json")
 try {
-  $archive = [IO.Compression.ZipArchive]::new(
-    $archiveStream,
-    [IO.Compression.ZipArchiveMode]::Create,
-    $false
-  )
-  try {
+  $entryManifest = @(
     foreach ($file in $files) {
       $relativePath = $file.FullName.Substring($repoRootPath.Length).TrimStart([char[]]@('\', '/'))
-      $entryName = $relativePath.Replace('\', '/')
-      [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-        $archive,
-        $file.FullName,
-        $entryName,
-        [IO.Compression.CompressionLevel]::Optimal
-      ) | Out-Null
+      [pscustomobject]@{
+        source = $file.FullName
+        entry = $relativePath.Replace('\', '/')
+        timestamp = $file.LastWriteTime.ToString(
+          "yyyy-MM-ddTHH:mm:ss",
+          [Globalization.CultureInfo]::InvariantCulture
+        )
+      }
     }
-  } finally {
-    $archive.Dispose()
+  )
+  [IO.File]::WriteAllText(
+    $entryManifestPath,
+    ($entryManifest | ConvertTo-Json -Depth 3),
+    [Text.UTF8Encoding]::new($false)
+  )
+
+  & python $zipWriter --entries $entryManifestPath --output $zipPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Deterministic Skill package writer failed with exit code $LASTEXITCODE"
   }
 } finally {
-  $archiveStream.Dispose()
+  if (Test-Path -LiteralPath $entryManifestPath -PathType Leaf) {
+    Remove-Item -LiteralPath $entryManifestPath -Force
+  }
 }
 
 Get-Item -LiteralPath $zipPath | Select-Object FullName, Length, LastWriteTime

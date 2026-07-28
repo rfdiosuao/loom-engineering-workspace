@@ -1,5 +1,6 @@
 param(
-  [string]$Validator
+  [string]$Validator,
+  [switch]$SkipContracts
 )
 
 $ErrorActionPreference = "Stop"
@@ -87,8 +88,7 @@ function Invoke-NativeChild {
 function Exit-ChildFailure {
   param([string]$Stage, [object]$Child)
 
-  [Console]::Error.WriteLine("$Stage failed with exit code $($Child.ExitCode): $($Child.Output -join "`n")")
-  exit $Child.ExitCode
+  throw "$Stage failed with exit code $($Child.ExitCode): $($Child.Output -join "`n")"
 }
 
 $validatorResult = Invoke-NativeChild -Command "python" -Arguments @($Validator, $unifiedSkill.FullName)
@@ -123,7 +123,7 @@ $results += [pscustomobject]@{
 }
 
 $testsRoot = Join-Path $repoRoot "tests"
-if (Test-Path -LiteralPath $testsRoot) {
+if (-not $SkipContracts -and (Test-Path -LiteralPath $testsRoot)) {
   Get-ChildItem -LiteralPath $testsRoot -File -Filter "*-contract.ps1" | Sort-Object Name | ForEach-Object {
     $contractResult = Invoke-NativeChild -Command "powershell" -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $_.FullName)
     if ($contractResult.ExitCode -ne 0) {
@@ -137,4 +137,3 @@ if (Test-Path -LiteralPath $testsRoot) {
 }
 
 $results | ConvertTo-Json -Depth 4
-exit 0

@@ -25,7 +25,7 @@ class AgentAccessUiContractTests(unittest.TestCase):
         return self._page() + "\n" + self._prompt_module()
 
     def _bundled_library_path(self) -> str:
-        return os.path.join(ROOT, "public", "skills", "luming-skills-library-20260721.zip")
+        return os.path.join(ROOT, "public", "skills", "luming-skills-library-20260729.zip")
 
     def _bundled_library_text(self) -> str:
         with zipfile.ZipFile(self._bundled_library_path()) as archive:
@@ -69,7 +69,7 @@ class AgentAccessUiContractTests(unittest.TestCase):
         self.assertIn("LUMING_SKILL_LIBRARY_PATH", page)
         self.assertIn("LUMING_SKILL_LIBRARY_URL", page)
         self.assertIn("LUMING_SKILL_LIBRARY_SHA256", page)
-        self.assertIn("luming-skills-library-20260721.zip", page)
+        self.assertIn("luming-skills-library-20260729.zip", page)
         self.assertIn("luming-phone-agent", page)
         self.assertNotIn("LOOM_COMMAND_BRAIN_SKILL_URLS", page)
         self.assertNotIn("LUMING_ACQUISITION_SKILL_URLS", page)
@@ -114,10 +114,11 @@ class AgentAccessUiContractTests(unittest.TestCase):
     def test_agent_access_uses_domestic_primary_source_with_pinned_fallback(self) -> None:
         prompt = self._prompt_module()
         domestic_url = (
-            "https://loom.heang.top/downloads/"
-            "luming-skills-library-20260721-36D03E43.zip"
+            "https://gitee.com/rfdiosuao/lumi/releases/download/"
         )
-        github_url = "https://raw.githubusercontent.com/rfdiosuao/loom-release-channel/"
+        github_url = (
+            "https://github.com/rfdiosuao/loom-engineering-workspace/releases/download/"
+        )
 
         self.assertIn(domestic_url, prompt)
         self.assertIn("LUMING_SKILL_LIBRARY_FALLBACK_URL", prompt)
@@ -131,6 +132,35 @@ class AgentAccessUiContractTests(unittest.TestCase):
             digest = hashlib.sha256(handle.read()).hexdigest().upper()
 
         self.assertIn(digest, prompt)
+
+    def test_agent_access_resolves_the_offline_bundle_to_an_absolute_file_path(self) -> None:
+        prompt = self._prompt_module()
+
+        self.assertIn("BUNDLED_SKILL_PATH", prompt)
+        self.assertIn("doctor.data.paths.cliPath", prompt)
+        self.assertIn("必须是绝对路径", prompt)
+        self.assertNotIn("BUNDLED_URL = '/skills/", prompt)
+        self.assertNotIn("bundledUrl: /skills/", prompt)
+
+    def test_ci_and_release_build_and_verify_the_skill_asset(self) -> None:
+        repository_root = os.path.dirname(os.path.dirname(os.path.dirname(ROOT)))
+        ci_path = os.path.join(repository_root, ".github", "workflows", "platform-ci.yml")
+        release_path = os.path.join(
+            repository_root, ".github", "workflows", "platform-release.yml"
+        )
+        with open(ci_path, "r", encoding="utf-8") as handle:
+            ci = handle.read()
+        with open(release_path, "r", encoding="utf-8") as handle:
+            release = handle.read()
+
+        marker = "build-luming-skills-library.ps1"
+        self.assertIn(marker, ci)
+        self.assertIn("-VerifyOnly", ci)
+        self.assertIn(marker, release)
+        self.assertLess(release.index(marker), release.index("- name: Build frontend"))
+        self.assertIn("LOOM_SKILL_ARCHIVE", release)
+        self.assertIn("LOOM_SKILL_SHA256", release)
+        self.assertIn("Verify published Skill mirrors", release)
 
     def test_bundle_contains_only_the_unified_loom_skill_distribution(self) -> None:
         skills_root = os.path.join(ROOT, "public", "skills")

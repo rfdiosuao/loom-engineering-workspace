@@ -2,7 +2,7 @@
 
 Status: current
 Owner: LOOM Agent Platform
-Last verified: 2026-07-21
+Last verified: 2026-07-29
 Applies to: `packages/luming-skills-library/`
 
 ## Migration Source
@@ -26,6 +26,8 @@ The previous standalone repository is retained only as migration evidence and
 must not receive new product changes. Packages are generated through
 `scripts/build-luming-skills-library.ps1` from the main repository root.
 
-The generated `luming-skills-library-20260721.zip` must reproduce SHA256
-`36D03E43FEA6102AA6FEE96E7B91004FABAE45C6E40C5C3FC8D933F30DD03CA7` until the
-manifest version or Skill source changes intentionally.
+The generated `luming-skills-library-20260729.zip` must reproduce SHA256
+`77096F186C88EA2043B193285D327BA5FCEB1992A62A2E406421F5E7C2B61773` until the
+manifest version or Skill source changes intentionally. CI and release builds
+recreate the archive from the manifest/provenance timestamp map and reject any
+byte-level difference.
