@@ -25,6 +25,12 @@ class SystemInfoContractTests(unittest.TestCase):
             auth_error=lambda _request: None,
             fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
             get_updater=lambda: SimpleNamespace(current_version=lambda: "2026.7.16"),
+            get_bridge_identity=lambda: {
+                "pid": 1234,
+                "port": 18791,
+                "instanceId": "instance-1",
+                "impl": "fastapi",
+            },
             paths=SimpleNamespace(node_exe="node", base_path="D:/LOOM"),
         )
         register_system_routes(app, ctx)
@@ -40,6 +46,9 @@ class SystemInfoContractTests(unittest.TestCase):
         self.assertIn("matrix.dispatch.v2", payload["capabilities"])
         self.assertIn("feishu.reconcile.v1", payload["capabilities"])
         self.assertEqual(payload["bridge"]["apiContractVersion"], "loom.bridge.api.v2")
+        self.assertEqual(payload["bridge"]["identity"]["pid"], 1234)
+        self.assertEqual(payload["bridge"]["identity"]["port"], 18791)
+        self.assertEqual(payload["bridge"]["identity"]["instanceId"], "instance-1")
 
 
 if __name__ == "__main__":

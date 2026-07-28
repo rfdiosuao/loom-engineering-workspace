@@ -84,7 +84,12 @@ _skill_svc: SkillService | None = None
 _job_mgr: JobManager | None = None
 _wire_svc: WireService | None = None
 _agent_service: AgentService | None = None
+_agent_service_lock = threading.RLock()
 _storyboard_svc = None
+_bridge_instance_id = secrets.token_hex(16)
+_bridge_process_started_at_ms = int(time.time() * 1000)
+_bridge_runtime_port = 0
+_bridge_runtime_impl = ""
 
 DEFAULT_OPENCLAW_TEXT_MODEL = "glm-5.2-coding"
 MANAGED_ACCOUNT_SOURCES = {"newapi_account", "heang_account"}
@@ -178,14 +183,36 @@ def _get_wire_svc() -> WireService:
 
 def _get_agent_service() -> AgentService:
     global _agent_service
-    if _agent_service is None:
-        _agent_service = AgentService(
-            paths,
-            account_manager=_get_newapi_account_mgr(),
-            context_factory=_build_fastapi_context,
-            job_manager=_get_job_mgr(),
-        )
-    return _agent_service
+    with _agent_service_lock:
+        if _agent_service is None:
+            _agent_service = AgentService(
+                paths,
+                account_manager=_get_newapi_account_mgr(),
+                context_factory=_build_fastapi_context,
+                job_manager=_get_job_mgr(),
+            )
+        return _agent_service
+
+
+def _shutdown_agent_service() -> dict:
+    global _agent_service
+    with _agent_service_lock:
+        service = _agent_service
+        _agent_service = None
+    if service is None:
+        return {"stopped": False, "drained": True}
+    service.shutdown()
+    return {"stopped": True, "drained": True}
+
+
+def _get_bridge_identity() -> dict:
+    return {
+        "pid": os.getpid(),
+        "port": _bridge_runtime_port,
+        "instanceId": _bridge_instance_id,
+        "processStartedAtMs": _bridge_process_started_at_ms,
+        "impl": _bridge_runtime_impl,
+    }
 
 
 def _provider_id_from_base_url(base_url: str, fallback: str) -> str:
@@ -720,8 +747,11 @@ def _bridge_session_path() -> str:
 
 
 def _write_bridge_session(port: int, token: str, impl: str) -> None:
+    global _bridge_runtime_impl, _bridge_runtime_port
     if not port or not token:
         return
+    _bridge_runtime_port = port
+    _bridge_runtime_impl = impl
     try:
         path = _bridge_session_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -731,6 +761,8 @@ def _write_bridge_session(port: int, token: str, impl: str) -> None:
             "port": port,
             "token": token,
             "pid": os.getpid(),
+            "instanceId": _bridge_instance_id,
+            "processStartedAtMs": _bridge_process_started_at_ms,
             "impl": impl,
             "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
@@ -741,6 +773,23 @@ def _write_bridge_session(port: int, token: str, impl: str) -> None:
         os.replace(tmp, path)
     except Exception as exc:
         append_log(f"[Bridge] Failed to write session file: {exc}\n")
+
+
+def _remove_bridge_session_if_owned() -> bool:
+    path = _bridge_session_path()
+    try:
+        payload = read_json(path, {})
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != "loom.bridge_session.v1"
+            or payload.get("pid") != os.getpid()
+            or payload.get("instanceId") != _bridge_instance_id
+        ):
+            return False
+        os.remove(path)
+        return True
+    except OSError:
+        return False
 
 
 def _legacy_headers() -> dict[str, str]:
@@ -863,6 +912,8 @@ def _build_fastapi_context():
         get_updater=_get_updater,
         get_app_updater=_get_app_updater,
         get_agent_service=_get_agent_service,
+        get_bridge_identity=_get_bridge_identity,
+        shutdown_agent_service=_shutdown_agent_service,
         get_storyboard_svc=_get_storyboard_svc,
         get_video_client=_get_video_client,
         get_wire_svc=_get_wire_svc,
@@ -907,7 +958,11 @@ def _serve_fastapi(port: int, token: str) -> None:
         access_log=False,
     )
     server = uvicorn.Server(config)
-    server.run()
+    try:
+        server.run()
+    finally:
+        _shutdown_agent_service()
+        _remove_bridge_session_if_owned()
 
 def _serve_dependency_error(port: int, token: str) -> None:
     Handler.bridge_token = token
@@ -918,7 +973,11 @@ def _serve_dependency_error(port: int, token: str) -> None:
     print("BRIDGE_IMPL=dependency-error", flush=True)
     _write_bridge_session(actual_port, token, "dependency-error")
     append_log(f"[Bridge] Started dependency error service on port {actual_port}\n")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        _shutdown_agent_service()
+        _remove_bridge_session_if_owned()
 
 
 def main() -> None:

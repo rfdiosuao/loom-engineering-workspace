@@ -784,9 +784,14 @@ class AgentSessionRepository:
         client_message_id: str,
         message: JsonObject,
         run: JsonObject,
+        *,
+        reject_active_run: bool = False,
+        history_limit: int | None = None,
     ) -> JsonObject:
         if not client_message_id:
             raise ValueError("clientMessageId is required")
+        if history_limit is not None and (history_limit < 1 or history_limit > 500):
+            raise ValueError("history limit must be between 1 and 500")
         with self._locked():
             index = self._load_index_unlocked()
             self._require_session_unlocked(session_id, index)
@@ -799,8 +804,31 @@ class AgentSessionRepository:
                     "created": False,
                 }
 
+            if reject_active_run:
+                active_runs = []
+                for run_id, owner in index["runs"].items():
+                    if owner != session_id:
+                        continue
+                    current = _read_json(self._run_path(session_id, run_id))
+                    if isinstance(current, dict) and current.get("status") in {
+                        "queued",
+                        "running",
+                        "waiting_approval",
+                        "paused",
+                    }:
+                        active_runs.append(current)
+                if active_runs:
+                    raise ValueError("another agent run is already active for this session")
+
             sanitized_message = sanitize_for_storage(message)
-            sanitized_run = sanitize_for_storage(run)
+            run_with_history = copy.deepcopy(run)
+            if history_limit is not None:
+                request = run_with_history.get("request")
+                if not isinstance(request, dict):
+                    request = {}
+                    run_with_history["request"] = request
+                request["history"] = _read_jsonl(self._messages_path(session_id))[-history_limit:]
+            sanitized_run = sanitize_for_storage(run_with_history)
             self._validate_owned_record(sanitized_message, "messageId", session_id)
             self._validate_owned_record(sanitized_run, "runId", session_id)
             transaction_path = self._message_transaction_path(session_id, client_message_id)

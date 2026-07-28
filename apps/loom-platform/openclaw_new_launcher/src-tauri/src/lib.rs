@@ -217,6 +217,7 @@ async fn post_bridge_shutdown(path: &str) {
 }
 
 async fn shutdown_backend() {
+    post_bridge_shutdown("/api/agent/shutdown").await;
     post_bridge_shutdown("/api/process/stop").await;
     post_bridge_shutdown("/api/desktop-agent/stop").await;
     terminate_bridge_process_tree();

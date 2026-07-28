@@ -197,6 +197,19 @@ class ProgressMatrix:
         }
 
 
+class GatedStatusMatrix(ProgressMatrix):
+    def __init__(self) -> None:
+        super().__init__()
+        self.status_entered = threading.Event()
+        self.release_status = threading.Event()
+
+    def status(self):
+        self.status_entered.set()
+        if not self.release_status.wait(5.0):
+            raise RuntimeError("timed out waiting to release matrix status")
+        return super().status()
+
+
 class ConfirmationMatrix(ProgressMatrix):
     def __init__(self, *, require_confirmation: bool = False) -> None:
         super().__init__()
@@ -724,16 +737,17 @@ class AgentServiceTests(unittest.TestCase):
             threads: list[threading.Thread] = []
             try:
                 session = first_service.create_session({"title": "Cross-service single run"})
-                original_list_runs = first_service.repository.list_runs
+                original_commit = first_service.repository._commit_message_transaction_unlocked
 
-                def pause_after_first_check(session_id: str) -> list[dict]:
-                    runs = original_list_runs(session_id)
+                def pause_before_first_commit(index: dict, transaction: dict) -> dict:
                     first_check_completed.set()
                     if not release_first_check.wait(5.0):
                         raise RuntimeError("timed out waiting to continue first submission")
-                    return runs
+                    return original_commit(index, transaction)
 
-                first_service.repository.list_runs = pause_after_first_check  # type: ignore[method-assign]
+                first_service.repository._commit_message_transaction_unlocked = (  # type: ignore[method-assign]
+                    pause_before_first_commit
+                )
 
                 def submit(label: str, service: AgentService) -> None:
                     try:
@@ -769,15 +783,82 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertEqual(len(successes), 1)
                 self.assertEqual(len(failures), 1)
                 self.assertRegex(str(failures[0]), "already active")
-                self.assertEqual(len(original_list_runs(session["sessionId"])), 1)
+                self.assertEqual(len(first_service.repository.list_runs(session["sessionId"])), 1)
             finally:
                 release_first_check.set()
                 first_runtime.release.set()
                 second_runtime.release.set()
                 for thread in threads:
-                    thread.join(1.0)
+                    if thread.ident is not None:
+                        thread.join(1.0)
                 first_service.shutdown()
                 second_service.shutdown()
+
+    def test_accepted_follow_up_snapshots_history_after_previous_run_commits(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            first_runtime = BlockingRuntime()
+            second_runtime = ScriptedRuntime([{"final": {"text": "second answer"}}])
+            gated_matrix = GatedStatusMatrix()
+            first_service = AgentService(
+                AppPaths(root),
+                runtime=first_runtime,
+                capabilities=_registry(),
+                matrix_factory=ProgressMatrix,
+            )
+            second_service = AgentService(
+                AppPaths(root),
+                runtime=second_runtime,
+                capabilities=_registry(),
+                matrix_factory=lambda: gated_matrix,
+            )
+            outcome: dict[str, object] = {}
+            follow_up_thread: threading.Thread | None = None
+            try:
+                session = first_service.create_session({"title": "Committed history boundary"})
+                first = first_service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "history-race-1", "text": "first question"},
+                )
+                self.assertTrue(first_runtime.started.wait(1.0))
+
+                def send_follow_up() -> None:
+                    try:
+                        outcome["result"] = second_service.send_message(
+                            session["sessionId"],
+                            {"clientMessageId": "history-race-2", "text": "follow up"},
+                        )
+                    except Exception as error:
+                        outcome["error"] = error
+
+                follow_up_thread = threading.Thread(target=send_follow_up)
+                follow_up_thread.start()
+                self.assertTrue(gated_matrix.status_entered.wait(1.0))
+
+                first_runtime.release.set()
+                _wait_for_status(first_service, first["run"]["runId"], "completed")
+                gated_matrix.release_status.set()
+                follow_up_thread.join(5.0)
+
+                self.assertFalse(follow_up_thread.is_alive())
+                self.assertNotIn("error", outcome)
+                second = outcome.get("result")
+                self.assertIsInstance(second, dict)
+                _wait_for_status(second_service, second["run"]["runId"], "completed")
+            finally:
+                first_runtime.release.set()
+                gated_matrix.release_status.set()
+                if follow_up_thread is not None:
+                    follow_up_thread.join(1.0)
+                first_service.shutdown()
+                second_service.shutdown()
+
+        history = second_runtime.requests[0].get("history")
+        self.assertIsInstance(history, list)
+        serialized = json.dumps(history, ensure_ascii=False)
+        self.assertIn("first question", serialized)
+        self.assertIn("done", serialized)
 
     def test_quick_pause_then_resume_chains_continuation_after_worker_wind_down(self) -> None:
         from services.agent_service import AgentService
@@ -1995,6 +2076,54 @@ class AgentServiceTests(unittest.TestCase):
         self.assertNotIn("secret.value", persisted)
         self.assertNotIn("sk-super-secret-value", persisted)
 
+    def test_shutdown_rejects_new_messages_without_persisting_an_orphan_run(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime(), capabilities=_registry())
+            session = service.create_session({"title": "Closed service"})
+
+            service.shutdown()
+
+            with self.assertRaisesRegex(RuntimeError, "agent service is closed"):
+                service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "after-shutdown", "text": "must not persist"},
+                )
+
+            detail = service.session_detail(session["sessionId"])
+            self.assertEqual(detail["messages"], [])
+            self.assertEqual(detail["runs"], [])
+
+    def test_shutdown_waits_for_an_inflight_run_to_stop(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            runtime = SlowStoppingRuntime()
+            service = AgentService(AppPaths(root), runtime=runtime, capabilities=_registry())
+            session = service.create_session({"title": "Controlled shutdown"})
+            sent = service.send_message(
+                session["sessionId"],
+                {"clientMessageId": "shutdown-active", "text": "keep running"},
+            )
+            self.assertTrue(runtime.started.wait(1.0))
+
+            shutdown_thread = threading.Thread(target=service.shutdown)
+            shutdown_thread.start()
+            try:
+                self.assertTrue(runtime.cancel_seen.wait(1.0))
+                self.assertTrue(shutdown_thread.is_alive())
+
+                runtime.allow_stop.set()
+                shutdown_thread.join(2.0)
+
+                self.assertFalse(shutdown_thread.is_alive())
+                self.assertEqual(service.get_run(sent["run"]["runId"])["status"], "paused")
+            finally:
+                runtime.allow_stop.set()
+                shutdown_thread.join(2.0)
+                service.shutdown()
+
     def test_bridge_context_exposes_one_lazy_agent_service(self) -> None:
         import bridge
 
@@ -2013,6 +2142,45 @@ class AgentServiceTests(unittest.TestCase):
                     self.assertIs(first.account_manager, bridge._get_newapi_account_mgr())
                 finally:
                     first.shutdown()
+
+    def test_bridge_shutdown_closes_only_the_existing_agent_service_once(self) -> None:
+        import bridge
+
+        class FakeService:
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+
+        service = FakeService()
+        with patch.object(bridge, "_agent_service", service):
+            first = bridge._shutdown_agent_service()
+            second = bridge._shutdown_agent_service()
+
+        self.assertTrue(first["stopped"])
+        self.assertFalse(second["stopped"])
+        self.assertEqual(service.shutdown_calls, 1)
+
+    def test_bridge_exit_removes_only_its_own_session_file(self) -> None:
+        import bridge
+
+        with tempfile.TemporaryDirectory() as session_dir:
+            session_path = os.path.join(session_dir, "bridge-session.json")
+            with patch.dict(os.environ, {"LOOM_BRIDGE_SESSION_FILE": session_path}):
+                bridge._write_bridge_session(18888, "owned-token", "fastapi")
+                with open(session_path, "r", encoding="utf-8") as handle:
+                    replacement = json.load(handle)
+                replacement["instanceId"] = "replacement-instance"
+                with open(session_path, "w", encoding="utf-8") as handle:
+                    json.dump(replacement, handle)
+
+                self.assertFalse(bridge._remove_bridge_session_if_owned())
+                self.assertTrue(os.path.exists(session_path))
+
+                bridge._write_bridge_session(18888, "owned-token", "fastapi")
+                self.assertTrue(bridge._remove_bridge_session_if_owned())
+                self.assertFalse(os.path.exists(session_path))
 
 
 if __name__ == "__main__":

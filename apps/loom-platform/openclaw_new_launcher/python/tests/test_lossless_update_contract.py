@@ -390,6 +390,11 @@ class LosslessUpdateContractTests(unittest.TestCase):
 
         self.assertIn("prepare_update_install", source)
         self.assertIn("shutdown_backend().await", source)
+        self.assertIn('post_bridge_shutdown("/api/agent/shutdown").await;', source)
+        self.assertLess(
+            source.index('post_bridge_shutdown("/api/agent/shutdown").await;'),
+            source.index('post_bridge_shutdown("/api/process/stop").await;'),
+        )
         self.assertIn("upgrade-backups", source)
         self.assertIn('None => "LOOM"', source)
         self.assertIn("update_recovery_dir_name()", source)

@@ -689,6 +689,9 @@ class LoomCliContractTests(unittest.TestCase):
         import loom_cli
 
         class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
             def __enter__(self):
                 return self
 
@@ -696,16 +699,28 @@ class LoomCliContractTests(unittest.TestCase):
                 return False
 
             def read(self) -> bytes:
-                return b'{"devices":[],"tasks":[]}'
+                return json.dumps(self.payload).encode("utf-8")
 
-        captured: dict[str, str] = {}
+        captured: dict[str, object] = {"urls": []}
 
         def fake_urlopen(request, timeout):
             headers = {key.lower(): value for key, value in request.header_items()}
+            captured["urls"].append(request.full_url)
             captured["url"] = request.full_url
             captured["token"] = headers.get("x-bridge-token", "")
             captured["timeout"] = str(timeout)
-            return FakeResponse()
+            if request.full_url.endswith("/api/system/info"):
+                return FakeResponse({
+                    "api_contract_version": "loom.bridge.api.v2",
+                    "bridge": {
+                        "identity": {
+                            "pid": os.getpid(),
+                            "port": 18888,
+                            "instanceId": "bridge-instance-1",
+                        },
+                    },
+                })
+            return FakeResponse({"devices": [], "tasks": []})
 
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = os.path.join(temp_dir, "session")
@@ -715,7 +730,10 @@ class LoomCliContractTests(unittest.TestCase):
                     {
                         "schema": "loom.bridge_session.v1",
                         "url": "http://127.0.0.1:18888",
+                        "port": 18888,
                         "token": "local-session-token",
+                        "pid": os.getpid(),
+                        "instanceId": "bridge-instance-1",
                     },
                     handle,
                 )
@@ -728,7 +746,107 @@ class LoomCliContractTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(captured["url"], "http://127.0.0.1:18888/api/matrix/status")
         self.assertEqual(captured["token"], "local-session-token")
+        self.assertEqual(
+            captured["urls"],
+            [
+                "http://127.0.0.1:18888/api/system/info",
+                "http://127.0.0.1:18888/api/matrix/status",
+            ],
+        )
         self.assertEqual(payload["data"]["result"]["devices"], [])
+
+    def test_bridge_session_rejects_dead_pid_and_removes_the_stale_file(self) -> None:
+        import loom_cli
+
+        with tempfile.TemporaryDirectory() as session_dir:
+            session_path = os.path.join(session_dir, "bridge-session.json")
+            with open(session_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "schema": "loom.bridge_session.v1",
+                    "url": "http://127.0.0.1:18888",
+                    "port": 18888,
+                    "token": "stale-token",
+                    "pid": 999999,
+                    "instanceId": "stale-instance",
+                }, handle)
+
+            with (
+                patch.dict(os.environ, {"LOOM_BRIDGE_SESSION_DIR": session_dir}),
+                patch.object(loom_cli, "_process_is_alive", return_value=False),
+            ):
+                session = loom_cli._load_bridge_session()
+                diagnostic = loom_cli._bridge_session_diagnostic()
+
+            self.assertEqual(session, {})
+            self.assertFalse(os.path.exists(session_path))
+            self.assertEqual(diagnostic["code"], "pid_not_running")
+
+    def test_bridge_session_rejects_mismatched_live_process_identity(self) -> None:
+        import loom_cli
+
+        with tempfile.TemporaryDirectory() as session_dir:
+            session_path = os.path.join(session_dir, "bridge-session.json")
+            with open(session_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "schema": "loom.bridge_session.v1",
+                    "url": "http://127.0.0.1:18888",
+                    "port": 18888,
+                    "token": "stale-token",
+                    "pid": 4321,
+                    "instanceId": "expected-instance",
+                }, handle)
+
+            with (
+                patch.dict(os.environ, {"LOOM_BRIDGE_SESSION_DIR": session_dir}),
+                patch.object(loom_cli, "_process_is_alive", return_value=True),
+                patch.object(loom_cli, "_listener_pid_for_port", return_value=4321),
+                patch.object(
+                    loom_cli,
+                    "_probe_bridge_identity",
+                    return_value={
+                        "apiContractVersion": "loom.bridge.api.v2",
+                        "pid": 4321,
+                        "port": 18888,
+                        "instanceId": "different-instance",
+                    },
+                ),
+            ):
+                session = loom_cli._load_bridge_session()
+                diagnostic = loom_cli._bridge_session_diagnostic()
+
+            self.assertEqual(session, {})
+            self.assertFalse(os.path.exists(session_path))
+            self.assertEqual(diagnostic["code"], "process_identity_mismatch")
+
+    def test_legacy_bridge_session_requires_matching_listener_and_api_contract(self) -> None:
+        import loom_cli
+
+        with tempfile.TemporaryDirectory() as session_dir:
+            with open(os.path.join(session_dir, "bridge-session.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "schema": "loom.bridge_session.v1",
+                    "url": "http://127.0.0.1:18888",
+                    "port": 18888,
+                    "token": "legacy-token",
+                    "pid": 4321,
+                }, handle)
+
+            with (
+                patch.dict(os.environ, {"LOOM_BRIDGE_SESSION_DIR": session_dir}),
+                patch.object(loom_cli, "_process_is_alive", return_value=True),
+                patch.object(loom_cli, "_listener_pid_for_port", return_value=4321),
+                patch.object(
+                    loom_cli,
+                    "_probe_bridge_identity",
+                    return_value={"apiContractVersion": "loom.bridge.api.v2"},
+                ),
+            ):
+                session = loom_cli._load_bridge_session()
+                diagnostic = loom_cli._bridge_session_diagnostic()
+
+            self.assertEqual(session["url"], "http://127.0.0.1:18888")
+            self.assertEqual(session["token"], "legacy-token")
+            self.assertEqual(diagnostic["code"], "legacy_identity_verified")
 
     def test_matrix_dispatch_requires_confirmation_for_bulk_outreach(self) -> None:
         from loom_cli import dispatch

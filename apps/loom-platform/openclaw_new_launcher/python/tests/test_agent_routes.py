@@ -107,6 +107,10 @@ class FakeAgentService:
             "data": {},
         }]
 
+    def shutdown(self):
+        self.calls.append(("shutdown", None))
+        return {"stopped": True, "drained": True}
+
 
 def _ctx(service: FakeAgentService, *, authorized: bool = True):
     async def body(request):
@@ -122,6 +126,7 @@ def _ctx(service: FakeAgentService, *, authorized: bool = True):
         body=body,
         fastapi_json=lambda payload, status=200: JSONResponse(payload, status_code=status),
         get_agent_service=lambda: service,
+        shutdown_agent_service=service.shutdown,
     )
 
 
@@ -141,6 +146,16 @@ def test_agent_routes_require_bridge_authentication() -> None:
     response = TestClient(app).get("/api/agent/bootstrap")
 
     assert response.status_code == 401
+
+
+def test_agent_shutdown_uses_the_existing_service_without_lazy_creation() -> None:
+    client, service = _client()
+
+    response = client.post("/api/agent/shutdown")
+
+    assert response.status_code == 200
+    assert response.json() == {"stopped": True, "drained": True}
+    assert service.calls == [("shutdown", None)]
 
 
 def test_sync_agent_service_calls_do_not_block_the_event_loop() -> None:

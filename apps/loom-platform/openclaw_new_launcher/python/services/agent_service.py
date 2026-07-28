@@ -262,6 +262,9 @@ class AgentService:
         }
 
     def send_message(self, session_id: str, body: Mapping[str, Any]) -> Json:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("agent service is closed")
         request = dict(body)
         client_message_id = str(request.get("clientMessageId") or "").strip()
         if not client_message_id:
@@ -365,25 +368,23 @@ class AgentService:
         if model_id:
             run["modelId"] = model_id
             run["modelSource"] = model_source
-        # Span the active-run check and commit across services sharing this repository.
-        with self._lock, self.repository._lock:
-            existing = self.repository.find_message_run(session_id, client_message_id)
-            if existing is not None:
-                return {"message": existing["message"], "run": existing["run"]}
-            active_runs = [
-                item
-                for item in self.repository.list_runs(session_id)
-                if str(item.get("status") or "") not in TERMINAL_RUN_STATUSES
-            ]
-            if active_runs:
-                raise ValueError("another agent run is already active for this session")
+        # Repository submission spans idempotency, active-run validation, the
+        # committed history snapshot, and persistence under one process-safe transaction.
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("agent service is closed")
             result = self.repository.create_message_run(
                 session_id,
                 client_message_id,
                 message,
                 run,
+                reject_active_run=True,
+                history_limit=40,
             )
             if result.get("created"):
+                persisted_request = result["run"].get("request")
+                if not isinstance(persisted_request, Mapping):
+                    persisted_request = runtime_request
                 self.event_bus.publish(
                     session_id,
                     "run.queued",
@@ -391,7 +392,7 @@ class AgentService:
                     entity_id=str(result["run"]["runId"]),
                     data={"status": "queued"},
                 )
-                self._submit_run(session_id, str(result["run"]["runId"]), runtime_request)
+                self._submit_run(session_id, str(result["run"]["runId"]), persisted_request)
         return {"message": result["message"], "run": result["run"]}
 
     def _session_artifacts(self, session_id: str, *, limit: int = 20) -> list[Json]:
