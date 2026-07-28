@@ -133,7 +133,7 @@ function jobTone(status: string): string {
   const key = String(status || '').toLowerCase();
   if (['succeeded', 'success', 'completed', 'complete'].includes(key)) return 'border-status-success/30 bg-status-success/10 text-status-success';
   if (['failed', 'error'].includes(key)) return 'border-status-danger/30 bg-status-danger/10 text-status-danger';
-  if (['queued', 'running'].includes(key)) return 'border-accent/30 bg-accent/10 text-accent';
+  if (['queued', 'running'].includes(key)) return 'border-info bg-info-soft text-info-ink';
   return 'border-border/70 bg-surface/35 text-text-muted';
 }
 
@@ -1191,6 +1191,7 @@ export const PhoneDemoPage: React.FC = () => {
             : '检测到多台 USB 手机。请选择要连接的已配对设备，系统会校验设备身份。'}
         </p>
         <Select
+          aria-label="选择 USB 手机"
           className="mt-5 w-full"
           value={selectedUsbSerial}
           onChange={(event) => setSelectedUsbSerial(event.target.value)}
@@ -1220,60 +1221,45 @@ export const PhoneDemoPage: React.FC = () => {
           </Button>
         </div>
       </Modal>
-      {phoneAppModalOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm">
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="phone-app-download-title"
-            className="max-h-[92vh] w-full max-w-[760px] overflow-y-auto rounded-[24px] border border-border bg-surface shadow-[0_28px_80px_rgba(0,0,0,0.28)]"
-          >
-            <div className="flex items-start justify-between gap-5 border-b border-border px-7 py-6">
-              <div>
-                <h2 id="phone-app-download-title" className="text-2xl font-black text-text">下载手机端 App</h2>
-                <p className="mt-2 text-sm font-bold text-text-subtle">手机扫码安装后，在手机端生成一次性配对码，再回到{APP_DISPLAY_NAME}完成配对。</p>
+      <Modal
+        isOpen={phoneAppModalOpen}
+        onClose={() => setPhoneAppModalOpen(false)}
+        title="下载手机端 App"
+        panelClassName="max-w-[760px]"
+      >
+        <p className="text-sm font-bold text-text-subtle">
+          手机扫码安装后，在手机端生成一次性配对码，再回到{APP_DISPLAY_NAME}完成配对。
+        </p>
+        <div className="mt-6 grid gap-6 md:grid-cols-[260px_minmax(0,1fr)]">
+          <div className="flex flex-col items-center justify-center rounded-[8px] border border-border bg-surface p-5">
+            <img
+              src={PHONE_AGENT_QR_SRC}
+              alt="手机端 App 下载二维码"
+              className="h-[220px] w-[220px] rounded-[8px] object-contain"
+            />
+            <div className="mt-4 text-center text-xs font-bold text-text-subtle">手机相机或浏览器扫码下载</div>
+          </div>
+          <div className="min-w-0">
+            <div className="rounded-[8px] border border-border bg-surface-alt p-4">
+              <div className="text-sm font-black text-text">下载链接</div>
+              <div className="mt-3 rounded-[8px] border border-border bg-input p-3 text-sm font-bold leading-6 text-text-muted">
+                手机端 App 下载链接已准备
               </div>
-              <button
-                type="button"
-                onClick={() => setPhoneAppModalOpen(false)}
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px] border border-border bg-surface-alt/55 text-2xl leading-none text-text-muted transition hover:border-border-strong hover:text-text"
-                aria-label="关闭下载手机端 App"
-              >
-                ×
-              </button>
+              <Button className="mt-4" variant="primary" onClick={copyPhoneAgentApkUrl}>复制</Button>
             </div>
-            <div className="grid gap-6 px-7 py-7 md:grid-cols-[260px_minmax(0,1fr)]">
-              <div className="flex flex-col items-center justify-center rounded-[18px] border border-border bg-surface p-5">
-                <img
-                  src={PHONE_AGENT_QR_SRC}
-                  alt="手机端 App 下载二维码"
-                  className="h-[220px] w-[220px] rounded-[12px] object-contain"
-                />
-                <div className="mt-4 text-center text-xs font-bold text-text-subtle">手机相机或浏览器扫码下载</div>
-              </div>
-              <div className="min-w-0">
-                <div className="rounded-[18px] border border-border bg-surface/70 p-4">
-                  <div className="text-sm font-black text-text">下载链接</div>
-                  <div className="mt-3 rounded-[12px] border border-border bg-surface-alt p-3 text-sm font-bold leading-6 text-text-muted">
-                    手机端 App 下载链接已准备
-                  </div>
-                  <Button className="mt-4" variant="primary" onClick={copyPhoneAgentApkUrl}>复制</Button>
-                </div>
-                <div className="mt-5 rounded-[18px] border border-border bg-surface/70 p-4">
-                  <div className="text-sm font-black text-text">安装三步</div>
-                  <ol className="mt-3 space-y-2 text-sm leading-6 text-text-muted">
-                    <li>1. 手机扫码或复制链接，在手机浏览器下载手机端 App。</li>
-                    <li>2. 安装后打开手机端 App，按提示开启无障碍和悬浮窗权限。</li>
-                    <li>3. 在手机“与 LOOM 配对”页生成配对信息；局域网粘贴完整信息，USB 可输入 6 位配对码。</li>
-                  </ol>
-                </div>
-              </div>
+            <div className="mt-5 rounded-[8px] border border-border bg-surface p-4">
+              <div className="text-sm font-black text-text">安装三步</div>
+              <ol className="mt-3 space-y-2 text-sm leading-6 text-text-muted">
+                <li>1. 手机扫码或复制链接，在手机浏览器下载手机端 App。</li>
+                <li>2. 安装后打开手机端 App，按提示开启无障碍和悬浮窗权限。</li>
+                <li>3. 在手机“与 LOOM 配对”页生成配对信息；局域网粘贴完整信息，USB 可输入 6 位配对码。</li>
+              </ol>
             </div>
           </div>
         </div>
-      ) : null}
+      </Modal>
       <div className="mx-auto flex w-full max-w-[1480px] flex-col gap-6 px-7 py-6">
-        <header className="flex flex-wrap items-end justify-between gap-6 rounded-[8px] border border-border/70 bg-surface/90 px-5 py-4 shadow-[0_14px_36px_rgba(17,24,21,0.06)]">
+        <header className="flex flex-wrap items-end justify-between gap-6 rounded-[8px] border border-border/70 bg-surface/90 px-5 py-4 shadow-elevation-low">
           <div>
             <div className="text-[11px] font-bold tracking-[0.18em] text-accent">手机控制</div>
             <h1 className="mt-2 text-[30px] font-black leading-tight text-text">手机控制</h1>

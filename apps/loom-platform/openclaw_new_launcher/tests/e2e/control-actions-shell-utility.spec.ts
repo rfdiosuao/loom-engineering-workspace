@@ -211,10 +211,58 @@ test('settings appearance controls persist language and theme state', async ({ a
   await appMain(page).getByRole('combobox', { name: 'Language' }).selectOption('zh-CN');
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
 
-  for (const [name, mode] of [['深色', 'dark'], ['跟随系统', 'system'], ['米白', 'light']] as const) {
-    await appMain(page).getByRole('button', { name, exact: true }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme-mode', mode);
-  }
+  await appMain(page).getByRole('button', { name: '深色', exact: true }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'dark');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('loom_theme_mode_v2'))).toBe('dark');
+
+  await page.reload();
+  await expect(page.locator('[data-commercial-app-shell]')).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'dark');
+  await expect(page.locator('html')).toHaveAttribute('data-effective-theme-mode', 'dark');
+
+  await navigateTo(audit, 'settings');
+  await appMain(page).getByRole('button', { name: '跟随系统', exact: true }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'system');
+  await appMain(page).getByRole('button', { name: '米白', exact: true }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'light');
+});
+
+test('phone download dialog owns focus, closes with Escape, and restores its trigger', async ({ audit, page }) => {
+  await navigateTo(audit, 'phone');
+  const trigger = appMain(page).getByRole('button', { name: '下载手机端 App' });
+  await trigger.focus();
+  await trigger.click();
+
+  const dialog = page.getByRole('dialog', { name: '下载手机端 App' });
+  await expect(dialog).toBeVisible();
+  const close = dialog.getByRole('button', { name: '关闭下载手机端 App' }).last();
+  await expect(close).toBeFocused();
+
+  await page.keyboard.press('Shift+Tab');
+  await expect(dialog.locator(':focus')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
+test('USB device picker exposes a stable accessible select name', async ({ audit, page }) => {
+  await audit.registerRoute('GET', '/api/phone/usb/devices', {
+    value: {
+      ok: true,
+      devices: [
+        { serial: 'AUDIT-USB-1', state: 'device', label: '测试手机 1' },
+        { serial: 'AUDIT-USB-2', state: 'device', label: '测试手机 2' },
+      ],
+    },
+  });
+  await navigateTo(audit, 'phone');
+  await appMain(page).getByLabel('USB 6 位配对码').fill('123456');
+  await appMain(page).getByRole('button', { name: '通过 USB 配对' }).click();
+
+  const dialog = page.getByRole('dialog', { name: '选择 USB 手机' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('combobox', { name: '选择 USB 手机' })).toHaveValue('AUDIT-USB-1');
 });
 
 test('settings opens the global update center and installs only after download verification', async ({ audit, page }) => {

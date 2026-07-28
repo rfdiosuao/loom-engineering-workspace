@@ -122,7 +122,7 @@ type StatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger';
 
 function matrixStatusTone(error: string, counts: ReturnType<typeof countMatrixDevices>): StatusTone {
   if (error) return 'danger';
-  if (counts.failed > 0) return 'warning';
+  if (counts.failed > 0) return 'danger';
   if (counts.total === 0) return 'neutral';
   if (counts.online === counts.total) return 'success';
   return 'info';
@@ -340,7 +340,7 @@ export const AcquisitionWorkbenchPage = () => {
             <Metric label="设备总数" value={matrixCounts.total} desc={matrixStatus.updatedAt ? `更新 ${formatTime(matrixStatus.updatedAt)}` : '等待接入'} />
             <Metric label="在线设备" value={matrixCounts.online} desc={matrixError || '可接收矩阵任务'} />
             <Metric label="执行中设备" value={matrixCounts.busy} desc={latestAgentRun?.deviceId || '暂无执行任务'} />
-            <Metric label="异常设备" value={matrixCounts.failed} desc={matrixError || '矩阵状态待刷新'} tone={matrixCounts.failed > 0 || matrixError ? 'warn' : 'default'} />
+            <Metric label="异常设备" value={matrixCounts.failed} desc={matrixError || '矩阵状态待刷新'} tone={matrixCounts.failed > 0 || matrixError ? 'danger' : 'default'} />
           </div>
 
           <div className="mt-4 grid gap-3 lg:grid-cols-[1.25fr_1fr_1fr]">
@@ -504,9 +504,9 @@ function FeishuQrPanel({ guide }: { guide: FeishuLoginGuideState }) {
   );
 }
 
-function Metric({ label, value, desc, tone = 'default' }: { label: string; value: React.ReactNode; desc: React.ReactNode; tone?: 'default' | 'warn' }) {
-  const toneClass = tone === 'warn'
-    ? 'border-status-warning bg-status-warning-soft text-status-warning-ink'
+function Metric({ label, value, desc, tone = 'default' }: { label: string; value: React.ReactNode; desc: React.ReactNode; tone?: 'default' | 'danger' }) {
+  const toneClass = tone === 'danger'
+    ? 'border-status-danger bg-status-danger-soft text-status-danger-ink'
     : 'border-border bg-surface text-accent';
   return (
     <div className={`min-w-0 rounded-[8px] border p-3 ${toneClass}`}>
@@ -531,7 +531,7 @@ function MatrixDeviceItem({ device }: { device: MatrixDeviceSummary }) {
   const statusClass = status === '异常'
     ? 'text-status-danger'
     : status === '执行中'
-      ? 'text-status-warning'
+      ? 'text-info'
       : status === '在线'
         ? 'text-status-success'
         : 'text-text-muted';
