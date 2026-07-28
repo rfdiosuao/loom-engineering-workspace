@@ -7,8 +7,9 @@ import json
 import os
 import shutil
 import threading
+import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -640,20 +641,43 @@ class AgentService:
     def events_after(self, *, session_id: str, after_seq: int) -> list[Json]:
         return self.event_bus.replay(session_id, after_seq=after_seq, limit=500)
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, grace_seconds: float = 2.0) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            active_run_ids = [run_id for run_id, future in self._futures.items() if not future.done()]
-        for run_id in active_run_ids:
+            active = [
+                (run_id, future)
+                for run_id, future in self._futures.items()
+                if not future.done()
+            ]
+        for run_id, _future in active:
             try:
                 self.orchestrator.pause_run(run_id)
             except Exception:
                 pass
         self._matrix_monitor_stop.set()
         self._matrix_monitor_thread.join(timeout=2.0)
-        self._executor.shutdown(wait=True, cancel_futures=True)
+        deadline = time.monotonic() + max(0.0, float(grace_seconds))
+        while True:
+            with self._lock:
+                tracked = list(self._futures.values())
+            if not tracked:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            pending = [future for future in tracked if not future.done()]
+            if pending:
+                wait(pending, timeout=min(remaining, 0.05))
+            else:
+                # Future callbacks remove completed entries after persisting
+                # their terminal state; give that cleanup a bounded turn.
+                time.sleep(min(remaining, 0.01))
+        # A non-cooperative external executor must not keep the desktop close
+        # request blocked forever. Tauri owns the final Bridge process-tree
+        # cleanup after this bounded graceful window.
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _submit_run(
         self,
@@ -1000,6 +1024,29 @@ class AgentService:
                     else:
                         current["lastSignature"] = signature
                         current["missingPolls"] = 0
+                if status in TERMINAL_MATRIX_STATUSES:
+                    self._queue_matrix_terminal_resume(
+                        session_id=data["sessionId"],
+                        run_id=data["runId"],
+                    )
+
+    def _queue_matrix_terminal_resume(self, *, session_id: str, run_id: str) -> None:
+        if not session_id or not run_id:
+            return
+        try:
+            run = self.repository.get_run(run_id, session_id=session_id)
+            if str(run.get("status") or "") in TERMINAL_RUN_STATUSES:
+                return
+            self._submit_run(
+                session_id,
+                run_id,
+                self._request_from_run(run),
+                resume=True,
+                emit_runtime_requested=False,
+                queue_if_busy=True,
+            )
+        except (KeyError, RuntimeError, ValueError):
+            return
 
     @staticmethod
     def _matrix_device_tasks(campaign: Mapping[str, Any]) -> list[Json]:

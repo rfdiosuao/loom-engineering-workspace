@@ -190,11 +190,18 @@ class ProgressMatrix:
             "missions": [{"deviceTasks": [dict(self.campaign["missions"][0]["deviceTasks"][0])]}],
         }
 
-    def status(self):
-        return {
+    def status(self, campaign_id=None):
+        payload = {
             "devices": json.loads(json.dumps(self.devices)),
             "campaigns": [json.loads(json.dumps(self.campaign))],
         }
+        if campaign_id:
+            payload["campaigns"] = [
+                campaign
+                for campaign in payload["campaigns"]
+                if campaign.get("campaignId") == campaign_id
+            ]
+        return payload
 
 
 class GatedStatusMatrix(ProgressMatrix):
@@ -203,11 +210,11 @@ class GatedStatusMatrix(ProgressMatrix):
         self.status_entered = threading.Event()
         self.release_status = threading.Event()
 
-    def status(self):
+    def status(self, campaign_id=None):
         self.status_entered.set()
         if not self.release_status.wait(5.0):
             raise RuntimeError("timed out waiting to release matrix status")
-        return super().status()
+        return super().status(campaign_id)
 
 
 class ConfirmationMatrix(ProgressMatrix):
@@ -1639,6 +1646,7 @@ class AgentServiceTests(unittest.TestCase):
                 }]
             },
             {"final": {"text": "Matrix campaign started."}},
+            {"final": {"text": "Matrix campaign completed."}},
         ])
         matrix = ProgressMatrix()
         with tempfile.TemporaryDirectory() as root:
@@ -1661,7 +1669,7 @@ class AgentServiceTests(unittest.TestCase):
                 waiting = _wait_for_status(service, sent["run"]["runId"], "waiting_approval")
                 approval = service.get_trace(waiting["runId"])["approvals"][0]
                 resolved = service.resolve_approval(approval["approvalId"], {"decision": "approved"})
-                self.assertEqual(resolved["run"]["status"], "completed")
+                self.assertEqual(resolved["run"]["status"], "paused")
 
                 deadline = time.monotonic() + 2
                 events = []
@@ -1690,6 +1698,8 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertEqual(completed["data"]["completed"], 1)
                 self.assertEqual(completed["data"]["messageId"], "matrix:campaign-progress")
                 self.assertNotIn("campaign-progress", service._campaign_links)
+                resumed = _wait_for_status(service, sent["run"]["runId"], "completed")
+                self.assertEqual(resumed["status"], "completed")
             finally:
                 service.shutdown()
 
@@ -1747,8 +1757,8 @@ class AgentServiceTests(unittest.TestCase):
                     "text": "contact the selected account",
                     "targets": {"deviceIds": ["phone-progress"]},
                 })
-                completed = _wait_for_status(service, sent["run"]["runId"], "completed")
-                trace = service.get_trace(completed["runId"])
+                paused = _wait_for_status(service, sent["run"]["runId"], "paused")
+                trace = service.get_trace(paused["runId"])
             finally:
                 service.shutdown()
 
@@ -1793,7 +1803,7 @@ class AgentServiceTests(unittest.TestCase):
 
                 outcome = service.resolve_approval(approval["approvalId"], {"decision": "approved"})
 
-                self.assertEqual(outcome["run"]["status"], "completed")
+                self.assertEqual(outcome["run"]["status"], "paused")
                 self.assertEqual(len(matrix.dispatches), 1)
                 self.assertIs(matrix.dispatches[0].get("confirmed"), True)
             finally:
@@ -1837,10 +1847,10 @@ class AgentServiceTests(unittest.TestCase):
                     approval["approvalId"],
                     {"decision": "approved"},
                 )
-                completed = _wait_for_status(service, waiting["runId"], "completed")
+                paused = _wait_for_status(service, waiting["runId"], "paused")
 
                 self.assertEqual(outcome["approval"]["status"], "approved")
-                self.assertEqual(completed["status"], "completed")
+                self.assertEqual(paused["status"], "paused")
                 self.assertEqual(len(matrix.dispatches), 1)
                 self.assertIs(matrix.dispatches[0].get("confirmed"), True)
                 events = service.events_after(session_id=session["sessionId"], after_seq=0)
@@ -1904,7 +1914,7 @@ class AgentServiceTests(unittest.TestCase):
                     approvals[-1]["approvalId"],
                     {"decision": "approved"},
                 )
-                self.assertEqual(outcome["run"]["status"], "completed")
+                self.assertEqual(outcome["run"]["status"], "paused")
                 self.assertEqual(len(matrix.retries), 1)
                 self.assertIs(matrix.retries[0].get("confirmed"), True)
             finally:
@@ -1948,8 +1958,8 @@ class AgentServiceTests(unittest.TestCase):
                     "text": "dispatch and then retry the selected device",
                     "targets": {"deviceIds": ["phone-progress"]},
                 })
-                completed = _wait_for_status(service, sent["run"]["runId"], "completed")
-                trace = service.get_trace(completed["runId"])
+                paused = _wait_for_status(service, sent["run"]["runId"], "paused")
+                trace = service.get_trace(paused["runId"])
             finally:
                 service.shutdown()
 
@@ -2123,6 +2133,30 @@ class AgentServiceTests(unittest.TestCase):
                 runtime.allow_stop.set()
                 shutdown_thread.join(2.0)
                 service.shutdown()
+
+    def test_shutdown_returns_after_grace_window_for_non_cooperative_runtime(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            runtime = SlowStoppingRuntime()
+            service = AgentService(AppPaths(root), runtime=runtime, capabilities=_registry())
+            session = service.create_session({"title": "Bounded shutdown"})
+            sent = service.send_message(
+                session["sessionId"],
+                {"clientMessageId": "shutdown-bounded", "text": "keep running"},
+            )
+            self.assertTrue(runtime.started.wait(1.0))
+
+            started_at = time.monotonic()
+            try:
+                service.shutdown(grace_seconds=0.05)
+                elapsed = time.monotonic() - started_at
+
+                self.assertLess(elapsed, 0.5)
+                self.assertTrue(runtime.cancel_seen.wait(0.5))
+                self.assertEqual(service.get_run(sent["run"]["runId"])["status"], "paused")
+            finally:
+                runtime.allow_stop.set()
 
     def test_bridge_context_exposes_one_lazy_agent_service(self) -> None:
         import bridge
