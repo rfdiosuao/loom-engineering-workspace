@@ -469,8 +469,17 @@ jobs:
             -TagName $env:RELEASE_TAG `
             -Name $releaseName `
             -Body $releaseBody `
-            -Assets @($manifestPath, $env:LOOM_SKILL_ARCHIVE) `
+            -Assets @($manifestPath) `
             -PruneDesktopReleases
+
+          if (-not (Test-Path -LiteralPath $env:LOOM_SKILL_ARCHIVE -PathType Leaf)) {
+            throw "Bundled Skill archive is missing: $env:LOOM_SKILL_ARCHIVE"
+          }
+          & $publisher `
+            -TagName $env:RELEASE_TAG `
+            -Name $releaseName `
+            -Body $releaseBody `
+            -Assets @($env:LOOM_SKILL_ARCHIVE)
 
           $jobs = @(
             foreach ($part in $parts) {
