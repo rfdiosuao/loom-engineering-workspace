@@ -68,6 +68,9 @@
           "pytest",
           "python/tests/test_native_agent_runtime.py",
           "python/tests/test_native_agent_ui_contract.py",
+          "python/tests/test_agent_capabilities.py",
+          "python/tests/test_agent_orchestrator.py",
+          "python/tests/test_agent_service.py",
           "-q"
         ]
       }
@@ -89,6 +92,28 @@
           "pytest",
           "python/tests/test_routes_matrix.py",
           "python/tests/test_matrix_control_plane.py",
+          "-q"
+        ]
+      }
+    },
+    {
+      "id": "phone.pairing.contracts",
+      "domain": "phone",
+      "risk": "high",
+      "description": "手机配对、凭据存储和重连必须隐藏长期令牌、拒绝重放并保留可恢复状态。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "python",
+        "arguments": [
+          "-B",
+          "-m",
+          "pytest",
+          "python/tests/test_routes_phone.py",
+          "python/tests/test_phone_demo_page_contract.py",
+          "python/tests/test_phone_signature_contract.py",
           "-q"
         ]
       }
@@ -160,6 +185,19 @@
       ],
       "gateIds": [
         "matrix.control.contracts"
+      ]
+    },
+    {
+      "type": "phone_pairing_or_reconnection_failure",
+      "failureDomains": [
+        "phone_identity",
+        "pairing_code",
+        "credential_storage",
+        "usb_transport",
+        "lan_transport"
+      ],
+      "gateIds": [
+        "phone.pairing.contracts"
       ]
     },
     {

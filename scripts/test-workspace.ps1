@@ -112,7 +112,7 @@ $gateManifest = Get-Content -LiteralPath $gateManifestPath -Raw -Encoding UTF8 |
 Assert-Workspace -Condition ($gateManifest.schema -eq 'loom.reliability-gates.v1') -Message 'reliability gate manifest uses v1 schema'
 Assert-Workspace -Condition ($gateManifest.baselineCommit -eq '4f2a01e40c2e0b777ec4f279e06969f962b4bc08') -Message 'reliability gates record the frozen baseline'
 
-$requiredGateDomains = @('installer', 'model', 'agent', 'matrix', 'ui')
+$requiredGateDomains = @('installer', 'model', 'agent', 'matrix', 'phone', 'ui')
 $actualGateDomains = @($gateManifest.gates | ForEach-Object { $_.domain } | Sort-Object -Unique)
 foreach ($domain in $requiredGateDomains) {
     Assert-Workspace -Condition ($actualGateDomains -contains $domain) -Message "reliability gates include $domain domain"
