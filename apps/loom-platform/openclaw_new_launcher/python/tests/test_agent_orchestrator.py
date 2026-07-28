@@ -850,7 +850,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             self.assertEqual([event["type"] for event in events].count("tool.failed"), 0)
             self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 1)
 
-    def test_recoverable_capability_failure_is_returned_to_model_for_one_hidden_repair(self) -> None:
+    def test_recoverable_side_effect_failure_is_not_retried(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
         from core.agent_orchestrator import AgentOrchestrator
 
@@ -889,16 +889,13 @@ class AgentOrchestratorTests(unittest.TestCase):
             )
             events = bus.replay("session-1")
 
-        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["status"], "failed")
         self.assertEqual(len(calls), 1)
-        self.assertEqual(len(runtime.requests), 2)
-        failed_result = runtime.requests[1]["toolResults"][-1]
-        self.assertEqual(failed_result["status"], "failed")
-        self.assertEqual(failed_result["error"]["code"], "phone_config_server_unreachable")
-        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 1)
-        self.assertEqual([event["type"] for event in events].count("tool.failed"), 0)
+        self.assertEqual(len(runtime.requests), 1)
+        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 0)
+        self.assertEqual([event["type"] for event in events].count("tool.failed"), 1)
 
-    def test_recoverable_capability_failure_repair_is_bounded_to_one_attempt(self) -> None:
+    def test_recoverable_side_effect_failure_never_replays(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
         from core.agent_orchestrator import AgentOrchestrator
 
@@ -945,10 +942,86 @@ class AgentOrchestratorTests(unittest.TestCase):
 
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["error"]["code"], "phone_config_server_unreachable")
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(len(runtime.requests), 2)
-        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(runtime.requests), 1)
+        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 0)
         self.assertEqual([event["type"] for event in events].count("tool.failed"), 1)
+
+    def test_explicit_idempotent_read_can_use_one_hidden_repair(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        attempts = 0
+
+        def transient_read(_payload):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise CapabilityExecutionError(
+                    "temporary_status_unavailable",
+                    "状态服务暂时不可用",
+                    recoverable=True,
+                )
+            return {"status": "ready"}
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "read-status-first",
+                    "name": "loom.test.idempotent-read",
+                    "input": {},
+                }]
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "read-status-second",
+                    "name": "loom.test.idempotent-read",
+                    "input": {},
+                }]
+            },
+            {"final": {"text": "状态已恢复。"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.test.idempotent-read": {
+                        "executor": transient_read,
+                        "permission": "read",
+                        "risk": "read",
+                        "idempotent": True,
+                    }
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            bus = AgentEventBus(repository)
+            orchestrator = AgentOrchestrator(
+                repository,
+                bus,
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="weak"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-idempotent-repair")
+
+            completed = orchestrator.execute_run(
+                "session-1",
+                "run-idempotent-repair",
+                {"prompt": "读取状态"},
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(len(runtime.requests), 3)
+        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 1)
 
     def test_publish_title_explicit_in_user_prompt_is_restored_before_validation(self) -> None:
         from core.agent_capabilities import CapabilityRegistry, PHONE_PUBLISH_INPUT_SCHEMA
@@ -1928,7 +2001,7 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(stored["error"]["code"], "phone_publish_semantic_failure")
         self.assertIn("未登录", stored["error"]["message"])
 
-    def test_approved_recoverable_tool_failure_returns_to_model_without_reusing_approval(self) -> None:
+    def test_approved_recoverable_side_effect_failure_stops_without_replay(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
         from core.agent_orchestrator import AgentOrchestrator
 
@@ -1980,16 +2053,14 @@ class AgentOrchestratorTests(unittest.TestCase):
             events = bus.replay("session-1")
 
         self.assertEqual(waiting["status"], "waiting_approval")
-        self.assertEqual(outcome["run"]["status"], "completed")
+        self.assertEqual(outcome["run"]["status"], "failed")
         self.assertEqual(stored_approval["status"], "consumed")
         self.assertEqual(len(calls), 1)
-        self.assertEqual(len(runtime.requests), 2)
-        failed_result = runtime.requests[1]["toolResults"][-1]
-        self.assertEqual(failed_result["error"]["code"], "phone_publish_semantic_failure")
-        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 1)
-        self.assertEqual([event["type"] for event in events].count("tool.failed"), 0)
+        self.assertEqual(len(runtime.requests), 1)
+        self.assertEqual([event["type"] for event in events].count("tool.input_rejected"), 0)
+        self.assertEqual([event["type"] for event in events].count("tool.failed"), 1)
 
-    def test_approved_recoverable_tool_retry_requires_a_new_approval(self) -> None:
+    def test_approved_recoverable_side_effect_failure_does_not_request_retry_approval(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
         from core.agent_orchestrator import AgentOrchestrator
 
@@ -2050,20 +2121,13 @@ class AgentOrchestratorTests(unittest.TestCase):
             approvals = repository.list_approvals(
                 "session-1", run_id="run-new-approval-after-failure"
             )
-            approvals_by_id = {item["approvalId"]: item for item in approvals}
-            first_stored = approvals_by_id[first["approvalId"]]
-            second = next(
-                item for item in approvals if item["approvalId"] != first["approvalId"]
-            )
+            first_stored = approvals[0]
 
         self.assertEqual(waiting["status"], "waiting_approval")
-        self.assertEqual(outcome["run"]["status"], "waiting_approval")
+        self.assertEqual(outcome["run"]["status"], "failed")
         self.assertEqual(len(calls), 1)
-        self.assertEqual(len(approvals), 2)
+        self.assertEqual(len(approvals), 1)
         self.assertEqual(first_stored["status"], "consumed")
-        self.assertEqual(second["status"], "pending")
-        self.assertNotEqual(first_stored["approvalId"], second["approvalId"])
-        self.assertEqual(second["toolCallId"], "publish-second-approval")
 
     def test_concurrent_approval_requests_execute_protected_tool_once_and_loser_conflicts(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
@@ -3104,6 +3168,524 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(paused["status"], "paused")
         self.assertEqual(outcome["result"]["run"]["status"], "paused")
         self.assertEqual(stored["status"], "paused")
+
+    def test_pause_signal_reaches_the_inflight_capability_executor(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        started = threading.Event()
+        cancellation_observed = threading.Event()
+
+        def cooperative_read(_payload, *, cancellation_token):
+            started.set()
+            if cancellation_token.wait(1):
+                cancellation_observed.set()
+            return {"cancelled": cancellation_token.cancelled}
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-cooperative-pause",
+                    "name": "loom.status.cooperative",
+                    "input": {},
+                }]
+            },
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.status.cooperative": {
+                        "executor": cooperative_read,
+                        "permission": "read",
+                        "risk": "read",
+                        "idempotent": True,
+                        "timeoutSec": 2,
+                    }
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                AgentEventBus(repository),
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="weak"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-cooperative-pause")
+            worker = threading.Thread(
+                target=lambda: orchestrator.execute_run(
+                    "session-1",
+                    "run-cooperative-pause",
+                    {"prompt": "check status"},
+                )
+            )
+            worker.start()
+            self.assertTrue(started.wait(timeout=1))
+
+            paused = orchestrator.pause_run("run-cooperative-pause", session_id="session-1")
+
+            self.assertTrue(cancellation_observed.wait(timeout=0.5))
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(paused["status"], "paused")
+
+    def test_cancel_signal_reaches_the_inflight_capability_executor(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        started = threading.Event()
+        cancellation_observed = threading.Event()
+
+        def cooperative_read(_payload, *, cancellation_token):
+            started.set()
+            if cancellation_token.wait(1):
+                cancellation_observed.set()
+            return {"cancelled": cancellation_token.cancelled}
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-cooperative-cancel",
+                    "name": "loom.status.cooperative",
+                    "input": {},
+                }]
+            },
+        ])
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.status.cooperative": {
+                        "executor": cooperative_read,
+                        "permission": "read",
+                        "risk": "read",
+                        "idempotent": True,
+                        "timeoutSec": 2,
+                    }
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            orchestrator = AgentOrchestrator(
+                repository,
+                AgentEventBus(repository),
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="weak"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-cooperative-cancel")
+            worker = threading.Thread(
+                target=lambda: orchestrator.execute_run(
+                    "session-1",
+                    "run-cooperative-cancel",
+                    {"prompt": "check status"},
+                )
+            )
+            worker.start()
+            self.assertTrue(started.wait(timeout=1))
+
+            cancelled = orchestrator.cancel_run("run-cooperative-cancel", session_id="session-1")
+
+            self.assertTrue(cancellation_observed.wait(timeout=0.5))
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(cancelled["status"], "cancelled")
+
+    def test_resume_never_replays_an_inflight_side_effecting_tool(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        started = threading.Event()
+        release = threading.Event()
+        call_count = 0
+        call_lock = threading.Lock()
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-side-effect-first",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "publish once"},
+                }]
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-side-effect-replayed",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "publish once"},
+                }]
+            },
+            {"final": {"text": "done"}},
+        ])
+
+        def side_effect(_payload):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+                invocation = call_count
+            if invocation == 1:
+                started.set()
+                release.wait(2)
+            return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, _calls = self._dependencies(
+                root,
+                runtime,
+                operation=side_effect,
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-side-effect-resume")
+            worker = threading.Thread(
+                target=lambda: orchestrator.execute_run(
+                    "session-1",
+                    "run-side-effect-resume",
+                    {
+                        "prompt": "publish once",
+                        "targets": {"deviceIds": ["phone-1"]},
+                    },
+                )
+            )
+            worker.start()
+            self.assertTrue(started.wait(timeout=1))
+            orchestrator.pause_run("run-side-effect-resume", session_id="session-1")
+
+            resumed = orchestrator.resume_run(
+                "run-side-effect-resume",
+                session_id="session-1",
+                request={
+                    "prompt": "publish once",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+            release.set()
+            worker.join(timeout=2)
+
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(call_count, 1)
+        self.assertEqual(resumed["status"], "failed")
+        self.assertEqual(resumed["error"]["code"], "agent_inflight_side_effect_unknown")
+        self.assertTrue(resumed["error"]["outcomeIndeterminate"])
+
+    def test_queued_matrix_child_pauses_the_run_instead_of_false_completion(self) -> None:
+        from core.agent_orchestrator import AgentOrchestrator
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-matrix-pending",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "inspect"},
+                }]
+            },
+            {"final": {"text": "任务已经完成"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository, bus, registry, policy, _calls = self._dependencies(
+                root,
+                runtime,
+                operation=lambda _payload: {
+                    "campaignId": "campaign-pending",
+                    "status": "running",
+                    "counts": {"total": 1, "completed": 0, "failed": 0, "running": 1},
+                },
+                approval_mode="weak",
+            )
+            orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
+            orchestrator.queue_run("session-1", run_id="run-matrix-pending")
+
+            pending = orchestrator.execute_run(
+                "session-1",
+                "run-matrix-pending",
+                {
+                    "prompt": "inspect",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(pending["status"], "paused")
+        self.assertEqual(pending["error"]["code"], "agent_child_operation_pending")
+        checkpoint = json.loads(pending["checkpoint"])
+        self.assertEqual(checkpoint["pendingChildOperations"][0]["campaignId"], "campaign-pending")
+        event_types = [event["type"] for event in events]
+        self.assertIn("tool.pending", event_types)
+        self.assertNotIn("tool.completed", event_types)
+        self.assertNotIn("run.completed", event_types)
+
+    def test_pending_matrix_child_resumes_only_after_authoritative_success(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        campaign_status = {"value": "running"}
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-matrix-resume",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "inspect"},
+                }]
+            },
+            {"final": {"text": "submitted"}},
+            {"final": {"text": "verified complete"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.matrix.dispatch": {
+                        "executor": lambda _payload: {
+                            "campaignId": "campaign-resume",
+                            "status": "queued",
+                            "counts": {"total": 1, "completed": 0, "failed": 0, "running": 1},
+                        },
+                        "permission": "control",
+                        "risk": "control_safe",
+                        "targetScope": "matrix-write",
+                    },
+                    "loom.matrix.status": {
+                        "executor": lambda _payload: {
+                            "campaigns": [{
+                                "campaignId": "campaign-resume",
+                                "status": campaign_status["value"],
+                            }]
+                        },
+                        "permission": "read",
+                        "risk": "read",
+                        "idempotent": True,
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            bus = AgentEventBus(repository)
+            orchestrator = AgentOrchestrator(
+                repository,
+                bus,
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="weak"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-matrix-resume")
+            pending = orchestrator.execute_run(
+                "session-1",
+                "run-matrix-resume",
+                {
+                    "prompt": "inspect",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+            still_pending = orchestrator.resume_run(
+                "run-matrix-resume",
+                session_id="session-1",
+                request={
+                    "prompt": "inspect",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+            campaign_status["value"] = "succeeded"
+            completed = orchestrator.resume_run(
+                "run-matrix-resume",
+                session_id="session-1",
+                request={
+                    "prompt": "inspect",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+            event_types = [event["type"] for event in bus.replay("session-1")]
+
+        self.assertEqual(pending["status"], "paused")
+        self.assertEqual(still_pending["status"], "paused")
+        self.assertEqual(completed["status"], "completed")
+        self.assertIn("matrix.succeeded", event_types)
+        self.assertIn("tool.completed", event_types)
+        self.assertEqual(len(runtime.requests), 3)
+
+    def test_pending_matrix_child_failure_is_terminal_traceable_and_redacted(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        secret = "sk-terminal-secret"
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-matrix-failed",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "inspect"},
+                }]
+            },
+            {"final": {"text": "submitted"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.matrix.dispatch": {
+                        "executor": lambda _payload: {
+                            "campaignId": "campaign-failed",
+                            "status": "queued",
+                        },
+                        "permission": "control",
+                        "risk": "control_safe",
+                        "targetScope": "matrix-write",
+                    },
+                    "loom.matrix.status": {
+                        "executor": lambda _payload: {
+                            "campaigns": [{
+                                "campaignId": "campaign-failed",
+                                "status": "failed",
+                                "error": {
+                                    "code": "device_failed",
+                                    "message": f"Authorization: Bearer {secret}",
+                                },
+                            }]
+                        },
+                        "permission": "read",
+                        "risk": "read",
+                        "idempotent": True,
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            bus = AgentEventBus(repository)
+            orchestrator = AgentOrchestrator(
+                repository,
+                bus,
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="weak"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-matrix-failed")
+            pending = orchestrator.execute_run(
+                "session-1",
+                "run-matrix-failed",
+                {
+                    "prompt": "inspect",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+
+            failed = orchestrator.resume_run(
+                "run-matrix-failed",
+                session_id="session-1",
+            )
+            events = bus.replay("session-1")
+
+        self.assertEqual(pending["status"], "paused")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "agent_child_operation_failed")
+        serialized = json.dumps({"run": failed, "events": events}, ensure_ascii=False)
+        self.assertNotIn(secret, serialized)
+        event_types = [event["type"] for event in events]
+        self.assertIn("matrix.failed", event_types)
+        self.assertIn("tool.failed", event_types)
+        self.assertIn("run.failed", event_types)
+
+    def test_pending_matrix_child_cancelled_uses_cancelled_terminal_events(self) -> None:
+        from core.agent_capabilities import CapabilityRegistry
+        from core.agent_events import AgentEventBus
+        from core.agent_orchestrator import AgentOrchestrator
+        from core.agent_policy import AgentPolicyEngine
+        from core.agent_sessions import AgentSessionRepository
+
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "call-matrix-cancelled",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "inspect"},
+                }]
+            },
+            {"final": {"text": "submitted"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            repository = AgentSessionRepository(root)
+            repository.create_session("Test", session_id="session-1")
+            registry = CapabilityRegistry(
+                internal_operations={
+                    "loom.matrix.dispatch": {
+                        "executor": lambda _payload: {
+                            "campaignId": "campaign-cancelled",
+                            "status": "queued",
+                        },
+                        "permission": "control",
+                        "risk": "control_safe",
+                        "targetScope": "matrix-write",
+                    },
+                    "loom.matrix.status": {
+                        "executor": lambda _payload: {
+                            "campaigns": [{
+                                "campaignId": "campaign-cancelled",
+                                "status": "cancelled",
+                            }]
+                        },
+                        "permission": "read",
+                        "risk": "read",
+                        "idempotent": True,
+                    },
+                },
+                skill_provider=lambda: [],
+                mcp_provider=lambda: [],
+                cli_catalog_provider=lambda: {"domains": []},
+            )
+            bus = AgentEventBus(repository)
+            orchestrator = AgentOrchestrator(
+                repository,
+                bus,
+                runtime,
+                registry,
+                AgentPolicyEngine(approval_mode="weak"),
+            )
+            orchestrator.queue_run("session-1", run_id="run-matrix-cancelled")
+            pending = orchestrator.execute_run(
+                "session-1",
+                "run-matrix-cancelled",
+                {
+                    "prompt": "inspect",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+
+            cancelled = orchestrator.resume_run(
+                "run-matrix-cancelled",
+                session_id="session-1",
+            )
+            event_types = [event["type"] for event in bus.replay("session-1")]
+
+        self.assertEqual(pending["status"], "paused")
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertIn("matrix.cancelled", event_types)
+        self.assertIn("tool.cancelled", event_types)
+        self.assertIn("run.cancelled", event_types)
 
     def test_matrix_dispatch_targets_are_bound_to_the_run_request(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator
