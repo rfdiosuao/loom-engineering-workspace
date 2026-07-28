@@ -38,14 +38,14 @@
 
 ### C. Phone Pairing And Recovery
 
-- The phone creates a cryptographically random six-digit code and a QR/paste payload with a five-minute TTL. The payload may contain the phone address and device identity, but never a permanent credential.
-- Pairing codes are single-use, attempt-limited and bound to a pairing session.
-- The desktop remains the client and claims the code from the phone over the existing USB/LAN ConfigServer path. The phone returns random long-lived phone and launcher credentials only after the claim succeeds.
+- The phone creates a short-lived pairing session. USB loopback may use a cryptographically random six-digit manual code; LAN pairing must use a QR/paste payload containing a high-entropy one-time bootstrap secret. Neither mode exposes a permanent credential.
+- Pairing proofs are single-use, attempt-limited, nonce-protected, source-rate-limited and bound to the pairing session plus expected device identity.
+- The desktop remains the client and claims the session over the existing USB/LAN ConfigServer path. LAN requests send only a keyed proof, never the bootstrap secret, and the phone returns random long-lived phone and launcher credentials in an AES-GCM encrypted response.
 - The phone never connects to the loopback-only desktop Bridge, and the Bridge is not exposed on the LAN for pairing.
 - Permanent credentials remain protected by DPAPI on Windows and private app storage/keystore on Android.
-- Existing token configurations migrate in place; old credentials remain until the new pairing is verified.
+- Credential rotation is transactional: existing credentials remain valid until the desktop has persisted and verified the new credentials and confirms the pairing. Failed or abandoned pairing cannot disconnect an existing device.
 - USB and LAN use the same saved device identity and execution channel.
-- Recovery is bounded and observable: no infinite reconnect loop and no generic “connection failed”.
+- Recovery is bounded and observable: reconnect uses backoff plus a finite retry budget, preserves the last verified identity, and reports actionable USB/LAN/authentication error codes instead of a generic “connection failed”.
 
 State machine:
 
@@ -53,6 +53,7 @@ State machine:
 unpaired
   -> code_generated
   -> phone_claimed
+  -> desktop_persisted
   -> verified
   -> connected
   -> reconnecting
