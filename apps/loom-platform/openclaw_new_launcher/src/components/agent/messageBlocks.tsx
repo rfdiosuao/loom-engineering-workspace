@@ -5,7 +5,7 @@ import { AlertCircle, Check, ChevronDown, Circle, Image as ImageIcon, LoaderCirc
 import { useEffect, useId, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { capabilityActionLabel, userFacingAgentError } from './agentViewModel';
+import { capabilityActionLabel, mergeToolLifecycleStatus, userFacingAgentError } from './agentViewModel';
 import { AgentApprovalCard } from './AgentApprovalCard';
 import { AgentRunAttachment } from './AgentRunAttachment';
 
@@ -115,7 +115,7 @@ function ToolBlock({ data }: { data: Record<string, unknown> }) {
   const occurrences = typeof data.occurrences === 'number' && data.occurrences > 1 ? data.occurrences : 1;
   return (
     <div
-      className="agent-tool-item border-t border-border/70 px-3 py-2.5 first:border-t-0"
+      className="agent-tool-item min-w-0 border-t border-border/70 px-3 py-2.5 first:border-t-0"
       data-agent-tool-action
       data-tool-status={status}
     >
@@ -141,10 +141,15 @@ function ToolBlock({ data }: { data: Record<string, unknown> }) {
         </span>
       </div>
       {error ? (
-        <div className="ml-7 mt-1.5 rounded-[6px] bg-status-danger/8 px-2.5 py-2" data-agent-tool-error>
+        <div className="ml-7 mt-1.5 min-w-0 rounded-[6px] bg-status-danger/8 px-2.5 py-2" data-agent-tool-error>
           <div className="text-[11px] font-bold text-status-danger">{error.title}</div>
-          <p className="mt-0.5 text-[11px] leading-4 text-text-muted">{error.message}</p>
+          <p className="mt-0.5 break-words text-[11px] leading-4 text-text-muted [overflow-wrap:anywhere]">{error.message}</p>
           {error.recoverable ? <div className="mt-1 text-[10px] font-semibold text-accent">修复后可重试</div> : null}
+        </div>
+      ) : null}
+      {Array.isArray(data.attachments) ? (
+        <div className="ml-7 mt-2">
+          <AttachmentBlock data={data} />
         </div>
       ) : null}
     </div>
@@ -163,19 +168,32 @@ export interface ToolExecutionGroupSummary {
 export function compactToolExecutionBlocks(blocks: AgentMessageBlock[]): AgentMessageBlock[] {
   const compacted = new Map<string, AgentMessageBlock>();
   blocks.forEach((block, index) => {
+    const toolCallId = text(block.data.toolCallId).trim();
     const capability = text(block.data.capability ?? block.data.tool ?? block.data.name).trim().toLowerCase();
-    const identity = capability || text(block.data.toolCallId, `tool-${index}`);
+    const fallbackIdentity = capability ? `capability:${capability}` : `event:${index}`;
+    const identity = toolCallId ? `tool-call:${toolCallId}` : fallbackIdentity;
+    const countsFallbackEvents = !toolCallId && Boolean(capability);
     const previous = compacted.get(identity);
     if (!previous) {
       compacted.set(identity, { ...block, data: { ...block.data, occurrences: 1 } });
       return;
     }
+    const status = mergeToolLifecycleStatus(previous.data.status, block.data.status);
+    const previousIsTerminal = previous.data.status === 'completed' || previous.data.status === 'failed';
+    const incomingIsActive = block.data.status === 'queued'
+      || block.data.status === 'awaiting'
+      || block.data.status === 'running';
+    const mergedData = previousIsTerminal && incomingIsActive
+      ? { ...block.data, ...previous.data }
+      : { ...previous.data, ...block.data };
     compacted.set(identity, {
-      ...block,
+      ...(previousIsTerminal && incomingIsActive ? previous : block),
       data: {
-        ...previous.data,
-        ...block.data,
-        occurrences: Number(previous.data.occurrences || 1) + 1,
+        ...mergedData,
+        status,
+        occurrences: countsFallbackEvents
+          ? Number(previous.data.occurrences || 1) + 1
+          : 1,
       },
     });
   });
@@ -255,7 +273,7 @@ export function ToolExecutionGroup({
 
   return (
     <section
-      className="agent-tool-group overflow-hidden rounded-[8px] border border-border bg-surface-alt/30"
+      className="agent-tool-group min-w-0 overflow-hidden rounded-[8px] border border-border bg-surface-alt/30"
       data-agent-tool-group
       data-state={summary.state}
       data-expanded={expanded ? 'true' : 'false'}
@@ -378,12 +396,12 @@ function AttachmentBlock({ data }: { data: Record<string, unknown> }) {
 function ErrorBlock({ data }: { data: Record<string, unknown> }) {
   const error = userFacingAgentError(data);
   return (
-    <section className="rounded-[8px] border border-status-danger/30 bg-status-danger/10 p-3">
+    <section className="min-w-0 rounded-[8px] border border-status-danger/30 bg-status-danger/10 p-3">
       <div className="flex items-center gap-2 text-xs font-black text-status-danger">
         <span aria-hidden="true">!</span>
         <span>{error.title}</span>
       </div>
-      <p className="mt-1 text-sm leading-5 text-text">{error.message}</p>
+      <p className="mt-1 break-words text-sm leading-5 text-text [overflow-wrap:anywhere]">{error.message}</p>
       {error.recoverable ? <div className="mt-1 text-[11px] font-bold text-accent">可以重试</div> : null}
     </section>
   );
@@ -403,7 +421,8 @@ export function MessageBlockView({
   }
   if (block.type === 'plan') return <PlanBlock data={block.data} />;
   if (block.type === 'tool') {
-    return Array.isArray(block.data.attachments)
+    const hasLifecycleIdentity = Boolean(text(block.data.runId).trim() && text(block.data.toolCallId).trim());
+    return Array.isArray(block.data.attachments) && !hasLifecycleIdentity
       ? <AttachmentBlock data={block.data} />
       : <ToolExecutionGroup blocks={[block]} run={runs[text(block.data.runId)]} />;
   }

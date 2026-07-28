@@ -15,10 +15,12 @@ import {
 } from './agentViewModel.ts';
 import * as agentViewModel from './agentViewModel.ts';
 import {
+  compactToolExecutionBlocks,
   MessageBlockView,
   ToolExecutionGroup,
   toolExecutionGroupSummary,
 } from './messageBlocks.tsx';
+import * as conversationStream from './ConversationStream.tsx';
 
 const SESSION_ID = 'session_1';
 
@@ -195,6 +197,116 @@ test('ordinary errors are Chinese and hide protocol identifiers', () => {
     recoverable: true,
   });
   assert.doesNotMatch(JSON.stringify(summary), /capability_not_found|loom_mcp|Unknown capability/);
+});
+
+test('unknown English backend errors become actionable Chinese guidance', () => {
+  const summary = agentViewModel.userFacingAgentError({
+    error: {
+      code: 'vendor_gateway_crashed',
+      message: 'Unexpected upstream response: connection reset by peer',
+      recoverable: true,
+    },
+  });
+
+  assert.equal(summary.title, '任务暂未完成');
+  assert.match(summary.message, /模型连接|网络|重试|诊断/);
+  assert.doesNotMatch(JSON.stringify(summary), /vendor_gateway_crashed|Unexpected upstream|connection reset/i);
+});
+
+test('one run across multiple messages produces one aggregated execution group', () => {
+  const buildPlan = (conversationStream as typeof conversationStream & {
+    buildConversationRenderPlan?: (
+      messages: AgentMessage[],
+    ) => Array<{
+      message: AgentMessage;
+      entries: Array<
+        | { kind: 'block'; blockIndex: number }
+        | { kind: 'tool-group'; runId: string; blocks: AgentMessage['blocks'] }
+      >;
+    }>;
+  }).buildConversationRenderPlan;
+  assert.equal(typeof buildPlan, 'function');
+
+  const queued: AgentMessage = {
+    schema: 'loom.agent.message.v1',
+    messageId: 'tool-message-queued',
+    sessionId: SESSION_ID,
+    role: 'tool',
+    status: 'streaming',
+    blocks: [{
+      type: 'tool',
+      data: {
+        runId: 'run_shared',
+        toolCallId: 'tool_1',
+        capability: 'loom.media.image.generate',
+        status: 'queued',
+      },
+    }],
+    createdAt: '2026-07-16T10:00:00+08:00',
+  };
+  const completed: AgentMessage = {
+    ...queued,
+    messageId: 'tool-message-completed',
+    status: 'completed',
+    blocks: [{
+      type: 'tool',
+      data: {
+        runId: 'run_shared',
+        toolCallId: 'tool_1',
+        capability: 'loom.media.image.generate',
+        status: 'completed',
+        attachments: [{
+          kind: 'image',
+          name: 'generated.png',
+          path: 'https://example.invalid/generated.png',
+          mime: 'image/png',
+        }],
+      },
+    }],
+    createdAt: '2026-07-16T10:00:03+08:00',
+  };
+
+  const plan = buildPlan?.([queued, completed]) || [];
+  assert.equal(plan.length, 1);
+  assert.equal(plan[0]?.message.messageId, 'tool-message-queued');
+  assert.equal(plan[0]?.entries.length, 1);
+  assert.deepEqual(plan[0]?.entries[0], {
+    kind: 'tool-group',
+    runId: 'run_shared',
+    blocks: [queued.blocks[0], completed.blocks[0]],
+  });
+
+  const markup = renderToStaticMarkup(React.createElement(ToolExecutionGroup, {
+    blocks: [queued.blocks[0], completed.blocks[0]],
+    run: { schema: 'loom.agent.run.v1', runId: 'run_shared', sessionId: SESSION_ID, status: 'completed', campaignIds: [] },
+  }));
+  assert.equal((markup.match(/data-agent-tool-action/g) || []).length, 1);
+  assert.match(markup, /data-agent-attachments/);
+  assert.match(markup, /generated\.png/);
+});
+
+test('legacy tool events without lifecycle identity keep their message-level execution group', () => {
+  const buildPlan = conversationStream.buildConversationRenderPlan;
+  const legacy: AgentMessage = {
+    schema: 'loom.agent.message.v1',
+    messageId: 'legacy-tool-message',
+    sessionId: SESSION_ID,
+    role: 'tool',
+    status: 'completed',
+    blocks: [
+      { type: 'tool', data: { capability: 'loom.cli.phone.status', status: 'queued' } },
+      { type: 'tool', data: { capability: 'loom.cli.phone.status', status: 'completed' } },
+    ],
+    createdAt: '2026-07-16T10:00:00+08:00',
+  };
+
+  const plan = buildPlan([legacy]);
+  assert.equal(plan.length, 1);
+  assert.deepEqual(plan[0]?.entries[0], {
+    kind: 'tool-group',
+    runId: 'legacy-tool-message',
+    blocks: legacy.blocks,
+  });
 });
 
 test('missing phone request scope is localized without leaking the policy code', () => {
@@ -995,17 +1107,108 @@ test('tool execution group is compact after success and stays expanded with inli
   assert.equal((failed.match(/data-agent-tool-action/g) || []).length, 1);
 });
 
-test('repeated calls to the same capability collapse into one visible execution row', () => {
+test('one toolCallId lifecycle keeps the latest state without counting lifecycle events as calls', () => {
+  const blocks = compactToolExecutionBlocks([
+    { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', capability: 'loom.cli.phone.status', status: 'queued' } },
+    { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', capability: 'loom.cli.phone.status', status: 'completed' } },
+  ]);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.data.status, 'completed');
+  assert.equal(blocks[0]?.data.occurrences, 1);
+
   const markup = renderToStaticMarkup(React.createElement(ToolExecutionGroup, {
-    blocks: [
-      { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', capability: 'loom.cli.phone.status', status: 'completed' } },
-      { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_2', capability: 'loom.cli.phone.status', status: 'completed' } },
-    ],
+    blocks,
     run: { schema: 'loom.agent.run.v1', runId: 'run_1', sessionId: SESSION_ID, status: 'completed', campaignIds: [] },
   }));
-
   assert.equal((markup.match(/data-agent-tool-action/g) || []).length, 1);
-  assert.match(markup, /2 次/);
+  assert.doesNotMatch(markup, /2 次/);
+});
+
+test('tool compaction never regresses terminal lifecycle state on replay', () => {
+  const completed = compactToolExecutionBlocks([
+    {
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_completed',
+        capability: 'loom.media.image.generate',
+        status: 'completed',
+        attachments: [{ kind: 'image', name: 'result.png', path: 'C:\\LOOM\\result.png' }],
+      },
+    },
+    {
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_completed',
+        capability: 'loom.media.image.generate',
+        status: 'running',
+      },
+    },
+  ]);
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0]?.data.status, 'completed');
+  assert.deepEqual(completed[0]?.data.attachments, [{
+    kind: 'image',
+    name: 'result.png',
+    path: 'C:\\LOOM\\result.png',
+  }]);
+
+  const failed = compactToolExecutionBlocks([
+    {
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_failed',
+        capability: 'loom.phone.control',
+        status: 'failed',
+        code: 'device_offline',
+        message: 'Device offline',
+      },
+    },
+    {
+      type: 'tool',
+      data: {
+        runId: 'run_1',
+        toolCallId: 'tool_failed',
+        capability: 'loom.phone.control',
+        status: 'queued',
+      },
+    },
+  ]);
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0]?.data.status, 'failed');
+  assert.equal(failed[0]?.data.code, 'device_offline');
+  assert.equal(failed[0]?.data.message, 'Device offline');
+});
+
+test('different toolCallIds using one capability remain separate execution rows', () => {
+  const blocks = compactToolExecutionBlocks([
+    { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_1', capability: 'loom.cli.phone.status', status: 'completed' } },
+    { type: 'tool', data: { runId: 'run_1', toolCallId: 'tool_2', capability: 'loom.cli.phone.status', status: 'completed' } },
+  ]);
+
+  assert.equal(blocks.length, 2);
+  assert.deepEqual(blocks.map((block) => block.data.toolCallId), ['tool_1', 'tool_2']);
+
+  const markup = renderToStaticMarkup(React.createElement(ToolExecutionGroup, {
+    blocks,
+    run: { schema: 'loom.agent.run.v1', runId: 'run_1', sessionId: SESSION_ID, status: 'completed', campaignIds: [] },
+  }));
+  assert.equal((markup.match(/data-agent-tool-action/g) || []).length, 2);
+  assert.doesNotMatch(markup, /2 次/);
+});
+
+test('tool events without toolCallId may use capability as a safe compacting fallback', () => {
+  const blocks = compactToolExecutionBlocks([
+    { type: 'tool', data: { runId: 'run_1', capability: 'loom.cli.phone.status', status: 'queued' } },
+    { type: 'tool', data: { runId: 'run_1', capability: 'loom.cli.phone.status', status: 'completed' } },
+  ]);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.data.status, 'completed');
+  assert.equal(blocks[0]?.data.occurrences, 2);
 });
 
 test('terminal tool status never regresses to a later nonterminal update', () => {

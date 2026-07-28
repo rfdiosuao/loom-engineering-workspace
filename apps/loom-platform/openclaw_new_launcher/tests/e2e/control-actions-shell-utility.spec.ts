@@ -9,10 +9,13 @@ import {
   navigateTo,
   registryEntry,
 } from './support/control-audit';
-import { AUDIT_REPAIRABLE_DIAGNOSTICS } from './support/control-audit-data';
+import { AUDIT_REPAIRABLE_DIAGNOSTICS, componentSnapshot } from './support/control-audit-data';
 import { AUDIT_DIAGNOSTICS } from './support/mock-responses';
 
 test.beforeEach(async ({ audit }) => {
+  await audit.registerRoute('POST', '/api/phone/usb/reconcile', {
+    value: { ok: true, count: 0, results: [] },
+  });
   await audit.openAuthorizedShell();
 });
 
@@ -59,35 +62,113 @@ test('every visible sidebar control navigates through the application handler', 
   await expect(page.locator(registryEntry('license').readySelector).first()).toBeVisible();
 });
 
-async function openDashboardLegacy(audit: Parameters<typeof navigateTo>[0], page: import('@playwright/test').Page) {
+async function openDashboardJourney(audit: Parameters<typeof navigateTo>[0], page: import('@playwright/test').Page) {
   await navigateTo(audit, 'dashboard');
   await page.getByRole('button', { name: '开始配置' }).click();
-  await expect(appMain(page).getByRole('heading', { name: '开始使用麓鸣', exact: true })).toBeVisible();
+  await expect(appMain(page).locator('[data-dashboard-journey]')).toBeVisible();
 }
 
-test('dashboard hero controls reveal legacy configuration and open the workbench', async ({ audit, page }) => {
+test('dashboard hero controls reveal the Bridge journey and open the workbench', async ({ audit, page }) => {
   await navigateTo(audit, 'dashboard');
   await page.getByRole('button', { name: '查看可做的事' }).click();
   await expect(page.locator(registryEntry('workbench').readySelector)).toBeVisible();
 
-  await openDashboardLegacy(audit, page);
+  await openDashboardJourney(audit, page);
   await appMain(page).getByRole('button', { name: '返回总览图' }).click();
   await expect(page.locator('[data-dashboard-matrix-hero]')).toBeVisible();
 });
 
-const dashboardLegacyDestinations = [
-  { label: 'first path card', key: 'agents', name: /第一步.*安装智能体.*选择智能体/ },
-  { label: 'second path card', key: 'phone', name: /第二步.*连接手机.*打开手机控制/ },
+const dashboardJourneyDestinations = [
+  { label: 'Agent install', key: 'agents', name: '安装 Agent' },
+  { label: 'model selection', key: 'models', name: /选择模型|查看模型/ },
+  { label: 'phone control', key: 'phone', name: '手机控制' },
 ] as const;
 
-for (const destination of dashboardLegacyDestinations) {
-  test(`dashboard legacy ${destination.label} navigates to ${destination.key}`, async ({ audit, page }) => {
-    await openDashboardLegacy(audit, page);
-    const control = appMain(page).getByRole('button', { name: destination.name });
+for (const destination of dashboardJourneyDestinations) {
+  test(`dashboard journey ${destination.label} navigates to ${destination.key}`, async ({ audit, page }) => {
+    await openDashboardJourney(audit, page);
+    const control = appMain(page).getByRole('button', { name: destination.name, exact: true });
     await control.click();
     await expect(page.locator(registryEntry(destination.key).readySelector).first()).toBeVisible();
   });
 }
+
+test('dashboard unlocks workspaces only after the current Bridge configuration check succeeds', async ({ audit, page }, testInfo) => {
+  await audit.registerRoute('GET', '/api/components/status', { value: componentSnapshot('ready') });
+  await audit.registerRoute('POST', '/api/wire/verify', {
+    value: {
+      ok: false,
+      targets: {
+        token: { ok: true },
+        codex: { ok: true },
+        claude: { ok: true },
+        opencode: { ok: true },
+        openclaw: { ok: true },
+        image: { ok: false },
+        phone: { ok: false },
+        video: { ok: false },
+      },
+    },
+  });
+
+  await openDashboardJourney(audit, page);
+  const agentEntry = appMain(page).getByRole('button', { name: '进入智能体', exact: true });
+  const creativeEntry = appMain(page).getByRole('button', { name: '进入创作', exact: true });
+  await expect(agentEntry).toBeDisabled();
+  await expect(creativeEntry).toBeDisabled();
+
+  await appMain(page).getByRole('button', { name: '开始检查', exact: true }).click();
+  await expectToast(page, '当前配置检查通过，可以进入智能体或创作。');
+  await expect(agentEntry).toBeEnabled();
+  await expect(creativeEntry).toBeEnabled();
+  await expect(agentEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
+  await expect(agentEntry).toHaveCSS('color', 'rgb(255, 255, 255)');
+  await expect(creativeEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
+  await expect(creativeEntry).toHaveCSS('color', 'rgb(255, 255, 255)');
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: testInfo.outputPath('dashboard-journey-verified.png') });
+  await expect.poll(() => page.evaluate(() => (
+    window.localStorage.getItem('loom.dashboard.last-verified-journey.v1')
+  ))).toContain('audit-text-model');
+
+  await page.reload();
+  await expect(page.locator('[data-commercial-app-shell]')).toBeVisible();
+  await audit.registerRoute('GET', '/api/components/status', { value: componentSnapshot('ready') });
+  await audit.registerRoute('POST', '/api/wire/verify', {
+    value: {
+      ok: false,
+      targets: {
+        token: { ok: true },
+        codex: { ok: true },
+        claude: { ok: true },
+        opencode: { ok: true },
+        openclaw: { ok: true },
+        image: { ok: false },
+        phone: { ok: false },
+        video: { ok: false },
+      },
+    },
+  });
+  await page.getByRole('button', { name: '开始配置' }).click();
+  await expect(appMain(page).getByText(/上次检查/).first()).toBeVisible();
+  const restoredAgentEntry = appMain(page).getByRole('button', { name: '进入智能体', exact: true });
+  await expect(restoredAgentEntry).toBeDisabled();
+  await appMain(page).getByRole('button', { name: '开始检查', exact: true }).click();
+  await expect(restoredAgentEntry).toBeEnabled();
+
+  const journey = appMain(page).locator('[data-dashboard-journey]');
+  await expect.poll(() => journey.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  const viewport = page.viewportSize();
+  for (const entry of [restoredAgentEntry, appMain(page).getByRole('button', { name: '进入创作', exact: true })]) {
+    const bounds = await entry.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport?.width || Number.MAX_SAFE_INTEGER);
+  }
+
+  await restoredAgentEntry.click();
+  await expect(page.locator(registryEntry('agent').readySelector).first()).toBeVisible();
+});
 
 test('Agent Access copies the one-shot and all advanced payloads through the real clipboard handler', async ({ audit, page }) => {
   await navigateTo(audit, 'agentAccess');

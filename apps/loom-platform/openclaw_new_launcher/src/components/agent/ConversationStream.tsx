@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react';
-import type { AgentMessage, AgentRun } from '../../types/agent';
+import { useEffect, useMemo, useRef } from 'react';
+import type { AgentMessage, AgentMessageBlock, AgentRun } from '../../types/agent';
 import type { FeatureNavigationContext } from '../../stores/appStore';
 import { LoomAgentMark } from '../brand/LoomBrand';
 import { shouldShowThinking, thinkingStatusLabel } from './agentViewModel';
@@ -26,6 +26,65 @@ const roleLabels: Record<AgentMessage['role'], string> = {
   tool: '执行过程',
 };
 
+type ConversationRenderEntry =
+  | { kind: 'block'; blockIndex: number }
+  | { kind: 'tool-group'; runId: string; blocks: AgentMessageBlock[] };
+
+export interface ConversationMessageRenderPlan {
+  message: AgentMessage;
+  entries: ConversationRenderEntry[];
+}
+
+function lifecycleToolRunId(message: AgentMessage, block: AgentMessageBlock): string | null {
+  if (block.type !== 'tool') return null;
+  const runId = typeof block.data.runId === 'string' ? block.data.runId.trim() : '';
+  const toolCallId = typeof block.data.toolCallId === 'string' ? block.data.toolCallId.trim() : '';
+  if (runId && toolCallId) return runId;
+  if (Array.isArray(block.data.attachments)) return null;
+  return runId || message.messageId;
+}
+
+export function buildConversationRenderPlan(messages: AgentMessage[]): ConversationMessageRenderPlan[] {
+  const groups = new Map<string, {
+    anchorMessageId: string;
+    anchorBlockIndex: number;
+    blocks: AgentMessageBlock[];
+  }>();
+
+  messages.forEach((message) => {
+    message.blocks.forEach((block, blockIndex) => {
+      const runId = lifecycleToolRunId(message, block);
+      if (!runId) return;
+      const existing = groups.get(runId);
+      if (existing) {
+        existing.blocks.push(block);
+        return;
+      }
+      groups.set(runId, {
+        anchorMessageId: message.messageId,
+        anchorBlockIndex: blockIndex,
+        blocks: [block],
+      });
+    });
+  });
+
+  return messages.flatMap((message) => {
+    const entries: ConversationRenderEntry[] = [];
+    message.blocks.forEach((block, blockIndex) => {
+      const runId = lifecycleToolRunId(message, block);
+      if (!runId) {
+        entries.push({ kind: 'block', blockIndex });
+        return;
+      }
+      const group = groups.get(runId);
+      if (group?.anchorMessageId === message.messageId && group.anchorBlockIndex === blockIndex) {
+        entries.push({ kind: 'tool-group', runId, blocks: group.blocks });
+      }
+    });
+    return entries.length > 0 ? [{ message, entries }] : [];
+  });
+}
+
 export function ConversationStream({
   messages,
   runs,
@@ -42,6 +101,7 @@ export function ConversationStream({
   const shouldFollowRef = useRef(true);
   const thinking = shouldShowThinking(messages, currentRun, sending);
   const thinkingLabel = thinkingStatusLabel(messages, currentRun);
+  const renderPlan = useMemo(() => buildConversationRenderPlan(messages), [messages]);
 
   useEffect(() => {
     const container = scrollRef.current;
@@ -67,8 +127,7 @@ export function ConversationStream({
           </div>
         ) : null}
         <div className="grid gap-5">
-          {messages.map((message) => {
-            const renderedToolRuns = new Set<string>();
+          {renderPlan.map(({ message, entries }) => {
             return (
               <article
                 key={message.messageId}
@@ -84,28 +143,21 @@ export function ConversationStream({
                   </div>
                 ) : null}
                 <div className={`grid min-w-0 break-words [overflow-wrap:anywhere] gap-3 ${message.role === 'user' ? 'rounded-[8px] border border-accent/25 bg-accent/10 px-4 py-3' : ''}`}>
-                  {message.blocks.map((block, index) => {
-                    const isLifecycleTool = block.type === 'tool' && !Array.isArray(block.data.attachments);
-                    if (isLifecycleTool) {
-                      const runId = typeof block.data.runId === 'string' ? block.data.runId : message.messageId;
-                      if (renderedToolRuns.has(runId)) return null;
-                      renderedToolRuns.add(runId);
-                      const groupedBlocks = message.blocks.filter((candidate) => (
-                        candidate.type === 'tool'
-                        && !Array.isArray(candidate.data.attachments)
-                        && (typeof candidate.data.runId === 'string' ? candidate.data.runId : message.messageId) === runId
-                      ));
+                  {entries.map((entry) => {
+                    if (entry.kind === 'tool-group') {
                       return (
                         <ToolExecutionGroup
-                          key={`${message.messageId}-tool-group-${runId}`}
-                          blocks={groupedBlocks}
-                          run={runs[runId]}
+                          key={`${message.messageId}-tool-group-${entry.runId}`}
+                          blocks={entry.blocks}
+                          run={runs[entry.runId]}
                         />
                       );
                     }
+                    const block = message.blocks[entry.blockIndex];
+                    if (!block) return null;
                     return (
                       <MessageBlockView
-                        key={`${message.messageId}-${block.type}-${index}`}
+                        key={`${message.messageId}-${block.type}-${entry.blockIndex}`}
                         block={block}
                         runs={runs}
                         busyKey={busyKey}
