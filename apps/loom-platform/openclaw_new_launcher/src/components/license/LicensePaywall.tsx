@@ -339,7 +339,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                   data-license-activate
                   type="submit"
                   disabled={activating || isLicenseChecking}
-                  className="h-11 shrink-0 rounded-[6px] bg-accent px-5 text-[13px] font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
+                  className="h-11 shrink-0 rounded-[6px] bg-accent px-5 text-[13px] font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                 >
                   {activating ? '激活中...' : phoneMatrixScope ? '激活手机矩阵' : '激活并进入'}
                 </button>
@@ -382,7 +382,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                 type="button"
                 onClick={() => void refreshAccess()}
                 disabled={isLicenseChecking}
-                className="h-10 rounded-[6px] border border-border-strong bg-surface px-3 text-[12px] font-black text-text hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
+                className="h-10 rounded-[6px] border border-border-strong bg-surface px-3 text-[12px] font-black text-text hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
               >
                 {isLicenseChecking ? '检查中...' : '重新检查'}
               </button>
@@ -391,7 +391,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                 type="button"
                 onClick={exportDiagnostics}
                 disabled={diagnosing}
-                className="col-span-2 h-10 rounded-[6px] border border-border-strong bg-surface px-3 text-[12px] font-black text-text hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text lg:col-span-1"
+                className="col-span-2 h-10 rounded-[6px] border border-border-strong bg-surface px-3 text-[12px] font-black text-text hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled lg:col-span-1"
               >
                 {diagnosing ? '导出中...' : '导出脱敏诊断'}
               </button>
@@ -422,7 +422,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                 type="button"
                 onClick={() => void onEmergencyStop()}
                 disabled={emergencyStopping}
-                className="mt-2 h-10 w-full rounded-[6px] border border-status-danger bg-surface px-4 text-[12px] font-black text-status-danger hover:bg-status-danger-soft disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
+                className="mt-2 h-10 w-full rounded-[6px] border border-status-danger bg-surface px-4 text-[12px] font-black text-status-danger hover:bg-status-danger-soft disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
               >
                 {emergencyStopping ? '正在停止全部手机任务...' : '紧急停止全部手机任务'}
               </button>

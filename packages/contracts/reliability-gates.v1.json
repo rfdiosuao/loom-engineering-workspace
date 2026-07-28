@@ -139,6 +139,23 @@
           "-q"
         ]
       }
+    },
+    {
+      "id": "ui.color.contracts",
+      "domain": "ui",
+      "risk": "high",
+      "description": "Tailwind 颜色产物必须包含统一语义 token，亮暗主题关键文本对比度必须达到 WCAG AA。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "npm",
+        "arguments": [
+          "run",
+          "test:ui-color-contracts"
+        ]
+      }
     }
   ],
   "incidentMappings": [
@@ -206,7 +223,8 @@
         "unknown"
       ],
       "gateIds": [
-        "ui.first-success.contracts"
+        "ui.first-success.contracts",
+        "ui.color.contracts"
       ]
     }
   ]

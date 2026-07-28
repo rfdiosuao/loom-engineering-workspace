@@ -438,7 +438,7 @@ export const SettingsPage: React.FC = () => {
               <SettingRow title={copy.about.capabilitiesTitle} desc={copy.about.capabilitiesDesc}>
                 <div className="flex flex-wrap gap-2 text-xs font-bold">
                   {copy.about.capabilities.map((item) => (
-                    <span key={item} className="rounded-full border border-status-info/20 bg-status-info/10 px-3 py-1.5 text-status-info">{item}</span>
+                    <span key={item} className="rounded-full border border-info bg-info-soft px-3 py-1.5 text-info-ink">{item}</span>
                   ))}
                 </div>
               </SettingRow>

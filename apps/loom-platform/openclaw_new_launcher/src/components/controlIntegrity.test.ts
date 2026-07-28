@@ -58,23 +58,47 @@ test('semantic theme contract covers light and dark operational states', () => {
 
 test('React presentation modules do not introduce private business hex colors', () => {
   const componentsRoot = new URL('./', import.meta.url);
-  const allowed = new Set([
-    'brand/LoomBrand.tsx',
-    'phone/PhoneDemoPage.tsx',
-  ]);
   const violations = recursiveFiles(componentsRoot)
     .filter((file) => file.pathname.endsWith('.tsx'))
     .filter((file) => {
       const relative = decodeURIComponent(file.pathname.split('/components/')[1] || '').replace(/\//g, '\\');
-      return !allowed.has(relative.replace(/\\/g, '/'));
+      return relative.replace(/\\/g, '/') !== 'phone/PhoneDemoPage.tsx';
     })
     .flatMap((file) => {
       const source = readFileSync(file, 'utf8');
       const relative = decodeURIComponent(file.pathname.split('/components/')[1] || file.pathname);
-      return [...source.matchAll(/#[0-9a-f]{3,8}\b/gi)].map((match) => `${relative}:${match[0]}`);
+      return source.split(/\r?\n/).flatMap((line, index) => {
+        const matches = [...line.matchAll(/#[0-9a-f]{3,8}\b/gi)];
+        const fixedLogoPathColor = relative === 'brand/LoomBrand.tsx' && /<(path|rect|circle)\b/.test(line);
+        return fixedLogoPathColor ? [] : matches.map((match) => `${relative}:${index + 1}:${match[0]}`);
+      });
     });
 
   assert.deepEqual(violations, []);
+});
+
+test('business components use canonical semantic utility names', () => {
+  const componentsRoot = new URL('./', import.meta.url);
+  const violations = recursiveFiles(componentsRoot)
+    .filter((file) => file.pathname.endsWith('.tsx'))
+    .filter((file) => !file.pathname.endsWith('/phone/PhoneDemoPage.tsx'))
+    .flatMap((file) => {
+      const source = readFileSync(file, 'utf8');
+      const relative = decodeURIComponent(file.pathname.split('/components/')[1] || file.pathname);
+      return [
+        ...[...source.matchAll(/\b(?:border|bg|text)-status-info(?:\/\d+)?\b/g)].map((match) => `${relative}:${match[0]}`),
+        ...[...source.matchAll(/\btext-disabled-text\b/g)].map((match) => `${relative}:${match[0]}`),
+      ];
+    });
+
+  assert.deepEqual(violations, []);
+});
+
+test('Matrix phone selection and focus keep a visible semantic ring width', () => {
+  const source = readSource('./matrix/PhoneTile.tsx');
+
+  assert.match(source, /\(focused \|\| selected\) \? 'ring-2 ring-focus'/);
+  assert.doesNotMatch(source, /\? 'ring-focus'/);
 });
 
 test('unavailable capabilities render as non-interactive status rows', () => {

@@ -69,8 +69,8 @@ export const DeviceInspector: React.FC<DeviceInspectorProps> = ({
             <div className="mt-0.5 truncate text-[9px] text-text-muted">{device.deviceId} · {device.status}</div>
           </div>
           <div className="flex rounded-[5px] border border-border p-0.5">
-            <button type="button" disabled={leaseBusy} onClick={() => onModeChange('ai')} className={`px-2 py-1 text-[9px] font-bold ${mode === 'ai' ? 'rounded-[3px] bg-selected text-selected-ink' : 'text-text-muted'} disabled:text-disabled-text`}>AI</button>
-            <button type="button" disabled={leaseBusy || !device.online} onClick={() => onModeChange('manual')} className={`px-2 py-1 text-[9px] font-bold ${mode === 'manual' ? 'rounded-[3px] bg-selected text-selected-ink' : 'text-text-muted'} disabled:text-disabled-text`}>{leaseBusy ? '接管中' : '人工'}</button>
+            <button type="button" disabled={leaseBusy} onClick={() => onModeChange('ai')} className={`px-2 py-1 text-[9px] font-bold ${mode === 'ai' ? 'rounded-[3px] bg-selected text-selected-ink' : 'text-text-muted'} disabled:text-disabled`}>AI</button>
+            <button type="button" disabled={leaseBusy || !device.online} onClick={() => onModeChange('manual')} className={`px-2 py-1 text-[9px] font-bold ${mode === 'manual' ? 'rounded-[3px] bg-selected text-selected-ink' : 'text-text-muted'} disabled:text-disabled`}>{leaseBusy ? '接管中' : '人工'}</button>
           </div>
         </div>
         {mode === 'manual' && !manualEnabled ? <div className="mt-1.5 text-[9px] text-status-warning" role="status">等待有效人工租约，控制命令保持禁用</div> : null}

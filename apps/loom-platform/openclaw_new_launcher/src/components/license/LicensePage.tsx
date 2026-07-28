@@ -598,7 +598,7 @@ export const LicensePage: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleOpenRegistration}
-                  className="mt-3 inline-flex rounded-full border border-status-info/45 bg-status-info/15 px-3 py-1 text-xs font-black text-info-ink transition hover:bg-status-info/25"
+                  className="mt-3 inline-flex rounded-full border border-info bg-info-soft px-3 py-1 text-xs font-black text-info-ink transition hover:bg-info"
                 >
                   新用户请前往网页注册
                 </button>
@@ -667,7 +667,7 @@ export const LicensePage: React.FC = () => {
                       type="button"
                       onClick={sendEmailCode}
                       disabled={busy}
-                      className="mt-[22px] h-11 rounded-[8px] border border-white/15 bg-surface-deep text-sm font-black text-white/80 transition hover:border-info disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
+                      className="mt-[22px] h-11 rounded-[8px] border border-white/15 bg-surface-deep text-sm font-black text-white/80 transition hover:border-info disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                     >
                       发送验证码
                     </button>
@@ -676,7 +676,7 @@ export const LicensePage: React.FC = () => {
                     type="button"
                     onClick={handleEmailCodeLogin}
                     disabled={busy}
-                    className="h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink shadow-elevation-medium transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
+                    className="h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink shadow-elevation-medium transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                   >
                     {busy ? '验证中...' : '验证并登录'}
                   </button>
@@ -711,7 +711,7 @@ export const LicensePage: React.FC = () => {
                     type="button"
                     onClick={handlePasswordLogin}
                     disabled={busy}
-                    className="h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink shadow-elevation-medium transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
+                    className="h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink shadow-elevation-medium transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                   >
                     {busy ? '登录中...' : '登录'}
                   </button>

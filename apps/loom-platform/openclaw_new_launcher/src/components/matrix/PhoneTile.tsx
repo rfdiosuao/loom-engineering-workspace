@@ -29,7 +29,7 @@ const STATUS_TONES = {
   running: 'border-info bg-info-soft text-info-ink',
   waiting: 'border-status-warning bg-status-warning-soft text-status-warning-ink',
   error: 'border-status-danger bg-status-danger-soft text-status-danger-ink',
-  offline: 'border-border bg-disabled text-disabled-text',
+  offline: 'border-border bg-disabled text-disabled',
 };
 
 function frameTime(value?: string): string {
@@ -59,7 +59,7 @@ export const PhoneTile: React.FC<PhoneTileProps> = ({
   return (
     <article
       data-screen-device={device.deviceId}
-      className={`relative min-w-0 overflow-hidden rounded-[7px] border transition ${STATUS_TONES[device.status]} ${focused ? 'ring-focus' : ''}`}
+      className={`relative min-w-0 overflow-hidden rounded-[7px] border transition ${STATUS_TONES[device.status]} ${(focused || selected) ? 'ring-2 ring-focus' : ''}`}
     >
       <button type="button" onClick={onFocus} className="block w-full text-left" title={`聚焦 ${device.name || device.deviceId}`}>
         <div className={`relative overflow-hidden bg-surface-deeper ${compact ? 'aspect-[9/12]' : 'aspect-[9/14]'}`}>
@@ -95,7 +95,7 @@ export const PhoneTile: React.FC<PhoneTileProps> = ({
           <input type="checkbox" checked={selected} onChange={onToggleSelected} /> 任务目标
         </label>
         {canAct && !compact ? (
-          <button type="button" disabled={actionPending} onClick={() => onTaskAction(taskAction)} className="text-[9px] font-bold text-info disabled:text-disabled-text">
+          <button type="button" disabled={actionPending} onClick={() => onTaskAction(taskAction)} className="text-[9px] font-bold text-info disabled:text-disabled">
             {actionPending ? '处理中' : taskActionLabel}
           </button>
         ) : null}

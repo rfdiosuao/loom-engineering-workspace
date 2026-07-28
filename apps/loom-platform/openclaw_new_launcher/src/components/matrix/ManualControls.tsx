@@ -38,7 +38,7 @@ export const ManualControls: React.FC<ManualControlsProps> = ({ enabled, busy, d
             onClick={() => onAction({ action } as MatrixManualAction)}
             title={label}
             aria-label={label}
-            className="h-8 rounded-[5px] border border-border bg-surface text-sm font-bold text-text hover:border-info disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled-text"
+            className="h-8 rounded-[5px] border border-border bg-surface text-sm font-bold text-text hover:border-info disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
           >
             {glyph}
           </button>
@@ -50,7 +50,7 @@ export const ManualControls: React.FC<ManualControlsProps> = ({ enabled, busy, d
           onChange={(event) => setText(event.target.value)}
           disabled={!enabled}
           placeholder="输入到当前设备"
-          className="min-w-0 flex-1 rounded-[5px] border border-border bg-input px-2 py-1.5 text-[10px] text-text outline-none focus:border-[var(--color-focus)] focus:ring-2 focus:ring-[var(--color-focus-soft)] disabled:bg-disabled disabled:text-disabled-text"
+          className="min-w-0 flex-1 rounded-[5px] border border-border bg-input px-2 py-1.5 text-[10px] text-text outline-none focus:border-focus focus:ring-2 focus:ring-focus disabled:bg-disabled disabled:text-disabled"
         />
         <Button
           variant="quiet"

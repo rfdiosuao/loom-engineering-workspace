@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import unittest
 
 
@@ -9,6 +10,31 @@ SETTINGS_PAGE = os.path.join(REPO_ROOT, "src", "components", "settings", "Settin
 UPDATE_CENTER = os.path.join(REPO_ROOT, "src", "components", "update", "UpdateCenter.tsx")
 THEME_FILE = os.path.join(REPO_ROOT, "src", "theme", "default.ts")
 APP_STORE = os.path.join(REPO_ROOT, "src", "stores", "appStore.ts")
+
+
+def _relative_luminance(color: str) -> float:
+    channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [
+        value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+        for value in channels
+    ]
+    return (0.2126 * linear[0]) + (0.7152 * linear[1]) + (0.0722 * linear[2])
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    foreground_luminance = _relative_luminance(foreground)
+    background_luminance = _relative_luminance(background)
+    lighter = max(foreground_luminance, background_luminance)
+    darker = min(foreground_luminance, background_luminance)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _theme_colors(source: str, theme_name: str) -> dict[str, str]:
+    theme_start = source.index(f"export const {theme_name}")
+    colors_start = source.index("colors: {", theme_start)
+    colors_end = source.index("\n  },", colors_start)
+    block = source[colors_start:colors_end]
+    return dict(re.findall(r"^\s+(\w+):\s+'(#[0-9A-Fa-f]{6})'", block, re.MULTILINE))
 
 
 class SettingsPageContractTests(unittest.TestCase):
@@ -49,14 +75,33 @@ class SettingsPageContractTests(unittest.TestCase):
         self.assertIn("resolveThemeMode(mode)", source)
         self.assertIn("mode === 'dark' ? DARK_THEME : LIGHT_THEME", source)
 
-    def test_builtin_themes_use_readable_muted_text_colors(self) -> None:
+    def test_builtin_theme_semantic_text_pairs_meet_wcag_aa(self) -> None:
         with open(THEME_FILE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn("text_subtle: '#766B5C'", source)
-        self.assertIn("text_subtle: '#A89E8B'", source)
-        self.assertNotIn("text_subtle: '#9D907D'", source)
-        self.assertNotIn("text_subtle: '#766F61'", source)
+        required_pairs = (
+            ("text", "surface"),
+            ("text_muted", "surface"),
+            ("text_subtle", "surface"),
+            ("disabled_text", "disabled"),
+            ("accent_ink", "accent"),
+            ("info_ink", "info_soft"),
+            ("success_ink", "success_soft"),
+            ("warning_ink", "warning_soft"),
+            ("danger_ink", "danger_soft"),
+            ("selected_ink", "selected"),
+        )
+        for theme_name in ("LIGHT_THEME", "DARK_THEME"):
+            colors = _theme_colors(source, theme_name)
+            for foreground_key, background_key in required_pairs:
+                self.assertIn(foreground_key, colors, f"{theme_name} missing {foreground_key}")
+                self.assertIn(background_key, colors, f"{theme_name} missing {background_key}")
+                ratio = _contrast_ratio(colors[foreground_key], colors[background_key])
+                self.assertGreaterEqual(
+                    ratio,
+                    4.5,
+                    f"{theme_name} {foreground_key}/{background_key} contrast is {ratio:.2f}:1",
+                )
 
     def test_language_selection_is_persisted_in_app_store(self) -> None:
         with open(APP_STORE, "r", encoding="utf-8") as handle:

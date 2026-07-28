@@ -3,40 +3,6 @@
 @tailwind components;
 @tailwind utilities;
 
-@layer utilities {
-  .bg-info { background-color: var(--color-info); }
-  .bg-info-soft { background-color: var(--color-info-soft); }
-  .border-info { border-color: var(--color-info-border); }
-  .text-info { color: var(--color-info); }
-  .text-info-ink { color: var(--color-info-ink); }
-
-  .bg-status-success-soft { background-color: var(--color-success-soft); }
-  .border-status-success { border-color: var(--color-success-border); }
-  .text-status-success-ink { color: var(--color-success-ink); }
-
-  .bg-status-warning-soft { background-color: var(--color-warning-soft); }
-  .border-status-warning { border-color: var(--color-warning-border); }
-  .text-status-warning-ink { color: var(--color-warning-ink); }
-
-  .bg-status-danger-soft { background-color: var(--color-danger-soft); }
-  .border-status-danger { border-color: var(--color-danger-border); }
-  .text-status-danger-ink { color: var(--color-danger-ink); }
-
-  .bg-selected { background-color: var(--color-selected); }
-  .text-selected-ink { color: var(--color-selected-ink); }
-  .bg-disabled { background-color: var(--color-disabled); }
-  .text-disabled { color: var(--color-disabled-text); }
-  .bg-overlay { background-color: var(--color-overlay); }
-  .border-focus { border-color: var(--color-focus); }
-  .ring-focus { --tw-ring-color: var(--color-focus); }
-  .shadow-elevation-low { box-shadow: var(--elevation-low); }
-  .shadow-elevation-medium { box-shadow: var(--elevation-medium); }
-  .shadow-elevation-high { box-shadow: var(--elevation-high); }
-  .duration-motion-fast { transition-duration: var(--motion-fast); }
-  .duration-motion-standard { transition-duration: var(--motion-standard); }
-  .duration-motion-deliberate { transition-duration: var(--motion-deliberate); }
-}
-
 html, body, #root {
   height: 100%;
   margin: 0;

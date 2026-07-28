@@ -484,7 +484,7 @@ const JourneyStep: React.FC<{
                 onClick={action.onClick}
                 disabled={disabled}
                 title={disabled ? disabledReason : action.label}
-                className="inline-flex min-w-0 items-center justify-center gap-1.5 rounded-[8px] border border-accent/35 bg-accent px-2.5 py-2 text-xs font-black text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:border-border disabled:bg-disabled disabled:text-disabled-text"
+                className="inline-flex min-w-0 items-center justify-center gap-1.5 rounded-[8px] border border-accent/35 bg-accent px-2.5 py-2 text-xs font-black text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:border-border disabled:bg-disabled disabled:text-disabled"
               >
                 {action.icon}
                 <span className="truncate">{action.label}</span>
@@ -498,7 +498,7 @@ const JourneyStep: React.FC<{
               onClick={onAction}
               disabled={disabled}
               title={disabled ? disabledReason : actionLabel}
-              className="inline-flex w-full items-center justify-between gap-2 rounded-[8px] border border-accent/35 bg-accent px-3 py-2.5 text-sm font-black text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:border-border disabled:bg-disabled disabled:text-disabled-text"
+              className="inline-flex w-full items-center justify-between gap-2 rounded-[8px] border border-accent/35 bg-accent px-3 py-2.5 text-sm font-black text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:border-border disabled:bg-disabled disabled:text-disabled"
               data-journey-action={number}
             >
               <span className="truncate">{actionLabel}</span>

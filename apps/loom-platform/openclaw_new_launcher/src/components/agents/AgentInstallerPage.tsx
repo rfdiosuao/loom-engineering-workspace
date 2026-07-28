@@ -187,9 +187,9 @@ function statusClass(status: string): string {
   if (status === 'simulation_ready') return 'border-border/80 bg-surface-alt/60 text-text-muted';
   if (status.endsWith('_failed')) return 'border-status-danger/30 bg-status-danger/10 text-status-danger';
   if (status === 'not_installed' || status === 'manual_install_required') {
-    return 'border-status-info/30 bg-status-info/10 text-status-info';
+    return 'border-info bg-info-soft text-info-ink';
   }
-  return 'border-status-info/30 bg-status-info/10 text-status-info';
+  return 'border-info bg-info-soft text-info-ink';
 }
 
 function diagnosticLabel(status: DiagnosticStatus): string {
@@ -587,7 +587,7 @@ export const CompactPrerequisitePanel: React.FC<{
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] ${
-              allReady ? 'bg-status-success/12 text-status-success' : busy ? 'bg-status-info/10 text-status-info' : 'bg-surface-alt text-text-muted'
+              allReady ? 'bg-status-success/12 text-status-success' : busy ? 'bg-info-soft text-info-ink' : 'bg-surface-alt text-text-muted'
             }`}>
               {busy ? <ActivityRing /> : <span className="text-lg font-black">{allReady ? '✓' : '•'}</span>}
             </div>
@@ -609,7 +609,7 @@ export const CompactPrerequisitePanel: React.FC<{
 
         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-disabled">
           <div
-            className={`h-full rounded-full bg-status-info transition-all duration-deliberate ${busy ? 'loom-scan-line' : ''}`}
+            className={`h-full rounded-full bg-info transition-all duration-deliberate ${busy ? 'loom-scan-line' : ''}`}
             style={{ width: `${Math.max(8, pct)}%` }}
           />
         </div>
@@ -689,7 +689,7 @@ function modelConfigTone(status?: AgentModelConfigStatus): string {
   if (status.status === 'unverified') return 'border-status-warning/30 bg-status-warning/10 text-status-warning';
   if (status.status === 'failed') return 'border-status-danger/30 bg-status-danger/10 text-status-danger';
   if (status.status === 'not_installed' || status.status === 'no_wire') return 'border-border/70 bg-surface-alt/50 text-text-muted';
-  return 'border-status-info/30 bg-status-info/10 text-status-info';
+  return 'border-info bg-info-soft text-info-ink';
 }
 
 const AgentModelConfigPanel: React.FC<{
@@ -911,7 +911,7 @@ const AgentModelConfigPanel: React.FC<{
             <label className="block md:col-span-2">
               <div className="mb-2 flex items-center justify-between gap-3 text-xs font-bold text-text-muted">
                 <span>API Key</span>
-                <span className="text-status-info">保存在本机，并写入 Codex 所需的用户环境</span>
+                <span className="text-info">保存在本机，并写入 Codex 所需的用户环境</span>
               </div>
               <Input
                 data-agent-custom-api-key-input
@@ -1895,7 +1895,7 @@ export const AgentInstallerPage: React.FC = () => {
                         {selected.errorMessage}
                       </div>
                     ) : isWorking(selected.status) ? (
-                      <div data-installer-job-progress className="rounded-[8px] border border-status-info/30 bg-status-info/10 p-4 text-sm font-bold text-status-info" role="status" aria-live="polite">
+                      <div data-installer-job-progress className="rounded-[8px] border border-info bg-info-soft p-4 text-sm font-bold text-info-ink" role="status" aria-live="polite">
                         <span className="inline-flex items-center gap-2">
                           <ActivityRing />
                           {selectedActiveJob?.progress?.message || selectedActiveJob?.message || displayStatusLabel(selected.status)}

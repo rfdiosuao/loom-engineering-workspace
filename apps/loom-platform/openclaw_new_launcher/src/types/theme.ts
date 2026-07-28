@@ -44,6 +44,9 @@ export interface ThemeColors {
   terminal_bg: string;
   terminal_header: string;
   terminal_text: string;
+  terminal_label: string;
+  terminal_label_muted: string;
+  terminal_selection: string;
 }
 
 export type ThemeColorOverrides = Partial<ThemeColors>;

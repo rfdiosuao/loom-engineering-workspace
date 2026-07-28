@@ -41,7 +41,7 @@ const LoomBrandImage: React.FC<{ className?: string }> = ({ className = '' }) =>
 
 export const LoomLogoMark: React.FC<{ className?: string }> = ({ className = '' }) => (
   <span
-    className={`loom-logo-mark relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[8px] bg-[#071b24] ${className}`}
+    className={`loom-logo-mark relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[8px] bg-app-sidebar ${className}`}
     data-loom-logo
     aria-hidden="true"
   >
@@ -99,7 +99,7 @@ export const LumingWordmarkImage: React.FC<{
   <LoomWordmark
     title={APP_DISPLAY_NAME}
     className={`luming-wordmark select-none ${
-      tone === 'dark' ? 'text-text' : tone === 'gold' ? 'text-[#F4EAD1]' : 'text-white'
+      tone === 'dark' ? 'text-text' : tone === 'gold' ? 'text-terminal-label' : 'text-white'
     } ${className}`}
   />
 );
