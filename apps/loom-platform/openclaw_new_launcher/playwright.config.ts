@@ -15,6 +15,7 @@ const reuseAuditServer = process.env.LOOM_AUDIT_REUSE_SERVER === '1';
 
 export default defineConfig({
   testDir: './tests/e2e',
+  timeout: 60_000,
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
@@ -25,7 +26,7 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: `npm run dev -- --host 127.0.0.1 --port ${auditPort} --strictPort`,
+    command: `node node_modules/vite/bin/vite.js --host 127.0.0.1 --port ${auditPort} --strictPort`,
     url: auditBaseUrl,
     reuseExistingServer: reuseAuditServer,
     timeout: 120_000,

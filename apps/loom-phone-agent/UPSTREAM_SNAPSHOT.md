@@ -12,8 +12,9 @@ synchronized from the committed APKClaw upstream snapshot below:
 Uncommitted files from the upstream worktree were intentionally excluded.
 LOOM-specific OEM build configuration remains owned by this monorepo.
 
-After the snapshot import, LOOM adds the `loom-usb-bind-v3` identity challenge
-and releases the phone Agent as `6.62-stability` (`versionCode 931`).
+After the snapshot import, LOOM adds the `loom-usb-bind-v3` identity challenge,
+the one-time pairing-code bootstrap, and the encrypted credential vault. The
+phone Agent is released as `6.63-stability` (`versionCode 932`).
 
 Future upstream synchronization must name an immutable commit, import only
 committed files, run the complete Android unit-test suite, and verify that the

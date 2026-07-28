@@ -140,7 +140,7 @@ export const Modal: React.FC<{
         type="button"
         data-modal-backdrop
         tabIndex={-1}
-        aria-label={title ? `关闭${title}` : '关闭对话框'}
+        aria-label="点击遮罩关闭对话框"
         onClick={onClose}
         className="absolute inset-0 h-full w-full bg-overlay backdrop-blur-sm"
       />
