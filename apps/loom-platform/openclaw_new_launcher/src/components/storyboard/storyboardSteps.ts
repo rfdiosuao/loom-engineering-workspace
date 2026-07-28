@@ -84,7 +84,7 @@ export const STORYBOARD_STEPS: StoryboardStep[] = [
     icon: '📋',
     goal: '把「定位 + 风格」一键展开为一份可直接执行的完整运营全案，让用户拿到就知道接下来 30/90 天该怎么干。',
     optionGroups: [
-      { module: '模块三', category: '可勾选生成的全案板块', label: '全案板块', control: 'tag', multi: true, hint: '勾选要生成的板块', options: ['账号资料', '内容三支柱', '选题库', '成长路径', '变现漏斗', '发布节奏', '对标账号库'] },
+      { module: '模块三', category: '全案板块', label: '全案板块', control: 'tag', multi: true, hint: '勾选要生成的板块', options: ['账号资料', '内容三支柱', '选题库', '成长路径', '变现漏斗', '发布节奏'] },
       { module: '模块三', category: '全案激进度', label: '全案激进度', control: 'radio', hint: '控制方案的激进程度', options: ['稳健', '平衡', '激进'] },
       { module: '模块三', category: '规划周期', label: '规划周期', control: 'radio', hint: '全案覆盖的时间范围', options: ['30天', '60天', '90天'] },
       { module: '模块三', category: '侧重方向', label: '侧重方向', control: 'radio', hint: '全案核心优先级', options: ['涨粉优先', '变现优先', '品牌优先'] },

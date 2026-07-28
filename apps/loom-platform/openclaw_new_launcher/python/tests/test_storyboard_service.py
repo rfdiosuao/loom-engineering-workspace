@@ -72,18 +72,32 @@ class ResolveHintTests(unittest.TestCase):
 
 
 class BuildContextTests(unittest.TestCase):
-    def test_script_stage_includes_target_and_modules_one_two_three(self) -> None:
+    def test_script_stage_includes_only_filled_target_and_selected_values(self) -> None:
         system, user = build_context("script", _project("script"), _param_config())
-        self.assertIn("3秒冷萃咖啡液", user)
-        self.assertIn("食品饮料", user)
-        self.assertIn("模块一", user)
-        self.assertIn("模块二", user)
-        self.assertIn("模块三", user)
-        # module 4 selections also included for script stage
-        self.assertIn("模块四", user)
-        # module 5 not relevant for script
+        self.assertIn("目标对象品类：食品饮料", user)
+        self.assertIn("目标对象名称：3秒冷萃咖啡液", user)
+        self.assertIn("产品/服务类型：实物商品", user)
+        self.assertIn("内容大类：种草测评类", user)
+        self.assertIn("视频类型：种草测评", user)
+        self.assertNotIn("模块一", user)
+        self.assertNotIn("模块三", user)
+        self.assertNotIn("暂无具体选项", user)
+        self.assertNotIn("你是实物商品定位专家", user)
         self.assertIsInstance(system, str)
         self.assertTrue(system.strip())
+
+    def test_script_stage_omits_blank_target_and_disabled_toggle(self) -> None:
+        project = _project("script")
+        project["target"] = {"category": "", "object": "冷萃咖啡液"}
+        project["selections"]["模块三"] = {
+            "开启账号规划": [False],
+            "开启发布节奏": [True],
+        }
+        _, user = build_context("script", project, _param_config())
+        self.assertNotIn("目标对象品类", user)
+        self.assertIn("目标对象名称：冷萃咖啡液", user)
+        self.assertNotIn("开启账号规划", user)
+        self.assertIn("开启发布节奏：已开启", user)
 
     def test_storyboard_stage_includes_script_content(self) -> None:
         _, user = build_context("storyboard", _project("storyboard"), _param_config())
@@ -93,6 +107,8 @@ class BuildContextTests(unittest.TestCase):
         _, user = build_context("videoPrompt", _project("videoPrompt"), _param_config())
         self.assertIn("定稿文案示例", user)
         self.assertIn('"assetType": "产品图"', user)
+        self.assertIn("【文案】", user)
+        self.assertIn("【分镜】", user)
 
     def test_unknown_stage_raises(self) -> None:
         with self.assertRaises(ValueError):

@@ -103,27 +103,18 @@ VIDEO_PROMPT_SYSTEM_TEMPLATE = (
 )
 
 
-def _append_selections(parts: list[str], project: dict, param_config: dict, module: str) -> None:
+def _collect_selected_lines(project: dict, module: str) -> list[str]:
     selections = (project.get("selections") or {}).get(module, {}) or {}
-    section_lines: list[str] = []
+    lines: list[str] = []
     for category, options in selections.items():
         if not isinstance(options, list):
             continue
-        for option in options:
-            if isinstance(option, bool):
-                # toggle controls: only mention when on
-                if option:
-                    section_lines.append(f"【{module} · {category}】已开启")
-                continue
-            option_text = str(option)
-            hint = resolve_hint(param_config, module, category, option_text)
-            section_lines.append(f"【{module} · {category} · {option_text}】\n{hint}")
-    # Always emit a section header for the module, even when it has no selections,
-    # so downstream prompts can see which modules were considered.
-    if section_lines:
-        parts.append(f"【{module}】\n" + "\n\n".join(section_lines))
-    else:
-        parts.append(f"【{module}】（暂无具体选项）")
+        values = [str(option).strip() for option in options if not isinstance(option, bool) and str(option).strip()]
+        if values:
+            lines.append(f"{category}：{'、'.join(values)}")
+        elif any(option is True for option in options):
+            lines.append(f"{category}：已开启")
+    return lines
 
 
 def build_context(stage: str, project: dict, param_config: dict) -> tuple[str, str]:
@@ -142,13 +133,19 @@ def build_context(stage: str, project: dict, param_config: dict) -> tuple[str, s
 
     parts: list[str] = []
     target = project.get("target") or {}
-    parts.append(
-        f"【目标对象】\n品类：{target.get('category', '')}\n对象：{target.get('object', '')}"
-    )
+    target_category = str(target.get("category") or "").strip()
+    target_object = str(target.get("object") or "").strip()
+    if target_category:
+        parts.append(f"目标对象品类：{target_category}")
+    if target_object:
+        parts.append(f"目标对象名称：{target_object}")
     for module in context_modules:
-        _append_selections(parts, project, param_config, module)
+        parts.extend(_collect_selected_lines(project, module))
 
-    user_parts = list(parts)
+    if stage == "script":
+        user_parts = ["请以下面参数内容生成短视频平台使用的故事文案：", *parts]
+    else:
+        user_parts = list(parts)
     if stage == "storyboard":
         script = (project.get("script") or {}).get("content") or ""
         user_parts.append(f"【定稿文案】\n{script}")

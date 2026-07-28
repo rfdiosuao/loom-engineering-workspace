@@ -11,6 +11,9 @@ CREATIVE_PAGE = os.path.join(SRC_ROOT, "components", "creative", "CreativeMediaP
 SETTINGS_PAGE = os.path.join(SRC_ROOT, "components", "settings", "SettingsPage.tsx")
 WORKBENCH = os.path.join(SRC_ROOT, "components", "storyboard", "StoryboardWorkbench.tsx")
 STEPS = os.path.join(SRC_ROOT, "components", "storyboard", "storyboardSteps.ts")
+ASSET_FILE = os.path.join(SRC_ROOT, "components", "storyboard", "StoryboardAssetPanel.tsx")
+VIDEO_FILE = os.path.join(SRC_ROOT, "components", "storyboard", "StoryboardVideoPanel.tsx")
+TYPES_FILE = os.path.join(SRC_ROOT, "components", "storyboard", "storyboardTypes.ts")
 API_FILE = os.path.join(SRC_ROOT, "services", "storyboardApi.ts")
 ROUTES_FILE = os.path.join(REPO_ROOT, "python", "api", "routes_storyboard.py")
 SERVICE_FILE = os.path.join(REPO_ROOT, "python", "services", "storyboard.py")
@@ -32,6 +35,12 @@ class StoryboardContractTests(unittest.TestCase):
             self.routes = handle.read()
         with open(SERVICE_FILE, "r", encoding="utf-8") as handle:
             self.service = handle.read()
+        with open(ASSET_FILE, "r", encoding="utf-8") as handle:
+            self.asset_panel = handle.read()
+        with open(VIDEO_FILE, "r", encoding="utf-8") as handle:
+            self.video_panel = handle.read()
+        with open(TYPES_FILE, "r", encoding="utf-8") as handle:
+            self.types = handle.read()
 
     def test_creative_page_has_storyboard_tab(self) -> None:
         self.assertIn("data-creative-tab-storyboard", self.creative)
@@ -55,6 +64,8 @@ class StoryboardContractTests(unittest.TestCase):
         self.assertIn("'script'", self.steps)
         self.assertIn("'storyboard'", self.steps)
         self.assertIn("'videoPrompt'", self.steps)
+        self.assertIn("category: '全案板块'", self.steps)
+        self.assertNotIn("对标账号库", self.steps)
 
     def test_api_wrappers_match_routes(self) -> None:
         self.assertIn("/api/storyboard/param-config", self.api)
@@ -72,6 +83,19 @@ class StoryboardContractTests(unittest.TestCase):
         self.assertIn("VIDEO_PROMPT_SYSTEM_TEMPLATE", self.service)
         self.assertIn("build_context", self.service)
         self.assertIn("extract_asset_prompts", self.service)
+
+    def test_generated_assets_are_persisted_by_real_shot_number(self) -> None:
+        self.assertIn("generatedAssets", self.workbench)
+        self.assertIn("shotNumbers", self.workbench)
+        self.assertIn("shotNum", self.workbench)
+        self.assertIn("generatedAssets", self.types)
+        self.assertIn("shotNumbers", self.asset_panel)
+        self.assertIn("convertFileSrc", self.asset_panel)
+
+    def test_storyboard_results_use_tauri_asset_urls(self) -> None:
+        self.assertIn("convertFileSrc", self.video_panel)
+        self.assertNotIn("asset://localhost/", self.video_panel)
+        self.assertIn("generatedAssets", self.video_panel)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,14 @@ export interface StoryboardShot {
   shootTip?: string;
 }
 
+export interface StoryboardGeneratedAsset {
+  shotNum: number;
+  kind: AssetKind;
+  path: string;
+  filename?: string;
+  createdAt?: string;
+}
+
 export interface StoryboardProject {
   projectId: string;
   title: string;
@@ -46,7 +54,7 @@ export interface StoryboardProject {
    * or null when no reference is attached.
    */
   assetReferences?: { 人物图: Array<string | null>; 产品图: Array<string | null>; 场景图: Array<string | null> };
-  generatedAssets?: Array<{ shotNum: number; kind: string; mediaId?: string; path?: string; createdAt?: string }>;
+  generatedAssets?: StoryboardGeneratedAsset[];
   videoPrompt?: { content: string; generatedAt?: string };
   videoResult?: { path?: string; filename?: string; generatedAt?: string };
 }
