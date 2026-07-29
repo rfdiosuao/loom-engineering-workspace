@@ -128,7 +128,7 @@ function Invoke-GiteeFormPost {
     $curlArgs = @(
         "-sS",
         "--connect-timeout", "30",
-        "--max-time", "1800",
+        "--max-time", "3600",
         "--retry", "1",
         "--retry-delay", "5",
         "--retry-all-errors",

@@ -362,7 +362,7 @@ class ReleaseScriptsContractTests(unittest.TestCase):
         publish_source = read_script("publish-gitee-release.ps1")
 
         self.assertIn('"--connect-timeout", "30"', publish_source)
-        self.assertIn('"--max-time", "1800"', publish_source)
+        self.assertIn('"--max-time", "3600"', publish_source)
         self.assertIn('"--retry", "1"', publish_source)
         self.assertIn('"--retry-all-errors"', publish_source)
 
