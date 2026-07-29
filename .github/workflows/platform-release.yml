@@ -434,7 +434,7 @@ jobs:
 
       - name: Publish signed domestic update mirror
         continue-on-error: false
-        timeout-minutes: 35
+        timeout-minutes: 75
         working-directory: apps/loom-platform
         env:
           GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
@@ -495,11 +495,11 @@ jobs:
             }
           )
           try {
-            $null = Wait-Job -Job $jobs -Timeout 1800
+            $null = Wait-Job -Job $jobs -Timeout 3600
             $unfinished = @($jobs | Where-Object { $_.State -notin @("Completed", "Failed", "Stopped") })
             if ($unfinished.Count -gt 0) {
               $unfinished | Stop-Job
-              throw "Domestic mirror uploads exceeded the 30 minute best-effort deadline."
+              throw "Domestic mirror uploads exceeded the 60 minute release deadline."
             }
             foreach ($job in $jobs) {
               Receive-Job -Job $job | Write-Host
