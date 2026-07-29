@@ -98,29 +98,29 @@ export function SetupGate() {
   const overlay: React.CSSProperties = {
     position: 'fixed', inset: 0, zIndex: 99999,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
-    background: 'rgba(7,27,36,0.90)', backdropFilter: 'blur(8px)',
+    background: 'var(--color-overlay)', backdropFilter: 'blur(8px)',
   };
   const card: React.CSSProperties = {
-    width: 'min(420px, 86vw)', padding: '26px 28px', borderRadius: 14,
-    background: '#fffaf0', border: '1px solid rgba(8,35,48,0.12)',
-    boxShadow: '0 24px 70px rgba(0,0,0,0.34)', color: '#1b211e',
+    width: 'min(420px, 86vw)', padding: '26px 28px', borderRadius: 8,
+    background: 'var(--color-surface)', border: '1px solid var(--color-border)',
+    boxShadow: 'var(--elevation-high)', color: 'var(--color-text)',
     fontFamily: '-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif',
   };
-  const bar: React.CSSProperties = { height: 8, borderRadius: 999, background: 'rgba(8,35,48,0.10)', overflow: 'hidden', marginTop: 14 };
-  const fill: React.CSSProperties = { height: '100%', width: `${pct}%`, background: 'linear-gradient(90deg,#0B4A3E,#37D5A3)', transition: 'width .2s ease' };
+  const bar: React.CSSProperties = { height: 8, borderRadius: 999, background: 'var(--color-disabled)', overflow: 'hidden', marginTop: 14 };
+  const fill: React.CSSProperties = { height: '100%', width: `${pct}%`, background: 'var(--color-info)', transition: 'width var(--motion-standard) var(--motion-ease-out)' };
 
   return (
-    <div style={overlay}>
+    <div style={overlay} role="dialog" aria-modal="true" aria-labelledby="setup-gate-title" aria-busy={!done && !error}>
       <div style={card}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {!done && !error ? <span className="loom-activity-ring" style={{ color: '#0B4A3E' }} /> : null}
-          <div style={{ fontSize: 17, fontWeight: 900 }}>{done ? '组件已就绪' : error ? '组件安装受阻' : `正在准备 ${APP_DISPLAY_NAME}`}</div>
+          {!done && !error ? <span className="loom-activity-ring" style={{ color: 'var(--color-info)' }} /> : null}
+          <div id="setup-gate-title" style={{ fontSize: 17, fontWeight: 900 }}>{done ? '组件已就绪' : error ? '组件安装受阻' : `正在准备 ${APP_DISPLAY_NAME}`}</div>
         </div>
-        <div style={{ marginTop: 6, fontSize: 13, color: '#6b6357' }}>
+        <div style={{ marginTop: 6, fontSize: 13, color: 'var(--color-text-muted)' }}>
           首次启动需要补齐运行组件，完成后会自动进入启动器。
         </div>
         {error ? (
-          <div style={{ marginTop: 18, fontSize: 13, color: '#c84b5f', lineHeight: 1.6 }}>
+          <div style={{ marginTop: 18, fontSize: 13, color: 'var(--color-danger)', lineHeight: 1.6 }} role="alert" aria-live="assertive">
             下载失败：{error}
             <br />请检查网络后直接重试；连续失败时再改用全量离线包。
             <div style={{ marginTop: 14 }}>
@@ -130,7 +130,7 @@ export function SetupGate() {
                 disabled={retrying}
                 style={{
                   minWidth: 112, height: 40, border: 0, borderRadius: 6,
-                  background: '#0B4A3E', color: '#fff', fontWeight: 800, cursor: retrying ? 'wait' : 'pointer',
+                  background: 'var(--color-accent)', color: 'var(--color-accent-ink)', fontWeight: 800, cursor: retrying ? 'wait' : 'pointer',
                 }}
               >
                 {retrying ? '正在补全...' : '重试补全'}
@@ -138,14 +138,14 @@ export function SetupGate() {
             </div>
           </div>
         ) : done ? (
-          <div style={{ marginTop: 18, fontSize: 14, color: '#0B8C6E', fontWeight: 800 }}>正在进入 {APP_DISPLAY_NAME}...</div>
+          <div style={{ marginTop: 18, fontSize: 14, color: 'var(--color-success)', fontWeight: 800 }} role="status" aria-live="polite">正在进入 {APP_DISPLAY_NAME}...</div>
         ) : prog ? (
           <>
             <div style={{ marginTop: 18, fontSize: 13, fontWeight: 700 }}>
               [{prog.index}/{prog.count}] {prog.title} · {phaseLabel}
             </div>
             <div className="loom-scan-line" style={bar}><div style={fill} /></div>
-            <div style={{ marginTop: 8, fontSize: 12, color: '#756b5b' }}>
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
               {prog.total > 0 ? `${fmtMB(prog.downloaded)} / ${fmtMB(prog.total)}（${pct}%）` : phaseLabel}
             </div>
           </>

@@ -255,6 +255,9 @@ export function createBaselineSeed(): TauriMockSeed {
       },
       'POST /api/license/authorized': { value: { authorized: true, feature: 'matrix.devices' } },
       'GET /api/phone/config': { value: { selectedDeviceId: '', configured: false, devices: [] } },
+      'POST /api/phone/usb/reconcile': {
+        value: { ok: true, recovered: 0, pending: [] },
+      },
       'GET /api/wire/current': {
         value: {
           wire: {

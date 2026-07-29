@@ -1136,6 +1136,98 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "capability_timeout_indeterminate")
         self.assertFalse(caught.exception.execution_may_continue)
 
+    def test_execute_propagates_the_run_cancellation_signal_to_the_executor(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        run_cancel = threading.Event()
+        started = threading.Event()
+        cancellation_observed = threading.Event()
+        outcome: dict[str, BaseException] = {}
+
+        def cooperative_read(_payload, *, cancellation_token):
+            started.set()
+            if cancellation_token.wait(1):
+                cancellation_observed.set()
+            return {"cancelled": cancellation_token.cancelled}
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.run-controlled": {
+                    "executor": cooperative_read,
+                    "permission": "read",
+                    "risk": "read",
+                    "idempotent": True,
+                    "timeoutSec": 2,
+                }
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        worker = threading.Thread(
+            target=lambda: _capture_exception(
+                outcome,
+                lambda: registry.execute(
+                    "loom.test.run-controlled",
+                    {},
+                    cancellation_token=run_cancel,
+                ),
+            )
+        )
+        worker.start()
+        self.assertTrue(started.wait(timeout=1), outcome)
+
+        run_cancel.set()
+        worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(cancellation_observed.is_set())
+        self.assertIsInstance(outcome.get("error"), CapabilityExecutionError)
+        error = outcome["error"]
+        self.assertEqual(getattr(error, "code", ""), "capability_cancelled")
+        self.assertTrue(getattr(error, "recoverable", False))
+
+    def test_registry_reports_unfinished_worker_until_timed_out_execution_settles(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def non_cooperative_side_effect(_payload):
+            started.set()
+            release.wait(2)
+            return {"ok": True}
+
+        registry = CapabilityRegistry(
+            internal_operations={
+                "loom.test.non-cooperative": {
+                    "executor": non_cooperative_side_effect,
+                    "permission": "control",
+                    "risk": "control_safe",
+                    "timeoutSec": 0.02,
+                }
+            },
+            skill_provider=lambda: [],
+            mcp_provider=lambda: [],
+            cli_catalog_provider=lambda: {"domains": []},
+        )
+
+        try:
+            with self.assertRaises(CapabilityExecutionError) as caught:
+                registry.execute("loom.test.non-cooperative", {})
+
+            self.assertTrue(started.is_set())
+            self.assertEqual(caught.exception.code, "capability_timeout_indeterminate")
+            self.assertTrue(caught.exception.execution_may_continue)
+            self.assertEqual(registry.unfinished_worker_count(), 1)
+            self.assertEqual(registry.drain_workers(timeout=0.01), 1)
+        finally:
+            release.set()
+
+        self.assertEqual(registry.drain_workers(timeout=1), 0)
+        self.assertEqual(registry.unfinished_worker_count(), 0)
+
     def test_execute_propagates_mcp_error_result_as_capability_failure(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError, CapabilityRegistry
 
@@ -1614,6 +1706,13 @@ class CapabilityRegistryTests(unittest.TestCase):
             permission="control",
             trusted_internal=True,
         )
+
+
+def _capture_exception(outcome: dict[str, BaseException], operation) -> None:
+    try:
+        operation()
+    except BaseException as exc:
+        outcome["error"] = exc
 
 
 if __name__ == "__main__":

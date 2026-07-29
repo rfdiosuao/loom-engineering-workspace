@@ -49,8 +49,14 @@ class ConfigServer(
                 // ==================== Lumi Secure Channel (Token + HMAC required) ====================
                 uri == "/api/lumi/security/identity-challenge" && method == Method.POST ->
                     LumiSecurityController.handleIdentityChallenge(session, configuredPort)
+                uri == "/api/lumi/security/bootstrap/claim" && method == Method.POST ->
+                    LumiSecurityController.handleBootstrapClaim(session, configuredPort)
+                uri == "/api/lumi/security/bootstrap/confirm" && method == Method.POST ->
+                    handleLumiJson(session) { LumiSecurityController.handleBootstrapConfirm(it) }
                 uri == "/api/lumi/security/pair" && method == Method.POST -> LumiSecurityController.handlePair(session)
-                uri == "/api/lumi/security/status" && method == Method.GET -> LumiSecurityController.handleStatus(session)
+                uri == "/api/lumi/security/status" && method == Method.GET -> handleLumiGet(session) {
+                    LumiSecurityController.handleStatus(it)
+                }
                 uri == "/api/lumi/events" && method == Method.GET -> handleLumiGet(session) {
                     PhoneEventStreamController.handleEvents(it)
                 }

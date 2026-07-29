@@ -133,7 +133,7 @@ function jobTone(status: string): string {
   const key = String(status || '').toLowerCase();
   if (['succeeded', 'success', 'completed', 'complete'].includes(key)) return 'border-status-success/30 bg-status-success/10 text-status-success';
   if (['failed', 'error'].includes(key)) return 'border-status-danger/30 bg-status-danger/10 text-status-danger';
-  if (['queued', 'running'].includes(key)) return 'border-accent/30 bg-accent/10 text-accent';
+  if (['queued', 'running'].includes(key)) return 'border-info bg-info-soft text-info-ink';
   return 'border-border/70 bg-surface/35 text-text-muted';
 }
 
@@ -162,19 +162,43 @@ function friendlyPhoneText(input?: string): string {
     return '当前桌面组件版本不支持删除手机，请更新到最新版本后重试。';
   }
   if (/No APKClaw devices are configured|no target device selected/i.test(text)) {
-    return '未配置手机设备。请先保存手机 IP 和连接令牌，然后重新检测。';
+    return '未配置手机设备。请先打开手机端“与 LOOM 配对”，粘贴完整配对信息；使用 USB 时也可输入 6 位配对码。';
   }
   if (/Missing phone URL|missing_phone_url/i.test(text)) {
-    return '缺少手机 IP。请先在手机页保存手机 IP 和连接令牌。';
+    return '缺少手机地址。局域网请粘贴手机生成的完整配对信息；使用 USB 时可输入 6 位配对码。';
   }
   if (/Missing phone token|missing_phone_token/i.test(text)) {
-    return '缺少手机连接令牌。请打开 APKClaw → Settings → LAN Config，复制当前连接令牌并重新保存。';
+    return '这台手机尚未完成安全配对。请在手机端生成新的配对码。';
+  }
+  if (/phone_pairing_code_expired/i.test(text)) {
+    return '配对码已过期，请在手机端刷新配对码后重试。';
+  }
+  if (/phone_pairing_code_replayed/i.test(text)) {
+    return '这个配对码已经使用，请在手机端生成新的配对码。';
+  }
+  if (/phone_pairing_rate_limited/i.test(text)) {
+    return '配对尝试次数过多，请在手机端刷新配对码后稍后重试。';
+  }
+  if (/phone_pairing_device_mismatch/i.test(text)) {
+    return '配对信息与当前手机不一致，请重新扫码或复制配对信息。';
+  }
+  if (/phone_pairing_usb_unauthorized/i.test(text)) {
+    return 'USB 调试尚未授权，请在手机弹窗中允许这台电脑后重试。';
+  }
+  if (/phone_pairing_(lan_unreachable|endpoint_unavailable)/i.test(text)) {
+    return '无法连接手机配对服务。请保持手机配对页面打开，并检查 USB 或局域网。';
+  }
+  if (/phone_pairing_credential_invalid/i.test(text)) {
+    return '手机安全校验未通过，旧连接未被修改。请刷新配对码后重试。';
+  }
+  if (/phone_pairing_confirmation_pending/i.test(text)) {
+    return '桌面凭据已安全保存，手机暂未确认。请保持手机连接服务在线，LOOM 会自动重试。';
   }
   if (/Unknown APKClaw device id/i.test(text)) {
     return '未找到指定手机设备。请刷新设备列表后重新选择。';
   }
   if (/auth_failed|unauthorized|forbidden|invalid.*token|token mismatch|HTTP\s*(401|403)\b/i.test(text)) {
-    return '已连接到手机端，但连接令牌无效或已变更。请重新复制 LAN Config 中的当前令牌并保存。';
+    return '手机安全凭据已失效。请在手机端生成新的配对码并重新配对。';
   }
   if (/phone_config_server_unreachable|fetch failed|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(text)) {
     return '无法连接手机端 APKClaw。请确认 App 和 LAN Config 服务已启动，并且手机与电脑在同一网络。';
@@ -479,12 +503,14 @@ export const PhoneDemoPage: React.FC = () => {
   const [selectedDeviceId, setSelectedDeviceId] = React.useState('phone-1');
   const [deviceName, setDeviceName] = React.useState('Android Phone');
   const [phoneAddress, setPhoneAddress] = React.useState('');
-  const [phoneToken, setPhoneToken] = React.useState('');
+  const [pairingPayload, setPairingPayload] = React.useState('');
+  const [pairingCode, setPairingCode] = React.useState('');
   const [tokenAvailable, setTokenAvailable] = React.useState(false);
   const [accountLoggedIn, setAccountLoggedIn] = React.useState(false);
   const [hasWireConfig, setHasWireConfig] = React.useState(false);
   const [phoneAppModalOpen, setPhoneAppModalOpen] = React.useState(false);
   const [usbDevicePickerOpen, setUsbDevicePickerOpen] = React.useState(false);
+  const [usbPickerMode, setUsbPickerMode] = React.useState<'pair' | 'connect'>('connect');
   const [usbDevices, setUsbDevices] = React.useState<PhoneAdbDevice[]>([]);
   const [selectedUsbSerial, setSelectedUsbSerial] = React.useState('');
   const [phoneConfigSnapshot, setPhoneConfigSnapshot] = React.useState<PhoneConfigSnapshot | null>(null);
@@ -510,9 +536,10 @@ export const PhoneDemoPage: React.FC = () => {
     && selectedConfiguredPhone?.tokenAvailable,
   );
   const hasUnsavedPhoneConfig = isAddingDevice
-    || Boolean(phoneToken.trim())
-    || displayPhoneAddress(phoneAddress) !== displayPhoneAddress(editablePhoneAddress(selectedConfiguredPhone));
-  const canUsePhone = Boolean(phoneAddress.trim() && (tokenAvailable || phoneToken.trim()));
+    || Boolean(pairingPayload.trim() || pairingCode.trim())
+    || displayPhoneAddress(phoneAddress) !== displayPhoneAddress(editablePhoneAddress(selectedConfiguredPhone))
+    || deviceName.trim() !== String(selectedConfiguredPhone?.name || selectedConfiguredPhone?.id || '').trim();
+  const canUsePhone = appConfigured;
   const selectedCheckedRuntime = deviceRuntime[selectedDeviceId];
   const selectedRuntimeIsFresh = Boolean(
     selectedCheckedRuntime && Date.now() - selectedCheckedRuntime.checkedAt < 30_000,
@@ -555,11 +582,11 @@ export const PhoneDemoPage: React.FC = () => {
   const currentDeviceJob = lastJob && lastJobDeviceId === selectedDeviceId ? lastJob : null;
   const requireSavedPhoneConfig = React.useCallback(() => {
     if (hasUnsavedPhoneConfig) {
-      showToast('手机 IP 或连接令牌有未保存修改，请先点击“保存并检测”，再继续操作。', 'info');
+      showToast('当前配对信息或地址尚未保存，请先完成配对或保存修改。', 'info');
       return false;
     }
     if (!appConfigured) {
-      showToast('请先填写手机 IP 和连接令牌，然后点击“保存并检测”。', 'info');
+      showToast('请先与手机完成配对，再执行手机任务。', 'info');
       return false;
     }
     return true;
@@ -602,7 +629,8 @@ export const PhoneDemoPage: React.FC = () => {
     setDeviceName(selected?.name || selected?.id || 'Android Phone');
     setPhoneAddress(displayPhoneAddress(editablePhoneAddress(selected)));
     setTokenAvailable(Boolean(selected?.tokenAvailable));
-    setPhoneToken('');
+    setPairingPayload('');
+    setPairingCode('');
   }, []);
 
   const startAddPhone = React.useCallback(() => {
@@ -611,7 +639,8 @@ export const PhoneDemoPage: React.FC = () => {
     setSelectedDeviceId(nextId);
     setDeviceName(`Android Phone ${configuredPhones.length + 1}`);
     setPhoneAddress('');
-    setPhoneToken('');
+    setPairingPayload('');
+    setPairingCode('');
     setTokenAvailable(false);
     setLastJob(null);
     setLastJobDeviceId('');
@@ -623,7 +652,8 @@ export const PhoneDemoPage: React.FC = () => {
     setSelectedDeviceId(nextId);
     setDeviceName(device.name || nextId);
     setPhoneAddress(displayPhoneAddress(editablePhoneAddress(device)));
-    setPhoneToken('');
+    setPairingPayload('');
+    setPairingCode('');
     setTokenAvailable(Boolean(device.tokenAvailable));
     const restoredJob = jobs.find((job) => (
       isUserPhoneJob(job as BridgeJob<CliResult>)
@@ -709,7 +739,7 @@ export const PhoneDemoPage: React.FC = () => {
     if (!device || isAddingDevice) return;
     const confirmed = await showConfirm({
       title: '删除手机连接',
-      message: `将删除“${device.name || device.id}”的本机地址和连接令牌，并停止实时同步。历史任务与审计记录会继续保留。`,
+      message: `将删除“${device.name || device.id}”的本机地址和安全配对凭据，并停止实时同步。历史任务与审计记录会继续保留。`,
       confirmText: '删除手机',
       cancelText: '取消',
       tone: 'danger',
@@ -838,24 +868,38 @@ export const PhoneDemoPage: React.FC = () => {
     }
   }, [refreshJobs, selectedDeviceId]);
 
-  const saveDeviceAndDetect = async () => {
+  const saveDeviceAndDetect = async (usbSerial = '') => {
     const cleanAddress = phoneAddress.trim();
     const cleanName = deviceName.trim() || 'Android Phone';
-    const cleanToken = phoneToken.trim();
-    if (!cleanToken && !tokenAvailable) {
-      showToast('请输入手机端连接令牌', 'error');
+    const cleanPayload = pairingPayload.trim();
+    const cleanCode = pairingCode.trim();
+    const shouldPair = isAddingDevice || !tokenAvailable || Boolean(cleanPayload || cleanCode || usbSerial);
+    if (shouldPair && usbSerial && !cleanPayload && !/^\d{6}$/.test(cleanCode)) {
+      showToast('USB 配对请输入手机端生成的 6 位配对码，或粘贴完整配对信息。', 'error');
+      return;
+    }
+    if (shouldPair && !usbSerial && !cleanPayload) {
+      showToast('局域网配对必须粘贴手机生成的完整配对信息；6 位码仅用于 USB。', 'error');
       return;
     }
     setBusy('config');
     try {
       const deviceId = selectedDeviceId.trim() || nextPhoneDeviceId(configuredPhones);
-      const snapshot = await phoneApi.saveDevice({
-        id: deviceId,
-        name: cleanName,
-        baseUrl: cleanAddress,
-        token: cleanToken,
-        selectedDeviceId: deviceId,
-      });
+      const snapshot = shouldPair
+        ? await phoneApi.claimPairing({
+            id: deviceId,
+            name: cleanName,
+            payload: cleanPayload,
+            baseUrl: cleanAddress,
+            code: cleanCode,
+            usbSerial,
+          })
+        : await phoneApi.saveDevice({
+            id: deviceId,
+            name: cleanName,
+            baseUrl: cleanAddress,
+            selectedDeviceId: deviceId,
+          });
       applyPhoneConfig(snapshot, deviceId);
       setIsAddingDevice(false);
       const matrixSnapshot = await matrixApi.registerDevice({
@@ -868,15 +912,58 @@ export const PhoneDemoPage: React.FC = () => {
         model: DEFAULT_PHONE_MODEL,
       });
       setMatrixStatus(matrixSnapshot.status);
-      setPhoneToken('');
-      if (cleanAddress) {
-        showToast('手机连接配置已保存', 'success');
+      setPairingPayload('');
+      setPairingCode('');
+      if (shouldPair) {
+        if (snapshot.pairing?.confirmationPending) {
+          showToast(
+            snapshot.pairing.confirmationStatus
+              || '桌面凭据已安全保存，手机暂未确认；旧连接仍保留，LOOM 会自动重试。',
+            'info',
+          );
+        } else {
+          showToast(`手机已通过${usbSerial ? ' USB' : '局域网'}安全配对并确认`, 'success');
+        }
+        await checkConnection(deviceId, true);
+      } else if (cleanAddress || selectedConfiguredPhone?.connectionMode === 'usb') {
+        showToast('手机名称和地址已保存', 'success');
         await checkConnection(deviceId, true);
       } else {
-        showToast('配置已保存，现在可以通过 USB 连接手机', 'success');
+        showToast('手机名称已保存', 'success');
       }
     } catch (error: any) {
-      showToast(friendlyPhoneText(parseErrorText(error)) || '保存手机连接配置失败', 'error');
+      showToast(friendlyPhoneText(parseErrorText(error)) || '手机配对未完成，旧连接已保留', 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const startUsbPairing = async () => {
+    const cleanPayload = pairingPayload.trim();
+    const cleanCode = pairingCode.trim();
+    if (!cleanPayload && !/^\d{6}$/.test(cleanCode)) {
+      showToast('请先输入手机端生成的 6 位配对码，或粘贴完整配对信息。', 'error');
+      return;
+    }
+    setBusy('usb');
+    try {
+      const response = await phoneApi.usbDevices();
+      const readyDevices = (response.devices || []).filter((device) => device.state === 'device');
+      if (!response.ok || readyDevices.length === 0) {
+        showToast(friendlyPhoneText(response.message || '') || '未检测到已授权的 USB 手机', 'error');
+        return;
+      }
+      if (readyDevices.length === 1) {
+        setBusy('');
+        await saveDeviceAndDetect(readyDevices[0].serial);
+        return;
+      }
+      setUsbPickerMode('pair');
+      setUsbDevices(readyDevices);
+      setSelectedUsbSerial(readyDevices[0].serial);
+      setUsbDevicePickerOpen(true);
+    } catch (error) {
+      showToast(friendlyPhoneText(parseErrorText(error)) || '读取 USB 手机失败', 'error');
     } finally {
       setBusy('');
     }
@@ -920,7 +1007,7 @@ export const PhoneDemoPage: React.FC = () => {
   const establishUsbConnection = async (serial: string) => {
     const confirmed = await showConfirm({
       title: '通过 USB 连接手机',
-      message: `将使用内置 ADB 连接 ${serial}，并验证它与当前麓鸣手机配置的令牌一致。`,
+      message: `将使用内置 ADB 连接 ${serial}，并验证它与当前手机的安全配对凭据一致。`,
       confirmText: '建立 USB 连接',
       cancelText: '取消',
     });
@@ -946,11 +1033,11 @@ export const PhoneDemoPage: React.FC = () => {
 
   const toggleUsbConnection = async () => {
     if (hasUnsavedPhoneConfig) {
-      showToast('手机连接令牌有未保存修改，请先点击“保存并检测”。', 'info');
+      showToast('当前配对信息或地址尚未保存，请先完成配对或保存修改。', 'info');
       return;
     }
     if (!usbConfigured) {
-      showToast('请先保存手机连接令牌，再建立 USB 连接。', 'info');
+      showToast('请先与手机完成配对，再建立 USB 连接。', 'info');
       return;
     }
     const usingUsb = selectedConfiguredPhone?.connectionMode === 'usb';
@@ -994,6 +1081,7 @@ export const PhoneDemoPage: React.FC = () => {
         await establishUsbConnection(readyDevices[0].serial);
         return;
       }
+      setUsbPickerMode('connect');
       setUsbDevices(readyDevices);
       setSelectedUsbSerial(readyDevices[0].serial);
       setUsbDevicePickerOpen(true);
@@ -1086,7 +1174,7 @@ export const PhoneDemoPage: React.FC = () => {
                 : '正在处理手机任务';
 
   return (
-    <div className="h-full overflow-y-auto bg-app-bg">
+    <div data-phone-page className="h-full overflow-y-auto bg-app-bg">
       <BusyOverlay
         active={Boolean(busy)}
         title={busyOverlayTitle}
@@ -1098,9 +1186,12 @@ export const PhoneDemoPage: React.FC = () => {
         title="选择 USB 手机"
       >
         <p className="text-sm leading-6 text-text-muted">
-          检测到多台 USB 手机。请选择要与当前麓鸣配置绑定的设备，系统会在保存前校验连接令牌。
+          {usbPickerMode === 'pair'
+            ? '检测到多台 USB 手机。请选择正在显示配对码的设备，系统会通过现有 USB 通道完成安全配对。'
+            : '检测到多台 USB 手机。请选择要连接的已配对设备，系统会校验设备身份。'}
         </p>
         <Select
+          aria-label="选择 USB 手机"
           className="mt-5 w-full"
           value={selectedUsbSerial}
           onChange={(event) => setSelectedUsbSerial(event.target.value)}
@@ -1119,67 +1210,56 @@ export const PhoneDemoPage: React.FC = () => {
             onClick={() => {
               const serial = selectedUsbSerial;
               setUsbDevicePickerOpen(false);
-              void establishUsbConnection(serial);
+              if (usbPickerMode === 'pair') {
+                void saveDeviceAndDetect(serial);
+              } else {
+                void establishUsbConnection(serial);
+              }
             }}
           >
-            连接
+            {usbPickerMode === 'pair' ? '与手机配对' : '连接'}
           </Button>
         </div>
       </Modal>
-      {phoneAppModalOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#071916]/70 p-6 backdrop-blur-sm">
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="phone-app-download-title"
-            className="max-h-[92vh] w-full max-w-[760px] overflow-y-auto rounded-[24px] border border-[#0b4a3e]/18 bg-[#fffaf1] shadow-[0_28px_80px_rgba(2,28,24,0.28)]"
-          >
-            <div className="flex items-start justify-between gap-5 border-b border-[#0b4a3e]/12 px-7 py-6">
-              <div>
-                <h2 id="phone-app-download-title" className="text-2xl font-black text-[#071916]">下载手机端 App</h2>
-                <p className="mt-2 text-sm font-bold text-[#58645f]">手机扫码安装手机端 App 后，再回到{APP_DISPLAY_NAME}保存 IP 和令牌。</p>
+      <Modal
+        isOpen={phoneAppModalOpen}
+        onClose={() => setPhoneAppModalOpen(false)}
+        title="下载手机端 App"
+        panelClassName="max-w-[760px]"
+      >
+        <p className="text-sm font-bold text-text-subtle">
+          手机扫码安装后，在手机端生成一次性配对码，再回到{APP_DISPLAY_NAME}完成配对。
+        </p>
+        <div className="mt-6 grid gap-6 md:grid-cols-[260px_minmax(0,1fr)]">
+          <div className="flex flex-col items-center justify-center rounded-[8px] border border-border bg-surface p-5">
+            <img
+              src={PHONE_AGENT_QR_SRC}
+              alt="手机端 App 下载二维码"
+              className="h-[220px] w-[220px] rounded-[8px] object-contain"
+            />
+            <div className="mt-4 text-center text-xs font-bold text-text-subtle">手机相机或浏览器扫码下载</div>
+          </div>
+          <div className="min-w-0">
+            <div className="rounded-[8px] border border-border bg-surface-alt p-4">
+              <div className="text-sm font-black text-text">下载链接</div>
+              <div className="mt-3 rounded-[8px] border border-border bg-input p-3 text-sm font-bold leading-6 text-text-muted">
+                手机端 App 下载链接已准备
               </div>
-              <button
-                type="button"
-                onClick={() => setPhoneAppModalOpen(false)}
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px] border border-[#0b4a3e]/16 bg-white/55 text-2xl leading-none text-[#31413b] transition hover:border-[#0b4a3e]/35 hover:text-[#071916]"
-                aria-label="关闭下载手机端 App"
-              >
-                ×
-              </button>
+              <Button className="mt-4" variant="primary" onClick={copyPhoneAgentApkUrl}>复制</Button>
             </div>
-            <div className="grid gap-6 px-7 py-7 md:grid-cols-[260px_minmax(0,1fr)]">
-              <div className="flex flex-col items-center justify-center rounded-[18px] border border-[#0b4a3e]/12 bg-white p-5">
-                <img
-                  src={PHONE_AGENT_QR_SRC}
-                  alt="手机端 App 下载二维码"
-                  className="h-[220px] w-[220px] rounded-[12px] object-contain"
-                />
-                <div className="mt-4 text-center text-xs font-bold text-[#58645f]">手机相机或浏览器扫码下载</div>
-              </div>
-              <div className="min-w-0">
-                <div className="rounded-[18px] border border-[#0b4a3e]/12 bg-white/70 p-4">
-                  <div className="text-sm font-black text-[#071916]">下载链接</div>
-                  <div className="mt-3 rounded-[12px] border border-[#0b4a3e]/10 bg-[#f5efe3] p-3 text-sm font-bold leading-6 text-[#26352f]">
-                    手机端 App 下载链接已准备
-                  </div>
-                  <Button className="mt-4" variant="primary" onClick={copyPhoneAgentApkUrl}>复制</Button>
-                </div>
-                <div className="mt-5 rounded-[18px] border border-[#0b4a3e]/12 bg-white/70 p-4">
-                  <div className="text-sm font-black text-[#071916]">安装三步</div>
-                  <ol className="mt-3 space-y-2 text-sm leading-6 text-[#43524c]">
-                    <li>1. 手机扫码或复制链接，在手机浏览器下载手机端 App。</li>
-                    <li>2. 安装后打开手机端 App，按提示开启无障碍和悬浮窗权限。</li>
-                    <li>3. 回到{APP_DISPLAY_NAME}填写手机 IP 与连接令牌，再点保存并检测。</li>
-                  </ol>
-                </div>
-              </div>
+            <div className="mt-5 rounded-[8px] border border-border bg-surface p-4">
+              <div className="text-sm font-black text-text">安装三步</div>
+              <ol className="mt-3 space-y-2 text-sm leading-6 text-text-muted">
+                <li>1. 手机扫码或复制链接，在手机浏览器下载手机端 App。</li>
+                <li>2. 安装后打开手机端 App，按提示开启无障碍和悬浮窗权限。</li>
+                <li>3. 在手机“与 LOOM 配对”页生成配对信息；局域网粘贴完整信息，USB 可输入 6 位配对码。</li>
+              </ol>
             </div>
           </div>
         </div>
-      ) : null}
+      </Modal>
       <div className="mx-auto flex w-full max-w-[1480px] flex-col gap-6 px-7 py-6">
-        <header className="flex flex-wrap items-end justify-between gap-6 rounded-[8px] border border-border/70 bg-surface/90 px-5 py-4 shadow-[0_14px_36px_rgba(17,24,21,0.06)]">
+        <header className="flex flex-wrap items-end justify-between gap-6 rounded-[8px] border border-border/70 bg-surface/90 px-5 py-4 shadow-elevation-low">
           <div>
             <div className="text-[11px] font-bold tracking-[0.18em] text-accent">手机控制</div>
             <h1 className="mt-2 text-[30px] font-black leading-tight text-text">手机控制</h1>
@@ -1206,13 +1286,13 @@ export const PhoneDemoPage: React.FC = () => {
         </section>
 
         {phoneTaskRunning ? (
-          <section className="border-t border-[#0B4A3E]/25 bg-[#0B4A3E]/5 px-4 py-3">
+          <section className="border-t border-accent/25 bg-accent/[0.05] px-4 py-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-xs font-bold tracking-[0.22em] text-[#0B4A3E]">执行中</div>
+                <div className="text-xs font-bold tracking-[0.22em] text-accent">执行中</div>
                 <div className="mt-1 truncate text-sm font-black text-text">{currentStageText || '手机任务正在执行'}</div>
               </div>
-              <span className="rounded-full border border-[#0B4A3E]/30 bg-white/55 px-3 py-1 text-xs font-bold text-[#0B4A3E]">
+              <span className="rounded-full border border-accent/30 bg-surface/55 px-3 py-1 text-xs font-bold text-accent">
                 {currentDeviceJob?.progress?.executionLayer ? String(currentDeviceJob.progress.executionLayer).toUpperCase() : taskProfile.toUpperCase()}
               </span>
             </div>
@@ -1237,7 +1317,7 @@ export const PhoneDemoPage: React.FC = () => {
                   <div>
                     <h2 className="text-lg font-black text-text">手机连接配置</h2>
                     <p className="mt-1 text-xs leading-5 text-text-muted">
-                      只保存本机连接信息；连接令牌不会回显到界面。
+                      手机生成短时一次性配对码，长期安全凭据由系统自动交换并且永不显示。
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1285,8 +1365,8 @@ export const PhoneDemoPage: React.FC = () => {
                           disabled={Boolean(busy)}
                           className={`min-w-0 rounded-[8px] border px-3 py-2 text-left transition ${
                             active
-                              ? 'border-[#0B4A3E] bg-[#0B4A3E]/10 text-[#0B4A3E]'
-                              : 'border-border/70 bg-surface-alt/40 text-text hover:border-[#0B4A3E]/40'
+                              ? 'border-accent bg-accent/10 text-accent'
+                              : 'border-border/70 bg-surface-alt/40 text-text hover:border-accent/40'
                           } ${busy ? 'opacity-60' : ''}`}
                         >
                           <span className="flex items-center justify-between gap-2">
@@ -1327,30 +1407,50 @@ export const PhoneDemoPage: React.FC = () => {
                     </span>
                   </label>
                   <label className="block">
-                    <span className="mb-1 block text-xs font-bold text-text-subtle">连接令牌</span>
+                    <span className="mb-1 block text-xs font-bold text-text-subtle">USB 6 位配对码</span>
                     <Input
-                      type="password"
-                      value={phoneToken}
-                      onChange={(event) => setPhoneToken(event.target.value)}
-                      placeholder={tokenAvailable ? '已保存，留空沿用' : '手机端连接令牌'}
+                      inputMode="numeric"
+                      value={pairingCode}
+                      onChange={(event) => setPairingCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                      placeholder={tokenAvailable ? '重新配对时填写' : '例如 123456'}
                       disabled={Boolean(busy)}
                     />
                   </label>
                 </div>
+                <label className="mt-4 block">
+                  <span className="mb-1 block text-xs font-bold text-text-subtle">配对信息（推荐）</span>
+                  <TextArea
+                    value={pairingPayload}
+                    onChange={(event) => setPairingPayload(event.target.value)}
+                    placeholder="粘贴手机端显示的完整配对信息；其中不包含长期凭据"
+                    disabled={Boolean(busy)}
+                    rows={2}
+                  />
+                  <span className="mt-1 block text-[11px] leading-4 text-text-subtle">
+                    局域网必须粘贴完整配对信息；6 位配对码只通过 USB 本机通道使用。
+                  </span>
+                </label>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <Button variant="primary" onClick={saveDeviceAndDetect} disabled={Boolean(busy)}>
+                  <Button variant="primary" onClick={() => void saveDeviceAndDetect()} disabled={Boolean(busy)}>
                     {busy === 'config' || busy === 'status'
-                      ? '保存检测中...'
-                      : phoneAddress.trim()
-                        ? '保存并检测'
-                        : '保存配置'}
+                      ? '配对检测中...'
+                      : isAddingDevice || !tokenAvailable || pairingPayload.trim() || pairingCode.trim()
+                        ? '与手机配对'
+                        : '保存名称和地址'}
+                  </Button>
+                  <Button variant="quiet" onClick={() => void startUsbPairing()} disabled={Boolean(busy)}>
+                    通过 USB 配对
                   </Button>
                   <span className="text-xs font-bold text-text-subtle">
                     {hasUnsavedPhoneConfig
-                      ? '当前 IP 或令牌尚未保存，请先保存并检测'
+                      ? '当前配对信息或地址尚未保存'
+                      : selectedConfiguredPhone?.confirmationPending
+                        ? selectedConfiguredPhone.confirmationStatus || '桌面已保存，等待手机确认'
                       : tokenAvailable
-                        ? '令牌已保存'
-                        : '未保存令牌'}
+                        ? selectedConfiguredPhone?.confirmed === false
+                          ? '配对确认状态未知'
+                          : '已安全配对并确认'
+                        : '尚未配对'}
                   </span>
                 </div>
               </section>
@@ -1386,7 +1486,7 @@ export const PhoneDemoPage: React.FC = () => {
                       disabled={Boolean(busy)}
                       className={`rounded-[8px] border p-4 text-left transition-colors duration-150 ${
                         taskMode === option.value
-                          ? 'border-[#0B4A3E]/60 bg-[#0B4A3E]/10 text-text'
+                          ? 'border-accent/60 bg-accent/10 text-text'
                           : 'border-border/70 bg-surface-alt/35 text-text-muted hover:border-border-strong hover:text-text'
                       }`}
                     >
@@ -1406,7 +1506,7 @@ export const PhoneDemoPage: React.FC = () => {
                       title={option.desc}
                       className={`rounded-full border px-3 py-1.5 text-xs font-bold transition ${
                         taskProfile === option.value
-                          ? 'border-[#0B4A3E]/60 bg-[#0B4A3E]/10 text-[#0B4A3E]'
+                          ? 'border-accent/60 bg-accent/10 text-accent'
                           : 'border-border/70 bg-surface-alt/35 text-text-muted hover:border-border-strong hover:text-text'
                       }`}
                     >
@@ -1436,7 +1536,7 @@ export const PhoneDemoPage: React.FC = () => {
                       type="button"
                       onClick={() => applyQuickTask(task, index === 0 ? 'observe' : 'safe')}
                       disabled={Boolean(busy)}
-                      className="rounded-full border border-border/70 bg-surface-alt/35 px-3 py-1.5 text-xs font-bold text-text-muted transition hover:border-[#0B4A3E]/45 hover:bg-[#0B4A3E]/10 hover:text-text"
+                      className="rounded-full border border-border/70 bg-surface-alt/35 px-3 py-1.5 text-xs font-bold text-text-muted transition hover:border-accent/45 hover:bg-accent/10 hover:text-text"
                     >
                       {task.length > 18 ? `${task.slice(0, 18)}...` : task}
                     </button>

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'installer', 'model', 'agent', 'matrix', 'ui')]
+    [ValidateSet('all', 'installer', 'model', 'agent', 'matrix', 'phone', 'ui')]
     [string[]]$Domain = @('all'),
 
     [ValidateSet('all', 'high', 'medium', 'low')]

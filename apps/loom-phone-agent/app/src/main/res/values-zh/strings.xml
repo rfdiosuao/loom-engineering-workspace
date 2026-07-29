@@ -154,7 +154,7 @@
     <string name="menu_telegram">Telegram</string>
     <string name="menu_wechat">微信</string>
     <string name="menu_lan_config">局域网配置</string>
-    <string name="menu_api_token">API Token</string>
+    <string name="menu_pc_pairing">与 LOOM 配对</string>
     <string name="menu_publish_relay">发布中转</string>
     <string name="menu_floating_circle_size">悬浮球大小</string>
     <string name="menu_floating_click_enabled">悬浮窗可点击和拖动</string>
@@ -167,16 +167,21 @@
     <string name="lan_config_stopped">已关闭</string>
     <string name="lan_config_no_wifi">请连接 WiFi 或开启手机热点</string>
 
-    <!-- API Token 配置 -->
-    <string name="api_token_config_title">API Token 配置</string>
-    <string name="api_token_config_tip">Token 用于外部 HTTP API 认证。可自动生成或自定义。</string>
-    <string name="api_token_config_token">Token</string>
-    <string name="api_token_config_hint">输入自定义 Token 或使用生成的</string>
-    <string name="api_token_config_generate">随机生成</string>
-    <string name="api_token_config_saved">API Token 已保存</string>
-    <string name="api_token_config_required">请输入或生成 Token</string>
-    <string name="api_token_status_set">已设置</string>
-    <string name="api_token_status_unset">未设置</string>
+    <!-- LOOM 配对 -->
+    <string name="pc_pairing_title">与 LOOM 配对</string>
+    <string name="pc_pairing_tip_usb">USB 配对可在电脑 LOOM 输入下面的 6 位码，也可以复制完整配对信息。长期凭据不会显示。</string>
+    <string name="pc_pairing_tip_lan">局域网配对请在电脑 LOOM 扫码或粘贴完整配对信息。6 位码仅限 USB，长期凭据不会显示。</string>
+    <string name="pc_pairing_code">仅 USB：6 位配对码</string>
+    <string name="pc_pairing_expiry">%1$d 秒后失效</string>
+    <string name="pc_pairing_refresh">刷新配对信息</string>
+    <string name="pc_pairing_copy">复制配对信息</string>
+    <string name="pc_pairing_expired">配对信息已过期，请刷新后继续。</string>
+    <string name="pc_pairing_copied">配对信息已复制</string>
+    <string name="pc_pairing_server_failed">手机连接服务启动失败，请返回后重试。</string>
+    <string name="pc_pairing_usb_ready">USB 配对已准备好，请连接电脑后在 LOOM 输入配对码。</string>
+    <string name="pc_pairing_lan_ready">局域网配对已准备好，请在 LOOM 扫码或粘贴配对信息。</string>
+    <string name="pc_pairing_status_paired">已配对</string>
+    <string name="pc_pairing_status_unpaired">未配对</string>
 
     <!-- 发布中转配置 -->
     <string name="publish_relay_config_title">发布中转</string>

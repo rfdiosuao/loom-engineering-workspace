@@ -28,7 +28,7 @@ export const ManualControls: React.FC<ManualControlsProps> = ({ enabled, busy, d
   ];
 
   return (
-    <div data-matrix-manual-controls className="border-t border-white/[0.08] p-2.5">
+    <div data-matrix-manual-controls className="border-t border-border p-2.5">
       <div className="grid grid-cols-5 gap-1.5">
         {systemActions.map(([action, glyph, label]) => (
           <button
@@ -38,7 +38,7 @@ export const ManualControls: React.FC<ManualControlsProps> = ({ enabled, busy, d
             onClick={() => onAction({ action } as MatrixManualAction)}
             title={label}
             aria-label={label}
-            className="h-8 rounded-[5px] border border-white/10 bg-white/[0.04] text-sm font-bold text-slate-200 hover:border-cyan-300/30 disabled:cursor-not-allowed disabled:text-slate-600"
+            className="h-8 rounded-[5px] border border-border bg-surface text-sm font-bold text-text hover:border-info disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
           >
             {glyph}
           </button>
@@ -50,7 +50,7 @@ export const ManualControls: React.FC<ManualControlsProps> = ({ enabled, busy, d
           onChange={(event) => setText(event.target.value)}
           disabled={!enabled}
           placeholder="输入到当前设备"
-          className="min-w-0 flex-1 rounded-[5px] border border-white/10 bg-[#06131C] px-2 py-1.5 text-[10px] text-slate-100 outline-none focus:border-cyan-300/40"
+          className="min-w-0 flex-1 rounded-[5px] border border-border bg-input px-2 py-1.5 text-[10px] text-text outline-none focus:border-focus focus:ring-2 focus:ring-focus disabled:bg-disabled disabled:text-disabled"
         />
         <Button
           variant="quiet"
@@ -64,7 +64,7 @@ export const ManualControls: React.FC<ManualControlsProps> = ({ enabled, busy, d
           输入
         </Button>
       </div>
-      {!enabled ? <div className="mt-2 text-[9px] text-amber-200/80">{disabledMessage || '取得人工租约后可发送触控和系统命令'}</div> : null}
+      {!enabled ? <div className="mt-2 text-[9px] text-status-warning" role="status">{disabledMessage || '取得人工租约后可发送触控和系统命令'}</div> : null}
     </div>
   );
 };

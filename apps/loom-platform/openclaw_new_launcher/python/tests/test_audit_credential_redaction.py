@@ -49,6 +49,14 @@ class AuditCredentialRedactionTests(unittest.TestCase):
                 ["account", "bind-ticket", "--code=ocb_BIND-EQUALS-334"],
                 "ocb_BIND-EQUALS-334",
             ),
+            (
+                ["account", "login", "--api-token", "ACCOUNT-API-TOKEN-SPACED-445"],
+                "ACCOUNT-API-TOKEN-SPACED-445",
+            ),
+            (
+                ["account", "login", "--api-token=ACCOUNT-API-TOKEN-EQUALS-556"],
+                "ACCOUNT-API-TOKEN-EQUALS-556",
+            ),
         ]
 
         with tempfile.TemporaryDirectory() as temp_dir:

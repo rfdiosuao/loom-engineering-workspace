@@ -106,6 +106,16 @@ def register_agent_routes(app, ctx) -> None:
         except Exception as error:  # Route boundary maps domain errors to stable responses.
             return _error_response(ctx, error)
 
+    @app.post("/api/agent/shutdown")
+    async def agent_shutdown(request: Request):
+        def shutdown_existing_service():
+            shutdown = getattr(ctx, "shutdown_agent_service", None)
+            if not callable(shutdown):
+                raise AgentServiceUnavailable("central agent shutdown is not available")
+            return shutdown()
+
+        return await protected(request, shutdown_existing_service)
+
     @app.get("/api/agent/bootstrap")
     async def agent_bootstrap(request: Request):
         return await protected(request, lambda: _service(ctx).bootstrap())

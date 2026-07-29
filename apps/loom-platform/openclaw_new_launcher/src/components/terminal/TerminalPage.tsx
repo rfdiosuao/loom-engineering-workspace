@@ -34,7 +34,7 @@ export const TerminalPage: React.FC = () => {
   const highlightLine = (line: string) => {
     const lowered = line.toLowerCase();
     if (line.includes('[Error]') || lowered.includes('error') || lowered.includes('failed')) {
-      return <span className="text-[#FF6E86]">{line}</span>;
+      return <span className="text-status-danger">{line}</span>;
     }
     if (line.includes('[WARN]') || line.includes('[Warning]') || lowered.includes('warning')) {
       return <span className="text-status-warning">{line}</span>;

@@ -16,16 +16,54 @@ export interface ThemeColors {
   accent_hover: string;
   accent_soft: string;
   accent_ink: string;
+  info: string;
+  info_soft: string;
+  info_border: string;
+  info_ink: string;
   success: string;
+  success_soft: string;
+  success_border: string;
+  success_ink: string;
   warning: string;
+  warning_soft: string;
+  warning_border: string;
+  warning_ink: string;
   danger: string;
   danger_hover: string;
+  danger_soft: string;
+  danger_border: string;
+  danger_ink: string;
+  focus: string;
+  focus_soft: string;
+  selected: string;
+  selected_hover: string;
+  selected_ink: string;
+  disabled: string;
+  disabled_text: string;
+  overlay: string;
   terminal_bg: string;
   terminal_header: string;
   terminal_text: string;
+  terminal_label: string;
+  terminal_label_muted: string;
+  terminal_selection: string;
 }
 
 export type ThemeColorOverrides = Partial<ThemeColors>;
+
+export interface ThemeElevation {
+  low: string;
+  medium: string;
+  high: string;
+}
+
+export interface ThemeMotion {
+  fast: string;
+  standard: string;
+  deliberate: string;
+  ease_out: string;
+  ease_in_out: string;
+}
 
 export interface ThemeFonts {
   display: [string, number, string];
@@ -58,6 +96,8 @@ export interface ThemeConfig {
     light?: ThemeColorOverrides;
     dark?: ThemeColorOverrides;
   };
+  elevation?: Partial<ThemeElevation>;
+  motion?: Partial<ThemeMotion>;
   fonts: ThemeFonts;
   brand: ThemeBrand;
   navItems?: NavItem[];

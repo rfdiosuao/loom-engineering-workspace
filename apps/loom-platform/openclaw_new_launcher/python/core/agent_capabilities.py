@@ -254,15 +254,26 @@ class CapabilityExecutionError(CapabilityError):
 class CapabilityCancellationToken:
     """Read-only signal passed to executors declaring a ``cancellation_token`` keyword."""
 
-    def __init__(self) -> None:
+    def __init__(self, run_signal: Any | None = None) -> None:
         self._event = threading.Event()
+        self._run_signal = run_signal
 
     @property
     def cancelled(self) -> bool:
-        return self._event.is_set()
+        return self._event.is_set() or _signal_is_set(self._run_signal)
 
     def wait(self, timeout: float | None = None) -> bool:
-        return self._event.wait(timeout)
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while not self.cancelled:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                wait_for = min(0.01, remaining)
+            else:
+                wait_for = 0.01
+            self._event.wait(wait_for)
+        return True
 
     def _cancel(self) -> None:
         self._event.set()
@@ -290,6 +301,7 @@ class Capability:
     description: str = ""
     domain: str = "general"
     target_scope: str = "none"
+    idempotent: bool = False
     executor: Executor | None = field(default=None, compare=False, repr=False)
 
     def to_dict(self) -> Json:
@@ -299,6 +311,7 @@ class Capability:
             "description": self.description,
             "domain": self.domain,
             "targetScope": self.target_scope,
+            "idempotent": self.idempotent,
             "source": self.source,
             "permission": self.permission,
             "risk": self.risk,
@@ -578,6 +591,7 @@ DEFAULT_INTERNAL_SPECS: dict[str, Json] = {
         "targetScope": "none",
         "permission": "read",
         "risk": "read",
+        "idempotent": True,
         "timeoutSec": 15,
         "inputSchema": {"type": "object", "additionalProperties": False},
     },
@@ -588,6 +602,7 @@ DEFAULT_INTERNAL_SPECS: dict[str, Json] = {
         "targetScope": "none",
         "permission": "read",
         "risk": "read",
+        "idempotent": True,
         "timeoutSec": 15,
     },
     "loom.matrix.dispatch": {
@@ -691,6 +706,8 @@ class CapabilityRegistry:
         self._discovery_lock = threading.RLock()
         self._discovery_cache: dict[str, Capability] | None = None
         self._discovery_cache_expires_at = 0.0
+        self._worker_lock = threading.RLock()
+        self._workers: set[threading.Thread] = set()
 
     def list_capabilities(self, *, available_only: bool = False) -> list[Json]:
         capabilities = list(self._capabilities(available_only=available_only).values())
@@ -708,32 +725,77 @@ class CapabilityRegistry:
             raise CapabilityExecutionError("capability_not_found", f"Unknown capability: {name}", recoverable=False)
         return _preferred_capability(candidates, prefer_available=True)
 
-    def execute(self, name: str, payload: Mapping[str, Any] | None = None) -> Any:
+    def execute(
+        self,
+        name: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        cancellation_token: Any | None = None,
+    ) -> Any:
         capability, data = self.validate_input(name, payload)
         if capability.executor is None:
             raise CapabilityExecutionError("capability_unavailable", f"Capability is not connected: {name}")
         if capability.permission != "read":
             self.invalidate_cache()
-        token = CapabilityCancellationToken()
+        token = CapabilityCancellationToken(cancellation_token)
         state = _ExecutionState()
         supports_cancellation = _accepts_cancellation_token(capability.executor)
 
         def run() -> None:
-            with state.lock:
-                if token.cancelled:
-                    state.done.set()
-                    return
-                state.invocation_started = True
             try:
-                state.result = _invoke_executor(capability.executor, data, token, supports_cancellation)
-            except BaseException as exc:
-                state.error = exc
+                with state.lock:
+                    if token.cancelled:
+                        state.done.set()
+                        return
+                    state.invocation_started = True
+                try:
+                    state.result = _invoke_executor(capability.executor, data, token, supports_cancellation)
+                except BaseException as exc:
+                    state.error = exc
             finally:
                 state.done.set()
+                with self._worker_lock:
+                    self._workers.discard(threading.current_thread())
 
         worker = threading.Thread(target=run, name="loom-capability", daemon=True)
+        with self._worker_lock:
+            self._workers.add(worker)
         worker.start()
-        if not state.done.wait(capability.timeout_sec):
+        deadline = time.monotonic() + capability.timeout_sec
+        cancelled_by_run = False
+        timed_out = False
+        while not state.done.is_set():
+            if token.cancelled:
+                cancelled_by_run = True
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            state.done.wait(min(0.01, remaining))
+        if token.cancelled:
+            cancelled_by_run = True
+
+        if cancelled_by_run:
+            with state.lock:
+                token._cancel()
+                invocation_started = state.invocation_started
+            settled = state.done.wait(DEFAULT_CANCELLATION_GRACE_SEC)
+            if not invocation_started or (settled and _is_explicitly_idempotent_read(capability)):
+                raise CapabilityExecutionError(
+                    "capability_cancelled",
+                    f"Capability was cancelled by run control: {name}",
+                    recoverable=True,
+                )
+            raise CapabilityExecutionError(
+                "capability_cancelled_indeterminate",
+                f"能力取消结果不确定，外部操作可能已经发生或仍在继续，请先核验目标状态且不要直接重试：{name}",
+                recoverable=False,
+                outcome_indeterminate=True,
+                execution_may_continue=not settled,
+            )
+
+        if timed_out:
             with state.lock:
                 token._cancel()
                 invocation_started = state.invocation_started
@@ -787,6 +849,26 @@ class CapabilityRegistry:
                 outcome_indeterminate=True,
             ) from exc
         return safe_result
+
+    def unfinished_worker_count(self) -> int:
+        with self._worker_lock:
+            return sum(worker.is_alive() for worker in self._workers)
+
+    def drain_workers(self, *, timeout: float = 0.0) -> int:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._worker_lock:
+                workers = [worker for worker in self._workers if worker.is_alive()]
+            if not workers:
+                return 0
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return len(workers)
+            for worker in workers:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                worker.join(min(remaining, 0.05))
 
     def validate_input(
         self,
@@ -1122,7 +1204,28 @@ def _capability_from_spec(name: str, source: str, spec: Mapping[str, Any]) -> Ca
         description=str(spec.get("description") or spec.get("summary") or ""),
         domain=str(spec.get("domain") or "general"),
         target_scope=_normalize_target_scope(spec.get("targetScope") or spec.get("target_scope")),
+        idempotent=spec.get("idempotent") is True,
         executor=spec.get("executor") if callable(spec.get("executor")) else None,
+    )
+
+
+def _signal_is_set(signal: Any | None) -> bool:
+    if signal is None:
+        return False
+    is_set = getattr(signal, "is_set", None)
+    if callable(is_set):
+        try:
+            return bool(is_set())
+        except Exception:
+            return False
+    return bool(getattr(signal, "cancelled", False))
+
+
+def _is_explicitly_idempotent_read(capability: Capability) -> bool:
+    return (
+        capability.idempotent
+        and capability.permission == "read"
+        and capability.risk == "read"
     )
 
 

@@ -56,7 +56,10 @@ class NativeAgentFullCapabilityE2ETests(unittest.TestCase):
             }
             for index, (capability, tool_input) in enumerate(tool_calls, start=1)
         ]
-        responses.append({"final": {"text": "全部能力已完成"}})
+        responses.extend([
+            {"final": {"text": "矩阵任务已受理，等待真实终态"}},
+            {"final": {"text": "全部能力已完成"}},
+        ])
         runtime = ScriptedRuntime(responses)
         executions: list[dict] = []
 
@@ -64,9 +67,24 @@ class NativeAgentFullCapabilityE2ETests(unittest.TestCase):
             def execute(payload):
                 executions.append({"name": capability_name, "source": "internal", "input": dict(payload)})
                 if capability_name == "loom.matrix.dispatch":
-                    return {"campaignId": "campaign-full-e2e", "counts": {"total": 1, "completed": 1, "failed": 0}}
+                    return {
+                        "campaignId": "campaign-full-e2e",
+                        "status": "running",
+                        "counts": {"total": 1, "completed": 0, "failed": 0, "running": 1},
+                    }
+                if capability_name == "loom.matrix.status" and payload.get("campaignId"):
+                    return {
+                        "campaigns": [{
+                            "campaignId": payload["campaignId"],
+                            "status": "succeeded",
+                        }]
+                    }
                 if capability_name.startswith("loom.media"):
-                    return {"jobId": f"job-{len(executions)}", "kind": "video" if "video" in capability_name else "image", "status": "queued"}
+                    return {
+                        "jobId": f"job-{len(executions)}",
+                        "kind": "video" if "video" in capability_name else "image",
+                        "status": "completed",
+                    }
                 return {"ok": True, "status": "ready"}
             return execute
 
@@ -131,10 +149,21 @@ class NativeAgentFullCapabilityE2ETests(unittest.TestCase):
             event_bus = AgentEventBus(repository)
             orchestrator = AgentOrchestrator(repository, event_bus, runtime, registry, policy)
             orchestrator.queue_run("session-full-e2e", run_id="run-full-e2e")
-            result = orchestrator.execute_run(
+            pending = orchestrator.execute_run(
                 "session-full-e2e",
                 "run-full-e2e",
                 {
+                    "prompt": "完成原生能力验收",
+                    "scopeMode": "manual",
+                    "targets": {"deviceIds": ["phone-1"]},
+                },
+            )
+            self.assertEqual(pending["status"], "paused")
+            self.assertEqual(pending["error"]["code"], "agent_child_operation_pending")
+            result = orchestrator.resume_run(
+                "run-full-e2e",
+                session_id="session-full-e2e",
+                request={
                     "prompt": "完成原生能力验收",
                     "scopeMode": "manual",
                     "targets": {"deviceIds": ["phone-1"]},
@@ -144,7 +173,7 @@ class NativeAgentFullCapabilityE2ETests(unittest.TestCase):
 
         self.assertEqual(result["status"], "completed")
         self.assertNotIn("error", result)
-        self.assertEqual(len(executions), len(tool_calls))
+        self.assertEqual(len(executions), len(tool_calls) + 1)
         self.assertEqual([item["capability"] for item in policy.decisions], [name for name, _input in tool_calls])
         self.assertTrue(all(item["allowed"] for item in policy.decisions))
         self.assertTrue(all(not item["requiresApproval"] for item in policy.decisions))

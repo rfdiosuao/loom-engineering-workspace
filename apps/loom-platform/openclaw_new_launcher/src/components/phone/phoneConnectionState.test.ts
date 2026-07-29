@@ -33,17 +33,18 @@ test('phone status API accepts a device id', async () => {
   assert.match(source, /api\('\/api\/phone\/status', 'POST', params\)/);
 });
 
-test('unsaved address and token edits require saving before phone actions', async () => {
+test('unsaved pairing details and address edits require saving before phone actions', async () => {
   const source = await readFile(sourceUrl, 'utf8');
 
   assert.match(source, /device\?\.connectionMode === 'usb'/);
   assert.match(source, /return device\.lanBaseUrl \|\| ''/);
   assert.match(
     source,
-    /const hasUnsavedPhoneConfig = isAddingDevice\s+\|\| Boolean\(phoneToken\.trim\(\)\)\s+\|\| displayPhoneAddress\(phoneAddress\) !== displayPhoneAddress\(editablePhoneAddress\(selectedConfiguredPhone\)\);/,
+    /const hasUnsavedPhoneConfig = isAddingDevice\s+\|\| Boolean\(pairingPayload\.trim\(\) \|\| pairingCode\.trim\(\)\)/,
   );
-  assert.match(source, /手机 IP 或连接令牌有未保存修改，请先点击“保存并检测”，再继续操作。/);
-  assert.match(source, /请先填写手机 IP 和连接令牌，然后点击“保存并检测”。/);
+  assert.match(source, /当前配对信息或地址尚未保存，请先完成配对或保存修改。/);
+  assert.match(source, /请先与手机完成配对，再执行手机任务。/);
+  assert.doesNotMatch(source, /value=\{phoneToken\}/);
 });
 
 test('USB transport is explicit, reversible, and scoped to the selected device', async () => {
@@ -127,6 +128,7 @@ test('connection checks, screen reads, and task submissions guard before using s
 
   const saveBlock = actionBlock('const saveDeviceAndDetect =', 'const checkConnection =');
   assert.match(saveBlock, /await checkConnection\(deviceId, true\)/);
-  assert.doesNotMatch(saveBlock, /if \(!cleanAddress\)/);
-  assert.match(saveBlock, /配置已保存，现在可以通过 USB 连接手机/);
+  assert.match(saveBlock, /await phoneApi\.claimPairing/);
+  assert.match(saveBlock, /await phoneApi\.saveDevice/);
+  assert.match(saveBlock, /手机已通过/);
 });

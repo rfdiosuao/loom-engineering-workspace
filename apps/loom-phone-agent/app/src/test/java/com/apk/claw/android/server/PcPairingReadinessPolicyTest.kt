@@ -7,38 +7,36 @@ import org.junit.Test
 
 class PcPairingReadinessPolicyTest {
     @Test
-    fun refuses_pairing_when_lan_address_is_missing() {
+    fun usb_pairing_remains_ready_when_lan_address_is_missing() {
         val result = PcPairingReadinessPolicy.evaluate(
             lanIp = null,
-            tokenConfigured = true,
             serverRunning = true,
             serverPort = 9527
         )
 
-        assertFalse(result.ready)
-        assertEquals("lan_unavailable", result.errorCode)
-        assertTrue(result.message.contains("LAN", ignoreCase = true))
+        assertTrue(result.ready)
+        assertEquals("http://127.0.0.1:9527", result.baseUrl)
+        assertEquals("usb", result.transportHint)
+        assertEquals("", result.errorCode)
     }
 
     @Test
-    fun refuses_pairing_when_token_is_missing() {
+    fun first_pairing_does_not_require_an_existing_token() {
         val result = PcPairingReadinessPolicy.evaluate(
             lanIp = "192.168.1.8",
-            tokenConfigured = false,
             serverRunning = true,
             serverPort = 9527
         )
 
-        assertFalse(result.ready)
-        assertEquals("api_token_missing", result.errorCode)
-        assertTrue(result.message.contains("token", ignoreCase = true))
+        assertTrue(result.ready)
+        assertEquals("http://192.168.1.8:9527", result.baseUrl)
+        assertEquals("lan", result.transportHint)
     }
 
     @Test
     fun refuses_pairing_when_server_is_not_actually_listening() {
         val result = PcPairingReadinessPolicy.evaluate(
             lanIp = "192.168.1.8",
-            tokenConfigured = true,
             serverRunning = false,
             serverPort = null
         )
@@ -52,13 +50,13 @@ class PcPairingReadinessPolicyTest {
     fun ready_pairing_uses_actual_runtime_port() {
         val result = PcPairingReadinessPolicy.evaluate(
             lanIp = "192.168.1.8",
-            tokenConfigured = true,
             serverRunning = true,
             serverPort = 9531
         )
 
         assertTrue(result.ready)
         assertEquals("http://192.168.1.8:9531", result.baseUrl)
+        assertEquals("lan", result.transportHint)
         assertEquals("", result.errorCode)
     }
 }

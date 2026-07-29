@@ -8,6 +8,17 @@ description: Use when a user asks LOOM/Luming/麓鸣 to operate one or more phon
 
 Use this as the single operational entrypoint for phone work. Do not modify LOOM product code. Resolve real capabilities from the installed command catalog first; never invent CLI commands, routes, device IDs, or successful evidence.
 
+## Pairing Boundary
+
+Use LOOM CLI/MCP for every phone discovery, status, screenshot, task, Matrix, media-transfer, and recovery operation. Never ask for, store, or construct a phone URL, port, header, permanent credential, or direct HTTP request.
+
+When no controllable phone is discovered, ask the user to open the phone App's **与 LOOM 配对** page and complete one of the two supported flows:
+
+- USB: connect the phone and enter the short-lived 6-digit pairing code in LOOM.
+- LAN: scan or paste the complete short-lived pairing payload in LOOM.
+
+Do not ask the user to paste either value into Agent configuration. Pairing is completed by LOOM, and reconnect/recovery remains owned by LOOM after the initial exchange.
+
 ## State Machine
 
 Advance in this exact order. Do not skip a state, except that a blocking result resumes at the named resumeFrom state after its prerequisite is resolved.

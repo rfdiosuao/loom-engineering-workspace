@@ -1,13 +1,14 @@
 import 'tsx/esm';
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { CapabilityCenterPage } from './capabilities/CapabilityCenterPage.tsx';
 import { IMAGE_RATIO_PRESETS, validateReferenceFile } from './creative/mediaPresets.ts';
+import { DARK_THEME, LIGHT_THEME } from '../theme/default.ts';
 import {
   configurationCheckSucceeded,
   resolveDashboardJourneyState,
@@ -24,6 +25,150 @@ function sourceBlock(source: string, start: string, end: string): string {
   assert.notEqual(endIndex, -1, `missing source block end: ${end}`);
   return source.slice(startIndex, endIndex);
 }
+
+function recursiveFiles(directory: URL): URL[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const child = new URL(entry.name, directory.href.endsWith('/') ? directory : new URL(`${directory.href}/`));
+    return entry.isDirectory() ? recursiveFiles(child) : [child];
+  });
+}
+
+test('semantic theme contract covers light and dark operational states', () => {
+  const requiredColors = [
+    'info', 'info_soft', 'info_border', 'info_ink',
+    'success', 'success_soft', 'success_border', 'success_ink',
+    'warning', 'warning_soft', 'warning_border', 'warning_ink',
+    'danger', 'danger_soft', 'danger_border', 'danger_ink',
+    'focus', 'focus_soft', 'selected', 'selected_hover', 'selected_ink',
+    'disabled', 'disabled_text', 'overlay',
+  ] as const;
+  const defaultThemeSource = readSource('../theme/default.ts');
+
+  for (const key of requiredColors) {
+    assert.ok(LIGHT_THEME.colors[key], `light theme missing ${key}`);
+    assert.ok(DARK_THEME.colors[key], `dark theme missing ${key}`);
+    assert.match(defaultThemeSource, new RegExp(`${key}:\\s*'--color-`), `CSS variable map missing ${key}`);
+  }
+  for (const duration of ['150ms', '200ms', '300ms']) {
+    assert.match(defaultThemeSource, new RegExp(`['"]${duration}['"]`));
+  }
+  assert.deepEqual(Object.keys(LIGHT_THEME.colors).sort(), Object.keys(DARK_THEME.colors).sort());
+  assert.doesNotMatch(readSource('../styles/theme.css'), /#[0-9a-f]{3,8}\b/i);
+});
+
+test('React presentation modules do not introduce unreviewed colors or arbitrary shadows', () => {
+  const componentsRoot = new URL('./', import.meta.url);
+  const legacyAllowlist = new Set([
+    'agent/AgentComposer.tsx|shadow|shadow-[0_10px_30px_rgba(5,35,29,0.08)]',
+    'agent/AgentDebugger.tsx|shadow|shadow-[-18px_0_48px_rgba(5,25,22,0.18)]',
+    'agent/AgentModelMenu.tsx|shadow|shadow-[0_18px_50px_rgba(5,25,22,0.22)]',
+    'agent/AgentScopeMenu.tsx|shadow|shadow-[0_18px_50px_rgba(5,25,22,0.22)]',
+    'agents/AgentInstallerPage.tsx|shadow|shadow-[0_12px_30px_rgba(8,35,48,0.05)]',
+    'agents/AgentLogo.tsx|shadow|shadow-[0_14px_30px_rgba(0,0,0,0.14)]',
+    'brand/LoomBrand.tsx|shadow|shadow-[0_8px_22px_rgba(3,30,38,0.22)]',
+    'dashboard/DashboardPage.tsx|shadow|shadow-[0_10px_28px_rgba(8,60,49,0.08)]',
+    'sidebar/Sidebar.tsx|color|rgba(55,213,163,0.08)',
+    'sidebar/Sidebar.tsx|shadow|shadow-[inset_0_0_0_1px_rgba(55,213,163,0.16)]',
+    'sidebar/Sidebar.tsx|shadow|shadow-[0_14px_30px_rgba(0,0,0,0.34),0_0_0_1px_rgba(223,250,255,0.04)]',
+    'terminal/TerminalPage.tsx|shadow|shadow-[0_24px_70px_rgba(0,0,0,0.32)]',
+  ]);
+  const violations = recursiveFiles(componentsRoot)
+    .filter((file) => file.pathname.endsWith('.tsx'))
+    .flatMap((file) => {
+      const source = readFileSync(file, 'utf8');
+      const relative = decodeURIComponent(file.pathname.split('/components/')[1] || file.pathname);
+      return source.split(/\r?\n/).flatMap((line, index) => {
+        const arbitraryShadows = [...line.matchAll(/\bshadow-\[[^\]]+\]/gi)];
+        const shadowRanges = arbitraryShadows.map((match) => [
+          match.index ?? 0,
+          (match.index ?? 0) + match[0].length,
+        ] as const);
+        const shadowViolations = arbitraryShadows.map(
+          (match) => `${relative}|shadow|${match[0]}`,
+        );
+        const matches = [...line.matchAll(/#[0-9a-f]{3,8}\b|rgba?\([^)]*\)/gi)]
+          .filter((match) => !shadowRanges.some(
+            ([start, end]) => (match.index ?? 0) >= start && (match.index ?? 0) < end,
+          ));
+        const fixedLogoPathColor = relative === 'brand/LoomBrand.tsx' && /<(path|rect|circle)\b/.test(line);
+        const colorViolations = fixedLogoPathColor
+          ? []
+          : matches.map((match) => `${relative}|color|${match[0]}`);
+        return [...shadowViolations, ...colorViolations]
+          .filter((violation) => !legacyAllowlist.has(violation))
+          .map((violation) => `${violation}|line:${index + 1}`);
+      });
+    });
+
+  assert.deepEqual(violations, []);
+});
+
+test('business components use canonical semantic utility names', () => {
+  const componentsRoot = new URL('./', import.meta.url);
+  const violations = recursiveFiles(componentsRoot)
+    .filter((file) => file.pathname.endsWith('.tsx'))
+    .flatMap((file) => {
+      const source = readFileSync(file, 'utf8');
+      const relative = decodeURIComponent(file.pathname.split('/components/')[1] || file.pathname);
+      return [
+        ...[...source.matchAll(/\b(?:border|bg|text)-status-info(?:\/\d+)?\b/g)].map((match) => `${relative}:${match[0]}`),
+        ...[...source.matchAll(/\btext-disabled-text\b/g)].map((match) => `${relative}:${match[0]}`),
+      ];
+    });
+
+  assert.deepEqual(violations, []);
+});
+
+test('Matrix phone selection and focus keep a visible semantic ring width', () => {
+  const source = readSource('./matrix/PhoneTile.tsx');
+
+  assert.match(source, /\(focused \|\| selected\) \? 'ring-2 ring-focus'/);
+  assert.doesNotMatch(source, /\? 'ring-focus'/);
+});
+
+test('major workbenches share the canonical canvas and surface color hierarchy', () => {
+  const styles = readSource('../styles/index.css');
+  const matrixTheme = sourceBlock(styles, '.loom-matrix-shell {', '.matrix-live-feed-row {');
+  const acquisition = readSource('./acquisition/AcquisitionWorkbenchPage.tsx');
+  const agent = readSource('./agent/AgentWorkbenchPage.tsx');
+  const creative = readSource('./creative/CreativeMediaPage.tsx');
+  const diagnostics = readSource('./diagnostics/DiagnosticsPage.tsx');
+  const models = readSource('./models/ModelsPage.tsx');
+
+  assert.match(matrixTheme, /\.loom-matrix-shell\s*\{\s*background:\s*var\(--color-app-bg\)/);
+  assert.match(matrixTheme, /\.loom-matrix-shell header\s*\{\s*background:\s*var\(--color-surface\)/);
+  assert.match(matrixTheme, /background:\s*var\(--color-surface-alt\)/);
+  assert.doesNotMatch(matrixTheme, /background:\s*var\(--color-surface-deep(?:er)?\)/);
+
+  assert.match(acquisition, /data-acquisition-hero/);
+  assert.match(acquisition, /bg-surface-alt/);
+  assert.match(acquisition, /: 'border-border bg-surface text-accent'/);
+  assert.match(acquisition, /type StatusTone = 'neutral' \| 'info' \| 'success' \| 'warning' \| 'danger'/);
+  assert.match(acquisition, /if \(counts\.failed > 0\) return 'danger'/);
+  assert.match(acquisition, /status === '执行中'[\s\S]{0,80}\? 'text-info'/);
+  assert.match(acquisition, /<StatusPill tone=/);
+  assert.doesNotMatch(acquisition, /border-info bg-info-soft text-info-ink/);
+  assert.doesNotMatch(acquisition, /data-acquisition-overview[\s\S]{0,500}bg-surface-deep/);
+  assert.doesNotMatch(acquisition, /data-acquisition-overview[\s\S]{0,900}text-white/);
+  assert.match(agent, /bg-app-bg/);
+  assert.match(creative, /data-creative-media-page[^>]+bg-app-bg/);
+  assert.match(diagnostics, /data-diagnostics-page[^>]+bg-app-bg/);
+  assert.doesNotMatch(diagnostics, /bg-black/);
+  assert.doesNotMatch(diagnostics, /rgba\(79,112,95,0\.45\)/);
+  assert.match(models, /data-models-page[^>]+bg-app-bg/);
+  assert.doesNotMatch(models, /rounded-\[20px\]/);
+  assert.doesNotMatch(creative, /rounded-\[10px\]/);
+});
+
+test('toast notifications expose one live region per message', () => {
+  const common = readSource('./common/index.tsx');
+  const container = sourceBlock(common, 'data-toast-container', '{toasts.map');
+
+  assert.doesNotMatch(container, /role=/);
+  assert.doesNotMatch(container, /aria-live=/);
+  assert.match(common, /role=\{toast\.type === 'error' \? 'alert' : 'status'\}/);
+  assert.match(common, /aria-live=\{toast\.type === 'error' \? 'assertive' : 'polite'\}/);
+});
 
 test('unavailable capabilities render as non-interactive status rows', () => {
   const markup = renderToStaticMarkup(React.createElement(CapabilityCenterPage));
@@ -121,6 +266,7 @@ test('named form controls expose accessible labels', () => {
   assert.ok(acquisitionSource.includes('aria-label="飞书多维表格链接"'));
   assert.ok(acquisitionSource.includes('aria-label="AI 接入提示词预览"'));
   assert.ok(phoneSource.includes('aria-label="手机任务描述"'));
+  assert.ok(phoneSource.includes('aria-label="选择 USB 手机"'));
   assert.ok(settingsSource.includes('aria-label={copy.appearance.languageTitle}'));
 });
 
@@ -141,15 +287,31 @@ test('shared modal, confirmation, and toast controls expose accessibility contra
   assert.doesNotMatch(modal, /<div[^>]*onClick=\{onClose\}/);
   assert.match(modal, /<button[\s\S]*?data-modal-backdrop[\s\S]*?aria-label=/);
   assert.match(modal, /aria-label=\{title \? `关闭\$\{title\}` : '关闭对话框'\}/);
+  assert.match(modal, /onKeyDown=\{handleModalKeyDown\}/);
+  assert.match(modal, /ref=\{dialogPanelRef\}/);
+  assert.match(modal, /previouslyFocusedElementRef/);
+  assert.match(modal, /focusableElements/);
+  assert.match(modal, /previouslyFocused\.focus\(\)/);
   assert.match(confirmation, /onKeyDown=\{handleConfirmKeyDown\}/);
   assert.match(confirmation, /tabIndex=\{-1\}/);
   assert.match(confirmation, /ref=\{dialogPanelRef\}/);
   assert.match(confirmation, /data-confirm-cancel/);
   assert.match(confirmation, /previouslyFocusedElementRef/);
-  assert.match(toast, /role="status"/);
-  assert.match(toast, /aria-live="polite"/);
+  assert.match(toast, /role=\{toast\.type === 'error' \? 'alert' : 'status'\}/);
+  assert.match(toast, /aria-live=\{toast\.type === 'error' \? 'assertive' : 'polite'\}/);
   assert.match(toast, /aria-atomic="true"/);
   assert.ok(toast.includes('aria-label={`关闭通知：${toast.message}`}'));
+});
+
+test('phone and acquisition status mappings use danger for failures and info for active work', () => {
+  const phoneSource = readSource('./phone/PhoneDemoPage.tsx');
+  const acquisitionSource = readSource('./acquisition/AcquisitionWorkbenchPage.tsx');
+  const phoneTone = sourceBlock(phoneSource, 'function jobTone', 'function parseJsonMaybe');
+
+  assert.match(phoneTone, /\['failed', 'error'\][\s\S]{0,140}status-danger/);
+  assert.match(phoneTone, /\['queued', 'running'\][\s\S]{0,140}border-info[\s\S]{0,100}bg-info-soft[\s\S]{0,100}text-info-ink/);
+  assert.match(acquisitionSource, /if \(counts\.failed > 0\) return 'danger'/);
+  assert.match(acquisitionSource, /tone=\{matrixCounts\.failed > 0 \|\| matrixError \? 'danger' : 'default'\}/);
 });
 
 test('dashboard journey advances only from current Bridge responses', () => {

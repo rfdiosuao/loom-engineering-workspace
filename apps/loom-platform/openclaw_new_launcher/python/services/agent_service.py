@@ -7,8 +7,9 @@ import json
 import os
 import shutil
 import threading
+import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -176,6 +177,7 @@ class AgentService:
         self._matrix_confirmation_tokens: dict[str, list[str]] = {}
         self._lock = threading.RLock()
         self._closed = False
+        self._executor_shutdown = False
 
         recovered = self.orchestrator.recover_unfinished_runs()
         for run in recovered:
@@ -262,6 +264,9 @@ class AgentService:
         }
 
     def send_message(self, session_id: str, body: Mapping[str, Any]) -> Json:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("agent service is closed")
         request = dict(body)
         client_message_id = str(request.get("clientMessageId") or "").strip()
         if not client_message_id:
@@ -365,25 +370,23 @@ class AgentService:
         if model_id:
             run["modelId"] = model_id
             run["modelSource"] = model_source
-        # Span the active-run check and commit across services sharing this repository.
-        with self._lock, self.repository._lock:
-            existing = self.repository.find_message_run(session_id, client_message_id)
-            if existing is not None:
-                return {"message": existing["message"], "run": existing["run"]}
-            active_runs = [
-                item
-                for item in self.repository.list_runs(session_id)
-                if str(item.get("status") or "") not in TERMINAL_RUN_STATUSES
-            ]
-            if active_runs:
-                raise ValueError("another agent run is already active for this session")
+        # Repository submission spans idempotency, active-run validation, the
+        # committed history snapshot, and persistence under one process-safe transaction.
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("agent service is closed")
             result = self.repository.create_message_run(
                 session_id,
                 client_message_id,
                 message,
                 run,
+                reject_active_run=True,
+                history_limit=40,
             )
             if result.get("created"):
+                persisted_request = result["run"].get("request")
+                if not isinstance(persisted_request, Mapping):
+                    persisted_request = runtime_request
                 self.event_bus.publish(
                     session_id,
                     "run.queued",
@@ -391,7 +394,7 @@ class AgentService:
                     entity_id=str(result["run"]["runId"]),
                     data={"status": "queued"},
                 )
-                self._submit_run(session_id, str(result["run"]["runId"]), runtime_request)
+                self._submit_run(session_id, str(result["run"]["runId"]), persisted_request)
         return {"message": result["message"], "run": result["run"]}
 
     def _session_artifacts(self, session_id: str, *, limit: int = 20) -> list[Json]:
@@ -511,7 +514,14 @@ class AgentService:
     def resume_run(self, run_id: str) -> Json:
         with self._lock:
             run = self.repository.get_run(run_id)
-            if run.get("status") != "paused" or run_id in self._resume_requests:
+            pause_requested = (
+                run.get("status") == "running"
+                and run.get("controlState") == "pause_requested"
+            )
+            if (
+                run.get("status") != "paused"
+                and not pause_requested
+            ) or run_id in self._resume_requests:
                 return run
             self._resume_requests.add(run_id)
             try:
@@ -533,16 +543,25 @@ class AgentService:
                 session_id = str(run["sessionId"])
                 current = self.repository.get_run(run_id, session_id=session_id)
                 if current.get("status") not in TERMINAL_RUN_STATUSES:
-                    current = self.orchestrator.pause_run(run_id, session_id=session_id)
-                status = "paused" if current.get("status") == "cancelled" else current.get("status")
+                    current = self.orchestrator.cancel_run(
+                        run_id,
+                        session_id=session_id,
+                        force_pending=True,
+                    )
                 updated = self.repository.update_run(
                     run_id,
                     {
-                        "status": status,
+                        "status": "running",
+                        "controlState": "cancel_requested",
                         "error": {
                             "code": "agent_matrix_cancel_incomplete",
-                            "message": f"Linked Matrix cancellation is incomplete: {', '.join(incomplete)}",
-                            "recoverable": True,
+                            "message": (
+                                "关联 Matrix 任务尚未确认停止，外部执行可能仍在继续；"
+                                f"请等待终态并勿直接重试：{', '.join(incomplete)}"
+                            ),
+                            "recoverable": False,
+                            "outcomeIndeterminate": True,
+                            "executionMayContinue": True,
                         },
                     },
                     session_id=session_id,
@@ -639,20 +658,64 @@ class AgentService:
     def events_after(self, *, session_id: str, after_seq: int) -> list[Json]:
         return self.event_bus.replay(session_id, after_seq=after_seq, limit=500)
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, grace_seconds: float = 2.0) -> Json:
         with self._lock:
-            if self._closed:
-                return
+            first_request = not self._closed
             self._closed = True
-            active_run_ids = [run_id for run_id, future in self._futures.items() if not future.done()]
-        for run_id in active_run_ids:
-            try:
-                self.orchestrator.pause_run(run_id)
-            except Exception:
-                pass
+            active = [
+                (run_id, future)
+                for run_id, future in self._futures.items()
+                if not future.done()
+            ]
+        if first_request:
+            for run_id, _future in active:
+                try:
+                    self.orchestrator.pause_run(run_id)
+                except Exception:
+                    pass
         self._matrix_monitor_stop.set()
         self._matrix_monitor_thread.join(timeout=2.0)
-        self._executor.shutdown(wait=True, cancel_futures=True)
+        deadline = time.monotonic() + max(0.0, float(grace_seconds))
+        while True:
+            with self._lock:
+                tracked_runs = list(self._futures.values())
+            pending_runs = [future for future in tracked_runs if not future.done()]
+            unfinished_workers = self.capabilities.unfinished_worker_count()
+            if not tracked_runs and unfinished_workers == 0:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if pending_runs:
+                wait(pending_runs, timeout=min(remaining, 0.05))
+            elif tracked_runs:
+                time.sleep(min(remaining, 0.01))
+            if unfinished_workers:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    self.capabilities.drain_workers(timeout=min(remaining, 0.05))
+        with self._lock:
+            unfinished_runs = len(self._futures)
+            if not self._executor_shutdown:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+                self._executor_shutdown = True
+        unfinished_workers = self.capabilities.unfinished_worker_count()
+        drained = unfinished_runs == 0 and unfinished_workers == 0
+        result: Json = {
+            "stopped": drained,
+            "drained": drained,
+            "unfinishedRuns": unfinished_runs,
+            "unfinishedWorkers": unfinished_workers,
+            "outcomeIndeterminate": not drained,
+            "executionMayContinue": not drained,
+        }
+        if not drained:
+            result.update({
+                "code": "agent_shutdown_incomplete",
+                "message": "Agent 关闭等待已超时，仍有执行可能继续；全局服务将保留且不会创建第二个实例。",
+                "retryable": False,
+            })
+        return result
 
     def _submit_run(
         self,
@@ -918,7 +981,7 @@ class AgentService:
 
         for campaign_id in campaign_ids:
             status = statuses.get(campaign_id)
-            if status is not None and status not in TERMINAL_MATRIX_STATUSES:
+            if status not in TERMINAL_MATRIX_STATUSES:
                 incomplete.append(campaign_id)
                 continue
             with self._lock:
@@ -927,78 +990,157 @@ class AgentService:
 
     def _monitor_matrix_campaigns(self) -> None:
         while not self._matrix_monitor_stop.wait(0.5):
-            with self._lock:
-                links = {campaign_id: dict(link) for campaign_id, link in self._campaign_links.items()}
-            if not links:
-                continue
             try:
                 snapshot = self._matrix_factory().status()
             except Exception:
                 continue
-            campaigns = snapshot.get("campaigns", []) if isinstance(snapshot, Mapping) else []
-            by_id = {
-                str(campaign.get("campaignId")): campaign
-                for campaign in campaigns if isinstance(campaign, Mapping) and campaign.get("campaignId")
-            }
-            for campaign_id, link in links.items():
-                campaign = by_id.get(campaign_id)
-                if not isinstance(campaign, Mapping):
-                    with self._lock:
-                        current = self._campaign_links.get(campaign_id)
-                        if current is not None:
-                            current["missingPolls"] = int(current.get("missingPolls") or 0) + 1
-                            if current["missingPolls"] >= 20:
-                                self._campaign_links.pop(campaign_id, None)
-                    continue
-                tasks = self._matrix_device_tasks(campaign)
-                counts = self._matrix_task_counts(tasks)
-                status = str(campaign.get("status") or "running")
-                data = {
-                    "messageId": f"matrix:{campaign_id}",
-                    "sessionId": str(link.get("sessionId") or ""),
-                    "runId": str(link.get("runId") or ""),
-                    "campaignId": campaign_id,
-                    "status": status,
-                    "counts": sanitize_for_storage(counts),
-                    "total": int(counts.get("total", len(tasks)) or 0),
-                    "completed": int(counts.get("completed", 0) or 0),
-                    "failed": int(counts.get("failed", 0) or 0),
-                    "deviceIds": [str(task.get("deviceId")) for task in tasks if isinstance(task, Mapping) and task.get("deviceId")],
-                    "failedDeviceIds": [
-                        str(task.get("deviceId"))
-                        for task in tasks
-                        if isinstance(task, Mapping) and task.get("status") in {"failed", "needs_human", "cancelled"} and task.get("deviceId")
-                    ],
-                    "failures": [
-                        {
-                            "deviceId": str(task.get("deviceId") or ""),
-                            "deviceTaskId": str(task.get("deviceTaskId") or ""),
-                            "errorCode": str(task.get("failureCode") or "matrix_device_task_failed"),
-                            "message": str(task.get("failureReason") or "手机任务执行失败"),
-                        }
-                        for task in tasks
-                        if isinstance(task, Mapping) and task.get("status") in {"failed", "needs_human"}
-                    ],
-                }
-                signature = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                if signature != str(link.get("lastSignature") or ""):
-                    event_type = f"matrix.{status}" if status in TERMINAL_MATRIX_STATUSES else "matrix.progress"
-                    self.event_bus.publish(
-                        data["sessionId"],
-                        event_type,
-                        topic="matrix.campaign",
-                        entity_id=campaign_id,
-                        data=data,
-                    )
+            self._reconcile_matrix_campaign_snapshot(snapshot)
+
+    def _reconcile_matrix_campaign_snapshot(self, snapshot: Mapping[str, Any]) -> None:
+        with self._lock:
+            links = {campaign_id: dict(link) for campaign_id, link in self._campaign_links.items()}
+        if not links:
+            return
+        campaigns = snapshot.get("campaigns", []) if isinstance(snapshot, Mapping) else []
+        by_id = {
+            str(campaign.get("campaignId")): campaign
+            for campaign in campaigns if isinstance(campaign, Mapping) and campaign.get("campaignId")
+        }
+        for campaign_id, link in links.items():
+            campaign = by_id.get(campaign_id)
+            if not isinstance(campaign, Mapping):
                 with self._lock:
                     current = self._campaign_links.get(campaign_id)
-                    if current is None:
-                        continue
-                    if status in TERMINAL_MATRIX_STATUSES:
-                        self._campaign_links.pop(campaign_id, None)
-                    else:
-                        current["lastSignature"] = signature
-                        current["missingPolls"] = 0
+                    if current is not None:
+                        current["missingPolls"] = int(current.get("missingPolls") or 0) + 1
+                continue
+            tasks = self._matrix_device_tasks(campaign)
+            counts = self._matrix_task_counts(tasks)
+            status = str(campaign.get("status") or "running")
+            data = {
+                "messageId": f"matrix:{campaign_id}",
+                "sessionId": str(link.get("sessionId") or ""),
+                "runId": str(link.get("runId") or ""),
+                "campaignId": campaign_id,
+                "status": status,
+                "counts": sanitize_for_storage(counts),
+                "total": int(counts.get("total", len(tasks)) or 0),
+                "completed": int(counts.get("completed", 0) or 0),
+                "failed": int(counts.get("failed", 0) or 0),
+                "deviceIds": [str(task.get("deviceId")) for task in tasks if isinstance(task, Mapping) and task.get("deviceId")],
+                "failedDeviceIds": [
+                    str(task.get("deviceId"))
+                    for task in tasks
+                    if isinstance(task, Mapping) and task.get("status") in {"failed", "needs_human", "cancelled"} and task.get("deviceId")
+                ],
+                "failures": [
+                    {
+                        "deviceId": str(task.get("deviceId") or ""),
+                        "deviceTaskId": str(task.get("deviceTaskId") or ""),
+                        "errorCode": str(task.get("failureCode") or "matrix_device_task_failed"),
+                        "message": str(task.get("failureReason") or "手机任务执行失败"),
+                    }
+                    for task in tasks
+                    if isinstance(task, Mapping) and task.get("status") in {"failed", "needs_human"}
+                ],
+            }
+            signature = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            should_publish = signature != str(link.get("lastSignature") or "")
+            if status in TERMINAL_MATRIX_STATUSES:
+                self._persist_matrix_terminal_intent(
+                    session_id=data["sessionId"],
+                    run_id=data["runId"],
+                    campaign=campaign,
+                )
+            with self._lock:
+                current = self._campaign_links.get(campaign_id)
+                if current is None:
+                    continue
+                if status in TERMINAL_MATRIX_STATUSES:
+                    self._campaign_links.pop(campaign_id, None)
+                else:
+                    current["lastSignature"] = signature
+                    current["missingPolls"] = 0
+            if should_publish:
+                event_type = f"matrix.{status}" if status in TERMINAL_MATRIX_STATUSES else "matrix.progress"
+                self.event_bus.publish(
+                    data["sessionId"],
+                    event_type,
+                    topic="matrix.campaign",
+                    entity_id=campaign_id,
+                    data=data,
+                )
+            if status in TERMINAL_MATRIX_STATUSES:
+                self._queue_matrix_terminal_resume(
+                    session_id=data["sessionId"],
+                    run_id=data["runId"],
+                )
+
+    def _persist_matrix_terminal_intent(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        campaign: Mapping[str, Any],
+    ) -> None:
+        if not session_id or not run_id:
+            return
+        try:
+            run = self.repository.get_run(run_id, session_id=session_id)
+        except KeyError:
+            return
+        if str(run.get("status") or "") in TERMINAL_RUN_STATUSES:
+            return
+        campaign_id = str(campaign.get("campaignId") or "")
+        if not campaign_id:
+            return
+        raw_intents = run.get("matrixTerminalIntents")
+        intents = [
+            dict(item)
+            for item in raw_intents
+            if isinstance(item, Mapping)
+            and str(item.get("campaignId") or "") != campaign_id
+        ] if isinstance(raw_intents, list) else []
+        error = campaign.get("error")
+        if isinstance(error, Mapping):
+            failure_detail = error.get("message") or error.get("code")
+        else:
+            failure_detail = error
+        failure_detail = failure_detail or campaign.get("message") or campaign.get("reason")
+        intents.append({
+            "campaignId": campaign_id,
+            "status": str(campaign.get("status") or ""),
+            "failureDetail": str(redact_sensitive(str(failure_detail or "")))[:300],
+            "observedAt": _utc_now(),
+        })
+        self.repository.update_run(
+            run_id,
+            {"matrixTerminalIntents": intents},
+            session_id=session_id,
+        )
+
+    def _queue_matrix_terminal_resume(self, *, session_id: str, run_id: str) -> None:
+        if not session_id or not run_id:
+            return
+        try:
+            run = self.repository.get_run(run_id, session_id=session_id)
+            if str(run.get("status") or "") in TERMINAL_RUN_STATUSES:
+                return
+            if str(run.get("controlState") or "") == "cancel_requested":
+                self.orchestrator.cancel_run(run_id, session_id=session_id)
+                return
+            if str(run.get("status") or "") == "waiting_approval":
+                return
+            self._submit_run(
+                session_id,
+                run_id,
+                self._request_from_run(run),
+                resume=True,
+                emit_runtime_requested=False,
+                queue_if_busy=True,
+            )
+        except (KeyError, RuntimeError, ValueError):
+            return
 
     @staticmethod
     def _matrix_device_tasks(campaign: Mapping[str, Any]) -> list[Json]:

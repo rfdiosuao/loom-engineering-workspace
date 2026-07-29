@@ -51,7 +51,7 @@ export const FocusScreen: React.FC<FocusScreenProps> = ({
     <div
       data-matrix-focus-screen
       data-phone-actions-enabled={controlsEnabled ? 'true' : 'false'}
-      className={`relative mx-auto aspect-[9/19.5] w-full max-w-[222px] touch-none overflow-hidden rounded-[8px] border bg-[#02070B] ${controlsEnabled ? 'cursor-crosshair border-cyan-300/45' : 'cursor-default border-white/12'}`}
+      className={`relative mx-auto aspect-[9/19.5] w-full max-w-[222px] touch-none overflow-hidden rounded-[8px] border bg-surface-deeper ${controlsEnabled ? 'cursor-crosshair border-info' : 'cursor-default border-border-strong'}`}
       onPointerDown={(event) => {
         onSelect();
         if (!controlsEnabled) return;
@@ -75,7 +75,7 @@ export const FocusScreen: React.FC<FocusScreenProps> = ({
       {frame ? (
         <img src={frame.url} alt={`${deviceName} 聚焦画面`} draggable={false} className="h-full w-full select-none object-contain" />
       ) : (
-        <div className="flex h-full items-center justify-center px-5 text-center text-[11px] text-slate-500">等待设备返回聚焦画面</div>
+        <div className="flex h-full items-center justify-center px-5 text-center text-[11px] text-white/55" role="status">等待设备返回聚焦画面</div>
       )}
       {error && !frame ? (
         <div
@@ -85,25 +85,25 @@ export const FocusScreen: React.FC<FocusScreenProps> = ({
           onPointerUp={stopOverlayPointer}
           className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/80 px-4 text-center"
         >
-          <span className="text-[10px] leading-4 text-rose-100">{error}</span>
+          <span className="text-[10px] leading-4 text-status-danger-ink">{error}</span>
           <button
             type="button"
             onClick={onRetry}
-            className="rounded-[5px] border border-rose-200/30 bg-rose-200/10 px-2.5 py-1 text-[9px] font-bold text-rose-50 hover:bg-rose-200/20"
+            className="rounded-[5px] border border-status-danger bg-status-danger-soft px-2.5 py-1 text-[9px] font-bold text-status-danger-ink hover:brightness-95"
           >
             重试画面
           </button>
         </div>
       ) : null}
       {error && frame ? (
-        <div className="pointer-events-none absolute inset-x-1 bottom-1 z-20 flex items-center justify-between gap-2 rounded-[5px] bg-black/80 px-2 py-1 text-[9px] text-amber-100">
+        <div className="pointer-events-none absolute inset-x-1 bottom-1 z-20 flex items-center justify-between gap-2 rounded-[5px] bg-status-warning-soft px-2 py-1 text-[9px] text-status-warning-ink" role="status">
           <span className="min-w-0 truncate">画面刷新较慢，暂时显示上一帧</span>
           <button
             type="button"
             onPointerDown={stopOverlayPointer}
             onPointerUp={stopOverlayPointer}
             onClick={onRetry}
-            className="pointer-events-auto shrink-0 font-bold text-cyan-100"
+            className="pointer-events-auto shrink-0 font-bold text-info"
           >
             重试
           </button>
@@ -113,7 +113,7 @@ export const FocusScreen: React.FC<FocusScreenProps> = ({
         data-matrix-focus-status
         onPointerDown={stopOverlayPointer}
         onPointerUp={stopOverlayPointer}
-        className="absolute inset-x-0 top-0 z-20 flex items-center justify-between bg-black/70 px-2 py-1 text-[9px] text-slate-300"
+        className="absolute inset-x-0 top-0 z-20 flex items-center justify-between bg-overlay px-2 py-1 text-[9px] text-white/75"
       >
         <span className="truncate">{deviceName}</span>
         <span>{manualEnabled ? '人工控制' : 'AI 观察'}</span>

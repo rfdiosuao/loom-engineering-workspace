@@ -344,13 +344,14 @@ export const UpdateCenter: React.FC = () => {
               : '发现新版本';
 
   return createPortal(
-    <div className="fixed inset-0 z-[180] flex items-center justify-center bg-[#001820]/60 px-5 py-8 backdrop-blur-[7px]">
+    <div className="fixed inset-0 z-[180] flex items-center justify-center bg-overlay px-5 py-8 backdrop-blur-[7px]">
       <section
         role="dialog"
         aria-modal="true"
         aria-labelledby="loom-update-title"
+        aria-busy={busy}
         data-update-phase={phase}
-        className="update-center-enter flex max-h-[min(82vh,760px)] w-full max-w-[680px] flex-col overflow-hidden rounded-[8px] border border-border-strong bg-surface shadow-[0_32px_110px_rgba(0,18,24,0.48)]"
+        className="update-center-enter flex max-h-[min(82vh,760px)] w-full max-w-[680px] flex-col overflow-hidden rounded-[8px] border border-border-strong bg-surface shadow-elevation-high"
       >
         <header className="flex shrink-0 items-center gap-4 border-b border-border bg-surface-alt/50 px-6 py-5">
           <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] border ${
@@ -493,7 +494,7 @@ export const UpdateCenter: React.FC = () => {
 
           {phase === 'failed' ? (
             <div className="space-y-5">
-              <div className="rounded-[8px] border border-status-danger/25 bg-status-danger/8 p-4">
+              <div className="rounded-[8px] border border-status-danger/25 bg-status-danger/8 p-4" role="alert" aria-live="assertive">
                 <div className="flex items-center gap-2 text-sm font-black text-status-danger"><AlertTriangle size={17} />{receipt ? resultTitle(receipt) : '更新没有完成'}</div>
                 <div className="mt-2 text-sm leading-6 text-text">{errorMessage || '当前版本保持不变，可以稍后重试。'}</div>
               </div>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import unittest
 
 
@@ -60,13 +61,17 @@ class BusyOverlayContractTests(unittest.TestCase):
         self.assertIn("role=\"status\"", source)
         self.assertIn("aria-live=\"polite\"", source)
         self.assertIn("data-busy-overlay-card", source)
-        self.assertIn("bg-[#FFFCF4]", source)
+        self.assertIn("bg-surface", source)
+        self.assertIn("border-border-strong", source)
+        self.assertIn("text-text", source)
+        self.assertIn("text-text-muted", source)
         self.assertIn("rounded-[8px]", source)
         self.assertIn("max-h-[min(80vh,420px)]", source)
         self.assertIn("overflow-auto", source)
         self.assertIn("break-words", source)
         self.assertIn("whitespace-pre-wrap", source)
         self.assertNotIn("absolute inset-0", source)
+        self.assertIsNone(re.search(r"#[0-9a-fA-F]{3,8}\b", source))
 
     def test_busy_overlay_supports_compact_non_blocking_corner_mode(self) -> None:
         source = _busy_overlay_source()

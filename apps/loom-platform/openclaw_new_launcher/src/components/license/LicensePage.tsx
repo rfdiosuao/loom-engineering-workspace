@@ -401,7 +401,7 @@ export const LicensePage: React.FC = () => {
       <div
         data-account-subscription-page
         data-white-label-layout="account-subscription"
-        className="loom-white-page flex h-full flex-col overflow-hidden bg-surface text-text"
+        className="loom-white-page flex h-full flex-col overflow-hidden bg-app-bg text-text"
       >
         <BusyOverlay
           active={busy}
@@ -409,7 +409,7 @@ export const LicensePage: React.FC = () => {
           detail={`${APP_DISPLAY_NAME} 正在连接模型服务。`}
         />
 
-        <header className="shrink-0 border-b border-border px-8 py-7">
+        <header className="shrink-0 border-b border-border bg-surface px-8 py-7">
           <div className="text-sm font-black text-accent">模型账户</div>
           <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
             <div>
@@ -545,7 +545,7 @@ export const LicensePage: React.FC = () => {
   return (
     <div
       data-account-subscription-page
-      className="relative h-full overflow-hidden bg-app-bg text-text"
+      className="relative h-full overflow-y-auto overflow-x-hidden bg-app-bg text-text"
     >
       <BusyOverlay
         active={busy}
@@ -583,22 +583,22 @@ export const LicensePage: React.FC = () => {
         </div>
       </div>
 
-      <div className="absolute inset-0 bg-[#1c211c]/45 backdrop-blur-[2px]" />
+      <div className="absolute inset-0 bg-overlay backdrop-blur-[2px]" />
 
-      <div className="relative z-10 flex h-full items-center justify-center px-6 py-8">
-        <section className="w-full max-w-[440px] rounded-[18px] border border-[#2C332C] bg-[#14140F]/96 p-8 text-[#F6F2E8] shadow-[0_34px_100px_rgba(0,0,0,0.42)]">
+      <div className="relative z-10 flex min-h-full items-start justify-center px-6 py-8 lg:items-center">
+        <section className="w-full max-w-[440px] rounded-[8px] border border-border-strong bg-surface-deeper p-8 text-white shadow-elevation-high">
           <div className="mb-7 flex items-start justify-between gap-4">
             <div className="flex min-w-0 gap-4">
-              <LoomLogoMark className="h-11 w-11 rounded-[12px] border border-[#31554B] bg-[#0B2F2A]" />
+              <LoomLogoMark className="h-11 w-11 rounded-[8px] border border-white/15 bg-surface-deep" />
               <div className="min-w-0">
                 <h1 className="text-[24px] font-black leading-tight">{APP_DISPLAY_NAME}</h1>
-                <p className="mt-2 text-sm leading-6 text-[#AAA59A]">
+                <p className="mt-2 text-sm leading-6 text-white/65">
                   登录后同步模型、余额与智能体配置。
                 </p>
                 <button
                   type="button"
                   onClick={handleOpenRegistration}
-                  className="mt-3 inline-flex rounded-full border border-[#1E7A63]/45 bg-[#0B6B57]/16 px-3 py-1 text-xs font-black text-[#BFF7E7] transition hover:border-[#3DBD9D] hover:bg-[#0B6B57]/28"
+                  className="mt-3 inline-flex rounded-full border border-info bg-info-soft px-3 py-1 text-xs font-black text-info-ink transition hover:bg-info"
                 >
                   新用户请前往网页注册
                 </button>
@@ -606,7 +606,7 @@ export const LicensePage: React.FC = () => {
             </div>
             <button
               type="button"
-              className="shrink-0 text-2xl leading-none text-[#9D978C] transition hover:text-[#F6F2E8]"
+              className="shrink-0 text-2xl leading-none text-white/55 transition hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus)]"
               onClick={() => setCurrentPage('dashboard')}
               aria-label="关闭登录页"
             >
@@ -615,7 +615,7 @@ export const LicensePage: React.FC = () => {
           </div>
 
           <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-2 rounded-[11px] border border-[#302B23] bg-[#100F0B] p-1">
+              <div className="grid grid-cols-2 gap-2 rounded-[8px] border border-white/15 bg-surface-deep p-1">
                 <ModeButton
                   active={authMode === 'email'}
                   onClick={() => setAuthMode('email')}
@@ -626,13 +626,13 @@ export const LicensePage: React.FC = () => {
               </div>
 
               {authMode !== 'password' && (!authCapabilities.inlineEmailCode || authCapabilities.webRegistrationRequired) ? (
-                <div className="rounded-[10px] border border-[#31554B] bg-[#10201B] px-3 py-3 text-xs leading-5 text-[#CDEFE4]">
+                <div className="rounded-[8px] border border-info bg-info-soft px-3 py-3 text-xs leading-5 text-info-ink" role="status">
                   <div>{authCapabilities.emailReason}</div>
                   {authCapabilities.webRegistrationRequired ? (
                     <button
                       type="button"
                       onClick={handleOpenRegistration}
-                      className="mt-2 font-black text-[#F6F2E8] underline decoration-[#1E7A63] underline-offset-4"
+                      className="mt-2 font-black text-info-ink underline decoration-info underline-offset-4"
                     >
                       网页注册
                     </button>
@@ -643,22 +643,22 @@ export const LicensePage: React.FC = () => {
               {authMode === 'email' ? (
                 <>
                   <label className="block">
-                    <span className="mb-2 block text-xs font-bold text-[#A9A397]">邮箱</span>
+                    <span className="mb-2 block text-xs font-bold text-white/65">邮箱</span>
                     <input
                       value={email}
                       onChange={(event) => setEmail(event.target.value)}
-                      className="h-11 w-full rounded-[9px] border border-[#3A3327] bg-[#12100B] px-3 text-sm text-[#F6F2E8] outline-none transition placeholder:text-[#615B52] focus:border-[#1E7A63] focus:ring-2 focus:ring-[#1E7A63]/25"
+                      className="h-11 w-full rounded-[8px] border border-white/15 bg-surface-deep px-3 text-sm text-white outline-none transition placeholder:text-white/35 focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
                       placeholder="请输入模型账号邮箱"
                       autoComplete="email"
                     />
                   </label>
                   <div className="grid grid-cols-[minmax(0,1fr)_112px] gap-2">
                     <label className="block min-w-0">
-                      <span className="mb-2 block text-xs font-bold text-[#A9A397]">邮箱验证码</span>
+                      <span className="mb-2 block text-xs font-bold text-white/65">邮箱验证码</span>
                       <input
                         value={emailCode}
                         onChange={(event) => setEmailCode(event.target.value)}
-                        className="h-11 w-full rounded-[9px] border border-[#3A3327] bg-[#12100B] px-3 text-sm text-[#F6F2E8] outline-none transition placeholder:text-[#615B52] focus:border-[#1E7A63] focus:ring-2 focus:ring-[#1E7A63]/25"
+                        className="h-11 w-full rounded-[8px] border border-white/15 bg-surface-deep px-3 text-sm text-white outline-none transition placeholder:text-white/35 focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
                         placeholder="6 位验证码"
                         autoComplete="one-time-code"
                       />
@@ -667,7 +667,7 @@ export const LicensePage: React.FC = () => {
                       type="button"
                       onClick={sendEmailCode}
                       disabled={busy}
-                      className="mt-[22px] h-11 rounded-[9px] border border-[#31554B] bg-[#10201B] text-sm font-black text-[#CDEFE4] transition hover:border-[#0B6B57] disabled:opacity-55"
+                      className="mt-[22px] h-11 rounded-[8px] border border-white/15 bg-surface-deep text-sm font-black text-white/80 transition hover:border-info disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                     >
                       发送验证码
                     </button>
@@ -676,14 +676,14 @@ export const LicensePage: React.FC = () => {
                     type="button"
                     onClick={handleEmailCodeLogin}
                     disabled={busy}
-                    className="h-11 w-full rounded-[9px] bg-[#0B6B57] text-sm font-black text-[#F5FFF9] shadow-[0_16px_30px_rgba(11,107,87,0.26)] transition hover:bg-[#0E7B64] disabled:cursor-not-allowed disabled:opacity-55"
+                    className="h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink shadow-elevation-medium transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                   >
                     {busy ? '验证中...' : '验证并登录'}
                   </button>
                   <button
                     type="button"
                     onClick={handleOpenRegistration}
-                    className="w-full text-center text-sm font-bold text-[#A9A397] transition hover:text-[#F6F2E8]"
+                    className="w-full text-center text-sm font-bold text-white/65 transition hover:text-white"
                   >
                     还没有账户？网页注册
                   </button>
@@ -691,11 +691,11 @@ export const LicensePage: React.FC = () => {
               ) : (
                 <>
                   <label className="block">
-                    <span className="mb-2 block text-xs font-bold text-[#A9A397]">用户名或邮箱</span>
+                    <span className="mb-2 block text-xs font-bold text-white/65">用户名或邮箱</span>
                     <input
                       value={loginName}
                       onChange={(event) => setLoginName(event.target.value)}
-                      className="h-11 w-full rounded-[9px] border border-[#3A3327] bg-[#12100B] px-3 text-sm text-[#F6F2E8] outline-none transition placeholder:text-[#615B52] focus:border-[#1E7A63] focus:ring-2 focus:ring-[#1E7A63]/25"
+                      className="h-11 w-full rounded-[8px] border border-white/15 bg-surface-deep px-3 text-sm text-white outline-none transition placeholder:text-white/35 focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
                       placeholder="请输入模型账号"
                       autoComplete="username"
                       autoFocus
@@ -711,14 +711,14 @@ export const LicensePage: React.FC = () => {
                     type="button"
                     onClick={handlePasswordLogin}
                     disabled={busy}
-                    className="h-11 w-full rounded-[9px] bg-[#0B6B57] text-sm font-black text-[#F5FFF9] shadow-[0_16px_30px_rgba(11,107,87,0.26)] transition hover:bg-[#0E7B64] disabled:cursor-not-allowed disabled:opacity-55"
+                    className="h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink shadow-elevation-medium transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                   >
                     {busy ? '登录中...' : '登录'}
                   </button>
                   <button
                     type="button"
                     onClick={handleOpenRegistration}
-                    className="w-full text-center text-sm font-bold text-[#A9A397] transition hover:text-[#F6F2E8]"
+                    className="w-full text-center text-sm font-bold text-white/65 transition hover:text-white"
                   >
                     还没有账户？网页注册
                   </button>
@@ -728,14 +728,14 @@ export const LicensePage: React.FC = () => {
               <button
                 type="button"
                 onClick={continueAsGuest}
-                className="mt-5 w-full rounded-[10px] border border-[#3A3327] bg-[#15130E] px-4 py-3 text-sm font-black text-[#F6F2E8] transition hover:border-[#0B6B57]/60 hover:bg-[#10201B]"
+                className="mt-5 w-full rounded-[8px] border border-white/15 bg-surface-deep px-4 py-3 text-sm font-black text-white transition hover:border-info hover:bg-hover"
               >
                 暂不登录，继续以访客身份浏览
               </button>
               <button
                 type="button"
                 onClick={handleOpenSubscription}
-                className="w-full text-center text-sm font-bold text-[#A9A397] transition hover:text-[#F6F2E8]"
+                className="w-full text-center text-sm font-bold text-white/65 transition hover:text-white"
               >
                 打开订阅页
               </button>
@@ -743,7 +743,7 @@ export const LicensePage: React.FC = () => {
           </div>
 
           {statusText ? (
-            <div className="mt-5 rounded-[10px] border border-[#3A3327] bg-[#10130F] px-3 py-2 text-sm leading-6 text-[#BBB5A9]">
+            <div className="mt-5 rounded-[8px] border border-white/15 bg-surface-deep px-3 py-2 text-sm leading-6 text-white/75" role="status" aria-live="polite">
               {statusText}
             </div>
           ) : null}
@@ -767,7 +767,7 @@ const ModeButton: React.FC<{
     title={title}
     className={[
       'h-9 rounded-[8px] text-xs font-black transition disabled:cursor-not-allowed disabled:opacity-45',
-      active ? 'bg-[#0B6B57] text-[#F5FFF9]' : 'text-[#A9A397] hover:bg-[#171A14] hover:text-[#F6F2E8]',
+      active ? 'bg-selected text-selected-ink' : 'text-white/65 hover:bg-hover hover:text-white',
     ].join(' ')}
   >
     {children}
@@ -781,11 +781,11 @@ const PasswordInput: React.FC<{
   onEnter: () => void;
 }> = ({ value, autoComplete, onChange, onEnter }) => (
   <label className="block">
-    <span className="mb-2 block text-xs font-bold text-[#A9A397]">密码</span>
+    <span className="mb-2 block text-xs font-bold text-white/65">密码</span>
     <input
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      className="h-11 w-full rounded-[9px] border border-[#3A3327] bg-[#12100B] px-3 text-sm text-[#F6F2E8] outline-none transition placeholder:text-[#615B52] focus:border-[#1E7A63] focus:ring-2 focus:ring-[#1E7A63]/25"
+      className="h-11 w-full rounded-[8px] border border-white/15 bg-surface-deep px-3 text-sm text-white outline-none transition placeholder:text-white/35 focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
       placeholder="请输入密码"
       type="password"
       autoComplete={autoComplete}

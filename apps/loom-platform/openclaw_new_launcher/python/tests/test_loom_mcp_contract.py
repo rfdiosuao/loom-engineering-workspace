@@ -426,6 +426,26 @@ class LoomMcpContractTests(unittest.TestCase):
         self.assertIn("durationMs", audit)
         self.assertFalse(os.path.exists(source_audit_path))
 
+    def test_mcp_result_survives_audit_volume_failure(self) -> None:
+        import loom_mcp
+
+        dispatched = (0, {"ok": True, "data": {"status": "ready"}})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(loom_mcp, "dispatch", return_value=dispatched), patch.object(
+                loom_mcp,
+                "append_audit_record",
+                side_effect=OSError(28, "No space left on device"),
+            ):
+                result = loom_mcp.call_tool(
+                    "loom_status",
+                    {"dryRun": True},
+                    permission="read",
+                    base_path=temp_dir,
+                )
+
+        self.assertFalse(result["isError"])
+        self.assertIn('"status":"ready"', result["content"][0]["text"])
+
     def test_mcp_matrix_tools_call_cli_dispatcher(self) -> None:
         import loom_mcp
 

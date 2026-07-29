@@ -95,10 +95,11 @@ class UiNavigationContractTests(unittest.TestCase):
         self.assertIn("bg-app-sidebar text-white", titlebar)
         self.assertIn("flex min-w-0 flex-1 items-stretch justify-end bg-app-sidebar", titlebar)
         self.assertIn("text-white/58 hover:bg-white/[0.07] hover:text-white", titlebar)
-        self.assertIn("text-white/60 hover:bg-[#E81123] hover:text-white", titlebar)
+        self.assertIn("text-white/60 hover:bg-status-danger hover:text-white", titlebar)
         self.assertNotIn("flex-1 items-stretch justify-end bg-surface", titlebar)
         self.assertNotIn("text-text-muted", titlebar)
         self.assertNotIn("hover:bg-hover", titlebar)
+        self.assertNotRegex(titlebar, r"#[0-9a-fA-F]{3,8}\b")
 
 
 if __name__ == "__main__":

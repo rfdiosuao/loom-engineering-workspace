@@ -240,7 +240,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const items = React.useMemo(() => normalizeNavItems(navItems.length > 0 ? navItems : DEFAULT_NAV_ITEMS), [navItems]);
 
   return (
-    <aside className="relative z-10 flex h-full w-[72px] shrink-0 flex-col border-r border-[#12343D]/75 bg-app-sidebar text-white shadow-[inset_-1px_0_rgba(55,213,163,0.08)]">
+    <aside className="relative z-10 flex h-full w-[72px] shrink-0 flex-col border-r border-white/10 bg-app-sidebar text-white">
       <div className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-[linear-gradient(90deg,transparent,rgba(55,213,163,0.08))]" />
 
       <div className="relative flex shrink-0 items-center justify-center pb-3 pt-4">

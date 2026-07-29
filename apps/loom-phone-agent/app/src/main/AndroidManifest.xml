@@ -70,7 +70,7 @@
             android:exported="false"
             android:screenOrientation="portrait" />
         <activity
-            android:name=".ui.settings.ApiTokenConfigActivity"
+            android:name=".ui.settings.PcPairingActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
         <activity

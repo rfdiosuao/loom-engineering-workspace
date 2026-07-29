@@ -551,11 +551,11 @@ export const MatrixWorkbenchPage = () => {
   };
 
   return (
-    <div data-white-label-layout="phone-matrix" className="loom-matrix-shell relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#07131B] text-slate-100">
-      <header className="flex shrink-0 items-center justify-between gap-4 border-b border-white/[0.08] bg-[#091722] px-3 py-2">
-        <div className="min-w-0"><div className="text-[9px] font-black tracking-[0.2em] text-cyan-200/60">LOOM CONTROL PLANE</div><h1 className="truncate text-[17px] font-black text-white">超级矩阵工作台</h1></div>
+    <div data-white-label-layout="phone-matrix" className="loom-matrix-shell relative flex min-h-0 flex-1 flex-col overflow-hidden bg-app-bg text-text">
+      <header className="flex shrink-0 items-center justify-between gap-4 border-b border-border bg-surface px-3 py-2">
+        <div className="min-w-0"><div className="text-[9px] font-black tracking-[0.2em] text-text-subtle">LOOM CONTROL PLANE</div><h1 className="truncate text-[17px] font-black text-text">超级矩阵工作台</h1></div>
         <div className="flex items-center gap-3">
-          {stream.error ? <span className="max-w-[220px] truncate text-[10px] text-rose-200">{stream.error}</span> : stream.loading ? <span className="text-[10px] font-bold text-slate-300">正在加载矩阵状态</span> : stream.reconnecting ? <span className="text-[10px] font-bold text-amber-200">实时流正在重连</span> : stream.connected ? <span className="text-[10px] font-bold text-emerald-200">实时状态已连接</span> : <span className="text-[10px] font-bold text-slate-400">实时状态未连接</span>}
+          {stream.error ? <span className="max-w-[220px] truncate text-[10px] text-status-danger" role="alert">{stream.error}</span> : stream.loading ? <span className="text-[10px] font-bold text-info" role="status">正在加载矩阵状态</span> : stream.reconnecting ? <span className="text-[10px] font-bold text-status-warning" role="status">实时流正在重连</span> : stream.connected ? <span className="text-[10px] font-bold text-status-success" role="status">实时状态已连接</span> : <span className="text-[10px] font-bold text-text-muted">实时状态未连接</span>}
           <MatrixMetrics devices={devices} />
         </div>
       </header>

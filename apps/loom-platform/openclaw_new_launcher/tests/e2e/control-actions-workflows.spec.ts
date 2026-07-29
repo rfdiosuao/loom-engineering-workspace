@@ -543,14 +543,19 @@ test('phone baseline controls own form, mode, profile, quick-task, and clipboard
 
   const name = appMain(page).getByLabel('设备名称');
   const address = appMain(page).getByLabel('手机 IP');
-  const token = appMain(page).getByLabel('连接令牌');
+  const pairingCode = appMain(page).getByLabel('USB 6 位配对码');
+  const pairingPayload = appMain(page).getByLabel('配对信息（推荐）');
   await name.fill('Temporary Phone');
   await address.fill('192.0.2.20');
-  await token.fill('temporary-token');
+  await pairingCode.fill('123456');
+  await pairingPayload.fill('loom-pairing-v1:isolated-audit-payload');
   await appMain(page).getByRole('button', { name: '添加手机' }).click();
   await expect(name).toHaveValue('Android Phone 1');
   await expect(address).toHaveValue('');
-  await expect(token).toHaveValue('');
+  await expect(pairingCode).toHaveValue('');
+  await expect(pairingPayload).toHaveValue('');
+  await appMain(page).getByRole('button', { name: '通过 USB 配对' }).click();
+  await expectToast(page, '请先输入手机端生成的 6 位配对码，或粘贴完整配对信息。');
 
   const beforeReadConfig = await markCalls(audit);
   await appMain(page).getByRole('button', { name: '读取配置' }).click();
@@ -578,10 +583,32 @@ test('phone baseline controls own form, mode, profile, quick-task, and clipboard
 });
 
 test('phone save-and-detect path records config, matrix registration, and status without touching a device', async ({ audit, page }) => {
+  const pairedConfig = {
+    selectedDeviceId: 'phone-1',
+    configured: true,
+    devices: [{
+      id: 'phone-1',
+      deviceId: 'phone-1',
+      name: 'Audit Phone',
+      baseUrl: 'http://192.0.2.10:9527',
+      tokenAvailable: true,
+      paired: true,
+      confirmed: true,
+      configured: true,
+      selected: true,
+    }],
+    pairing: {
+      ok: true,
+      state: 'verified',
+      confirmed: true,
+      confirmationPending: false,
+      connectionMode: 'lan',
+    },
+  };
   const statusJob = completedJob('phone-save-status', {
-    stdout: JSON.stringify({ ok: true, success: true, deviceId: 'phone-audit-1' }),
+    stdout: JSON.stringify({ ok: true, success: true, deviceId: 'phone-1' }),
   });
-  await audit.registerRoute('POST', '/api/phone/config/device', { value: AUDIT_PHONE_CONFIG });
+  await audit.registerRoute('POST', '/api/phone/pairing/claim', { value: pairedConfig });
   await audit.registerRoute('POST', '/api/matrix/device/register', {
     value: { device: AUDIT_MATRIX_WITH_DEVICE.devices[0], status: AUDIT_MATRIX_WITH_DEVICE },
   });
@@ -593,23 +620,24 @@ test('phone save-and-detect path records config, matrix registration, and status
 
   await appMain(page).getByLabel('设备名称').fill('Audit Phone');
   await appMain(page).getByLabel('手机 IP').fill('192.0.2.10');
-  await appMain(page).getByLabel('连接令牌').fill('audit-token-not-real');
+  await appMain(page).getByLabel('配对信息（推荐）').fill('loom-pairing-v1:isolated-audit-payload');
   const before = await markCalls(audit);
-  await appMain(page).getByRole('button', { name: '保存并检测' }).click();
+  await appMain(page).getByRole('button', { name: '与手机配对' }).click();
   await expectProxyIntent(audit, before, {
     method: 'POST',
-    path: '/api/phone/config/device',
+    path: '/api/phone/pairing/claim',
     body: {
       id: 'phone-1',
       name: 'Audit Phone',
       baseUrl: '192.0.2.10',
-      token: 'audit-token-not-real',
-      selectedDeviceId: 'phone-1',
+      payload: 'loom-pairing-v1:isolated-audit-payload',
+      code: '',
+      usbSerial: '',
     },
   });
   await expectProxyIntent(audit, before, { method: 'POST', path: '/api/phone/status', body: { deviceId: 'phone-1' } });
   await expectProxyIntent(audit, before, { method: 'GET', path: `/api/jobs/${statusJob.id}`, body: null });
-  await expectToast(page, '手机连接配置已保存');
+  await expectToast(page, '手机已通过局域网安全配对并确认');
 });
 
 test('configured phone controls mock device, read, task, model, and delete intents', async ({ audit, page }) => {
@@ -797,7 +825,7 @@ test('matrix dispatch tracks the shared job until completion', async ({ audit, p
 
   const main = appMain(page);
   await main.getByRole('checkbox', { name: '任务目标' }).check();
-  await main.getByPlaceholder('输入要在已选设备上执行的真实任务').fill('打开系统设置');
+  await main.getByRole('textbox', { name: '矩阵任务' }).fill('打开系统设置');
   const beforeDispatch = await markCalls(audit);
   await main.getByRole('button', { name: '下发任务' }).click();
 
@@ -852,7 +880,7 @@ test('matrix workbench selects devices, configures a task, dispatches, and suppo
   await expect(drawer.getByRole('link', { name: '下载 APK' })).toBeVisible();
   await drawer.getByRole('button', { name: '完成' }).click();
 
-  const promptInput = main.getByPlaceholder('输入要在已选设备上执行的真实任务');
+  const promptInput = main.getByRole('textbox', { name: '矩阵任务' });
   await promptInput.fill('mocked matrix dispatch only');
   await main.getByRole('button', { name: '高级参数' }).click();
   await expect(riskConfirmation).not.toBeChecked();

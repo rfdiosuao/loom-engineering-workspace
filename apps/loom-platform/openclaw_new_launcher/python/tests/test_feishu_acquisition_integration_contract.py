@@ -625,7 +625,7 @@ class FeishuAcquisitionIntegrationContractTests(unittest.TestCase):
     def test_ui_and_prompt_surface_include_feishu_sync_policy(self) -> None:
         page_path = os.path.join(REPO_ROOT, "src", "components", "acquisition", "AcquisitionWorkbenchPage.tsx")
         api_path = os.path.join(REPO_ROOT, "src", "services", "api.ts")
-        skill_path = os.path.join(REPO_ROOT, "public", "skills", "luming-skills-library-20260721.zip")
+        skill_path = os.path.join(REPO_ROOT, "public", "skills", "luming-skills-library-20260729.zip")
 
         with open(page_path, "r", encoding="utf-8") as handle:
             page = handle.read()

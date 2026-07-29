@@ -187,9 +187,9 @@ function statusClass(status: string): string {
   if (status === 'simulation_ready') return 'border-border/80 bg-surface-alt/60 text-text-muted';
   if (status.endsWith('_failed')) return 'border-status-danger/30 bg-status-danger/10 text-status-danger';
   if (status === 'not_installed' || status === 'manual_install_required') {
-    return 'border-[#0B4A3E]/30 bg-[#0B4A3E]/10 text-[#0B4A3E]';
+    return 'border-info bg-info-soft text-info-ink';
   }
-  return 'border-[#0B4A3E]/30 bg-[#0B4A3E]/10 text-[#0B4A3E]';
+  return 'border-info bg-info-soft text-info-ink';
 }
 
 function diagnosticLabel(status: DiagnosticStatus): string {
@@ -200,7 +200,7 @@ function diagnosticLabel(status: DiagnosticStatus): string {
 
 function diagnosticClass(status: DiagnosticStatus): string {
   if (status === 'ok') return 'border-status-success/30 bg-status-success/10 text-status-success';
-  if (status === 'warn') return 'border-[#0B4A3E]/25 bg-[#0B4A3E]/10 text-[#0B4A3E]';
+  if (status === 'warn') return 'border-status-warning/30 bg-status-warning/10 text-status-warning';
   return 'border-status-danger/30 bg-status-danger/10 text-status-danger';
 }
 
@@ -587,7 +587,7 @@ export const CompactPrerequisitePanel: React.FC<{
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] ${
-              allReady ? 'bg-status-success/12 text-status-success' : busy ? 'bg-[#0B4A3E]/10 text-[#0B4A3E]' : 'bg-surface-alt text-text-muted'
+              allReady ? 'bg-status-success/12 text-status-success' : busy ? 'bg-info-soft text-info-ink' : 'bg-surface-alt text-text-muted'
             }`}>
               {busy ? <ActivityRing /> : <span className="text-lg font-black">{allReady ? '✓' : '•'}</span>}
             </div>
@@ -607,15 +607,15 @@ export const CompactPrerequisitePanel: React.FC<{
           </div>
         </div>
 
-        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#0B4A3E]/10">
+        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-disabled">
           <div
-            className={`h-full rounded-full bg-[#0B4A3E] transition-all duration-300 ${busy ? 'loom-scan-line' : ''}`}
+            className={`h-full rounded-full bg-info transition-all duration-deliberate ${busy ? 'loom-scan-line' : ''}`}
             style={{ width: `${Math.max(8, pct)}%` }}
           />
         </div>
 
         {error ? (
-          <div className="mt-4 rounded-[12px] border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
+          <div className="mt-4 rounded-[8px] border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger" role="alert" aria-live="assertive">
             {error}
           </div>
         ) : null}
@@ -636,8 +636,8 @@ export const CompactPrerequisitePanel: React.FC<{
               <div className="flex items-center justify-between gap-2">
                 <div className="truncate text-xs font-black text-text">{check.label}</div>
                 <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-                  check.status === 'ok' ? 'bg-status-success' : check.status === 'fail' ? 'bg-status-danger' : 'bg-[#0B4A3E]/50'
-                }`} />
+                  check.status === 'ok' ? 'bg-status-success' : check.status === 'fail' ? 'bg-status-danger' : 'bg-status-warning'
+                }`} aria-hidden="true" />
               </div>
               <div className="mt-1 truncate text-xs text-text-muted" title={check.message}>{check.message || displayDiagnosticLabel(check.status)}</div>
             </div>
@@ -689,7 +689,7 @@ function modelConfigTone(status?: AgentModelConfigStatus): string {
   if (status.status === 'unverified') return 'border-status-warning/30 bg-status-warning/10 text-status-warning';
   if (status.status === 'failed') return 'border-status-danger/30 bg-status-danger/10 text-status-danger';
   if (status.status === 'not_installed' || status.status === 'no_wire') return 'border-border/70 bg-surface-alt/50 text-text-muted';
-  return 'border-[#0B4A3E]/30 bg-[#0B4A3E]/10 text-[#0B4A3E]';
+  return 'border-info bg-info-soft text-info-ink';
 }
 
 const AgentModelConfigPanel: React.FC<{
@@ -823,7 +823,7 @@ const AgentModelConfigPanel: React.FC<{
             type="button"
             onClick={() => setSourceMode('custom')}
             disabled={locked || busy}
-            className={`h-10 min-w-0 rounded-[6px] px-2 text-xs font-black transition ${sourceMode === 'custom' ? 'bg-[#0B6B57] text-white shadow-[0_12px_24px_rgba(11,107,87,0.22)]' : 'text-text-muted hover:text-text'}`}
+            className={`h-10 min-w-0 rounded-[6px] px-2 text-xs font-black transition ${sourceMode === 'custom' ? 'bg-selected text-selected-ink shadow-elevation-low' : 'text-text-muted hover:text-text'}`}
           >
             自定义
           </button>
@@ -911,7 +911,7 @@ const AgentModelConfigPanel: React.FC<{
             <label className="block md:col-span-2">
               <div className="mb-2 flex items-center justify-between gap-3 text-xs font-bold text-text-muted">
                 <span>API Key</span>
-                <span className="text-[#0B6B57]">保存在本机，并写入 Codex 所需的用户环境</span>
+                <span className="text-info">保存在本机，并写入 Codex 所需的用户环境</span>
               </div>
               <Input
                 data-agent-custom-api-key-input
@@ -1895,7 +1895,7 @@ export const AgentInstallerPage: React.FC = () => {
                         {selected.errorMessage}
                       </div>
                     ) : isWorking(selected.status) ? (
-                      <div data-installer-job-progress className="rounded-[16px] border border-[#0B4A3E]/30 bg-[#0B4A3E]/10 p-4 text-sm font-bold text-[#0B4A3E]">
+                      <div data-installer-job-progress className="rounded-[8px] border border-info bg-info-soft p-4 text-sm font-bold text-info-ink" role="status" aria-live="polite">
                         <span className="inline-flex items-center gap-2">
                           <ActivityRing />
                           {selectedActiveJob?.progress?.message || selectedActiveJob?.message || displayStatusLabel(selected.status)}
@@ -1986,7 +1986,7 @@ export const AgentInstallerPage: React.FC = () => {
                     {pendingModelRestart?.componentId === selected.id && !modelRestartPrompt ? (
                       <div
                         data-agent-model-restart-pending
-                        className="flex max-w-[min(420px,calc(100vw-40px))] flex-wrap items-center justify-between gap-3 rounded-[8px] border border-status-warning/35 bg-[#FFFCF4] px-4 py-3 text-xs font-bold text-status-warning shadow-[0_20px_60px_rgba(5,35,29,0.28)]"
+                        className="flex max-w-[min(420px,calc(100vw-40px))] flex-wrap items-center justify-between gap-3 rounded-[8px] border border-status-warning/35 bg-status-warning/10 px-4 py-3 text-xs font-bold text-status-warning shadow-elevation-medium"
                         style={{
                           position: 'fixed',
                           bottom: '20px',

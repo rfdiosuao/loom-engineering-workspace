@@ -68,6 +68,9 @@
           "pytest",
           "python/tests/test_native_agent_runtime.py",
           "python/tests/test_native_agent_ui_contract.py",
+          "python/tests/test_agent_capabilities.py",
+          "python/tests/test_agent_orchestrator.py",
+          "python/tests/test_agent_service.py",
           "-q"
         ]
       }
@@ -94,6 +97,28 @@
       }
     },
     {
+      "id": "phone.pairing.contracts",
+      "domain": "phone",
+      "risk": "high",
+      "description": "手机配对、凭据存储和重连必须隐藏长期令牌、拒绝重放并保留可恢复状态。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "python",
+        "arguments": [
+          "-B",
+          "-m",
+          "pytest",
+          "python/tests/test_routes_phone.py",
+          "python/tests/test_phone_demo_page_contract.py",
+          "python/tests/test_phone_signature_contract.py",
+          "-q"
+        ]
+      }
+    },
+    {
       "id": "ui.first-success.contracts",
       "domain": "ui",
       "risk": "high",
@@ -112,6 +137,23 @@
           "python/tests/test_models_page_contract.py",
           "python/tests/test_native_agent_ui_contract.py",
           "-q"
+        ]
+      }
+    },
+    {
+      "id": "ui.color.contracts",
+      "domain": "ui",
+      "risk": "high",
+      "description": "Tailwind 颜色产物必须包含统一语义 token，亮暗主题关键文本对比度必须达到 WCAG AA。",
+      "readOnly": true,
+      "requiresExternalEnvironment": false,
+      "ci": true,
+      "workingDirectory": "apps/loom-platform/openclaw_new_launcher",
+      "command": {
+        "executable": "npm",
+        "arguments": [
+          "run",
+          "test:ui-color-contracts"
         ]
       }
     }
@@ -163,12 +205,26 @@
       ]
     },
     {
+      "type": "phone_pairing_or_reconnection_failure",
+      "failureDomains": [
+        "phone_identity",
+        "pairing_code",
+        "credential_storage",
+        "usb_transport",
+        "lan_transport"
+      ],
+      "gateIds": [
+        "phone.pairing.contracts"
+      ]
+    },
+    {
       "type": "ui_false_success_or_unactionable_error",
       "failureDomains": [
         "unknown"
       ],
       "gateIds": [
-        "ui.first-success.contracts"
+        "ui.first-success.contracts",
+        "ui.color.contracts"
       ]
     }
   ]

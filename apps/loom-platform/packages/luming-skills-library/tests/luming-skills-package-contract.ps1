@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $skillsRoot = Join-Path $repoRoot "skills"
 $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "manifest.json") | ConvertFrom-Json
+$provenance = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repoRoot "BUNDLE_PROVENANCE.json") | ConvertFrom-Json
 $packageScript = Join-Path $repoRoot "scripts\package.ps1"
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("luming-skills-package-contract-" + [guid]::NewGuid().ToString("N"))
 
@@ -86,11 +87,18 @@ foreach ($artifactRoot in @(
 
 try {
   New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
+  $packageSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $packageScript
+  if ($packageSource -match '\bGet-Date\b') {
+    throw "Package naming must come from manifest/provenance, not the wall clock"
+  }
   & $packageScript -OutputDir $tempRoot | Out-Null
 
   $zipFiles = @(Get-ChildItem -LiteralPath $tempRoot -File -Filter "*.zip")
   if ($zipFiles.Count -ne 1) {
     throw "Expected exactly one package ZIP, found $($zipFiles.Count)"
+  }
+  if ($zipFiles[0].Name -cne [string]$provenance.archive) {
+    throw "Package archive name differs from bundle provenance: $($zipFiles[0].Name)"
   }
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem

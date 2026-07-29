@@ -9,13 +9,17 @@ $stateRoot = Join-Path $tempRoot "phone-agent-state"
 $unifiedSkillName = "luming-phone-agent"
 $reparsePaths = [Collections.Generic.List[string]]::new()
 $legacyNames = @(
+  "android-agent",
+  "android-control",
   "loom-adb-forward-proxy-bypass",
   "loom-command-brain",
   "luming-acquisition-agent",
   "luming-boss-resume-screening",
   "luming-matrix-supervisor-loop",
   "luming-phone-scenario-builder",
-  "luming-scenario-skill-writer"
+  "luming-scenario-skill-writer",
+  "phone-agent",
+  "phone-master"
 )
 
 function Get-FileManifest {
@@ -72,6 +76,7 @@ function Assert-DirectoryParity {
 
   $sourceManifest = Get-FileManifest -Root $Source
   $installedManifest = Get-FileManifest -Root $Installed
+  $installedManifest.Remove(".loom-skill-owner.json") | Out-Null
   Assert-StringSetEqual `
     -Expected @($sourceManifest.Keys) `
     -Actual @($installedManifest.Keys) `
@@ -265,9 +270,13 @@ function Assert-TransactionalRollback {
 
   $failureDestination = New-TransactionalFailureDestination -Name "$Name-destination"
   $failureStateRoot = Join-Path $tempRoot "$Name-state"
+  New-Item -ItemType Directory -Force -Path $failureStateRoot | Out-Null
+  New-Item -ItemType File -Force -Path (Join-Path $failureStateRoot "install.lock") | Out-Null
   if ($SeedMetadata) {
-    New-Item -ItemType Directory -Force -Path $failureStateRoot | Out-Null
-    [IO.File]::WriteAllBytes((Join-Path $failureStateRoot "source.json"), [byte[]](255, 0, 128, 64, 32))
+    Set-Content `
+      -LiteralPath (Join-Path $failureStateRoot "source.json") `
+      -Value '{"schema":"loom.phone-agent.source.v1","sourceSkillRoot":"C:\\missing","installedSkillRoot":"C:\\missing"}' `
+      -Encoding UTF8
   }
 
   $destinationBefore = Get-TreeSnapshot -Root $failureDestination
@@ -318,7 +327,7 @@ function Assert-CleanupFailurePreservesCommittedInstall {
     throw "Cleanup failure fixture unexpectedly exited 0"
   }
   Assert-StringSetEqual `
-    -Expected @($unifiedSkillName) `
+    -Expected @($legacyNames + @($unifiedSkillName)) `
     -Actual @(Get-TriggerableSkillNames -Destination $failureDestination) `
     -Context "Cleanup failure committed triggerable Skills"
   Assert-DirectoryParity `
@@ -423,20 +432,15 @@ try {
   Assert-DestinationIsRequired
 
   $sourceSkill = Join-Path $skillsRoot $unifiedSkillName
-  $staleUnifiedTarget = Join-Path $destination $unifiedSkillName
   $unownedDirectory = Join-Path $destination "unowned-sentinel"
   foreach ($legacyName in $legacyNames) {
     $staleLegacyTarget = Join-Path $destination $legacyName
     New-Item -ItemType Directory -Path (Join-Path $staleLegacyTarget "stale-content") -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $staleLegacyTarget "SKILL.md") -Value "obsolete $legacyName" -Encoding UTF8
   }
-  New-Item -ItemType Directory -Path (Join-Path $staleUnifiedTarget "stale-content") -Force | Out-Null
   New-Item -ItemType Directory -Path $unownedDirectory -Force | Out-Null
   New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
-  Set-Content -LiteralPath (Join-Path $staleUnifiedTarget "SKILL.md") -Value "stale unified skill" -Encoding UTF8
-  Set-Content -LiteralPath (Join-Path $staleUnifiedTarget "stale-content\obsolete.txt") -Value "obsolete" -Encoding UTF8
   Set-Content -LiteralPath (Join-Path $unownedDirectory "keep.txt") -Value "keep" -Encoding UTF8
-  Set-Content -LiteralPath (Join-Path $stateRoot "source.json") -Value '{"stale":true}' -Encoding UTF8
 
   $installerOutput = @(
     & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript `
@@ -459,10 +463,13 @@ try {
     -Expected @($unifiedSkillName) `
     -Actual @($result.installed) `
     -Context "Installer JSON installed Skills"
+  if (@($result.removed | Where-Object { $_ }).Count -ne 0) {
+    throw "Installer removed legacy Skills without LOOM ownership proof: $($result.removed -join ', ')"
+  }
   Assert-StringSetEqual `
     -Expected $legacyNames `
-    -Actual @($result.removed) `
-    -Context "Installer JSON removed legacy Skills"
+    -Actual @($result.skippedUnowned) `
+    -Context "Installer JSON preserved unowned replacement names"
 
   Assert-DirectoryParity `
     -Source $sourceSkill `
@@ -471,8 +478,8 @@ try {
 
   foreach ($legacyName in $legacyNames) {
     $legacyTarget = Join-Path $destination $legacyName
-    if (Test-Path -LiteralPath $legacyTarget) {
-      throw "Installer did not remove legacy Skill: $legacyName"
+    if (-not (Test-Path -LiteralPath $legacyTarget -PathType Container)) {
+      throw "Installer removed an unowned legacy Skill: $legacyName"
     }
   }
   if (-not (Test-Path -LiteralPath (Join-Path $unownedDirectory "keep.txt") -PathType Leaf)) {
@@ -482,7 +489,7 @@ try {
   Assert-SourceMetadata `
     -Result $result `
     -StateRoot $stateRoot `
-    -SourceSkillRoot $sourceSkill `
+    -SourceSkillRoot (Join-Path $stateRoot "source\$unifiedSkillName") `
     -InstalledSkillRoot (Join-Path $destination $unifiedSkillName)
 
   $stagingResidue = @(
@@ -526,9 +533,7 @@ try {
     Remove-Item -LiteralPath $sourceMetadataPlaceholder -Recurse -Force
   }
 
-  Assert-MetadataWriteFailureRetainsLegacyTargets
   Assert-TransactionalRollback -Name "metadata-failure" -FailureInjection "metadata-write" -SeedMetadata $true
-  Assert-TransactionalRollback -Name "legacy-removal-failure" -FailureInjection "legacy-removal" -SeedMetadata $false
   Assert-CleanupFailurePreservesCommittedInstall
   Assert-ReparseStateRootRejectedWithoutMutation
 } finally {

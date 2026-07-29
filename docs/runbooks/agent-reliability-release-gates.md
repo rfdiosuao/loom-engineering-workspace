@@ -2,25 +2,29 @@
 
 本文档用于在发布 LOOM 安装包前验证智能体、模型接线、媒体配置、矩阵状态和手机连接。命令默认从 `apps/loom-platform/openclaw_new_launcher` 目录执行。
 
-## 受控基线与五域定向门禁
+## 受控基线与六域定向门禁
 
 `2.4.x` 的冻结计划位于：
 
 - `docs/superpowers/plans/2026-07-27-loom-core-business-stability-roadmap.md`
 - `docs/reviews/2026-07-27-agent-install-model-baseline.md`
 
-机器可读门禁位于 `packages/contracts/reliability-gates.v1.json`。它把事故类型映射到 `installer`、`model`、`agent`、`matrix` 和 `ui` 五个可执行域，命令只能由根目录只读执行器运行：
+机器可读门禁位于 `packages/contracts/reliability-gates.v1.json`。它把事故类型映射到 `installer`、`model`、`agent`、`matrix`、`phone` 和 `ui` 六个可执行域，命令只能由根目录只读执行器运行：
 
 ```powershell
 .\scripts\invoke-reliability-gates.ps1 -List
 .\scripts\invoke-reliability-gates.ps1 -Domain installer
+.\scripts\invoke-reliability-gates.ps1 -Domain phone
 .\scripts\invoke-reliability-gates.ps1 -IncidentType model_unavailable_or_upstream_error
+.\scripts\invoke-reliability-gates.ps1 -IncidentType phone_pairing_or_reconnection_failure
 .\scripts\invoke-reliability-gates.ps1 -Risk high -Ci
 ```
 
 执行器只接受清单中的 allow-list 程序和仓库内工作目录，不运行真实模型推理、媒体生成、手机写操作、签名或发布。CI 必须先运行高风险定向门禁，再运行全量 Platform 测试。
 
-事故归类使用固定故障域：`loom_installer`、`agent_package`、`local_environment`、`account_auth`、`model_permission`、`provider_upstream`、`network`、`unknown`。`unknown` 只能作为证据不足的临时状态，不允许作为发布结论。
+事故归类使用固定故障域：`loom_installer`、`agent_package`、`local_environment`、`account_auth`、`model_permission`、`provider_upstream`、`network`、`phone_identity`、`pairing_code`、`credential_storage`、`usb_transport`、`lan_transport`、`unknown`。`unknown` 只能作为证据不足的临时状态，不允许作为发布结论。
+
+`phone` 门禁只验证配对状态机、凭据保护、重放拒绝和恢复契约，不会连接或控制真实手机。实体手机首次配对、断线恢复和多机稳定性仍必须按下文单独验收。
 
 自动化证据保存命令和 PASS/FAIL；需要真实环境的证据必须标记“未执行”直至独立验收。发布前按 `docs/releases/RELEASE_CHECKLIST.md` 逐项复核。
 

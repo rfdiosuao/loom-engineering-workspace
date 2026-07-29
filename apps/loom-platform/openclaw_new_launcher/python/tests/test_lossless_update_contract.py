@@ -390,6 +390,11 @@ class LosslessUpdateContractTests(unittest.TestCase):
 
         self.assertIn("prepare_update_install", source)
         self.assertIn("shutdown_backend().await", source)
+        self.assertIn('post_bridge_shutdown("/api/agent/shutdown").await;', source)
+        self.assertLess(
+            source.index('post_bridge_shutdown("/api/agent/shutdown").await;'),
+            source.index('post_bridge_shutdown("/api/process/stop").await;'),
+        )
         self.assertIn("upgrade-backups", source)
         self.assertIn('None => "LOOM"', source)
         self.assertIn("update_recovery_dir_name()", source)
@@ -448,6 +453,11 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("if ready_path.is_file()", source)
         self.assertIn("handoff_process.try_wait()", source)
         self.assertIn("app_handle.exit(0)", source)
+        self.assertNotIn("Duration::from_millis(1200)", source)
+        self.assertIn(
+            "shutdown_backend().await;\n                app_handle.exit(0);",
+            source,
+        )
         self.assertLess(
             source.index("if ready_path.is_file()"),
             source.index("shutdown_backend().await"),

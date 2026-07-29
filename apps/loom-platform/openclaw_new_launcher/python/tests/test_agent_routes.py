@@ -107,6 +107,10 @@ class FakeAgentService:
             "data": {},
         }]
 
+    def shutdown(self):
+        self.calls.append(("shutdown", None))
+        return {"stopped": True, "drained": True}
+
 
 def _ctx(service: FakeAgentService, *, authorized: bool = True):
     async def body(request):
@@ -122,6 +126,7 @@ def _ctx(service: FakeAgentService, *, authorized: bool = True):
         body=body,
         fastapi_json=lambda payload, status=200: JSONResponse(payload, status_code=status),
         get_agent_service=lambda: service,
+        shutdown_agent_service=service.shutdown,
     )
 
 
@@ -141,6 +146,45 @@ def test_agent_routes_require_bridge_authentication() -> None:
     response = TestClient(app).get("/api/agent/bootstrap")
 
     assert response.status_code == 401
+
+
+def test_agent_shutdown_uses_the_existing_service_without_lazy_creation() -> None:
+    client, service = _client()
+
+    response = client.post("/api/agent/shutdown")
+
+    assert response.status_code == 200
+    assert response.json() == {"stopped": True, "drained": True}
+    assert service.calls == [("shutdown", None)]
+
+
+def test_agent_shutdown_preserves_incomplete_drain_flags() -> None:
+    service = FakeAgentService()
+
+    def incomplete_shutdown():
+        return {
+            "stopped": False,
+            "drained": False,
+            "unfinishedRuns": 1,
+            "unfinishedWorkers": 1,
+            "outcomeIndeterminate": True,
+            "executionMayContinue": True,
+            "code": "agent_shutdown_incomplete",
+            "message": "仍有执行可能继续",
+            "retryable": False,
+        }
+
+    service.shutdown = incomplete_shutdown
+    client, _service = _client(service)
+
+    response = client.post("/api/agent/shutdown")
+
+    assert response.status_code == 200
+    assert response.json()["drained"] is False
+    assert response.json()["unfinishedRuns"] == 1
+    assert response.json()["unfinishedWorkers"] == 1
+    assert response.json()["executionMayContinue"] is True
+    assert response.json()["code"] == "agent_shutdown_incomplete"
 
 
 def test_sync_agent_service_calls_do_not_block_the_event_loop() -> None:

@@ -28,7 +28,7 @@ export const MatrixCommandBar: React.FC<MatrixCommandBarProps> = ({
   onEmergencyStop,
   onOpenAdvanced,
 }) => (
-  <section data-matrix-command-bar className="border-b border-white/[0.08] bg-[#0A1B26] px-3 py-2.5">
+  <section data-matrix-command-bar className="border-b border-border bg-surface px-3 py-2.5" aria-busy={dispatching || stopping}>
     <div className="grid grid-cols-[minmax(280px,1fr)_auto] items-end gap-2">
       <label className="min-w-0">
         <span className="sr-only">矩阵任务</span>
@@ -37,11 +37,11 @@ export const MatrixCommandBar: React.FC<MatrixCommandBarProps> = ({
           onChange={(event) => onPromptChange(event.target.value)}
           rows={2}
           placeholder={APP_TASK_PLACEHOLDER}
-          className="min-h-[58px] !rounded-[6px] !border-white/10 !bg-[#06131C] !px-3 !py-2 !text-xs !leading-5 !text-slate-100"
+          className="min-h-[58px] !rounded-[6px] !border-border !bg-input !px-3 !py-2 !text-xs !leading-5 !text-text"
         />
       </label>
       <div className="flex items-center gap-2 pb-0.5">
-        <span className="whitespace-nowrap text-[11px] font-bold text-slate-400">作用于 {selectedCount} 台</span>
+        <span className="whitespace-nowrap text-[11px] font-bold text-text-muted">作用于 {selectedCount} 台</span>
         <Button variant="quiet" onClick={onOpenAdvanced} className="!rounded-[6px] !px-2.5 !py-2 !text-xs" title="任务高级参数">
           高级参数
         </Button>
@@ -60,6 +60,6 @@ export const MatrixCommandBar: React.FC<MatrixCommandBarProps> = ({
         </Button>
       </div>
     </div>
-    {result ? <div data-matrix-action-result className="mt-1.5 text-[11px] font-semibold text-cyan-100">{result}</div> : null}
+    {result ? <div data-matrix-action-result className="mt-1.5 text-[11px] font-semibold text-info" role="status" aria-live="polite">{result}</div> : null}
   </section>
 );

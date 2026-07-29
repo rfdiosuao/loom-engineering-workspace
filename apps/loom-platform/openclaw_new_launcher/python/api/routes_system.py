@@ -41,6 +41,8 @@ def register_system_routes(app, ctx) -> None:
         updater = ctx.get_updater()
         launcher_version = _launcher_version()
         capabilities = list(BRIDGE_CAPABILITIES)
+        identity_getter = getattr(ctx, "get_bridge_identity", None)
+        identity = identity_getter() if callable(identity_getter) else {}
         return ctx.fastapi_json({
             "node_path": ctx.paths.node_exe,
             "base_path": ctx.paths.base_path,
@@ -52,5 +54,6 @@ def register_system_routes(app, ctx) -> None:
                 "version": launcher_version,
                 "apiContractVersion": API_CONTRACT_VERSION,
                 "capabilities": capabilities,
+                "identity": identity,
             },
         })

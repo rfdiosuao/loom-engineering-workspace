@@ -727,7 +727,7 @@ export function AgentWorkbenchPage() {
   const runActive = Boolean(currentRun && !isTerminalRun(currentRun));
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface" data-agent-workbench>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-app-bg" data-agent-workbench>
       <AgentHeader
         bootstrap={bootstrap}
         run={currentRun}

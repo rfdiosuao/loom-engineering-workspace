@@ -28,7 +28,7 @@ _LOCKS_GUARD = threading.Lock()
 _LOCKS: Dict[str, threading.RLock] = {}
 _PROCESS_LOCKS: Dict[str, "_InterProcessFileLock"] = {}
 _REDACTED = "[REDACTED]"
-_REMOVABLE_RUN_FIELDS = frozenset({"error", "completedAt"})
+_REMOVABLE_RUN_FIELDS = frozenset({"controlState", "error", "completedAt"})
 _SENSITIVE_KEYS = {
     "apikey",
     "authorization",
@@ -451,6 +451,40 @@ class AgentSessionRepository:
             self._update_session_from_message_unlocked(session_id, sanitized)
             return copy.deepcopy(sanitized)
 
+    def finalize_run_with_message(
+        self,
+        session_id: str,
+        run_id: str,
+        message: JsonObject,
+        changes: JsonObject,
+        *,
+        lease_id: str,
+    ) -> JsonObject:
+        if not isinstance(lease_id, str) or not lease_id.strip():
+            raise ValueError("lease_id is required")
+        sanitized_message = sanitize_for_storage(message)
+        sanitized_changes = sanitize_for_storage(changes)
+        if sanitized_changes.get("status") != "completed":
+            raise ValueError("run finalization status must be completed")
+        with self._locked():
+            index = self._load_index_unlocked()
+            self._require_session_unlocked(session_id, index)
+            self._validate_owned_record(sanitized_message, "messageId", session_id)
+            transaction_path = self._run_finalization_transaction_path(session_id, run_id)
+            pending = _read_json(transaction_path)
+            if isinstance(pending, dict):
+                return self._commit_run_finalization_transaction_unlocked(index, pending)
+            transaction = {
+                "schema": "loom.agent.run-finalization-transaction.v1",
+                "sessionId": session_id,
+                "runId": run_id,
+                "leaseId": lease_id,
+                "message": sanitized_message,
+                "changes": sanitized_changes,
+            }
+            _atomic_write_json(transaction_path, transaction)
+            return self._commit_run_finalization_transaction_unlocked(index, transaction)
+
     def page_messages(
         self,
         session_id: str,
@@ -461,7 +495,9 @@ class AgentSessionRepository:
             raise ValueError("limit must be between 1 and 500")
         cursor_end = _decode_cursor(cursor) if cursor else None
         with self._locked():
-            self._require_session_unlocked(session_id)
+            index = self._load_index_unlocked()
+            self._recover_message_transactions_unlocked(index)
+            self._require_session_unlocked(session_id, index)
             messages = _read_jsonl(self._messages_path(session_id))
         end = len(messages) if cursor_end is None else min(cursor_end, len(messages))
         start = max(0, end - limit)
@@ -480,6 +516,7 @@ class AgentSessionRepository:
     def get_run(self, run_id: str, session_id: Optional[str] = None) -> JsonObject:
         with self._locked():
             index = self._load_index_unlocked()
+            self._recover_message_transactions_unlocked(index)
             owner = session_id or index["runs"].get(run_id)
             if not owner:
                 raise KeyError(run_id)
@@ -784,9 +821,14 @@ class AgentSessionRepository:
         client_message_id: str,
         message: JsonObject,
         run: JsonObject,
+        *,
+        reject_active_run: bool = False,
+        history_limit: int | None = None,
     ) -> JsonObject:
         if not client_message_id:
             raise ValueError("clientMessageId is required")
+        if history_limit is not None and (history_limit < 1 or history_limit > 500):
+            raise ValueError("history limit must be between 1 and 500")
         with self._locked():
             index = self._load_index_unlocked()
             self._require_session_unlocked(session_id, index)
@@ -799,8 +841,31 @@ class AgentSessionRepository:
                     "created": False,
                 }
 
+            if reject_active_run:
+                active_runs = []
+                for run_id, owner in index["runs"].items():
+                    if owner != session_id:
+                        continue
+                    current = _read_json(self._run_path(session_id, run_id))
+                    if isinstance(current, dict) and current.get("status") in {
+                        "queued",
+                        "running",
+                        "waiting_approval",
+                        "paused",
+                    }:
+                        active_runs.append(current)
+                if active_runs:
+                    raise ValueError("another agent run is already active for this session")
+
             sanitized_message = sanitize_for_storage(message)
-            sanitized_run = sanitize_for_storage(run)
+            run_with_history = copy.deepcopy(run)
+            if history_limit is not None:
+                request = run_with_history.get("request")
+                if not isinstance(request, dict):
+                    request = {}
+                    run_with_history["request"] = request
+                request["history"] = _read_jsonl(self._messages_path(session_id))[-history_limit:]
+            sanitized_run = sanitize_for_storage(run_with_history)
             self._validate_owned_record(sanitized_message, "messageId", session_id)
             self._validate_owned_record(sanitized_run, "runId", session_id)
             transaction_path = self._message_transaction_path(session_id, client_message_id)
@@ -932,6 +997,15 @@ class AgentSessionRepository:
         digest = hashlib.sha256(str(client_message_id).encode("utf-8")).hexdigest()
         return os.path.join(self._session_dir(session_id), "transactions", digest + ".json")
 
+    def _run_finalization_transaction_path(self, session_id: str, run_id: str) -> str:
+        self._validate_identifier(run_id, "run id")
+        digest = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()
+        return os.path.join(
+            self._session_dir(session_id),
+            "transactions",
+            "finalize-" + digest + ".json",
+        )
+
     def _commit_message_transaction_unlocked(self, index: JsonObject, transaction: JsonObject) -> JsonObject:
         session_id = str(transaction.get("sessionId") or "")
         client_message_id = str(transaction.get("clientMessageId") or "")
@@ -993,6 +1067,80 @@ class AgentSessionRepository:
             "created": True,
         }
 
+    def _commit_run_finalization_transaction_unlocked(
+        self,
+        index: JsonObject,
+        transaction: JsonObject,
+    ) -> JsonObject:
+        if transaction.get("schema") != "loom.agent.run-finalization-transaction.v1":
+            raise ValueError("invalid run finalization transaction schema")
+        session_id = str(transaction.get("sessionId") or "")
+        run_id = str(transaction.get("runId") or "")
+        lease_id = str(transaction.get("leaseId") or "")
+        message = transaction.get("message")
+        changes = transaction.get("changes")
+        if not lease_id or not isinstance(message, dict) or not isinstance(changes, dict):
+            raise ValueError("invalid run finalization transaction")
+        self._require_session_unlocked(session_id, index)
+        self._validate_owned_record(message, "messageId", session_id)
+        self._validate_identifier(run_id, "run id")
+        if changes.get("status") != "completed":
+            raise ValueError("run finalization transaction is not terminal")
+
+        run_path = self._run_path(session_id, run_id)
+        current = _read_json(run_path)
+        if not isinstance(current, dict) or current.get("sessionId") != session_id:
+            raise KeyError(run_id)
+        message_id = str(message["messageId"])
+        already_finalized = (
+            current.get("status") == "completed"
+            and current.get("finalMessageId") == message_id
+        )
+        if already_finalized:
+            updated = current
+        else:
+            checkpoint = _run_checkpoint(current.get("checkpoint"))
+            current_lease_id = _run_lease_id(checkpoint)
+            if current_lease_id != lease_id:
+                raise RepositoryConflictError(
+                    f"run {run_id} expected lease {lease_id}, found {current_lease_id or 'none'}"
+                )
+            updated = dict(current)
+            updated.update(changes)
+            next_checkpoint = _run_checkpoint(changes.get("checkpoint", current.get("checkpoint")))
+            next_checkpoint.pop("runLease", None)
+            updated["checkpoint"] = _dump_run_checkpoint(next_checkpoint)
+            updated["finalMessageId"] = message_id
+            _atomic_write_json(run_path, updated)
+
+        messages_path = self._messages_path(session_id)
+        messages = _read_jsonl(messages_path)
+        existing = next(
+            (item for item in messages if item.get("messageId") == message_id),
+            None,
+        )
+        if existing is None:
+            _append_jsonl(messages_path, message)
+            persisted_message = message
+        elif existing == message:
+            persisted_message = existing
+        else:
+            raise ValueError("run finalization message id conflict")
+
+        index["runs"][run_id] = session_id
+        self._sync_active_run_unlocked(index, session_id, updated)
+        self._update_session_from_message_unlocked(session_id, persisted_message, index=index)
+        self._write_index_unlocked(index)
+        transaction_path = self._run_finalization_transaction_path(session_id, run_id)
+        try:
+            os.remove(transaction_path)
+        except FileNotFoundError:
+            pass
+        return {
+            "message": copy.deepcopy(persisted_message),
+            "run": copy.deepcopy(updated),
+        }
+
     def _recover_message_transactions_unlocked(self, index: JsonObject) -> None:
         try:
             session_ids = os.listdir(self.sessions_root)
@@ -1011,7 +1159,10 @@ class AgentSessionRepository:
                 if not isinstance(transaction, dict):
                     continue
                 try:
-                    self._commit_message_transaction_unlocked(index, transaction)
+                    if transaction.get("schema") == "loom.agent.message-transaction.v1":
+                        self._commit_message_transaction_unlocked(index, transaction)
+                    elif transaction.get("schema") == "loom.agent.run-finalization-transaction.v1":
+                        self._commit_run_finalization_transaction_unlocked(index, transaction)
                 except Exception:
                     continue
 

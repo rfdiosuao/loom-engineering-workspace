@@ -667,8 +667,8 @@ export const CreativeMediaPage: React.FC = () => {
   };
 
   return (
-    <div data-creative-media-page className="flex h-full flex-col overflow-hidden bg-surface">
-      <header className="shrink-0 border-b border-border px-8 py-7">
+    <div data-creative-media-page className="flex h-full flex-col overflow-hidden bg-app-bg">
+      <header className="shrink-0 border-b border-border bg-surface px-8 py-7">
         <div className="text-sm font-black text-accent">创作</div>
         <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -696,7 +696,7 @@ export const CreativeMediaPage: React.FC = () => {
               data-creative-tab-storyboard
               type="button"
               onClick={() => setTab('storyboard')}
-              className={`rounded-[10px] px-5 py-2 text-sm font-black transition ${tab === 'storyboard' ? 'bg-accent text-accent-ink shadow-[0_12px_28px_rgba(8,60,49,0.18)]' : 'text-text-muted hover:text-text'}`}
+              className={`rounded-[6px] px-5 py-2 text-sm font-black transition ${tab === 'storyboard' ? 'bg-accent text-accent-ink shadow-elevation-low' : 'text-text-muted hover:text-text'}`}
             >
               全案九步
             </button>

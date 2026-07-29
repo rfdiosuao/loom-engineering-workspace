@@ -104,7 +104,135 @@ object LumiSecurityController {
         return jsonElementResponse(NanoHTTPD.Response.Status.OK, true, data, null)
     }
 
+    fun handleBootstrapClaim(
+        session: NanoHTTPD.IHTTPSession,
+        listeningPort: Int
+    ): NanoHTTPD.Response {
+        val rawContentLength = session.headers["content-length"]
+            ?: session.headers["Content-Length"]
+        val contentLength = rawContentLength?.toLongOrNull()
+        if (
+            (rawContentLength != null && contentLength == null) ||
+            (contentLength != null && contentLength > 8 * 1024L)
+        ) {
+            return pairingErrorResponse(
+                NanoHTTPD.Response.Status.BAD_REQUEST,
+                "phone_pairing_request_invalid",
+                "配对请求无效，请刷新配对码后重试。",
+                false
+            )
+        }
+        val json = ToolApiController.parseJsonBody(session)
+            ?: return pairingErrorResponse(
+                NanoHTTPD.Response.Status.BAD_REQUEST,
+                "phone_pairing_request_invalid",
+                "配对请求无效，请刷新配对码后重试。",
+                false
+            )
+        val result = PhonePairingBootstrap.claim(
+            PhonePairingBootstrap.ClaimRequest(
+                sessionId = json.stringOrEmpty("sessionId")
+                    .ifBlank { json.stringOrEmpty("session_id") },
+                code = json.stringOrEmpty("code"),
+                nonce = json.stringOrEmpty("nonce"),
+                proof = json.stringOrEmpty("proof"),
+                transport = json.stringOrEmpty("transport"),
+                deviceInstanceId = json.stringOrEmpty("deviceInstanceId")
+                    .ifBlank { json.stringOrEmpty("device_instance_id") },
+                launcherId = json.stringOrEmpty("launcherId")
+                    .ifBlank { json.stringOrEmpty("launcher_id") },
+                launcherName = json.stringOrEmpty("launcherName")
+                    .ifBlank { json.stringOrEmpty("launcher_name") }
+            ),
+            remoteAddress = session.remoteIpAddress.orEmpty()
+        )
+        if (!result.success) {
+            val status = when (result.errorCode) {
+                "phone_pairing_code_replayed",
+                "phone_pairing_nonce_replayed",
+                "phone_pairing_proof_invalid",
+                "phone_pairing_transport_invalid",
+                "phone_pairing_device_mismatch" -> NanoHTTPD.Response.Status.FORBIDDEN
+                "phone_pairing_rate_limited" -> NanoHTTPD.Response.Status.FORBIDDEN
+                else -> NanoHTTPD.Response.Status.BAD_REQUEST
+            }
+            return pairingErrorResponse(
+                status,
+                result.errorCode,
+                result.message,
+                result.retryable
+            )
+        }
+
+        val data = JsonObject().apply {
+            addProperty("paired", true)
+            addProperty("sessionId", result.sessionId)
+            addProperty("nonce", result.nonce)
+            addProperty("launcherId", result.launcherId)
+            addProperty("pairedAt", result.pairedAt)
+            addProperty("algorithm", "HMAC-SHA256")
+            addProperty("signatureVersion", 1)
+            addProperty("timestampSkewMs", MAX_CLOCK_SKEW_MS)
+            addProperty("deviceInstanceId", KVUtils.ensureLumiDeviceInstanceId())
+            addProperty("packageName", BuildConfig.APPLICATION_ID)
+            addProperty("version", BuildConfig.VERSION_NAME)
+            addProperty("versionCode", BuildConfig.VERSION_CODE)
+            addProperty("listeningPort", listeningPort)
+            result.encryptedCredentials?.let { encrypted ->
+                add("encryptedCredentials", JsonObject().apply {
+                    addProperty("algorithm", encrypted.algorithm)
+                    addProperty("iv", encrypted.iv)
+                    addProperty("ciphertext", encrypted.ciphertext)
+                })
+            }
+            result.credentials?.let { credentials ->
+                addProperty("phoneToken", credentials.phoneToken)
+                addProperty("launcherName", credentials.launcherName)
+                addProperty("launcherSecret", credentials.launcherSecret)
+            }
+        }
+        XLog.i(TAG, "LOOM bootstrap pairing completed for launcher ${result.launcherId}")
+        return jsonElementResponse(NanoHTTPD.Response.Status.OK, true, data, null)
+    }
+
+    fun handleBootstrapConfirm(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+        val launcherId = session.headers[HEADER_LAUNCHER_ID]?.trim().orEmpty()
+        if (!KVUtils.confirmPhonePairingCredentials(launcherId)) {
+            return pairingErrorResponse(
+                NanoHTTPD.Response.Status.FORBIDDEN,
+                "phone_pairing_credential_invalid",
+                "配对确认失败，旧连接仍然保留。",
+                true
+            )
+        }
+        return jsonElementResponse(
+            NanoHTTPD.Response.Status.OK,
+            true,
+            JsonObject().apply {
+                addProperty("confirmed", true)
+                addProperty("launcherId", launcherId)
+            },
+            null
+        )
+    }
+
     fun handlePair(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+        if (!UsbIdentityChallenge.isLoopbackPeer(session.remoteIpAddress)) {
+            return pairingErrorResponse(
+                NanoHTTPD.Response.Status.FORBIDDEN,
+                "phone_legacy_pairing_usb_required",
+                "旧版连接迁移仅允许通过 USB 本机通道进行，请使用“与 LOOM 配对”。",
+                false
+            )
+        }
+        if (KVUtils.isSecurePhonePairingEstablished()) {
+            return pairingErrorResponse(
+                NanoHTTPD.Response.Status.FORBIDDEN,
+                "phone_secure_pairing_required",
+                "此手机已启用安全配对，旧版配对接口已关闭。请生成新的配对码。",
+                false
+            )
+        }
         val authError = ToolApiController.checkAuth(session)
         if (authError != null) return authError
 
@@ -131,9 +259,15 @@ object LumiSecurityController {
             System.currentTimeMillis()
         }
 
-        KVUtils.setLumiLauncherId(launcherId)
+        if (!KVUtils.setLumiLauncherPairing(launcherId, secret)) {
+            return jsonElementResponse(
+                NanoHTTPD.Response.Status.INTERNAL_ERROR,
+                false,
+                null,
+                "Unable to persist launcher pairing"
+            )
+        }
         KVUtils.setLumiLauncherName(launcherName)
-        KVUtils.setLumiLauncherSecret(secret)
         KVUtils.setLumiLauncherPairedAt(pairedAt)
 
         XLog.i(TAG, "Launcher paired: id=$launcherId, name=$launcherName")
@@ -151,9 +285,6 @@ object LumiSecurityController {
     }
 
     fun handleStatus(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
-        val authError = ToolApiController.checkAuth(session)
-        if (authError != null) return authError
-
         val launcherId = KVUtils.getLumiLauncherId()
         val data = JsonObject().apply {
             addProperty("paired", launcherId.isNotBlank() && KVUtils.getLumiLauncherSecret().isNotBlank())
@@ -170,9 +301,13 @@ object LumiSecurityController {
     }
 
     fun authorize(session: NanoHTTPD.IHTTPSession, bodyBytes: ByteArray = ByteArray(0)): NanoHTTPD.Response? {
+        KVUtils.clearExpiredPreviousPhoneCredentials()
         val storedLauncherId = KVUtils.getLumiLauncherId()
-        val secret = KVUtils.getLumiLauncherSecret()
-        if (storedLauncherId.isBlank() || secret.isBlank()) {
+        val storedSecret = KVUtils.getLumiLauncherSecret()
+        val previousLauncherId = KVUtils.getPreviousLumiLauncherId()
+        val previousSecret = KVUtils.getPreviousLumiLauncherSecret()
+        val previousValid = KVUtils.getPreviousPhoneCredentialValidUntil() > System.currentTimeMillis()
+        if (storedLauncherId.isBlank() || storedSecret.isBlank()) {
             return jsonElementResponse(
                 NanoHTTPD.Response.Status.FORBIDDEN,
                 false,
@@ -196,7 +331,18 @@ object LumiSecurityController {
                 "Missing Lumi security headers"
             )
         }
-        if (launcherId != storedLauncherId) {
+        val candidateSecrets = buildList {
+            if (launcherId == storedLauncherId && storedSecret.isNotBlank()) add(storedSecret)
+            if (
+                previousValid &&
+                launcherId == previousLauncherId &&
+                previousSecret.isNotBlank() &&
+                previousSecret != storedSecret
+            ) {
+                add(previousSecret)
+            }
+        }
+        if (candidateSecrets.isEmpty()) {
             XLog.w(TAG, "Unknown Lumi launcher id: $launcherId")
             return jsonElementResponse(
                 NanoHTTPD.Response.Status.FORBIDDEN,
@@ -246,8 +392,10 @@ object LumiSecurityController {
             nonce,
             bodyHash
         ).joinToString("\n")
-        val expected = hmacBase64Url(secret, signatureInput)
-        if (!constantTimeEquals(signature, expected)) {
+        val signatureMatches = candidateSecrets.any { secret ->
+            constantTimeEquals(signature, hmacBase64Url(secret, signatureInput))
+        }
+        if (!signatureMatches) {
             XLog.w(TAG, "Invalid Lumi signature from ${session.remoteIpAddress}")
             return jsonElementResponse(
                 NanoHTTPD.Response.Status.FORBIDDEN,
@@ -306,6 +454,25 @@ object LumiSecurityController {
             "Access-Control-Allow-Headers",
             "Content-Type, X-AGENT-PHONE-TOKEN, X-APKCLAW-TOKEN, X-LUMI-LAUNCHER-ID, X-LUMI-TIMESTAMP, X-LUMI-NONCE, X-LUMI-SIGNATURE, X-LUMI-BODY-SHA256"
         )
+        return response
+    }
+
+    private fun pairingErrorResponse(
+        status: NanoHTTPD.Response.IStatus,
+        errorCode: String,
+        message: String,
+        retryable: Boolean
+    ): NanoHTTPD.Response {
+        val json = JsonObject().apply {
+            addProperty("success", false)
+            addProperty("errorCode", errorCode)
+            addProperty("message", message)
+            addProperty("retryable", retryable)
+        }
+        val response = NanoHTTPD.newFixedLengthResponse(status, MIME_JSON_UTF8, json.toString())
+        response.addHeader("Access-Control-Allow-Origin", "*")
+        response.addHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+        response.addHeader("Access-Control-Allow-Headers", "Content-Type")
         return response
     }
 

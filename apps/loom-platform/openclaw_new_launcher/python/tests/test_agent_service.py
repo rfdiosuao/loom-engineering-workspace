@@ -190,11 +190,31 @@ class ProgressMatrix:
             "missions": [{"deviceTasks": [dict(self.campaign["missions"][0]["deviceTasks"][0])]}],
         }
 
-    def status(self):
-        return {
+    def status(self, campaign_id=None):
+        payload = {
             "devices": json.loads(json.dumps(self.devices)),
             "campaigns": [json.loads(json.dumps(self.campaign))],
         }
+        if campaign_id:
+            payload["campaigns"] = [
+                campaign
+                for campaign in payload["campaigns"]
+                if campaign.get("campaignId") == campaign_id
+            ]
+        return payload
+
+
+class GatedStatusMatrix(ProgressMatrix):
+    def __init__(self) -> None:
+        super().__init__()
+        self.status_entered = threading.Event()
+        self.release_status = threading.Event()
+
+    def status(self, campaign_id=None):
+        self.status_entered.set()
+        if not self.release_status.wait(5.0):
+            raise RuntimeError("timed out waiting to release matrix status")
+        return super().status(campaign_id)
 
 
 class ConfirmationMatrix(ProgressMatrix):
@@ -724,16 +744,17 @@ class AgentServiceTests(unittest.TestCase):
             threads: list[threading.Thread] = []
             try:
                 session = first_service.create_session({"title": "Cross-service single run"})
-                original_list_runs = first_service.repository.list_runs
+                original_commit = first_service.repository._commit_message_transaction_unlocked
 
-                def pause_after_first_check(session_id: str) -> list[dict]:
-                    runs = original_list_runs(session_id)
+                def pause_before_first_commit(index: dict, transaction: dict) -> dict:
                     first_check_completed.set()
                     if not release_first_check.wait(5.0):
                         raise RuntimeError("timed out waiting to continue first submission")
-                    return runs
+                    return original_commit(index, transaction)
 
-                first_service.repository.list_runs = pause_after_first_check  # type: ignore[method-assign]
+                first_service.repository._commit_message_transaction_unlocked = (  # type: ignore[method-assign]
+                    pause_before_first_commit
+                )
 
                 def submit(label: str, service: AgentService) -> None:
                     try:
@@ -769,15 +790,82 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertEqual(len(successes), 1)
                 self.assertEqual(len(failures), 1)
                 self.assertRegex(str(failures[0]), "already active")
-                self.assertEqual(len(original_list_runs(session["sessionId"])), 1)
+                self.assertEqual(len(first_service.repository.list_runs(session["sessionId"])), 1)
             finally:
                 release_first_check.set()
                 first_runtime.release.set()
                 second_runtime.release.set()
                 for thread in threads:
-                    thread.join(1.0)
+                    if thread.ident is not None:
+                        thread.join(1.0)
                 first_service.shutdown()
                 second_service.shutdown()
+
+    def test_accepted_follow_up_snapshots_history_after_previous_run_commits(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            first_runtime = BlockingRuntime()
+            second_runtime = ScriptedRuntime([{"final": {"text": "second answer"}}])
+            gated_matrix = GatedStatusMatrix()
+            first_service = AgentService(
+                AppPaths(root),
+                runtime=first_runtime,
+                capabilities=_registry(),
+                matrix_factory=ProgressMatrix,
+            )
+            second_service = AgentService(
+                AppPaths(root),
+                runtime=second_runtime,
+                capabilities=_registry(),
+                matrix_factory=lambda: gated_matrix,
+            )
+            outcome: dict[str, object] = {}
+            follow_up_thread: threading.Thread | None = None
+            try:
+                session = first_service.create_session({"title": "Committed history boundary"})
+                first = first_service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "history-race-1", "text": "first question"},
+                )
+                self.assertTrue(first_runtime.started.wait(1.0))
+
+                def send_follow_up() -> None:
+                    try:
+                        outcome["result"] = second_service.send_message(
+                            session["sessionId"],
+                            {"clientMessageId": "history-race-2", "text": "follow up"},
+                        )
+                    except Exception as error:
+                        outcome["error"] = error
+
+                follow_up_thread = threading.Thread(target=send_follow_up)
+                follow_up_thread.start()
+                self.assertTrue(gated_matrix.status_entered.wait(1.0))
+
+                first_runtime.release.set()
+                _wait_for_status(first_service, first["run"]["runId"], "completed")
+                gated_matrix.release_status.set()
+                follow_up_thread.join(5.0)
+
+                self.assertFalse(follow_up_thread.is_alive())
+                self.assertNotIn("error", outcome)
+                second = outcome.get("result")
+                self.assertIsInstance(second, dict)
+                _wait_for_status(second_service, second["run"]["runId"], "completed")
+            finally:
+                first_runtime.release.set()
+                gated_matrix.release_status.set()
+                if follow_up_thread is not None:
+                    follow_up_thread.join(1.0)
+                first_service.shutdown()
+                second_service.shutdown()
+
+        history = second_runtime.requests[0].get("history")
+        self.assertIsInstance(history, list)
+        serialized = json.dumps(history, ensure_ascii=False)
+        self.assertIn("first question", serialized)
+        self.assertIn("done", serialized)
 
     def test_quick_pause_then_resume_chains_continuation_after_worker_wind_down(self) -> None:
         from services.agent_service import AgentService
@@ -794,9 +882,11 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertTrue(runtime.started.wait(1.0))
 
                 paused = service.pause_run(sent["run"]["runId"])
-                self.assertEqual(paused["status"], "paused")
+                self.assertEqual(paused["status"], "running")
+                self.assertEqual(paused["controlState"], "pause_requested")
                 self.assertTrue(runtime.cancel_seen.wait(1.0))
-                service.resume_run(sent["run"]["runId"])
+                queued_resume = service.resume_run(sent["run"]["runId"])
+                self.assertEqual(queued_resume["status"], "running")
 
                 self.assertFalse(runtime.resumed.wait(0.1))
                 runtime.allow_stop.set()
@@ -1558,6 +1648,7 @@ class AgentServiceTests(unittest.TestCase):
                 }]
             },
             {"final": {"text": "Matrix campaign started."}},
+            {"final": {"text": "Matrix campaign completed."}},
         ])
         matrix = ProgressMatrix()
         with tempfile.TemporaryDirectory() as root:
@@ -1580,7 +1671,7 @@ class AgentServiceTests(unittest.TestCase):
                 waiting = _wait_for_status(service, sent["run"]["runId"], "waiting_approval")
                 approval = service.get_trace(waiting["runId"])["approvals"][0]
                 resolved = service.resolve_approval(approval["approvalId"], {"decision": "approved"})
-                self.assertEqual(resolved["run"]["status"], "completed")
+                self.assertEqual(resolved["run"]["status"], "paused")
 
                 deadline = time.monotonic() + 2
                 events = []
@@ -1608,6 +1699,169 @@ class AgentServiceTests(unittest.TestCase):
                 completed = next(event for event in events if event["type"] == "matrix.succeeded")
                 self.assertEqual(completed["data"]["completed"], 1)
                 self.assertEqual(completed["data"]["messageId"], "matrix:campaign-progress")
+                self.assertNotIn("campaign-progress", service._campaign_links)
+                resumed = _wait_for_status(service, sent["run"]["runId"], "completed")
+                self.assertEqual(resumed["status"], "completed")
+            finally:
+                service.shutdown()
+
+    def test_matrix_terminal_intent_survives_waiting_approval_and_reconciles_after_approval(self) -> None:
+        from services.agent_service import AgentService
+
+        matrix = ProgressMatrix()
+        registry = _registry({
+            "loom.matrix.status": {
+                "executor": lambda payload: matrix.status(payload.get("campaignId")),
+                "permission": "read",
+                "risk": "read",
+                "idempotent": True,
+            },
+            "loom.matrix.dispatch": {
+                "executor": lambda payload: matrix.dispatch(payload),
+                "permission": "control",
+                "risk": "control_safe",
+                "targetScope": "matrix-write",
+            },
+            "loom.outbound.publish": {
+                "executor": lambda _payload: {"status": "completed", "receiptId": "publish-1"},
+                "permission": "control",
+                "risk": "outbound",
+                "targetScope": "none",
+            },
+        })
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "dispatch-before-approval-window",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "inspect the selected phone"},
+                }]
+            },
+            {
+                "toolCalls": [{
+                    "toolCallId": "publish-during-approval-window",
+                    "name": "loom.outbound.publish",
+                    "input": {"text": "publish after matrix completion"},
+                }]
+            },
+            {"final": {"text": "matrix and publish both completed"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=registry,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="strong"),
+            )
+            try:
+                session = service.create_session({"title": "Terminal during approval"})
+                sent = service.send_message(session["sessionId"], {
+                    "clientMessageId": "terminal-during-approval",
+                    "text": "inspect then publish",
+                    "targets": {"deviceIds": ["phone-progress"]},
+                })
+                first_waiting = _wait_for_status(service, sent["run"]["runId"], "waiting_approval")
+                first_approval = service.get_trace(first_waiting["runId"])["approvals"][0]
+                second_waiting = service.resolve_approval(
+                    first_approval["approvalId"],
+                    {"decision": "approved"},
+                )["run"]
+                self.assertEqual(second_waiting["status"], "waiting_approval")
+
+                matrix.campaign["status"] = "succeeded"
+                matrix.campaign["missions"][0]["status"] = "succeeded"
+                matrix.campaign["missions"][0]["deviceTasks"][0]["status"] = "succeeded"
+                service._reconcile_matrix_campaign_snapshot(matrix.status())
+
+                persisted = service.get_run(sent["run"]["runId"])
+                self.assertEqual(persisted["status"], "waiting_approval")
+                self.assertEqual(
+                    [item["campaignId"] for item in persisted["matrixTerminalIntents"]],
+                    ["campaign-progress"],
+                )
+                second_approval = service.get_trace(persisted["runId"])["approvals"][-1]
+                completed = service.resolve_approval(
+                    second_approval["approvalId"],
+                    {"decision": "approved"},
+                )["run"]
+
+                self.assertEqual(completed["status"], "completed")
+                checkpoint = json.loads(completed["checkpoint"])
+                matrix_result = next(
+                    item
+                    for item in checkpoint["toolResults"]
+                    if item["toolCallId"] == "dispatch-before-approval-window"
+                )
+                self.assertEqual(matrix_result["status"], "completed")
+                self.assertEqual(completed.get("matrixTerminalIntents"), [])
+            finally:
+                service.shutdown()
+
+    def test_matrix_link_survives_many_missing_snapshots_then_resumes_on_terminal_return(self) -> None:
+        from services.agent_service import AgentService
+
+        matrix = ProgressMatrix()
+        registry = _registry({
+            "loom.matrix.status": {
+                "executor": lambda payload: matrix.status(payload.get("campaignId")),
+                "permission": "read",
+                "risk": "read",
+                "idempotent": True,
+            },
+            "loom.matrix.dispatch": {
+                "executor": lambda payload: matrix.dispatch(payload),
+                "permission": "control",
+                "risk": "control_safe",
+                "targetScope": "matrix-write",
+            },
+        })
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "dispatch-before-missing-window",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "inspect the selected phone"},
+                }]
+            },
+            {"final": {"text": "campaign accepted"}},
+            {"final": {"text": "campaign reached a real terminal state"}},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=registry,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            try:
+                session = service.create_session({"title": "Transient missing campaign"})
+                sent = service.send_message(session["sessionId"], {
+                    "clientMessageId": "missing-then-terminal",
+                    "text": "inspect the selected phone",
+                    "targets": {"deviceIds": ["phone-progress"]},
+                })
+                paused = _wait_for_status(service, sent["run"]["runId"], "paused")
+                self.assertEqual(paused["error"]["code"], "agent_child_operation_pending")
+
+                for _ in range(25):
+                    service._reconcile_matrix_campaign_snapshot({"campaigns": []})
+                self.assertIn("campaign-progress", service._campaign_links)
+                self.assertGreaterEqual(
+                    service._campaign_links["campaign-progress"]["missingPolls"],
+                    25,
+                )
+
+                matrix.campaign["status"] = "succeeded"
+                matrix.campaign["missions"][0]["status"] = "succeeded"
+                matrix.campaign["missions"][0]["deviceTasks"][0]["status"] = "succeeded"
+                service._reconcile_matrix_campaign_snapshot(matrix.status())
+                completed = _wait_for_status(service, sent["run"]["runId"], "completed")
+
+                self.assertEqual(completed["status"], "completed")
                 self.assertNotIn("campaign-progress", service._campaign_links)
             finally:
                 service.shutdown()
@@ -1666,8 +1920,8 @@ class AgentServiceTests(unittest.TestCase):
                     "text": "contact the selected account",
                     "targets": {"deviceIds": ["phone-progress"]},
                 })
-                completed = _wait_for_status(service, sent["run"]["runId"], "completed")
-                trace = service.get_trace(completed["runId"])
+                paused = _wait_for_status(service, sent["run"]["runId"], "paused")
+                trace = service.get_trace(paused["runId"])
             finally:
                 service.shutdown()
 
@@ -1712,7 +1966,7 @@ class AgentServiceTests(unittest.TestCase):
 
                 outcome = service.resolve_approval(approval["approvalId"], {"decision": "approved"})
 
-                self.assertEqual(outcome["run"]["status"], "completed")
+                self.assertEqual(outcome["run"]["status"], "paused")
                 self.assertEqual(len(matrix.dispatches), 1)
                 self.assertIs(matrix.dispatches[0].get("confirmed"), True)
             finally:
@@ -1756,10 +2010,10 @@ class AgentServiceTests(unittest.TestCase):
                     approval["approvalId"],
                     {"decision": "approved"},
                 )
-                completed = _wait_for_status(service, waiting["runId"], "completed")
+                paused = _wait_for_status(service, waiting["runId"], "paused")
 
                 self.assertEqual(outcome["approval"]["status"], "approved")
-                self.assertEqual(completed["status"], "completed")
+                self.assertEqual(paused["status"], "paused")
                 self.assertEqual(len(matrix.dispatches), 1)
                 self.assertIs(matrix.dispatches[0].get("confirmed"), True)
                 events = service.events_after(session_id=session["sessionId"], after_seq=0)
@@ -1823,7 +2077,7 @@ class AgentServiceTests(unittest.TestCase):
                     approvals[-1]["approvalId"],
                     {"decision": "approved"},
                 )
-                self.assertEqual(outcome["run"]["status"], "completed")
+                self.assertEqual(outcome["run"]["status"], "paused")
                 self.assertEqual(len(matrix.retries), 1)
                 self.assertIs(matrix.retries[0].get("confirmed"), True)
             finally:
@@ -1867,8 +2121,8 @@ class AgentServiceTests(unittest.TestCase):
                     "text": "dispatch and then retry the selected device",
                     "targets": {"deviceIds": ["phone-progress"]},
                 })
-                completed = _wait_for_status(service, sent["run"]["runId"], "completed")
-                trace = service.get_trace(completed["runId"])
+                paused = _wait_for_status(service, sent["run"]["runId"], "paused")
+                trace = service.get_trace(paused["runId"])
             finally:
                 service.shutdown()
 
@@ -1941,7 +2195,9 @@ class AgentServiceTests(unittest.TestCase):
 
                 self.assertNotEqual(outcome["status"], "cancelled")
                 self.assertEqual(outcome["error"]["code"], "agent_matrix_cancel_incomplete")
-                self.assertTrue(outcome["error"]["recoverable"])
+                self.assertFalse(outcome["error"]["recoverable"])
+                self.assertTrue(outcome["error"]["outcomeIndeterminate"])
+                self.assertTrue(outcome["error"]["executionMayContinue"])
                 self.assertIn("campaign-progress", service._campaign_links)
             finally:
                 service.shutdown()
@@ -1995,6 +2251,151 @@ class AgentServiceTests(unittest.TestCase):
         self.assertNotIn("secret.value", persisted)
         self.assertNotIn("sk-super-secret-value", persisted)
 
+    def test_shutdown_rejects_new_messages_without_persisting_an_orphan_run(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime(), capabilities=_registry())
+            session = service.create_session({"title": "Closed service"})
+
+            service.shutdown()
+
+            with self.assertRaisesRegex(RuntimeError, "agent service is closed"):
+                service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "after-shutdown", "text": "must not persist"},
+                )
+
+            detail = service.session_detail(session["sessionId"])
+            self.assertEqual(detail["messages"], [])
+            self.assertEqual(detail["runs"], [])
+
+    def test_shutdown_waits_for_an_inflight_run_to_stop(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            runtime = SlowStoppingRuntime()
+            service = AgentService(AppPaths(root), runtime=runtime, capabilities=_registry())
+            session = service.create_session({"title": "Controlled shutdown"})
+            sent = service.send_message(
+                session["sessionId"],
+                {"clientMessageId": "shutdown-active", "text": "keep running"},
+            )
+            self.assertTrue(runtime.started.wait(1.0))
+
+            shutdown_thread = threading.Thread(target=service.shutdown)
+            shutdown_thread.start()
+            try:
+                self.assertTrue(runtime.cancel_seen.wait(1.0))
+                self.assertTrue(shutdown_thread.is_alive())
+
+                runtime.allow_stop.set()
+                shutdown_thread.join(2.0)
+
+                self.assertFalse(shutdown_thread.is_alive())
+                self.assertEqual(service.get_run(sent["run"]["runId"])["status"], "paused")
+            finally:
+                runtime.allow_stop.set()
+                shutdown_thread.join(2.0)
+                service.shutdown()
+
+    def test_shutdown_returns_after_grace_window_for_non_cooperative_runtime(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            runtime = SlowStoppingRuntime()
+            service = AgentService(AppPaths(root), runtime=runtime, capabilities=_registry())
+            session = service.create_session({"title": "Bounded shutdown"})
+            sent = service.send_message(
+                session["sessionId"],
+                {"clientMessageId": "shutdown-bounded", "text": "keep running"},
+            )
+            self.assertTrue(runtime.started.wait(1.0))
+
+            started_at = time.monotonic()
+            try:
+                incomplete = service.shutdown(grace_seconds=0.05)
+                elapsed = time.monotonic() - started_at
+
+                self.assertLess(elapsed, 0.5)
+                self.assertTrue(runtime.cancel_seen.wait(0.5))
+                run = service.get_run(sent["run"]["runId"])
+                self.assertEqual(run["status"], "running")
+                self.assertEqual(run["controlState"], "pause_requested")
+                self.assertFalse(incomplete["drained"])
+                self.assertEqual(incomplete["unfinishedRuns"], 1)
+                self.assertTrue(incomplete["executionMayContinue"])
+            finally:
+                runtime.allow_stop.set()
+                service.shutdown(grace_seconds=1)
+
+    def test_shutdown_reports_unfinished_capability_worker_until_it_really_drains(self) -> None:
+        from services.agent_service import AgentService
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def non_cooperative_side_effect(_payload):
+            started.set()
+            release.wait(2)
+            return {"campaignId": "campaign-shutdown", "status": "running"}
+
+        registry = _registry({
+            "loom.matrix.dispatch": {
+                "executor": non_cooperative_side_effect,
+                "permission": "control",
+                "risk": "control_safe",
+                "targetScope": "matrix-write",
+                "timeoutSec": 2,
+            },
+        })
+        runtime = ScriptedRuntime([
+            {
+                "toolCalls": [{
+                    "toolCallId": "shutdown-capability-worker",
+                    "name": "loom.matrix.dispatch",
+                    "input": {"prompt": "perform one external action"},
+                }]
+            },
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            matrix = ProgressMatrix()
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                capabilities=registry,
+                matrix_factory=lambda: matrix,
+                policy=AgentPolicyEngine(approval_mode="weak"),
+            )
+            session = service.create_session({"title": "Capability worker shutdown"})
+            sent = service.send_message(session["sessionId"], {
+                "clientMessageId": "shutdown-capability-worker",
+                "text": "perform one external action",
+                "targets": {"deviceIds": ["phone-progress"]},
+            })
+            self.assertTrue(started.wait(1))
+
+            try:
+                incomplete = service.shutdown(grace_seconds=0.01)
+
+                self.assertFalse(incomplete["drained"])
+                self.assertGreaterEqual(incomplete["unfinishedWorkers"], 1)
+                self.assertTrue(incomplete["executionMayContinue"])
+                self.assertEqual(incomplete["code"], "agent_shutdown_incomplete")
+                self.assertIn(
+                    service.get_run(sent["run"]["runId"])["status"],
+                    {"running", "failed"},
+                )
+            finally:
+                release.set()
+
+            drained = service.shutdown(grace_seconds=1)
+            self.assertTrue(drained["drained"])
+            self.assertEqual(drained["unfinishedRuns"], 0)
+            self.assertEqual(drained["unfinishedWorkers"], 0)
+            self.assertFalse(drained["executionMayContinue"])
+
     def test_bridge_context_exposes_one_lazy_agent_service(self) -> None:
         import bridge
 
@@ -2013,6 +2414,83 @@ class AgentServiceTests(unittest.TestCase):
                     self.assertIs(first.account_manager, bridge._get_newapi_account_mgr())
                 finally:
                     first.shutdown()
+
+    def test_bridge_shutdown_closes_only_the_existing_agent_service_once(self) -> None:
+        import bridge
+
+        class FakeService:
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+
+        service = FakeService()
+        with patch.object(bridge, "_agent_service", service):
+            first = bridge._shutdown_agent_service()
+            second = bridge._shutdown_agent_service()
+
+        self.assertTrue(first["stopped"])
+        self.assertFalse(second["stopped"])
+        self.assertEqual(service.shutdown_calls, 1)
+
+    def test_bridge_keeps_global_service_until_shutdown_is_truly_drained(self) -> None:
+        import bridge
+
+        class FakeService:
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+
+            def shutdown(self):
+                self.shutdown_calls += 1
+                if self.shutdown_calls == 1:
+                    return {
+                        "stopped": False,
+                        "drained": False,
+                        "unfinishedRuns": 0,
+                        "unfinishedWorkers": 1,
+                        "executionMayContinue": True,
+                    }
+                return {
+                    "stopped": True,
+                    "drained": True,
+                    "unfinishedRuns": 0,
+                    "unfinishedWorkers": 0,
+                    "executionMayContinue": False,
+                }
+
+        service = FakeService()
+        with patch.object(bridge, "_agent_service", service):
+            incomplete = bridge._shutdown_agent_service()
+            self.assertIs(bridge._agent_service, service)
+
+            drained = bridge._shutdown_agent_service()
+            self.assertIsNone(bridge._agent_service)
+
+        self.assertFalse(incomplete["drained"])
+        self.assertTrue(incomplete["executionMayContinue"])
+        self.assertTrue(drained["drained"])
+        self.assertEqual(service.shutdown_calls, 2)
+
+    def test_bridge_exit_removes_only_its_own_session_file(self) -> None:
+        import bridge
+
+        with tempfile.TemporaryDirectory() as session_dir:
+            session_path = os.path.join(session_dir, "bridge-session.json")
+            with patch.dict(os.environ, {"LOOM_BRIDGE_SESSION_FILE": session_path}):
+                bridge._write_bridge_session(18888, "owned-token", "fastapi")
+                with open(session_path, "r", encoding="utf-8") as handle:
+                    replacement = json.load(handle)
+                replacement["instanceId"] = "replacement-instance"
+                with open(session_path, "w", encoding="utf-8") as handle:
+                    json.dump(replacement, handle)
+
+                self.assertFalse(bridge._remove_bridge_session_if_owned())
+                self.assertTrue(os.path.exists(session_path))
+
+                bridge._write_bridge_session(18888, "owned-token", "fastapi")
+                self.assertTrue(bridge._remove_bridge_session_if_owned())
+                self.assertFalse(os.path.exists(session_path))
 
 
 if __name__ == "__main__":

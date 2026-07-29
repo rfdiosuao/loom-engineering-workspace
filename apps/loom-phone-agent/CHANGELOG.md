@@ -1,5 +1,16 @@
 # 更新日志
 
+## v6.63 - 2026-07-29
+
+### One-time Pairing
+- Replaced manual long-lived API Token entry with a six-digit, short-lived pairing code for local USB onboarding.
+- Added signed LAN pairing payloads, replay protection, rate limiting, transport binding, and explicit expiration.
+- Stored exchanged device credentials with AndroidKeyStore-backed AES-GCM encryption and transactional migration.
+- Preserved USB and LAN recovery without downgrading to plaintext credentials.
+
+### Changes
+- Android version updated to `6.63-stability`, versionCode updated to `932`.
+
 ## v6.62 - 2026-07-26
 
 ### Secure USB Binding

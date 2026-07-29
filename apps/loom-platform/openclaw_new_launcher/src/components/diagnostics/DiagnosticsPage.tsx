@@ -20,19 +20,19 @@ const toneMap: Record<DiagnosticStatus, {
 }> = {
   ok: {
     label: '正常',
-    dot: 'bg-status-success shadow-[0_0_12px_rgba(22,199,132,0.55)]',
+    dot: 'bg-status-success',
     badge: 'border-status-success/30 bg-status-success/10 text-status-success',
     panel: 'border-status-success/25 bg-status-success/10',
   },
   warn: {
     label: '需处理',
-    dot: 'bg-status-warning shadow-[0_0_12px_rgba(79,112,95,0.45)]',
+    dot: 'bg-status-warning',
     badge: 'border-status-warning/30 bg-status-warning/10 text-status-warning',
     panel: 'border-status-warning/25 bg-status-warning/10',
   },
   fail: {
     label: '阻塞',
-    dot: 'bg-status-danger shadow-[0_0_12px_rgba(255,77,109,0.55)]',
+    dot: 'bg-status-danger',
     badge: 'border-status-danger/30 bg-status-danger/10 text-status-danger',
     panel: 'border-status-danger/25 bg-status-danger/10',
   },
@@ -51,7 +51,7 @@ function isRetiredOpenClawCheck(check: DiagnosticCheck): boolean {
 const CheckRow: React.FC<{ check: DiagnosticCheck }> = ({ check }) => {
   const tone = toneMap[check.status] || toneMap.warn;
   return (
-    <div className={`rounded-xl border p-4 ${tone.panel}`}>
+    <div className={`rounded-[8px] border p-4 ${tone.panel}`}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -65,7 +65,7 @@ const CheckRow: React.FC<{ check: DiagnosticCheck }> = ({ check }) => {
         </span>
       </div>
       {check.detail && (
-        <details className="mt-3 rounded-lg border border-border bg-black/10 px-3 py-2">
+        <details className="mt-3 rounded-lg border border-border bg-surface-alt px-3 py-2">
           <summary className="cursor-pointer text-xs font-bold text-text-muted">高级详情</summary>
           <div className="mt-2 break-all font-mono text-xs leading-relaxed text-text-subtle">
             {check.detail}
@@ -260,7 +260,7 @@ export const DiagnosticsPage: React.FC = () => {
       : '正在诊断环境';
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-transparent">
+    <div data-diagnostics-page className="flex h-full flex-col overflow-hidden bg-app-bg">
       <BusyOverlay
         active={loading || repairing || exporting}
         title={busyOverlayTitle}
@@ -290,7 +290,7 @@ export const DiagnosticsPage: React.FC = () => {
       <div className="flex-1 overflow-auto p-8">
         <div className="grid gap-4 xl:grid-cols-[330px_minmax(0,1fr)]">
           <aside className="space-y-4">
-            <section className={`rounded-2xl border p-5 ${summaryTone.panel}`}>
+            <section className={`rounded-[8px] border p-5 ${summaryTone.panel}`}>
               <div className="flex items-center gap-3">
                 <span className={`h-3 w-3 rounded-full ${summaryTone.dot}`} />
                 <div>
@@ -299,24 +299,24 @@ export const DiagnosticsPage: React.FC = () => {
                 </div>
               </div>
               <div className="mt-5 grid grid-cols-3 gap-2 text-center">
-                <div className="rounded-xl border border-border bg-black/10 p-3">
+                <div className="rounded-[8px] border border-border bg-surface-alt p-3">
                   <div className="text-lg font-black text-status-success">{visibleSummary.ok}</div>
                   <div className="text-[11px] text-text-subtle">正常</div>
                 </div>
-                <div className="rounded-xl border border-border bg-black/10 p-3">
+                <div className="rounded-[8px] border border-border bg-surface-alt p-3">
                   <div className="text-lg font-black text-status-warning">{visibleSummary.warnings}</div>
                   <div className="text-[11px] text-text-subtle">需处理</div>
                 </div>
-                <div className="rounded-xl border border-border bg-black/10 p-3">
+                <div className="rounded-[8px] border border-border bg-surface-alt p-3">
                   <div className="text-lg font-black text-status-danger">{visibleSummary.failed}</div>
                   <div className="text-[11px] text-text-subtle">阻塞</div>
                 </div>
               </div>
             </section>
 
-            <section className="rounded-2xl border border-border bg-surface-alt/70 p-5">
+            <section className="rounded-[8px] border border-border bg-surface-alt/70 p-5">
               <h2 className="text-sm font-bold text-text">安装状态</h2>
-              <div className="mt-3 rounded-lg border border-border bg-black/10 px-3 py-2 text-sm font-bold text-text">
+              <div className="mt-3 rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm font-bold text-text">
                 {report?.basePath ? '已定位安装目录' : '等待诊断结果...'}
               </div>
               <div className="mt-4 flex items-center justify-between text-sm">
@@ -324,7 +324,7 @@ export const DiagnosticsPage: React.FC = () => {
                 <span className="font-bold text-text">{report?.servicePid ? '已运行' : '未运行'}</span>
               </div>
               {report?.basePath || report?.servicePid ? (
-                <details className="mt-3 rounded-lg border border-border bg-black/10 px-3 py-2">
+                <details className="mt-3 rounded-lg border border-border bg-surface-alt px-3 py-2">
                   <summary className="cursor-pointer text-xs font-bold text-text-muted">高级详情</summary>
                   <div className="mt-2 space-y-2 break-all font-mono text-xs text-text-subtle">
                     <div>basePath: {report?.basePath || '-'}</div>
@@ -334,14 +334,14 @@ export const DiagnosticsPage: React.FC = () => {
               ) : null}
             </section>
 
-            <section className="rounded-2xl border border-border bg-surface-alt/70 p-5">
+            <section className="rounded-[8px] border border-border bg-surface-alt/70 p-5">
               <h2 className="text-sm font-bold text-text">启动耗时</h2>
               <div className="mt-4 grid grid-cols-2 gap-2">
-                <div className="rounded-xl border border-border bg-black/10 p-3">
+                <div className="rounded-[8px] border border-border bg-surface-alt p-3">
                   <div className="text-[11px] text-text-subtle">最近完成</div>
                   <div className="mt-1 font-mono text-base font-bold text-text">{startupDurationText}</div>
                 </div>
-                <div className="rounded-xl border border-border bg-black/10 p-3">
+                <div className="rounded-[8px] border border-border bg-surface-alt p-3">
                   <div className="text-[11px] text-text-subtle">当前等待</div>
                   <div className="mt-1 font-mono text-base font-bold text-text">{startupElapsedText}</div>
                 </div>
@@ -361,7 +361,7 @@ export const DiagnosticsPage: React.FC = () => {
                 </div>
               </div>
               {report?.startupError || report?.startupSnapshotPath ? (
-                <details className="mt-3 rounded-lg border border-border bg-black/10 px-3 py-2">
+                <details className="mt-3 rounded-lg border border-border bg-surface-alt px-3 py-2">
                   <summary className="cursor-pointer text-xs font-bold text-text-muted">高级启动详情</summary>
                   <div className="mt-2 space-y-2 break-all font-mono text-xs text-text-subtle">
                     {report?.startupError ? <div>error: {report.startupError}</div> : null}
@@ -372,20 +372,20 @@ export const DiagnosticsPage: React.FC = () => {
             </section>
 
             {exportInfo && (
-              <section className="rounded-2xl border border-border bg-surface-alt/70 p-5">
+              <section className="rounded-[8px] border border-border bg-surface-alt/70 p-5">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-sm font-bold text-text">诊断包</h2>
                   <Button variant="quiet" className="px-3 py-1.5 text-xs" onClick={handleOpenExportDir}>
                     打开目录
                   </Button>
                 </div>
-                <div className="mt-3 truncate rounded-lg border border-border bg-black/10 px-3 py-2 text-sm font-bold text-text" title={exportInfo.filename}>
+                <div className="mt-3 truncate rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm font-bold text-text" title={exportInfo.filename}>
                   {exportInfo.filename}
                 </div>
                 <div className="mt-3 text-xs text-text-muted">
                   大小: {Math.max(1, Math.round(exportInfo.size / 1024))} KB
                 </div>
-                <details className="mt-3 rounded-lg border border-border bg-black/10 px-3 py-2">
+                <details className="mt-3 rounded-lg border border-border bg-surface-alt px-3 py-2">
                   <summary className="cursor-pointer text-xs font-bold text-text-muted">高级详情</summary>
                   <div className="mt-2 space-y-2 break-all font-mono text-xs text-text-subtle">
                     <div>path: {exportInfo.path}</div>
@@ -396,7 +396,7 @@ export const DiagnosticsPage: React.FC = () => {
             )}
 
             {actions.length > 0 && (
-              <section className="rounded-2xl border border-border bg-surface-alt/70 p-5">
+              <section className="rounded-[8px] border border-border bg-surface-alt/70 p-5">
                 <h2 className="text-sm font-bold text-text">修复记录</h2>
                 <div className="mt-3 space-y-2">
                   {actions.map((action, index) => (
@@ -407,7 +407,7 @@ export const DiagnosticsPage: React.FC = () => {
             )}
           </aside>
 
-          <section className="min-w-0 rounded-2xl border border-border bg-surface-alt/70 p-5">
+          <section className="min-w-0 rounded-[8px] border border-border bg-surface-alt/70 p-5">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-sm font-bold uppercase tracking-[0.18em] text-text-subtle">检查项</h2>
               <span className="text-xs text-text-muted">{visibleSummary.total} 项</span>
@@ -417,12 +417,12 @@ export const DiagnosticsPage: React.FC = () => {
                 <CheckRow key={check.id} check={check} />
               ))}
               {!loading && sortedChecks.length === 0 && (
-                <div className="rounded-xl border border-border bg-black/10 p-8 text-center text-sm text-text-muted">
+                <div className="rounded-[8px] border border-border bg-surface-alt p-8 text-center text-sm text-text-muted">
                   暂无诊断结果
                 </div>
               )}
               {loading && (
-                <div className="rounded-xl border border-border bg-black/10 p-8 text-center text-sm text-text-muted">
+                <div className="rounded-[8px] border border-border bg-surface-alt p-8 text-center text-sm text-text-muted">
                   正在检查本机环境...
                 </div>
               )}

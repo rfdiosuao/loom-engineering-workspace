@@ -23,8 +23,9 @@
 - 写配置必须先备份、原子写入、回读校验；失败时恢复原配置，不能显示假成功。
 - 重新配置或覆盖升级不得删除 Codex、Claude Code、OpenCode 的历史会话和用户自定义配置。
 - Codex、Claude Code 和 OpenCode 是 `2.4.0` 首批正式支持对象；OpenClaw、Hermes 保持兼容维护，不扩大主路径。
-- 手机矩阵在 `2.4.x` 期间只修复 P0/P1 缺陷，不新增控制协议、视觉模型或平台发布流程。
+- 手机矩阵在 `2.4.x` 期间只修复 P0/P1 缺陷，不新增控制动作、视觉模型或平台发布流程。唯一允许的连接协议演进，是用短时一次性配对码替代用户可见的永久 `apiToken`，并继续复用现有 Bridge、phone daemon、USB 与 LAN 执行通道。
 - 生图、生视频和全案九步在 `2.4.x` 期间只修复阻断性问题，不增加新的供应商和工作流。
+- 全产品 UI 使用同一套语义颜色令牌。模块不得定义自己的主色、成功色、警告色和失败色；颜色不能作为唯一状态信号。
 - 每项任务必须先补失败测试，再实现，再运行定向测试与全量发行门禁。
 - 未单独注明工作目录的 Python、Node、Rust 和前端命令，均从 `apps/loom-platform/openclaw_new_launcher` 执行；工作区门禁从仓库根目录执行。
 
@@ -47,15 +48,17 @@ LOOM 在下一阶段统一对外定义为：
 | P0 | 模型发现、验证、选择和故障分类 | 决定产品是否可用 | 主开发线 |
 | P1 | 自动更新、诊断、日志、数据保护 | 降低售后成本 | 持续建设 |
 | P1 | 原生中枢智能体 | 统一使用入口 | 只优化可靠性 |
-| P2 | 手机连接与矩阵 | 差异化高级能力 | 稳定维护期 |
+| P1 | 手机首次配对、断线恢复与凭据安全 | 差异化能力的可用前提 | P0/P1 可靠性主线 |
+| P2 | 手机矩阵新动作与新场景 | 差异化高级能力 | 稳定维护期 |
 | P2 | 生图、生视频、全案九步 | 增值能力 | 阻断缺陷维护 |
+| P2 | 全局视觉一致性与可访问性 | 降低学习成本和玩具感 | 统一设计系统，不扩页面 |
 | P3 | YOLO、游戏控制、新平台自动发布 | 未来能力 | 暂停 |
 
 ### 1.3 暂停项
 
 在 `2.4.0` 达到发行门槛前，不开始以下工作：
 
-- 新增手机控制动作或新的手机通信协议。
+- 新增手机控制动作，或建立绕过现有 Bridge/phone daemon 的第二套手机执行通道。
 - 新增媒体供应商、全案步骤或创作页面。
 - 新增不产生安装、配置、付费或留存价值的 UI 页面。
 - 同时支持更多 Agent，导致首批三个 Agent 的兼容测试被稀释。
@@ -96,6 +99,33 @@ LOOM 在下一阶段统一对外定义为：
 | P1 已知缺陷 | 必须有明确规避方案和负责人 |
 | 客服可导出的诊断摘要 | 不含密钥，可直接定位所属故障域 |
 
+### 2.4 手机配对与连接
+
+| 指标 | `2.4.0` 门槛 |
+| --- | --- |
+| 用户手工查看或输入永久手机 `apiToken` | 0 |
+| 同局域网首次配对步骤 | <= 3 步 |
+| 单一用户配对入口 | 手机“与 LOOM 配对” + 电脑“手机连接”，旧 Token/直连 Skill 入口为 0 |
+| 配对码有效期 | <= 5 分钟、一次性使用 |
+| 首次配对成功率 | >= 98%（受控 USB/LAN 各 100 次） |
+| 已配对设备重启后自动恢复 | >= 99% 自动化与受控环境 |
+| 已配对设备恢复耗时 | P95 <= 15 秒；失败不得阻塞页面操作 |
+| 手机地址变化后自动修复 | >= 95%（受控同网段地址漂移） |
+| 断线后可行动错误分类 | 100% 已知错误 |
+| 在线状态假阳性 | 0；只有目标设备真实探测成功才显示在线 |
+| 配对码、长期令牌和 HMAC 密钥进入日志或前端响应 | 0 |
+| LAN 明文请求或响应包含配对码、长期令牌或 HMAC 密钥 | 0 |
+
+### 2.5 全局 UI 一致性
+
+| 指标 | `2.4.0` 门槛 |
+| --- | --- |
+| React 页面新增硬编码业务颜色 | 0 |
+| 主操作、信息、成功、警告、失败颜色语义 | 全模块一致 |
+| 普通文本对比度 | WCAG AA，至少 4.5:1 |
+| 状态仅依赖颜色表达 | 0 |
+| `prefers-reduced-motion` | 全局支持 |
+
 ---
 
 ## 3. 版本路线
@@ -106,6 +136,8 @@ LOOM 在下一阶段统一对外定义为：
 - 统一模型目录、能力标签、真实探测、配置事务和中文错误。
 - 首次使用向导只保留账号、Agent、模型和首轮验证四步。
 - 上游故障与本地故障明确分离。
+- 手机连接页移除用户可见的永久 `apiToken`，改为短时一次性配对码、自动保存长期凭据和重启恢复。
+- 全模块收敛到同一组表面、文本、边框、品牌与状态语义令牌。
 
 ### `2.4.1`：账号与权益中心
 
@@ -164,9 +196,15 @@ LOOM 在下一阶段统一对外定义为：
 
 - `apps/loom-platform/openclaw_new_launcher/python/api/routes_diagnostics.py`：可导出的结构化诊断。
 - `apps/loom-platform/openclaw_new_launcher/src/components/diagnostics/DiagnosticsPage.tsx`：中文诊断和修复入口。
+- `apps/loom-platform/openclaw_new_launcher/python/api/routes_phone.py`：配对会话、长期凭据落盘、USB/LAN 自动恢复和结构化错误。
+- `apps/loom-platform/openclaw_new_launcher/src/components/phone/PhoneDemoPage.tsx`：配对码输入/扫码、配对进度和恢复反馈，不再显示永久令牌。
+- `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/ui/settings/`：手机端配对入口和迁移后的设置体验。
+- `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/server/`：一次性配对领取、速率限制、长期凭据生成与兼容认证。
 - `apps/loom-platform/openclaw_new_launcher/python/core/phone_matrix.py`：矩阵 P0/P1 修复，不增加协议。
 - `apps/loom-platform/openclaw_new_launcher/python/api/routes_matrix.py`：矩阵状态和任务 API。
 - `apps/loom-platform/openclaw_new_launcher/src/components/matrix/MatrixWorkbenchPage.tsx`：矩阵状态一致性。
+- `apps/loom-platform/openclaw_new_launcher/src/styles/theme.css`：全局语义颜色与运动令牌。
+- `apps/loom-platform/openclaw_new_launcher/src/theme/default.ts`：亮色/暗色主题的唯一默认来源。
 
 ---
 
@@ -620,51 +658,125 @@ git commit -m "feat: add actionable redacted reliability diagnostics"
 
 ---
 
-## Task 9: 手机矩阵进入稳定维护门禁
+## Task 9: 用配对码完成手机首次接入与稳定恢复
 
 **Files:**
+- Modify: `apps/loom-platform/openclaw_new_launcher/python/api/routes_phone.py`
+- Modify: `apps/loom-platform/openclaw_new_launcher/src/services/api.ts`
+- Modify: `apps/loom-platform/openclaw_new_launcher/src/components/phone/PhoneDemoPage.tsx`
+- Modify: `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/ui/settings/SettingsActivity.kt`
+- Modify: `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/ui/settings/SettingsViewModel.kt`
+- Modify: `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/server/LumiSecurityController.kt`
+- Modify: `apps/loom-phone-agent/app/src/main/res/values-zh/strings.xml`
+- Modify: `apps/loom-phone-agent/README.md`
+- Modify: `apps/loom-phone-agent/README_CN.md`
+- Modify: `apps/loom-platform/packages/luming-skills-library/skills/luming-phone-agent/SKILL.md`
 - Modify: `docs/runbooks/agent-reliability-release-gates.md`
 - Modify: `apps/loom-platform/openclaw_new_launcher/python/core/phone_matrix.py`
 - Modify: `apps/loom-platform/openclaw_new_launcher/python/api/routes_matrix.py`
+- Test: `apps/loom-platform/openclaw_new_launcher/python/tests/test_routes_phone.py`
 - Test: `apps/loom-platform/openclaw_new_launcher/python/tests/test_routes_matrix.py`
 - Test: `apps/loom-platform/openclaw_new_launcher/python/tests/test_matrix_control_plane.py`
+- Test: `apps/loom-phone-agent/app/src/test/java/com/apk/claw/android/server/`
 
 **Interfaces:**
-- Consumes: 现有手机快速通道、ADB 兜底、截图缓存和任务状态。
-- Produces: 不阻塞 `2.4.x` 主线的 P0/P1 修复规则，以及恢复新功能开发的量化门槛。
+- Consumes: 现有手机快速通道、DPAPI 手机配置、Android 本地密钥、ADB 兜底、截图缓存和任务状态。
+- Produces: `unpaired → code_generated → claimed → verified → connected` 配对状态机，以及不阻塞 `2.4.x` 主线的 P0/P1 维护规则。
 
-- [ ] **Step 1: 限制允许变更**
+- [ ] **Step 1: 固定安全协议**
 
-`2.4.x` 只接受连接错误、任务假成功、错误设备目标、急停失效、截图阻塞、密钥泄露和升级回归。
+手机生成 6 位配对码和不含永久令牌的二维码载荷，默认 5 分钟过期、一次性使用、错误次数受限。电脑继续作为现有 USB/LAN 客户端，通过手机 ConfigServer 领取随机长期凭据；不让手机访问电脑回环 Bridge，也不新增电脑 LAN 监听。6 位人工配对码只允许用于 ADB 转发后的 USB 回环通道；LAN 完整配对载荷必须携带一次性高熵引导密钥，请求只发送基于该密钥的证明，长期凭据使用该密钥派生的 AES-GCM 密钥加密返回。配对码和引导密钥只用于交换随机长期凭据，不直接成为 API Token；长期凭据不进入 UI、日志、URL、命令行和普通 API 响应，也不得以明文穿过 LAN。
 
-- [ ] **Step 2: 保持单一执行通道**
+- [ ] **Step 2: 实现兼容迁移**
+
+已有 `apiToken` 继续作为迁移凭据使用，成功配对后隐藏旧配置入口并保存新的长期凭据。升级不能让已配对设备失联；重新配对成功前不得撤销旧凭据。
+
+- [ ] **Step 3: 自动发现与恢复**
+
+优先恢复已保存 USB 转发和 LAN 地址；地址变化或 HMAC 配对失效时执行有界修复，不无限重试。恢复在后台进行，不能冻结手机连接页、Matrix 或 Agent 输入框。每台设备独立退避、独立超时、独立熔断，单台慢手机不得拖慢其他设备。错误必须区分未配对、配对码过期、配对码错误、手机不可达、USB 未授权、LAN 不同网段和凭据失效。
+
+- [ ] **Step 4: 保持单一执行通道**
 
 手机连接页、Matrix、原生 Agent、CLI 和 MCP 必须继续复用现有 Bridge/phone daemon 能力，禁止新增旁路端口。
 
-- [ ] **Step 3: 增加回归门禁**
+- [ ] **Step 5: 删除冲突的旧接入方式**
+
+手机 README、Agent 接入提示词和发布的 Skill 只描述“与 LOOM 配对”。移除要求用户填写手机 URL、端口或永久 Token 的旧 Skill；开发协议文档可以说明内部认证，但不得把内部凭据变成用户配置。模型 API Key/Token 属于模型服务配置，必须与手机配对凭据保持不同名称、不同页面和不同存储边界。
+
+- [ ] **Step 6: 增加回归门禁**
 
 Run:
 
 ```powershell
-python -m pytest python/tests/test_routes_matrix.py python/tests/test_matrix_control_plane.py -q
+python -m pytest python/tests/test_routes_phone.py python/tests/test_routes_matrix.py python/tests/test_matrix_control_plane.py -q
+cd ..\..\..\loom-phone-agent
+.\gradlew.bat test
 ```
 
-Expected: PASS；矩阵维护修改不能改变模型安装和账号主链路。
+Expected: PASS；覆盖过期、重放、错误码限流、重复领取、兼容迁移、USB/LAN 恢复、LAN 密文交换、密文篡改拒绝和密钥脱敏。
 
-- [ ] **Step 4: 固定恢复条件**
+- [ ] **Step 7: 固定真实连接验收**
+
+在 Windows 10/11 分别完成全新配对、覆盖升级、电脑重启、手机重启、USB 拔插、USB 未授权、LAN IP 变化、Wi-Fi 短暂断开和凭据轮换。记录每个场景的成功率、恢复耗时、重试次数、最终错误码和是否需要用户操作；不得用模拟路由代替实体手机证据。
+
+- [ ] **Step 8: 固定矩阵恢复条件**
 
 恢复矩阵功能开发前必须完成 10 台实体手机、2 小时、任务/截图/急停/恢复综合 soak，并保存 P50、P95、失败率和误超时率。
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 9: Commit**
 
 ```powershell
-git add python/core/phone_matrix.py python/api/routes_matrix.py python/tests/test_routes_matrix.py python/tests/test_matrix_control_plane.py docs/runbooks/agent-reliability-release-gates.md
-git commit -m "test: freeze phone matrix behind reliability gates"
+git add apps/loom-platform/openclaw_new_launcher apps/loom-phone-agent docs/runbooks/agent-reliability-release-gates.md
+git commit -m "feat: replace visible phone tokens with secure pairing"
 ```
 
 ---
 
-## Task 10: 全量验证、灰度与商业指标
+## Task 10: 统一全产品颜色和交互反馈
+
+**Files:**
+- Modify: `apps/loom-platform/openclaw_new_launcher/src/styles/theme.css`
+- Modify: `apps/loom-platform/openclaw_new_launcher/src/styles/index.css`
+- Modify: `apps/loom-platform/openclaw_new_launcher/src/theme/default.ts`
+- Modify: `apps/loom-platform/openclaw_new_launcher/src/types/theme.ts`
+- Modify: affected React modules under `apps/loom-platform/openclaw_new_launcher/src/components/`
+- Test: `apps/loom-platform/openclaw_new_launcher/src/components/controlIntegrity.test.ts`
+- Test: `apps/loom-platform/openclaw_new_launcher/tests/e2e/`
+
+**Interfaces:**
+- Consumes: 现有 LOOM 深绿品牌、亮色/暗色主题和模块页面。
+- Produces: 中性工作台表面、深绿品牌主操作、蓝色信息、绿色成功、琥珀警告、红色失败的统一语义系统。
+
+- [ ] **Step 1: 扩充语义令牌**
+
+增加 `info`、`warning`、`success`、`danger`、`focus`、`selected`、`disabled`、`overlay`、`elevation` 和统一运动时长；亮色与暗色分别达到对比度门槛。
+
+- [ ] **Step 2: 移除模块私有主色**
+
+安装、智能体、创作、手机、矩阵、模型、获客和诊断页面不再直接声明业务十六进制颜色。所有主页面使用 `app-bg` 画布，页头和工作区使用 `surface`，次级面板使用 `surface-alt`；只有真实手机画面、终端和品牌启动场景允许使用深色表面。品牌色只用于主操作和选中态，状态色只表达状态。
+
+- [ ] **Step 3: 统一反馈**
+
+耗时超过 300ms 的操作必须显示进行中；所有失败使用 `role="alert"` 或 `aria-live`；图标与文字共同表达状态；点击目标和焦点环满足可访问性要求。
+
+- [ ] **Step 4: 控制运动**
+
+微交互保持 150-300ms，仅动画关键元素；支持 `prefers-reduced-motion`，关闭非必要的循环动画。
+
+- [ ] **Step 5: 视觉验收**
+
+使用 Playwright 在 960x640、1200x800、1440x900 验证安装、智能体、创作、手机、矩阵、模型和诊断页面，无文字溢出、重叠、透明度割裂和状态混色。
+
+- [ ] **Step 6: Commit**
+
+```powershell
+git add src/styles src/theme src/types/theme.ts src/components tests/e2e
+git commit -m "refactor: unify loom visual language across modules"
+```
+
+---
+
+## Task 11: 全量验证、灰度与商业指标
 
 **Files:**
 - Modify: `docs/runbooks/agent-reliability-release-gates.md`
@@ -672,7 +784,7 @@ git commit -m "test: freeze phone matrix behind reliability gates"
 - Modify: `apps/loom-platform/docs/LOOM_RELEASE_TEST_AND_DEMO_CHECKLIST.md`
 
 **Interfaces:**
-- Consumes: Tasks 1-9 的自动化与真实环境证据。
+- Consumes: Tasks 1-10 的自动化与真实环境证据。
 - Produces: `2.4.0` 发布决定和灰度监控指标。
 
 - [ ] **Step 1: 运行工作区门禁**
@@ -723,14 +835,15 @@ git commit -m "docs: gate loom 2.4.0 on first-use reliability"
 推荐顺序：
 
 1. Task 1 建立事实基线。
-2. Task 2 安装事务与 Task 3 模型目录可并行。
+2. Task 2 安装事务、Task 3 模型目录、Task 9 手机配对和 Task 10 视觉系统可并行。
 3. Task 4 依赖 Task 3。
 4. Task 5 依赖 Tasks 2-4。
 5. Task 6 依赖 Task 4。
 6. Task 7 可以与 Task 6 并行，但不得改变 Task 4 的配置事务。
 7. Task 8 汇总 Tasks 2、4、6、7 的结构化错误。
-8. Task 9 独立维护，不占用主线架构修改。
-9. Task 10 最后执行。
+8. Task 9 只改连接建立和恢复，不新增手机动作。
+9. Task 10 只改语义令牌和表现层，不修改业务状态机。
+10. Task 11 最后执行。
 
 每个任务使用独立分支和 worktree；一个任务只允许一个主写入者。跨任务共享接口先在本计划中更新后再编码，避免多个会话各自发明不同字段。
 
@@ -744,6 +857,8 @@ git commit -m "docs: gate loom 2.4.0 on first-use reliability"
 - 配置失败不会破坏历史会话和已有配置。
 - 上游宕机时明确说明是上游问题，并允许使用备用模型或 BYOK。
 - 客服不需要阅读 traceback 就能判断故障属于安装、环境、账号、权限、网络还是供应商。
+- 用户不再查看或输入永久手机 Token；配对码过期、重放和错误尝试会被拒绝，已配对设备能在重启后自动恢复。
+- 安装、智能体、创作、手机、矩阵、模型和诊断使用同一视觉语义，状态可由文字和图标共同识别。
 - 手机矩阵保持现有可用能力，没有因为主线重构产生回归。
 - 自动更新和覆盖安装能够把这些修复可靠交付给旧版本用户。
 

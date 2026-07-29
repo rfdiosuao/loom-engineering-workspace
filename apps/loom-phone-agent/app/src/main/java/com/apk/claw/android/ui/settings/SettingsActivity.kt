@@ -36,8 +36,8 @@ class SettingsActivity : BaseActivity() {
         viewModel.refresh()
     }
 
-    // 注册 API Token 配置页返回后刷新
-    private val apiTokenConfigLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
+    // 注册手机配对页返回后刷新
+    private val pcPairingLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
         viewModel.refresh()
     }
 
@@ -120,16 +120,9 @@ class SettingsActivity : BaseActivity() {
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.WECHAT) },
             showDivider = true
         )
-        menuItems[SettingsViewModel.MenuAction.API_TOKEN.name] = channelGroup.addMenuItem(
-            leadingIcon = R.drawable.ic_api_token,
-            title = getString(R.string.menu_api_token),
-            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.API_TOKEN) },
-            showDivider = true
-        )
-        menuItems[SettingsViewModel.MenuAction.API_TOKEN.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
         menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name] = channelGroup.addMenuItem(
-            leadingIcon = R.drawable.ic_lan_config,
-            title = "电脑配对",
+            leadingIcon = R.drawable.ic_pc_pairing,
+            title = getString(R.string.menu_pc_pairing),
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.PC_PAIRING) },
             showDivider = true
         )
@@ -288,11 +281,8 @@ class SettingsActivity : BaseActivity() {
                                     Toast.makeText(this@SettingsActivity, R.string.lan_config_no_wifi, Toast.LENGTH_SHORT).show()
                                 }
                             }
-                            SettingsViewModel.MenuAction.API_TOKEN -> {
-                                apiTokenConfigLauncher.launch(Intent(this@SettingsActivity, ApiTokenConfigActivity::class.java))
-                            }
                             SettingsViewModel.MenuAction.PC_PAIRING -> {
-                                viewModel.showPcPairingQr(this@SettingsActivity)
+                                pcPairingLauncher.launch(Intent(this@SettingsActivity, PcPairingActivity::class.java))
                             }
                             SettingsViewModel.MenuAction.LLM_CONFIG -> {
                                 llmConfigLauncher.launch(Intent(this@SettingsActivity, LlmConfigActivity::class.java))

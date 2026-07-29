@@ -52,6 +52,11 @@ PERMISSION_LEVELS = {
 
 DEFAULT_BRIDGE_URL = os.environ.get("LOOM_BRIDGE_URL", "").strip()
 DEFAULT_BRIDGE_TOKEN = os.environ.get("LOOM_BRIDGE_TOKEN", "").strip()
+_BRIDGE_SESSION_DIAGNOSTIC: Json = {
+    "status": "not_checked",
+    "code": "not_checked",
+    "message": "尚未检查 Bridge 会话。",
+}
 
 IMAGE_RATIO_TO_SIZE = {
     "1:1": "1024x1024",
@@ -637,6 +642,7 @@ def _status(ctx: CliContext) -> Json:
         "basePath": ctx.paths.base_path,
         "dataDir": ctx.paths.data_dir,
         "bridgeConfigured": bool(ctx.bridge_url),
+        "bridgeSession": _bridge_session_diagnostic(),
         "permission": ctx.permission,
         "time": _now_iso(),
     }
@@ -724,20 +730,178 @@ def _bridge_session_path() -> str:
     return os.path.join(base_dir, "bridge-session.json")
 
 
+def _set_bridge_session_diagnostic(status: str, code: str, message: str) -> None:
+    global _BRIDGE_SESSION_DIAGNOSTIC
+    _BRIDGE_SESSION_DIAGNOSTIC = {
+        "status": status,
+        "code": code,
+        "message": message,
+    }
+
+
+def _bridge_session_diagnostic() -> Json:
+    return dict(_BRIDGE_SESSION_DIAGNOSTIC)
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _listener_pid_for_port(port: int) -> int | None:
+    try:
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            for line in completed.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 5 or parts[0].upper() != "TCP" or parts[3].upper() != "LISTENING":
+                    continue
+                local = parts[1]
+                try:
+                    listener_port = int(local.rsplit(":", 1)[1])
+                    listener_pid = int(parts[-1])
+                except (IndexError, ValueError):
+                    continue
+                if listener_port == port:
+                    return listener_pid
+            return None
+        completed = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3,
+        )
+        first = completed.stdout.strip().splitlines()
+        return int(first[0]) if first else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _probe_bridge_identity(url: str, token: str) -> Json:
+    request = urllib.request.Request(f"{url}/api/system/info", method="GET")
+    request.add_header("Accept", "application/json")
+    request.add_header("X-Bridge-Token", token)
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    bridge = payload.get("bridge") if isinstance(payload.get("bridge"), dict) else {}
+    identity = bridge.get("identity") if isinstance(bridge.get("identity"), dict) else {}
+    return {
+        "apiContractVersion": str(
+            bridge.get("apiContractVersion") or payload.get("api_contract_version") or ""
+        ),
+        **identity,
+    }
+
+
+def _remove_stale_bridge_session(path: str, expected: Json) -> None:
+    try:
+        if _read_json_if_exists(path) == expected:
+            os.remove(path)
+    except OSError:
+        pass
+
+
 def _load_bridge_session() -> Json:
     path = _bridge_session_path()
     if not os.path.exists(path):
+        _set_bridge_session_diagnostic("missing", "session_file_missing", "未找到 Bridge 会话文件。")
         return {}
     data = _read_json_if_exists(path)
-    if data.get("schema") != "loom.bridge_session.v1":
+
+    def reject(code: str, message: str) -> Json:
+        _remove_stale_bridge_session(path, data)
+        _set_bridge_session_diagnostic("stale", code, message)
         return {}
+
+    if data.get("schema") != "loom.bridge_session.v1":
+        return reject("invalid_schema", "Bridge 会话格式无效，已清理陈旧文件。")
     url = str(data.get("url") or "").strip().rstrip("/")
     token = str(data.get("token") or "").strip()
     port = data.get("port")
     if not url and isinstance(port, int):
         url = f"http://127.0.0.1:{port}"
-    if not url.startswith("http://127.0.0.1:"):
-        return {}
+    try:
+        parsed = urllib.parse.urlparse(url)
+        url_port = parsed.port
+    except ValueError:
+        return reject("invalid_url", "Bridge 会话地址无效，已清理陈旧文件。")
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or not isinstance(url_port, int)
+    ):
+        return reject("invalid_url", "Bridge 会话不是安全的本机地址，已清理陈旧文件。")
+    if not isinstance(port, int) or isinstance(port, bool) or port != url_port:
+        return reject("port_mismatch", "Bridge 会话端口与地址不一致，已清理陈旧文件。")
+    if not token:
+        return reject("missing_token", "Bridge 会话缺少认证令牌，已清理陈旧文件。")
+    pid = data.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return reject("invalid_pid", "Bridge 会话缺少有效进程标识，已清理陈旧文件。")
+    if not _process_is_alive(pid):
+        return reject("pid_not_running", "Bridge 进程已经退出，已清理陈旧会话。")
+    listener_pid = _listener_pid_for_port(port)
+    if listener_pid is not None and listener_pid != pid:
+        return reject("listener_pid_mismatch", "Bridge 端口已被其他进程占用，已清理陈旧会话。")
+    identity = _probe_bridge_identity(url, token)
+    if identity.get("apiContractVersion") != "loom.bridge.api.v2":
+        return reject(
+            "bridge_identity_unavailable",
+            "无法使用当前令牌确认 LOOM Bridge 身份，已清理陈旧会话。",
+        )
+    instance_id = str(data.get("instanceId") or "").strip()
+    if instance_id:
+        if (
+            identity.get("pid") != pid
+            or identity.get("port") != port
+            or identity.get("instanceId") != instance_id
+        ):
+            return reject(
+                "process_identity_mismatch",
+                "Bridge 实例身份与会话文件不一致，已清理陈旧会话。",
+            )
+        diagnostic_code = "identity_verified"
+        diagnostic_message = "Bridge PID、端口和实例身份已验证。"
+    else:
+        if listener_pid != pid:
+            return reject(
+                "legacy_identity_unverifiable",
+                "旧版 Bridge 会话无法确认端口所属进程，已清理陈旧会话。",
+            )
+        diagnostic_code = "legacy_identity_verified"
+        diagnostic_message = "旧版 Bridge 会话已通过 PID、监听端口和 API 合同验证。"
+    _set_bridge_session_diagnostic("verified", diagnostic_code, diagnostic_message)
     return {"url": url, "token": token}
 
 
@@ -2567,7 +2731,7 @@ def _argv_summary(argv: list[str]) -> list[str]:
             summary.append("***")
             redact_next = False
             continue
-        if lowered in {"--bridge-token", "--token", "--api-key", "--password", "--secret"}:
+        if lowered in {"--bridge-token", "--token", "--api-token", "--api-key", "--password", "--secret"}:
             summary.append(item)
             redact_next = True
             continue

@@ -14,7 +14,7 @@ import { AUDIT_DIAGNOSTICS } from './support/mock-responses';
 
 test.beforeEach(async ({ audit }) => {
   await audit.registerRoute('POST', '/api/phone/usb/reconcile', {
-    value: { ok: true, count: 0, results: [] },
+    value: { ok: true, recovered: 0, pending: [] },
   });
   await audit.openAuthorizedShell();
 });
@@ -121,9 +121,9 @@ test('dashboard unlocks workspaces only after the current Bridge configuration c
   await expectToast(page, '当前配置检查通过，可以进入智能体或创作。');
   await expect(agentEntry).toBeEnabled();
   await expect(creativeEntry).toBeEnabled();
-  await expect(agentEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
+  await expect(agentEntry).toHaveCSS('background-color', 'rgb(11, 90, 72)');
   await expect(agentEntry).toHaveCSS('color', 'rgb(255, 255, 255)');
-  await expect(creativeEntry).toHaveCSS('background-color', 'rgb(11, 74, 62)');
+  await expect(creativeEntry).toHaveCSS('background-color', 'rgb(11, 90, 72)');
   await expect(creativeEntry).toHaveCSS('color', 'rgb(255, 255, 255)');
   await page.waitForTimeout(250);
   await page.screenshot({ path: testInfo.outputPath('dashboard-journey-verified.png') });
@@ -211,10 +211,58 @@ test('settings appearance controls persist language and theme state', async ({ a
   await appMain(page).getByRole('combobox', { name: 'Language' }).selectOption('zh-CN');
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
 
-  for (const [name, mode] of [['深色', 'dark'], ['跟随系统', 'system'], ['米白', 'light']] as const) {
-    await appMain(page).getByRole('button', { name, exact: true }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme-mode', mode);
-  }
+  await appMain(page).getByRole('button', { name: '深色', exact: true }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'dark');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('loom_theme_mode_v2'))).toBe('dark');
+
+  await page.reload();
+  await expect(page.locator('[data-commercial-app-shell]')).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'dark');
+  await expect(page.locator('html')).toHaveAttribute('data-effective-theme-mode', 'dark');
+
+  await navigateTo(audit, 'settings');
+  await appMain(page).getByRole('button', { name: '跟随系统', exact: true }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'system');
+  await appMain(page).getByRole('button', { name: '米白', exact: true }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'light');
+});
+
+test('phone download dialog owns focus, closes with Escape, and restores its trigger', async ({ audit, page }) => {
+  await navigateTo(audit, 'phone');
+  const trigger = appMain(page).getByRole('button', { name: '下载手机端 App' });
+  await trigger.focus();
+  await trigger.click();
+
+  const dialog = page.getByRole('dialog', { name: '下载手机端 App' });
+  await expect(dialog).toBeVisible();
+  const close = dialog.getByRole('button', { name: '关闭下载手机端 App' }).last();
+  await expect(close).toBeFocused();
+
+  await page.keyboard.press('Shift+Tab');
+  await expect(dialog.locator(':focus')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
+test('USB device picker exposes a stable accessible select name', async ({ audit, page }) => {
+  await audit.registerRoute('GET', '/api/phone/usb/devices', {
+    value: {
+      ok: true,
+      devices: [
+        { serial: 'AUDIT-USB-1', state: 'device', label: '测试手机 1' },
+        { serial: 'AUDIT-USB-2', state: 'device', label: '测试手机 2' },
+      ],
+    },
+  });
+  await navigateTo(audit, 'phone');
+  await appMain(page).getByLabel('USB 6 位配对码').fill('123456');
+  await appMain(page).getByRole('button', { name: '通过 USB 配对' }).click();
+
+  const dialog = page.getByRole('dialog', { name: '选择 USB 手机' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('combobox', { name: '选择 USB 手机' })).toHaveValue('AUDIT-USB-1');
 });
 
 test('settings opens the global update center and installs only after download verification', async ({ audit, page }) => {

@@ -76,22 +76,22 @@ export const PhoneWall: React.FC<PhoneWallProps> = ({
       : 'grid-cols-[repeat(auto-fill,minmax(148px,1fr))]';
 
   return (
-    <section data-matrix-phone-wall className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#07131B]">
-      <div className="flex shrink-0 items-center gap-2 border-b border-white/[0.08] px-3 py-2">
+    <section data-matrix-phone-wall className="flex min-h-0 min-w-0 flex-1 flex-col bg-app-bg">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-surface px-3 py-2">
         <input
           type="search"
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder="搜索设备、账号、应用"
-          className="min-w-0 flex-1 rounded-[6px] border border-white/10 bg-[#06131C] px-3 py-1.5 text-[11px] text-slate-100 outline-none focus:border-cyan-300/40"
+          className="min-w-0 flex-1 rounded-[6px] border border-border bg-input px-3 py-1.5 text-[11px] text-text outline-none focus:border-[var(--color-focus)] focus:ring-2 focus:ring-[var(--color-focus-soft)]"
         />
-        <div className="flex rounded-[6px] border border-white/10 p-0.5">
+        <div className="flex rounded-[6px] border border-border p-0.5">
           {DENSITY_LABELS.map(([value, label]) => (
             <button
               key={value}
               type="button"
               onClick={() => onDensityChange(value)}
-              className={`px-2 py-1 text-[9px] font-bold ${density === value ? 'rounded-[4px] bg-cyan-300/15 text-cyan-100' : 'text-slate-500'}`}
+              className={`px-2 py-1 text-[9px] font-bold ${density === value ? 'rounded-[4px] bg-selected text-selected-ink' : 'text-text-muted hover:text-text'}`}
             >
               {label}
             </button>
@@ -103,8 +103,8 @@ export const PhoneWall: React.FC<PhoneWallProps> = ({
       </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-3">
         {loading ? (
-          <div className="flex h-full min-h-[240px] items-center justify-center text-center text-xs text-slate-400">
-            <div><div className="font-bold text-slate-200">正在加载矩阵设备</div><div className="mt-1">正在同步设备与任务状态</div></div>
+          <div className="flex h-full min-h-[240px] items-center justify-center text-center text-xs text-text-muted" role="status" aria-live="polite">
+            <div><div className="font-bold text-text">正在加载矩阵设备</div><div className="mt-1">正在同步设备与任务状态</div></div>
           </div>
         ) : devices.length ? (
           <div className={`grid items-start gap-2 ${gridClass}`}>
@@ -125,8 +125,8 @@ export const PhoneWall: React.FC<PhoneWallProps> = ({
             ))}
           </div>
         ) : (
-          <div className="flex h-full min-h-[240px] items-center justify-center border border-dashed border-white/10 text-center text-xs text-slate-500">
-            <div><div className="font-bold text-slate-300">没有匹配的真实设备</div><div className="mt-1">调整分组或搜索条件</div></div>
+          <div className="flex h-full min-h-[240px] items-center justify-center border border-dashed border-border text-center text-xs text-text-muted">
+            <div><div className="font-bold text-text">没有匹配的真实设备</div><div className="mt-1">调整分组或搜索条件</div></div>
           </div>
         )}
       </div>
