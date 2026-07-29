@@ -54,7 +54,7 @@ jobs:
         run: ./gradlew -Pandroid7Compat=true testDebugUnitTest assembleDebug --stacktrace
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-phone-debug-apk
           path: apps/loom-phone-agent/app/build/outputs/apk/debug/*.apk
