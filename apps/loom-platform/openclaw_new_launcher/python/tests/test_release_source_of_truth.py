@@ -125,6 +125,7 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         self.assertIn("-PruneDesktopReleases", release)
         self.assertIn("MirrorFallbackBaseUrl", release)
         self.assertIn("-DownloadUrl $githubInstallerUrl", release)
+        self.assertIn("-MirrorPartSizeBytes 16777216", release)
         self.assertIn("LOOM-stable.update.json", release)
         self.assertIn("*.part???", release)
         self.assertLess(release.index(github_step), release.index(mirror_step))

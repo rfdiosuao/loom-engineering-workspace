@@ -216,7 +216,8 @@ jobs:
             -OutputDirectory $outputRoot `
             -DownloadUrl $githubInstallerUrl `
             -MirrorBaseUrl $mirrorBaseUrl `
-            -MirrorFallbackBaseUrl $githubPartsBaseUrl
+            -MirrorFallbackBaseUrl $githubPartsBaseUrl `
+            -MirrorPartSizeBytes 16777216
           if ($LASTEXITCODE -ne 0) {
             throw "Desktop update release preparation failed with exit code $LASTEXITCODE"
           }
