@@ -5719,6 +5719,7 @@ def register_phone_routes(app, ctx) -> None:
             step_timeout_sec=_PHONE_DIRECT_STEP_TIMEOUT_SEC,
             evidence_body={"deviceId": device_id} if device_id else {},
             device_id=device_id,
+            exact_timeout=True,
         )
 
     @app.api_route("/api/phone/metrics", methods=["GET", "POST"])
