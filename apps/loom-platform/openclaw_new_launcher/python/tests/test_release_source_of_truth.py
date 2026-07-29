@@ -113,7 +113,7 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
             release,
         )
 
-    def test_windows_release_publishes_signed_github_parts_before_best_effort_domestic_mirror(self) -> None:
+    def test_windows_release_publishes_signed_github_parts_before_required_domestic_mirror(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
 
         mirror_step = "- name: Publish signed domestic update mirror"
@@ -142,8 +142,9 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
             mirror_step.index("-Assets @($manifestPath)"),
             mirror_step.index("Start-Job"),
         )
-        self.assertIn("timeout-minutes: 35", release)
-        self.assertIn("Wait-Job -Job $jobs -Timeout 1800", mirror_step)
+        self.assertIn("timeout-minutes: 75", release)
+        self.assertIn("Wait-Job -Job $jobs -Timeout 3600", mirror_step)
+        self.assertIn("60 minute release deadline", mirror_step)
         self.assertIn("$expectedAssets", mirror_step)
         self.assertIn("-VerifyOnly", mirror_step)
         self.assertLess(
@@ -160,11 +161,11 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
 
         self.assertIn("Start-Job", mirror_step)
         self.assertIn("Wait-Job", mirror_step)
-        self.assertIn("-Timeout 1800", mirror_step)
+        self.assertIn("-Timeout 3600", mirror_step)
         self.assertIn("Stop-Job", mirror_step)
         self.assertNotIn("$LASTEXITCODE", mirror_step)
         self.assertIn("continue-on-error: false", mirror_step)
-        self.assertIn("timeout-minutes: 35", mirror_step)
+        self.assertIn("timeout-minutes: 75", mirror_step)
         self.assertLess(
             mirror_step.index("-PruneDesktopReleases"),
             mirror_step.index("Start-Job"),
