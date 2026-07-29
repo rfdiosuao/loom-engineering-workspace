@@ -19,7 +19,7 @@ import socket
 import subprocess
 import threading
 import time
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import Request
 from starlette.concurrency import run_in_threadpool
 
+from core.account_entitlement import AccountEntitlementError
 from core.secret_store import DPAPI_PROVIDER, SECRET_MARKER, protect_secret, unprotect_secret
 
 
@@ -49,6 +50,7 @@ _PHONE_STATUS_REQUEST_TIMEOUT_FLOOR_MS = 250
 _PHONE_STATUS_PROCESS_STARTUP_MARGIN_MS = 4000
 _PHONE_SCREENSHOT_REQUEST_TIMEOUT_MS = max(5_000, (_PHONE_OBSERVE_TIMEOUT_SEC - 5) * 1000)
 _PHONE_CANCEL_GRACE_SEC = 5.0
+_PHONE_ENTITLEMENT_HEARTBEAT_SEC = 5.0
 _PHONE_SCREENSHOT_CACHE_TTL_MS = 1200
 _PHONE_READ_CACHE_TTL_SEC = 30
 _PHONE_REF_PREFERRED_ACTIONS = {
@@ -897,6 +899,7 @@ def _retry_pending_phone_pairing_confirmations(
 ) -> dict:
     store = _load_store(ctx)
     devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
+    active_account_id = _current_entitlement_account_id(ctx)
     current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
     target_device_id = _normalize_device_id(device_id, "")
     attempted_devices = 0
@@ -905,6 +908,10 @@ def _retry_pending_phone_pairing_confirmations(
 
     for raw_device in devices:
         device = {**raw_device}
+        owner_account_id = str(device.get("ownerAccountId") or "").strip()
+        if active_account_id and owner_account_id != active_account_id:
+            next_devices.append(device)
+            continue
         pending = bool(device.get("pairingConfirmationPending"))
         attempts = max(0, int(device.get("pairingConfirmationAttempts") or 0))
         next_retry_at = max(0, int(device.get("pairingConfirmationNextRetryAt") or 0))
@@ -2561,13 +2568,24 @@ def _phone_status_matrix_summary(status: dict, fallback: str = "") -> str:
     return " · ".join(parts) or fallback or "手机状态已更新"
 
 
+def _phone_matrix_control(ctx):
+    from core.phone_matrix import MatrixControlPlane
+
+    return MatrixControlPlane(
+        ctx.paths,
+        phone_authorizer=lambda device_ids, operation: _authorize_phone_entitlement(
+            ctx,
+            device_ids,
+            operation,
+        ),
+    )
+
+
 def _sync_phone_matrix_presence(ctx, kind: str, result: dict, device_id: str = "") -> None:
     if not isinstance(result, dict):
         return
     try:
-        from core.phone_matrix import MatrixControlPlane
-
-        matrix = MatrixControlPlane(ctx.paths)
+        matrix = _phone_matrix_control(ctx)
         payload = _phone_stdout_payload(str(result.get("stdout") or ""))
         updates: list[dict] = []
         if kind == "phone.status":
@@ -3018,9 +3036,7 @@ def _apply_phone_event_to_matrix(ctx, event: dict, device: dict | None = None) -
     if not patch:
         return
     try:
-        from core.phone_matrix import MatrixControlPlane
-
-        matrix = MatrixControlPlane(ctx.paths)
+        matrix = _phone_matrix_control(ctx)
         matrix.register_device(patch)
         event_name = _clip(event.get("event") or event.get("type") or "runtime", 80) or "runtime"
         message = _clip(
@@ -3056,10 +3072,8 @@ def _mark_phone_event_stream_offline(ctx, device_id: str) -> None:
     if not safe_device_id:
         return
     try:
-        from core.phone_matrix import MatrixControlPlane
-
         observed_at = _phone_matrix_presence_time()
-        MatrixControlPlane(ctx.paths).register_device(
+        _phone_matrix_control(ctx).register_device(
             {
                 "deviceId": safe_device_id,
                 "online": False,
@@ -3162,6 +3176,20 @@ def _record_phone_event_sync_event(ctx, key: str, state: dict, event: dict) -> N
 
 
 def _start_phone_event_sync(ctx, *, device_id: str = "", max_sec: int = 3600, max_events: int = 0) -> dict:
+    resolved_device_id = _phone_matrix_runtime_device_id(ctx, device_id)
+    try:
+        _authorize_phone_entitlement(
+            ctx,
+            [resolved_device_id],
+            "phone.events.start",
+        )
+    except AccountEntitlementError as exc:
+        return {
+            "running": False,
+            "code": exc.code,
+            "error": str(exc),
+            "action": exc.action,
+        }
     key = _phone_event_sync_key(device_id)
     with _PHONE_EVENT_SYNC_LOCK:
         existing = _PHONE_EVENT_SYNC_STATE.get(key)
@@ -3317,6 +3345,44 @@ def _stop_phone_event_sync(device_id: str = "") -> dict:
         state["finishedAt"] = _phone_matrix_presence_time()
         state["returncode"] = process.poll() if process is not None else None
         return _phone_event_sync_public(state)
+
+
+def stop_all_phone_event_syncs() -> dict:
+    with _PHONE_EVENT_SYNC_LOCK:
+        targets = [
+            (
+                key,
+                str(state.get("deviceId") or "")
+                if isinstance(state, dict)
+                else "",
+            )
+            for key, state in _PHONE_EVENT_SYNC_STATE.items()
+        ]
+    results: list[dict] = []
+    for key, device_id in targets:
+        try:
+            result = _stop_phone_event_sync(
+                device_id if device_id else ("" if key == "__default__" else key)
+            )
+            results.append({
+                "deviceId": device_id,
+                "ok": not bool(result.get("running")),
+                "running": bool(result.get("running")),
+            })
+        except Exception:
+            results.append({
+                "deviceId": device_id,
+                "ok": False,
+                "running": True,
+            })
+    running = [item for item in results if item.get("running") is True]
+    return {
+        "ok": not running,
+        "stoppedCount": sum(1 for item in results if item.get("ok") is True),
+        "failedCount": len(running),
+        "devices": results,
+        "executionMayContinue": bool(running),
+    }
 
 
 def _phone_compact_selectors_from_payload(payload: dict, data: dict) -> list[dict]:
@@ -4201,11 +4267,9 @@ def _append_phone_matrix_runtime_log(
     if not message:
         return
     try:
-        from core.phone_matrix import MatrixControlPlane
-
         event_kind = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(kind or "phone.task")).strip(".-_") or "phone.task"
         stream_name = "stderr" if stream == "stderr" else "stdout"
-        MatrixControlPlane(ctx.paths).append_runtime_event(
+        _phone_matrix_control(ctx).append_runtime_event(
             f"phone.events.{event_kind}.{stream_name}",
             _phone_matrix_runtime_device_id(ctx, device_id),
             message,
@@ -4219,17 +4283,32 @@ def _append_phone_matrix_runtime_log(
         return
 
 
-def _phone_runtime_config_json(ctx) -> str:
+def _phone_runtime_config_json(
+    ctx,
+    allowed_device_ids: list[str] | None = None,
+) -> str:
     if not callable(getattr(ctx, "read_json", None)):
         return ""
     if not str(getattr(getattr(ctx, "paths", None), "launcher_dir", "") or "").strip():
         return ""
     store = _load_store(ctx)
+    active_account_id = _current_entitlement_account_id(ctx)
+    allowed = (
+        {_normalize_device_id(value, "") for value in allowed_device_ids if str(value).strip()}
+        if allowed_device_ids is not None
+        else None
+    )
     devices: list[dict] = []
     for item in store.get("devices", []):
         if not isinstance(item, dict):
             continue
         if not _is_securely_paired_device(item):
+            continue
+        owner_account_id = str(item.get("ownerAccountId") or "").strip()
+        if active_account_id and owner_account_id != active_account_id:
+            continue
+        local_id = _normalize_device_id(item.get("id"), "")
+        if allowed is not None and local_id not in allowed:
             continue
         if (
             str(item.get("connectionMode") or "").strip().lower() == "usb"
@@ -4241,16 +4320,27 @@ def _phone_runtime_config_json(ctx) -> str:
             for key in ("id", "name", "baseUrl", "token", "launcherId", "launcherSecret", "album", "tags", "priority")
             if item.get(key) not in (None, "")
         })
+    selected_device_id = _normalize_device_id(store.get("selectedDeviceId"), "")
+    available_ids = [
+        _normalize_device_id(item.get("id"), "")
+        for item in devices
+        if isinstance(item, dict)
+    ]
+    if selected_device_id not in available_ids:
+        selected_device_id = next((value for value in available_ids if value), "")
     return json.dumps(
-        {"selectedDeviceId": store.get("selectedDeviceId") or "", "devices": devices},
+        {"selectedDeviceId": selected_device_id, "devices": devices},
         ensure_ascii=False,
         separators=(",", ":"),
     )
 
 
-def phone_process_env(ctx) -> dict[str, str]:
+def phone_process_env(
+    ctx,
+    allowed_device_ids: list[str] | None = None,
+) -> dict[str, str]:
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-    runtime_config = _phone_runtime_config_json(ctx)
+    runtime_config = _phone_runtime_config_json(ctx, allowed_device_ids)
     if runtime_config:
         env[_PHONE_RUNTIME_CONFIG_ENV] = runtime_config
     return env
@@ -4267,6 +4357,7 @@ def _run_phone_process_with_matrix_stream(
     on_heartbeat=None,
     should_cancel=None,
     cooperative_cancel: bool = False,
+    allowed_device_ids: list[str] | None = None,
 ) -> dict:
     def cancellation_requested() -> bool:
         if not callable(should_cancel):
@@ -4289,7 +4380,7 @@ def _run_phone_process_with_matrix_stream(
     process = subprocess.Popen(
         command,
         cwd=ctx.paths.base_path,
-        env=phone_process_env(ctx),
+        env=phone_process_env(ctx, allowed_device_ids),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
@@ -4409,9 +4500,37 @@ def _submit_phone_job(
     fallback_timeout_sec: int = 0,
     device_id: str = "",
     exact_timeout: bool = False,
+    entitlement_context: dict | None = None,
     inline_job_id: str = "",
     should_cancel=None,
 ):
+    try:
+        allowed_device_ids = [device_id] if device_id else _claimed_phone_local_device_ids(ctx)
+    except AccountEntitlementError as exc:
+        if inline_job_id:
+            raise
+        return _account_entitlement_error_response(ctx, exc)
+    if allowed_device_ids == []:
+        error = AccountEntitlementError(
+            "当前账号尚未绑定可用手机，请先在手机连接中完成配对。",
+            code="phone_device_required",
+            action="pair_phone",
+            status_code=403,
+        )
+        if inline_job_id:
+            raise error
+        return _account_entitlement_error_response(ctx, error)
+    if entitlement_context is None and allowed_device_ids is not None:
+        try:
+            entitlement_context = _authorize_phone_entitlement(
+                ctx,
+                allowed_device_ids,
+                kind,
+            )
+        except AccountEntitlementError as exc:
+            if inline_job_id:
+                raise
+            return _account_entitlement_error_response(ctx, exc)
     script_path = _script_path(ctx, script_name)
     fallback_script_path = _script_path(ctx, fallback_script_name) if fallback_script_name else ""
     if not os.path.exists(script_path):
@@ -4445,11 +4564,15 @@ def _submit_phone_job(
     fallback_execution = dict(fallback_execution or {})
     fallback_timeout_sec = max(5, min(int(fallback_timeout_sec or timeout_sec), 1800))
 
-    def target_with_progress(job_id: str) -> dict:
+    def execute_target_with_progress(job_id: str) -> dict:
         job_manager = ctx.get_job_mgr()
         cancel_file = job_manager.cancel_file(job_id)
+        entitlement_denial: AccountEntitlementError | None = None
+        last_entitlement_check_at = 0.0
 
         def cancellation_requested() -> bool:
+            if entitlement_denial is not None:
+                return True
             if job_manager.is_cancelled(job_id):
                 return True
             if not callable(should_cancel):
@@ -4515,8 +4638,10 @@ def _submit_phone_job(
                 layer="agent",
                 timeout_sec=fallback_timeout_sec,
                 device_id=_phone_matrix_runtime_device_id(ctx, device_id),
+                on_heartbeat=heartbeat_progress,
                 should_cancel=cancellation_requested,
                 cooperative_cancel=os.path.basename(fallback_script_path).lower() == "openclaw-phone-agent.mjs",
+                allowed_device_ids=allowed_device_ids,
             )
             if fallback_completed.get("cancelled"):
                 return {"success": False, "cancelled": True, "errorCode": "cancelled", "error": "cancelled"}
@@ -4583,7 +4708,25 @@ def _submit_phone_job(
         heartbeat = 0
 
         def heartbeat_progress(elapsed: float) -> None:
-            nonlocal heartbeat
+            nonlocal heartbeat, entitlement_denial, last_entitlement_check_at
+            if (
+                entitlement_denial is None
+                and elapsed - last_entitlement_check_at
+                >= _PHONE_ENTITLEMENT_HEARTBEAT_SEC
+            ):
+                last_entitlement_check_at = elapsed
+                try:
+                    _authorize_phone_entitlement(
+                        ctx,
+                        allowed_device_ids,
+                        kind,
+                    )
+                except AccountEntitlementError as exc:
+                    entitlement_denial = exc
+                    ctx.append_log(
+                        "[phone-entitlement] running task authorization stopped: "
+                        f"{exc.code}"
+                    )
             next_heartbeat = int(elapsed)
             if next_heartbeat <= heartbeat:
                 return
@@ -4611,10 +4754,27 @@ def _submit_phone_job(
             on_heartbeat=heartbeat_progress,
             should_cancel=cancellation_requested,
             cooperative_cancel=os.path.basename(script_path).lower() == "openclaw-phone-agent.mjs",
+            allowed_device_ids=allowed_device_ids,
         )
         stdout = _sanitize_cli_output(ctx, completed.get("stdout") or "", kind=kind)
         stderr = _sanitize_cli_output(ctx, completed.get("stderr") or "", kind=kind)
         payload_failure = _phone_payload_failure(stdout)
+        if entitlement_denial is not None:
+            result = {
+                "success": False,
+                "code": entitlement_denial.code,
+                "errorCode": entitlement_denial.code,
+                "error": str(entitlement_denial),
+                "action": entitlement_denial.action,
+                "details": entitlement_denial.details,
+                "cancelled": True,
+                "stdout": stdout,
+                "stderr": stderr,
+                "executionLayer": layer,
+                "execution": execution,
+            }
+            record_evidence(result)
+            return result
         if completed.get("cancelled"):
             return {
                 "success": False,
@@ -4710,6 +4870,20 @@ def _submit_phone_job(
         record_evidence(result)
         return result
 
+    def target_with_progress(job_id: str) -> dict:
+        fresh_entitlement_context = _authorize_phone_entitlement(
+            ctx,
+            allowed_device_ids,
+            kind,
+        )
+        with _account_task_slot(
+            ctx,
+            fresh_entitlement_context,
+            kind,
+            cancelled=lambda: ctx.get_job_mgr().is_cancelled(job_id),
+        ):
+            return execute_target_with_progress(job_id)
+
     if inline_job_id:
         return target_with_progress(inline_job_id)
 
@@ -4784,6 +4958,281 @@ def _current_account_session(ctx) -> dict | None:
         return None
     session = current()
     return session if isinstance(session, dict) else None
+
+
+def _current_entitlement_account_id(ctx) -> str:
+    manager_getter = getattr(ctx, "get_entitlement_mgr", None)
+    manager = manager_getter() if callable(manager_getter) else None
+    current_state = getattr(manager, "current_state", None)
+    if not callable(current_state):
+        return ""
+    try:
+        current = current_state("matrix.devices")
+    except Exception:
+        return ""
+    if not isinstance(current, dict):
+        return ""
+    lease = current.get("lease") if isinstance(current.get("lease"), dict) else {}
+    return str(current.get("accountId") or lease.get("accountId") or "").strip()
+
+
+def _authorize_phone_entitlement(
+    ctx,
+    phone_device_ids: list[str],
+    operation: str,
+) -> dict:
+    manager_getter = getattr(ctx, "get_entitlement_mgr", None)
+    if not callable(manager_getter):
+        raise AccountEntitlementError(
+            "账号权益校验服务尚未就绪。",
+            code="entitlement_service_unavailable",
+            action="restart_loom",
+            status_code=503,
+        )
+    manager = manager_getter()
+    authorize = getattr(manager, "authorize_phone_devices", None)
+    if not callable(authorize):
+        raise AccountEntitlementError(
+            "账号权益校验服务尚未就绪。",
+            code="entitlement_service_unavailable",
+            action="restart_loom",
+            status_code=503,
+        )
+    active_account_id = _current_entitlement_account_id(ctx)
+    stable_ids: list[str] = []
+    matched_devices: list[dict] = []
+    try:
+        store = _load_store(ctx)
+        configured = [
+            item
+            for item in store.get("devices", [])
+            if isinstance(item, dict)
+        ]
+    except Exception:
+        configured = []
+    for raw_id in phone_device_ids:
+        requested_id = _normalize_device_id(raw_id, "")
+        configured_device = next(
+            (
+                item
+                for item in configured
+                if (
+                    _normalize_device_id(item.get("id"), "") == requested_id
+                    or str(item.get("deviceInstanceId") or "").strip() == requested_id
+                )
+            ),
+            None,
+        )
+        if configured_device is not None:
+            matched_devices.append(configured_device)
+            owner_account_id = str(
+                configured_device.get("ownerAccountId") or ""
+            ).strip()
+            if (
+                active_account_id
+                and owner_account_id
+                and owner_account_id != active_account_id
+                and operation not in {
+                    "matrix.device.reclaim",
+                    "matrix.device.release",
+                }
+            ):
+                raise AccountEntitlementError(
+                    "这台手机属于另一个模型账号，请在手机端重新生成配对码后修复连接。",
+                    code="phone_owner_account_mismatch",
+                    action="repair_phone",
+                    details={
+                        "deviceId": _normalize_device_id(
+                            configured_device.get("id"),
+                            "",
+                        ),
+                        "operation": operation,
+                    },
+                    status_code=409,
+                )
+        stable_id = str(
+            (configured_device or {}).get("deviceInstanceId")
+            or requested_id
+        ).strip()
+        if stable_id:
+            stable_ids.append(stable_id)
+    result = authorize(
+        sorted(set(stable_ids)),
+        operation,
+        session=_current_account_session(ctx),
+    )
+    if not active_account_id:
+        return result
+    unowned = [
+        item
+        for item in matched_devices
+        if not str(item.get("ownerAccountId") or "").strip()
+    ]
+    should_bind_owner = bool(unowned) or operation == "matrix.device.reclaim"
+    if not should_bind_owner:
+        return result
+    if result.get("offline") is True:
+        raise AccountEntitlementError(
+            "旧版手机连接需要联网确认所属账号，请联网后重试或重新配对。",
+            code="phone_owner_migration_online_required",
+            action="repair_phone",
+            details={"operation": operation},
+            status_code=503,
+        )
+    result_account_id = str(result.get("accountId") or "").strip()
+    if result_account_id and result_account_id != active_account_id:
+        raise AccountEntitlementError(
+            "权益服务返回的账号与当前账号不一致，请重新登录。",
+            code="entitlement_account_mismatch",
+            action="relogin",
+            status_code=403,
+        )
+    updated = False
+    for item in matched_devices:
+        if (
+            not str(item.get("ownerAccountId") or "").strip()
+            or operation == "matrix.device.reclaim"
+        ):
+            item["ownerAccountId"] = active_account_id
+            updated = True
+    if updated:
+        try:
+            _write_phone_store(ctx, {**store, "devices": configured})
+        except Exception as error:
+            raise AccountEntitlementError(
+                "手机账号归属已通过校验，但本地安全记录保存失败，请检查磁盘后重试。",
+                code="phone_owner_persist_failed",
+                action="retry",
+                status_code=500,
+            ) from error
+    return result
+
+
+def _require_phone_entitlement(ctx, operation: str) -> dict:
+    manager_getter = getattr(ctx, "get_entitlement_mgr", None)
+    if not callable(manager_getter):
+        raise AccountEntitlementError(
+            "账号权益校验服务尚未就绪。",
+            code="entitlement_service_unavailable",
+            action="restart_loom",
+            status_code=503,
+        )
+    manager = manager_getter()
+    current_state = getattr(manager, "current_state", None)
+    if not callable(current_state):
+        raise AccountEntitlementError(
+            "账号权益校验服务尚未就绪。",
+            code="entitlement_service_unavailable",
+            action="restart_loom",
+            status_code=503,
+        )
+    current = current_state("matrix.devices")
+    if not isinstance(current, dict):
+        raise AccountEntitlementError(
+            "账号权益校验结果无效。",
+            code="entitlement_service_unavailable",
+            action="restart_loom",
+            status_code=503,
+        )
+    if current.get("authorized") is not True:
+        details = (
+            dict(current.get("details"))
+            if isinstance(current.get("details"), dict)
+            else {}
+        )
+        details["operation"] = operation
+        raise AccountEntitlementError(
+            str(current.get("message") or "当前账号尚未激活手机矩阵。"),
+            code=str(current.get("code") or "authorization_required"),
+            action=str(current.get("action") or "bind_authorization_code"),
+            details=details,
+            status_code=int(current.get("statusCode") or 403),
+        )
+    return current
+
+
+def _claimed_phone_local_device_ids(ctx) -> list[str]:
+    manager_getter = getattr(ctx, "get_entitlement_mgr", None)
+    if not callable(manager_getter):
+        raise AccountEntitlementError(
+            "账号权益校验服务尚未就绪。",
+            code="entitlement_service_unavailable",
+            action="restart_loom",
+            status_code=503,
+        )
+    manager = manager_getter()
+    claimed_getter = getattr(manager, "claimed_phone_device_ids", None)
+    if not callable(claimed_getter):
+        raise AccountEntitlementError(
+            "账号权益校验服务尚未就绪。",
+            code="entitlement_service_unavailable",
+            action="restart_loom",
+            status_code=503,
+        )
+    claimed = {
+        str(value).strip()
+        for value in claimed_getter()
+        if str(value).strip()
+    }
+    if not claimed:
+        return []
+    try:
+        store = _load_store(ctx)
+        configured = [
+            item
+            for item in store.get("devices", [])
+            if isinstance(item, dict)
+        ]
+    except Exception:
+        configured = []
+    resolved: list[str] = []
+    mapped_stable_ids: set[str] = set()
+    for item in configured:
+        local_id = _normalize_device_id(item.get("id"), "")
+        stable_id = str(item.get("deviceInstanceId") or local_id).strip()
+        if stable_id in claimed and local_id:
+            resolved.append(local_id)
+            mapped_stable_ids.add(stable_id)
+    resolved.extend(sorted(claimed.difference(mapped_stable_ids)))
+    return sorted(set(resolved))
+
+
+def _account_task_slot(
+    ctx,
+    entitlement: dict | None,
+    operation: str,
+    *,
+    cancelled=None,
+):
+    manager_getter = getattr(ctx, "get_entitlement_mgr", None)
+    manager = manager_getter() if callable(manager_getter) else None
+    slot = getattr(manager, "account_task_slot", None)
+    if not callable(slot):
+        return nullcontext()
+    return slot(entitlement or {}, operation, cancelled=cancelled)
+
+
+def _account_entitlement_error_response(ctx, exc: AccountEntitlementError):
+    return ctx.fastapi_json(exc.payload(), exc.status_code)
+
+
+def _queue_phone_entitlement_release(
+    ctx,
+    phone_device_ids: list[str],
+    *,
+    reason: str,
+) -> None:
+    manager_getter = getattr(ctx, "get_entitlement_mgr", None)
+    manager = manager_getter() if callable(manager_getter) else None
+    queue_release = getattr(manager, "queue_phone_device_release", None)
+    if not callable(queue_release):
+        return
+    try:
+        queue_release(phone_device_ids, reason=reason)
+    except Exception:
+        ctx.append_log(
+            "[phone-entitlement] failed to persist deferred seat release"
+        )
 
 
 def _sync_failed(sync_result: dict) -> bool:
@@ -5186,6 +5635,11 @@ def register_phone_routes(app, ctx) -> None:
     async def start_saved_usb_transport_restore() -> None:
         if bool(getattr(app.state, "phone_usb_restore_blocked", False)):
             return
+        try:
+            _require_phone_entitlement(ctx, "phone.usb.restore")
+        except AccountEntitlementError as exc:
+            ctx.append_log(f"[phone-entitlement] authorization blocked USB restore: {exc.code}")
+            return
         app.state.phone_usb_restore_task = asyncio.create_task(restore_saved_usb_transports())
 
     async def stop_saved_usb_transport_restore() -> None:
@@ -5196,6 +5650,11 @@ def register_phone_routes(app, ctx) -> None:
                 await task
 
     async def retry_pending_phone_pairing_confirmations_on_startup() -> None:
+        try:
+            _require_phone_entitlement(ctx, "phone.pairing.background")
+        except AccountEntitlementError as exc:
+            ctx.append_log(f"[phone-entitlement] authorization blocked startup pairing retry: {exc.code}")
+            return
         try:
             await run_in_threadpool(
                 _retry_pending_phone_pairing_confirmations,
@@ -5210,6 +5669,11 @@ def register_phone_routes(app, ctx) -> None:
         while True:
             await asyncio.sleep(_PHONE_PAIRING_CONFIRMATION_BACKGROUND_INTERVAL_SEC)
             try:
+                _require_phone_entitlement(ctx, "phone.pairing.background")
+            except AccountEntitlementError as exc:
+                ctx.append_log(f"[phone-entitlement] authorization stopped pairing retry: {exc.code}")
+                return
+            try:
                 await run_in_threadpool(
                     _retry_pending_phone_pairing_confirmations,
                     ctx,
@@ -5221,6 +5685,11 @@ def register_phone_routes(app, ctx) -> None:
                 ctx.append_log("[phone-pairing] background confirmation retry deferred")
 
     async def start_phone_pairing_confirmation_retry() -> None:
+        try:
+            _require_phone_entitlement(ctx, "phone.pairing.background")
+        except AccountEntitlementError as exc:
+            ctx.append_log(f"[phone-entitlement] authorization blocked pairing worker: {exc.code}")
+            return
         task = getattr(app.state, "phone_pairing_confirmation_retry_task", None)
         if task is None or task.done():
             app.state.phone_pairing_confirmation_retry_task = asyncio.create_task(
@@ -5266,6 +5735,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_config(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.config.read")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         # Configuration reads must remain local and immediate. Confirmation
         # retries run after pairing and through background lifecycle hooks;
         # an unreachable phone must never stall opening the phone page.
@@ -5281,9 +5754,72 @@ def register_phone_routes(app, ctx) -> None:
             store = _upsert_device(_load_store(ctx), body)
         except ValueError as exc:
             return ctx.fastapi_json({"error": str(exc)}, 400)
-        _write_phone_store(ctx, store)
+        selected_id = _normalize_device_id(
+            store.get("selectedDeviceId")
+            or body.get("deviceId")
+            or body.get("id")
+        )
+        selected_device = next(
+            (
+                item
+                for item in store.get("devices", [])
+                if isinstance(item, dict)
+                and _normalize_device_id(item.get("id"), "") == selected_id
+            ),
+            {},
+        )
+        entitlement_device_id = str(
+            selected_device.get("deviceInstanceId") or selected_id
+        ).strip()
+        claimed_before: set[str] = set()
+        try:
+            manager_getter = getattr(ctx, "get_entitlement_mgr", None)
+            manager = manager_getter() if callable(manager_getter) else None
+            claimed_getter = getattr(manager, "claimed_phone_device_ids", None)
+            if callable(claimed_getter):
+                claimed_before = {
+                    str(value).strip()
+                    for value in claimed_getter()
+                    if str(value).strip()
+                }
+            _authorize_phone_entitlement(
+                ctx,
+                [entitlement_device_id],
+                "matrix.device.claim",
+            )
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
+        entitlement_claim_was_new = entitlement_device_id not in claimed_before
+        try:
+            _write_phone_store(ctx, store)
+        except Exception:
+            if entitlement_claim_was_new:
+                try:
+                    _authorize_phone_entitlement(
+                        ctx,
+                        [entitlement_device_id],
+                        "matrix.device.release",
+                    )
+                except AccountEntitlementError as release_error:
+                    _queue_phone_entitlement_release(
+                        ctx,
+                        [entitlement_device_id],
+                        reason="phone_config_write_rollback",
+                    )
+                    ctx.append_log(
+                        "[phone-entitlement] config rollback could not release "
+                        f"{entitlement_device_id}: {release_error.code}"
+                    )
+            return ctx.fastapi_json({
+                "error": "手机配置保存失败，账号设备席位已回滚；请检查磁盘后重试。",
+                "code": "phone_config_write_failed",
+            }, 500)
         public = _public_store(store)
-        selected_id = _normalize_device_id(public.get("selectedDeviceId") or body.get("deviceId") or body.get("id"))
+        selected_id = _normalize_device_id(
+            public.get("selectedDeviceId")
+            or body.get("deviceId")
+            or body.get("id")
+        )
         with _PHONE_EVENT_SYNC_LOCK:
             _PHONE_EVENT_SYNC_DISABLED_DEVICE_IDS.discard(selected_id)
         public["eventSync"] = _ensure_phone_event_syncs_for_saved_devices(ctx, device_ids=[selected_id])
@@ -5293,6 +5829,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_pairing_claim(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.pairing.claim")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         body = await ctx.body(request)
         try:
             pairing = _parse_phone_pairing_input(body)
@@ -5304,7 +5844,11 @@ def register_phone_routes(app, ctx) -> None:
             }, 400)
 
         original_store = _load_store(ctx)
-        devices = [item for item in original_store.get("devices", []) if isinstance(item, dict)]
+        devices = [
+            item
+            for item in original_store.get("devices", [])
+            if isinstance(item, dict)
+        ]
         device_id = _normalize_device_id(
             body.get("id")
             or body.get("deviceId")
@@ -5312,9 +5856,76 @@ def register_phone_routes(app, ctx) -> None:
             or "phone-1"
         )
         existing = next(
-            (item for item in devices if _normalize_device_id(item.get("id")) == device_id),
+            (
+                item
+                for item in devices
+                if _normalize_device_id(item.get("id")) == device_id
+            ),
             {},
         )
+        entitlement_device_id = str(pairing.get("deviceInstanceId") or "").strip()
+        ownership_device = next(
+            (
+                item
+                for item in devices
+                if str(item.get("deviceInstanceId") or "").strip()
+                == entitlement_device_id
+            ),
+            existing,
+        )
+        active_account_id = _current_entitlement_account_id(ctx)
+        previous_owner_account_id = str(
+            ownership_device.get("ownerAccountId") or ""
+        ).strip()
+        requires_reclaim = bool(
+            active_account_id
+            and previous_owner_account_id
+            and previous_owner_account_id != active_account_id
+        )
+        entitlement_claim_was_new = False
+        pairing_store_committed = False
+        claimed_before: set[str] = set()
+        if entitlement_device_id and not requires_reclaim:
+            try:
+                manager = ctx.get_entitlement_mgr()
+                claimed_before = {
+                    str(value).strip()
+                    for value in manager.claimed_phone_device_ids()
+                    if str(value).strip()
+                }
+                _authorize_phone_entitlement(
+                    ctx,
+                    [entitlement_device_id],
+                    "matrix.device.claim",
+                )
+                entitlement_claim_was_new = entitlement_device_id not in claimed_before
+            except AccountEntitlementError as exc:
+                return _account_entitlement_error_response(ctx, exc)
+
+        def release_uncommitted_entitlement_claim() -> None:
+            if (
+                not entitlement_claim_was_new
+                or pairing_store_committed
+                or not entitlement_device_id
+            ):
+                return
+            try:
+                _authorize_phone_entitlement(
+                    ctx,
+                    [entitlement_device_id],
+                    "matrix.device.release",
+                )
+            except AccountEntitlementError as release_error:
+                _queue_phone_entitlement_release(
+                    ctx,
+                    [entitlement_device_id],
+                    reason="phone_pairing_rollback",
+                )
+                ctx.append_log(
+                    "[phone-entitlement] pairing rollback could not release "
+                    f"{entitlement_device_id}: {release_error.code}"
+                )
+
         # Every rotation gets a distinct identity so the phone can keep the
         # old HMAC identity valid until the new credential is confirmed.
         launcher_id = f"loom-desktop-{secrets.token_hex(8)}"
@@ -5461,6 +6072,11 @@ def register_phone_routes(app, ctx) -> None:
                 "album": _clip(body.get("album") or existing.get("album") or "LOOM", 80),
                 "connectionMode": "usb" if use_usb else "lan",
                 "pairedAt": claim_data.get("pairedAt"),
+                **(
+                    {"ownerAccountId": active_account_id}
+                    if active_account_id
+                    else {}
+                ),
                 **_phone_pairing_confirmation_patch(
                     confirmed=False,
                     attempts=0,
@@ -5494,7 +6110,39 @@ def register_phone_routes(app, ctx) -> None:
                 "selectedDeviceId": device_id,
                 "devices": next_devices,
             }
-            _write_phone_store(ctx, next_store)
+            actual_entitlement_device_id = str(
+                claim_data.get("deviceInstanceId")
+                or identity.get("deviceInstanceId")
+                or device_id
+            ).strip()
+            if not entitlement_device_id:
+                manager = ctx.get_entitlement_mgr()
+                claimed_before = {
+                    str(value).strip()
+                    for value in manager.claimed_phone_device_ids()
+                    if str(value).strip()
+                }
+                entitlement_device_id = actual_entitlement_device_id
+            if requires_reclaim:
+                # Persist the phone-proven credential first, then transfer the
+                # server-side owner. A failed transfer restores the original
+                # store, while a crash still cannot use the phone without a
+                # valid seat lease for the new account.
+                _write_phone_store(ctx, next_store)
+            _authorize_phone_entitlement(
+                ctx,
+                [actual_entitlement_device_id],
+                (
+                    "matrix.device.reclaim"
+                    if requires_reclaim
+                    else "matrix.device.claim"
+                ),
+            )
+            if actual_entitlement_device_id not in claimed_before:
+                entitlement_claim_was_new = True
+            if not requires_reclaim:
+                _write_phone_store(ctx, next_store)
+            pairing_store_committed = True
             ctx.append_log(
                 f"[phone-pairing] desktop credentials persisted for {device_id}; "
                 "confirming phone"
@@ -5506,14 +6154,27 @@ def register_phone_routes(app, ctx) -> None:
                 max_devices=1,
                 device_id=device_id,
             )
-        except PhonePairingError as exc:
+        except AccountEntitlementError as exc:
+            release_uncommitted_entitlement_claim()
             if connection.get("ok"):
                 await run_in_threadpool(
                     ctx.get_process_svc().phone_adb_forward_remove,
                     serial=_clip(connection.get("serial"), 120),
                     local_port=int(connection.get("localPort") or 0),
                 )
-            if transaction:
+            if not pairing_store_committed:
+                with suppress(Exception):
+                    _write_phone_store(ctx, original_store)
+            return _account_entitlement_error_response(ctx, exc)
+        except PhonePairingError as exc:
+            release_uncommitted_entitlement_claim()
+            if connection.get("ok"):
+                await run_in_threadpool(
+                    ctx.get_process_svc().phone_adb_forward_remove,
+                    serial=_clip(connection.get("serial"), 120),
+                    local_port=int(connection.get("localPort") or 0),
+                )
+            if not pairing_store_committed:
                 try:
                     _write_phone_store(ctx, original_store)
                 except Exception:
@@ -5524,13 +6185,14 @@ def register_phone_routes(app, ctx) -> None:
                 "retryable": exc.retryable,
             }, exc.status_code)
         except Exception:
+            release_uncommitted_entitlement_claim()
             if connection.get("ok"):
                 await run_in_threadpool(
                     ctx.get_process_svc().phone_adb_forward_remove,
                     serial=_clip(connection.get("serial"), 120),
                     local_port=int(connection.get("localPort") or 0),
                 )
-            if transaction:
+            if not pairing_store_committed:
                 with suppress(Exception):
                     _write_phone_store(ctx, original_store)
             return ctx.fastapi_json({
@@ -5577,6 +6239,26 @@ def register_phone_routes(app, ctx) -> None:
         )
         if not deleted_device:
             return ctx.fastapi_json({"error": "phone device not found", "deviceId": safe_id}, 404)
+        entitlement_release_deferred = False
+        try:
+            _authorize_phone_entitlement(
+                ctx,
+                [safe_id],
+                "matrix.device.release",
+            )
+        except AccountEntitlementError as exc:
+            entitlement_release_deferred = True
+            stable_device_id = str(
+                deleted_device.get("deviceInstanceId") or safe_id
+            ).strip()
+            _queue_phone_entitlement_release(
+                ctx,
+                [stable_device_id],
+                reason="phone_config_delete",
+            )
+            ctx.append_log(
+                f"[phone-entitlement] deferred seat release for {safe_id}: {exc.code}"
+            )
 
         remaining = [item for item in devices if _normalize_device_id(item.get("id")) != safe_id]
         selected_id = _normalize_device_id(store.get("selectedDeviceId") or "", "")
@@ -5643,15 +6325,15 @@ def register_phone_routes(app, ctx) -> None:
             _PHONE_EVENT_SYNC_STATE.pop(_phone_event_sync_key(safe_id), None)
 
         try:
-            from core.phone_matrix import MatrixControlPlane
-
-            MatrixControlPlane(ctx.paths).unregister_device(safe_id)
+            _phone_matrix_control(ctx).unregister_device(safe_id)
         except Exception:
             pass
 
         public = _public_store(next_store)
         public["deletedDeviceId"] = safe_id
         public["eventSync"] = {**sync_status, "running": False}
+        if entitlement_release_deferred:
+            public["entitlementReleaseDeferred"] = True
         if isinstance(usb_cleanup, dict):
             public["usbCleanup"] = _public_adb_connection(usb_cleanup)
         return ctx.fastapi_json(public)
@@ -5660,6 +6342,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_sync_model(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.model.sync")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
 
         def target(job_id: str) -> dict:
             ctx.get_job_mgr().progress(
@@ -5741,6 +6427,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_adb_doctor(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.adb.doctor")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         body = await ctx.body(request)
         if not _phone_bool(body.get("confirmed")):
             return ctx.fastapi_json({"error": "ADB 修复需要明确确认"}, 403)
@@ -5762,6 +6452,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_usb_devices(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.usb.devices")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         result = await run_in_threadpool(ctx.get_process_svc().phone_adb_devices)
         status_code = 200 if result.get("ok") else 409
         return ctx.fastapi_json(_public_adb_connection(result), status_code)
@@ -5770,6 +6464,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_usb_reconcile(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.usb.reconcile")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         result = await reconcile_usb_transport_transactions()
         return ctx.fastapi_json(result, 200 if result.get("ok") else 409)
 
@@ -5777,6 +6475,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_usb_connect(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.usb.connect")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         body = await ctx.body(request)
         if not _phone_bool(body.get("confirmed")):
             return ctx.fastapi_json({"error": "USB 手机连接需要明确确认"}, 403)
@@ -5787,6 +6489,14 @@ def register_phone_routes(app, ctx) -> None:
         device = next((item for item in devices if _normalize_device_id(item.get("id")) == device_id), None)
         if not device:
             return ctx.fastapi_json({"error": "phone device not found", "deviceId": device_id}, 404)
+        try:
+            _authorize_phone_entitlement(
+                ctx,
+                [device_id],
+                "phone.usb.connect",
+            )
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
 
         existing_usb = str(device.get("connectionMode") or "").strip().lower() == "usb"
         previous_usb: dict | None = None
@@ -6152,8 +6862,20 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_events_start(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.events.start")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         body = await ctx.body(request)
         device_id = _clip(body.get("deviceId") or body.get("device_id"), 100)
+        try:
+            _authorize_phone_entitlement(
+                ctx,
+                [_phone_matrix_runtime_device_id(ctx, device_id)],
+                "phone.events.start",
+            )
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         max_sec = _bounded_int(body.get("maxSec") or body.get("max_sec"), default=3600, minimum=1, maximum=86400)
         max_events = _bounded_int(body.get("maxEvents") or body.get("max_events"), default=0, minimum=0, maximum=100000)
         return ctx.fastapi_json(_start_phone_event_sync(ctx, device_id=device_id, max_sec=max_sec, max_events=max_events))
@@ -6162,6 +6884,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_events_status(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.events.status")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         device_id = _clip(request.query_params.get("deviceId") or request.query_params.get("device_id"), 100)
         return ctx.fastapi_json(_phone_event_sync_status(device_id))
 
@@ -6177,6 +6903,10 @@ def register_phone_routes(app, ctx) -> None:
     async def phone_daemon_status_route(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "phone.daemon.status")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         return ctx.fastapi_json(phone_daemon_status(base_root=ctx.paths.base_path))
 
     @app.post("/api/phone/daemon/start")
@@ -6184,11 +6914,27 @@ def register_phone_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         try:
+            _require_phone_entitlement(ctx, "phone.daemon.start")
+            allowed_device_ids = _claimed_phone_local_device_ids(ctx)
+            if not allowed_device_ids:
+                raise AccountEntitlementError(
+                    "当前账号尚未绑定可用手机，请先在手机连接中完成配对。",
+                    code="phone_device_required",
+                    action="pair_phone",
+                    status_code=403,
+                )
+            _authorize_phone_entitlement(
+                ctx,
+                allowed_device_ids,
+                "phone.daemon.start",
+            )
             result = start_phone_daemon(
                 base_root=ctx.paths.base_path,
                 node_path=ctx.paths.node_exe,
-                runtime_config_json=_phone_runtime_config_json(ctx),
+                runtime_config_json=_phone_runtime_config_json(ctx, allowed_device_ids),
             )
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except OSError as exc:
             return ctx.fastapi_json({"ok": False, "error": str(exc)}, 500)
         return ctx.fastapi_json(result)
@@ -6206,6 +6952,14 @@ def register_phone_routes(app, ctx) -> None:
         body = await ctx.body(request)
         requested_device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
         device_id = _phone_matrix_runtime_device_id(ctx, requested_device_id)
+        try:
+            entitlement = _authorize_phone_entitlement(
+                ctx,
+                [device_id],
+                "phone.screenshot",
+            )
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         screenshot_body = _phone_screenshot_cache_body(ctx, {**body, "deviceId": device_id})
         cached_result = _phone_cached_screenshot_result(ctx, screenshot_body)
         if cached_result:
@@ -6277,6 +7031,7 @@ def register_phone_routes(app, ctx) -> None:
             evidence_body=screenshot_body,
             device_id=device_id,
             exact_timeout=True,
+            entitlement_context=entitlement,
         )
 
     @app.post("/api/phone/read")

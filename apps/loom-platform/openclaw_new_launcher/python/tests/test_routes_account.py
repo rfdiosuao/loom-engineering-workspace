@@ -379,6 +379,70 @@ class AccountRouteResponseTests(unittest.TestCase):
         self.assertEqual(payload["subscription"]["plan"], "pro")
         self.assertIn("purchaseUrl", payload["subscription"])
 
+    def test_entitlement_redeem_binds_code_to_logged_in_account_and_returns_safe_snapshot(self) -> None:
+        app = FastAPI()
+        calls = []
+
+        def redeem_entitlement_code(code: str) -> dict:
+            calls.append(code)
+            return {
+                "source": "newapi_account",
+                "lastSyncResults": [],
+            }
+
+        manager = SimpleNamespace(
+            redeem_entitlement_code=redeem_entitlement_code,
+            public_session=lambda: {
+                "loggedIn": True,
+                "account": "user@example.invalid",
+                "accountEntitlement": {
+                    "source": "signed_lease",
+                    "plan": "pro",
+                    "limits": {"devices": 5, "concurrentTasks": 3},
+                },
+            },
+        )
+        register_account_routes(app, _ctx(manager))
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/account/entitlement/redeem",
+            json={"code": "LM-PRO-UNUSED"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, ["LM-PRO-UNUSED"])
+        self.assertEqual(
+            response.json()["account"]["accountEntitlement"]["limits"]["devices"],
+            5,
+        )
+        self.assertNotIn("LM-PRO-UNUSED", repr(response.json()))
+
+    def test_entitlement_redeem_translates_code_errors_and_rejects_empty_code(self) -> None:
+        app = FastAPI()
+
+        def redeem_entitlement_code(_code: str) -> dict:
+            raise NewApiAccountError("authorization_code_expired")
+
+        manager = SimpleNamespace(
+            redeem_entitlement_code=redeem_entitlement_code,
+            public_session=lambda: {"loggedIn": True},
+        )
+        register_account_routes(app, _ctx(manager))
+        client = TestClient(app)
+
+        blank = client.post("/api/account/entitlement/redeem", json={"code": ""})
+        expired = client.post(
+            "/api/account/entitlement/redeem",
+            json={"code": "LM-EXPIRED"},
+        )
+
+        self.assertEqual(blank.status_code, 400)
+        self.assertIn("授权码", blank.json()["error"])
+        self.assertEqual(expired.status_code, 400)
+        self.assertIn("过期", expired.json()["error"])
+        self.assertNotIn("authorization_code_expired", expired.json()["error"])
+
     def test_current_route_can_show_cached_snapshot_while_offline(self) -> None:
         app = FastAPI()
         manager = SimpleNamespace(
@@ -405,6 +469,43 @@ class AccountRouteResponseTests(unittest.TestCase):
 
     def test_logout_route_clears_public_account_state(self) -> None:
         app = FastAPI()
+        calls: list[str] = []
+
+        def cleanup() -> dict:
+            calls.append("cleanup")
+            return {
+                "ok": True,
+                "executionMayContinue": False,
+                "cancelledJobIds": ["job-phone"],
+            }
+
+        def logout() -> bool:
+            calls.append("logout")
+            return True
+
+        manager = SimpleNamespace(
+            logout=logout,
+            public_session=lambda: {
+                "loggedIn": False,
+                "models": {"text": [], "image": [], "video": []},
+            },
+        )
+        register_account_routes(app, _ctx(manager, account_logout_cleanup=cleanup))
+        client = TestClient(app)
+
+        response = client.post("/api/account/logout")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(calls, ["cleanup", "logout"])
+        self.assertTrue(payload["loggedOut"])
+        self.assertFalse(payload["account"]["loggedIn"])
+        self.assertTrue(payload["cleanup"]["ok"])
+        self.assertFalse(payload["cleanup"]["executionMayContinue"])
+
+    def test_logout_route_still_removes_credentials_when_cleanup_is_incomplete(self) -> None:
+        app = FastAPI()
+        logs: list[str] = []
         manager = SimpleNamespace(
             logout=lambda: True,
             public_session=lambda: {
@@ -412,7 +513,13 @@ class AccountRouteResponseTests(unittest.TestCase):
                 "models": {"text": [], "image": [], "video": []},
             },
         )
-        register_account_routes(app, _ctx(manager))
+
+        def cleanup() -> dict:
+            raise RuntimeError("daemon stop failed apiKey=do-not-leak")
+
+        ctx = _ctx(manager, account_logout_cleanup=cleanup)
+        ctx.append_log = logs.append
+        register_account_routes(app, ctx)
         client = TestClient(app)
 
         response = client.post("/api/account/logout")
@@ -420,10 +527,13 @@ class AccountRouteResponseTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["loggedOut"])
-        self.assertFalse(payload["account"]["loggedIn"])
+        self.assertFalse(payload["cleanup"]["ok"])
+        self.assertTrue(payload["cleanup"]["executionMayContinue"])
+        self.assertNotIn("do-not-leak", repr(payload))
+        self.assertNotIn("do-not-leak", "".join(logs))
 
 
-def _ctx(manager):
+def _ctx(manager, *, account_logout_cleanup=None):
     async def body(request):
         try:
             payload = await request.json()
@@ -442,6 +552,7 @@ def _ctx(manager):
         fastapi_json=fastapi_json,
         get_newapi_account_mgr=lambda: manager,
         append_log=lambda _text: None,
+        account_logout_cleanup=account_logout_cleanup,
     )
 
 

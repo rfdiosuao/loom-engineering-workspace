@@ -102,6 +102,11 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
             id integer primary key autoincrement, code_hash text not null, install_id text not null,
             device_id text not null, license_json text not null, activated_at text not null,
             unique(code_hash, install_id))""",
+        """create table if not exists account_entitlement_redemptions (
+            code_hash text primary key, account_id text not null, plan text not null,
+            features_json text not null, devices integer not null,
+            concurrent_tasks integer not null, expires_at text not null,
+            code_label text not null, redeemed_at text not null)""",
         """create table if not exists accounts (
             id integer primary key autoincrement, username text not null unique,
             display_name text not null default '', password_hash text not null,
@@ -162,6 +167,10 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
     for statement in statements:
         conn.execute(statement)
     conn.execute("create index if not exists idx_publish_relay_channel_status on publish_relay_packets (channel_id, status, seq)")
+    conn.execute(
+        """create index if not exists idx_account_entitlement_redemptions_account
+           on account_entitlement_redemptions (account_id, redeemed_at)"""
+    )
     for table, name, definition in (
         ("codes", "owner_account_id", "integer not null default 0"),
         ("codes", "full_code", "text not null default ''"),

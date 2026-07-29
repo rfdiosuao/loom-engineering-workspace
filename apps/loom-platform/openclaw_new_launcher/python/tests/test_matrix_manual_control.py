@@ -23,13 +23,30 @@ from fastapi.testclient import TestClient
 from api.routes_matrix import register_matrix_routes
 from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 from services.jobs import JobManager
+from tests.matrix_test_support import matrix_for_test
+
+
+class _AllowEntitlement:
+    def current_state(self, _feature=None):
+        return {
+            "authorized": True,
+            "source": "account_entitlement",
+            "features": ["matrix.devices"],
+            "limits": {"devices": 1000, "concurrentTasks": 8},
+        }
+
+    def authorize_phone_devices(self, _device_ids, _operation, *, session=None):
+        return {
+            "authorized": True,
+            "limits": {"devices": 1000, "concurrentTasks": 8},
+        }
 
 
 class MatrixManualControlTests(unittest.TestCase):
     def test_manual_control_does_not_block_the_async_route_loop(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             app, _client_instance = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             lease = matrix.acquire_lease(
                 "phone-a", {"holderType": "human", "holderId": "operator-1"}
@@ -68,7 +85,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_manual_control_requires_valid_lease_and_normalized_coordinates(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
 
             missing = client.post(
@@ -91,7 +108,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_manual_control_rejects_an_agent_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             lease = matrix.acquire_lease(
                 "phone-a", {"holderType": "agent", "holderId": "run-1"}
@@ -119,7 +136,7 @@ class MatrixManualControlTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             lease = matrix.acquire_lease(
                 "phone-a", {"holderType": "human", "holderId": "operator-1"}
@@ -168,7 +185,7 @@ class MatrixManualControlTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             lease = matrix.acquire_lease(
                 "phone-a", {"holderType": "human", "holderId": "operator-1"}
@@ -208,7 +225,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_idempotent_manual_command_is_bound_to_the_original_human_holder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             lease = matrix.acquire_lease(
                 "phone-a", {"holderType": "human", "holderId": "operator-1"}
@@ -238,7 +255,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_manual_control_fails_closed_when_lease_ledger_is_corrupt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             lease = matrix.acquire_lease(
                 "phone-a", {"holderType": "human", "holderId": "operator-1"}
@@ -266,7 +283,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_client_command_id_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             lease = matrix.acquire_lease(
                 "phone-a", {"holderType": "human", "holderId": "operator-1"}
@@ -331,7 +348,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_pause_resume_preserve_identifiers_and_reject_terminal_transition(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch({"prompt": "read", "target": {"deviceIds": ["phone-a"]}})
             campaign_id = task["campaignId"]
@@ -357,7 +374,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_takeover_atomically_pauses_the_bound_agent_task_and_swaps_its_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch({"prompt": "read", "target": {"deviceIds": ["phone-a"]}})
             device_task_id = task["missions"][0]["deviceTasks"][0]["deviceTaskId"]
@@ -384,7 +401,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_takeover_rejects_a_stale_task_lease_pair_without_pausing_either_task(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             first = matrix.dispatch({"prompt": "first", "target": {"deviceIds": ["phone-a"]}})
             second = matrix.dispatch({"prompt": "second", "target": {"deviceIds": ["phone-a"]}})
@@ -417,7 +434,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_failed_takeover_lease_write_does_not_leave_the_agent_task_paused(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch({"prompt": "read", "target": {"deviceIds": ["phone-a"]}})
             device_task_id = task["missions"][0]["deviceTasks"][0]["deviceTaskId"]
@@ -453,7 +470,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_pause_with_a_stale_lease_does_not_pause_the_task_or_release_the_active_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             first = matrix.dispatch({"prompt": "first", "target": {"deviceIds": ["phone-a"]}})
             second = matrix.dispatch({"prompt": "second", "target": {"deviceIds": ["phone-a"]}})
@@ -478,7 +495,7 @@ class MatrixManualControlTests(unittest.TestCase):
     def test_releasing_human_takeover_resumes_only_the_task_bound_to_that_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             first = matrix.dispatch({"prompt": "first", "target": {"deviceIds": ["phone-a"]}})
             first_task_id = first["missions"][0]["deviceTasks"][0]["deviceTaskId"]
@@ -524,10 +541,44 @@ class MatrixManualControlTests(unittest.TestCase):
         self.assertEqual(first_status, "succeeded")
         self.assertEqual(second_status, "queued")
 
+    def test_releasing_human_takeover_keeps_paused_task_stopped_when_resume_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            task = matrix.dispatch({"prompt": "first", "target": {"deviceIds": ["phone-a"]}})
+            device_task_id = task["missions"][0]["deviceTasks"][0]["deviceTaskId"]
+            agent_lease = matrix.acquire_lease(
+                "phone-a",
+                {"holderType": "agent", "holderId": device_task_id},
+            )
+            matrix.start_task(device_task_id)
+            takeover = matrix.takeover_task(
+                "phone-a",
+                device_task_id,
+                {
+                    "holderType": "human",
+                    "holderId": "operator-1",
+                    "mode": "control",
+                    "leaseId": agent_lease["leaseId"],
+                },
+            )
+
+            released = matrix.release_lease(
+                "phone-a",
+                takeover["lease"]["leaseId"],
+                resume_paused_task=False,
+            )
+
+            self.assertTrue(released["released"])
+            self.assertNotIn("resumedDeviceTaskId", released)
+            self.assertEqual(matrix.task_status(device_task_id), "paused")
+            self.assertIsNone(matrix.get_lease("phone-a")["lease"])
+
 
 def _client(base_path: str) -> tuple[FastAPI, TestClient]:
     app = FastAPI()
     job_mgr = JobManager(lambda _message: None)
+    entitlement_mgr = _AllowEntitlement()
 
     async def body(request):
         try:
@@ -544,6 +595,7 @@ def _client(base_path: str) -> tuple[FastAPI, TestClient]:
         body=body,
         fastapi_json=fastapi_json,
         get_job_mgr=lambda: job_mgr,
+        get_entitlement_mgr=lambda: entitlement_mgr,
         paths=SimpleNamespace(base_path=base_path, launcher_dir=base_path, node_exe=sys.executable),
     )
     app.state.job_mgr = job_mgr

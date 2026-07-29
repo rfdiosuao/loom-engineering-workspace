@@ -1,4 +1,5 @@
 export type {
+  AccountEntitlementSnapshot,
   AccountSnapshot,
   AccountSubscriptionSnapshot,
   AgentModelConfigStatus,

@@ -98,6 +98,30 @@ def _friendly_account_error(value: object, context: str = "") -> str:
     context_lower = str(context or "").lower()
     if not text:
         return "账号请求失败，请稍后重试"
+    if "authorization_code_expired" in lower or "授权码已过期" in text:
+        return "该商业授权码已过期，请更换有效授权码。"
+    if (
+        "authorization_code_disabled" in lower
+        or "authorization_code_revoked" in lower
+        or "授权码已停用" in text
+    ):
+        return "该商业授权码已停用，请联系销售或管理员。"
+    if (
+        "authorization_code_already_bound" in lower
+        or "authorization_code_used" in lower
+        or "already bound" in lower
+    ):
+        return "该商业授权码已绑定其他账号，不能重复绑定。"
+    if (
+        "authorization_code_invalid" in lower
+        or "authorization_code_not_found" in lower
+        or "invalid authorization code" in lower
+    ):
+        return "商业授权码无效，请核对后重试。"
+    if "authorization_code_required" in lower:
+        return "请输入商业授权码。"
+    if "entitlement_service_unavailable" in lower or "license service unavailable" in lower:
+        return "商业授权服务暂不可用，请稍后重试；已验证的账号权益不受影响。"
     email_taken_markers = (
         "邮箱地址已被占用",
         "邮箱已被占用",
@@ -147,6 +171,41 @@ def _public_email_code_response(payload: dict, email: str) -> dict:
     result.setdefault("sent", True)
     result.setdefault("email", email)
     return result
+
+
+def _public_logout_cleanup(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        return {
+            "ok": True,
+            "performed": False,
+            "executionMayContinue": False,
+        }
+    safe: dict = {}
+    for key, value in payload.items():
+        text_key = str(key)
+        lower_key = text_key.lower()
+        if (
+            text_key in SECRET_RESULT_KEYS
+            or "token" in lower_key
+            or "cookie" in lower_key
+            or "secret" in lower_key
+        ):
+            continue
+        if isinstance(value, dict):
+            safe[text_key] = _public_logout_cleanup(value)
+        elif isinstance(value, list):
+            safe[text_key] = [
+                _public_logout_cleanup(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        elif isinstance(value, str):
+            safe[text_key] = _redact_secret_text(value)
+        else:
+            safe[text_key] = value
+    safe.setdefault("ok", True)
+    safe.setdefault("performed", True)
+    safe.setdefault("executionMayContinue", not bool(safe.get("ok")))
+    return safe
 
 
 def register_account_routes(app, ctx) -> None:
@@ -288,6 +347,30 @@ def register_account_routes(app, ctx) -> None:
         except Exception as exc:
             return ctx.fastapi_json({"error": _friendly_account_error(exc)}, 500)
 
+    @app.post("/api/account/entitlement/redeem")
+    async def account_entitlement_redeem(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        code = str(body.get("code") or body.get("authorizationCode") or "").strip()
+        if not code:
+            return ctx.fastapi_json({"error": "请输入商业授权码。"}, 400)
+        try:
+            manager = ctx.get_newapi_account_mgr()
+            session = await asyncio.to_thread(manager.redeem_entitlement_code, code)
+            return ctx.fastapi_json(
+                _account_response(
+                    account=manager.public_session(),
+                    session=session,
+                )
+            )
+        except NewApiAccountError as exc:
+            status_code = exc.status_code if exc.status_code in {400, 401, 403, 409, 429, 502, 503} else 400
+            return ctx.fastapi_json(
+                {"error": _friendly_account_error(exc, "entitlement_redeem")},
+                status_code,
+            )
+
     @app.post("/api/account/models/select")
     async def account_select_models(request: Request):
         if error := ctx.auth_error(request):
@@ -321,8 +404,31 @@ def register_account_routes(app, ctx) -> None:
     async def account_logout(request: Request):
         if error := ctx.auth_error(request):
             return error
-        removed = ctx.get_newapi_account_mgr().logout()
+        cleanup = {
+            "ok": True,
+            "performed": False,
+            "executionMayContinue": False,
+        }
+        cleanup_callback = getattr(ctx, "account_logout_cleanup", None)
+        if callable(cleanup_callback):
+            try:
+                cleanup = _public_logout_cleanup(
+                    await asyncio.to_thread(cleanup_callback)
+                )
+            except Exception as exc:
+                ctx.append_log(
+                    "[Account] logout runtime cleanup failed: "
+                    f"{_redact_secret_text(exc)}\n"
+                )
+                cleanup = {
+                    "ok": False,
+                    "performed": True,
+                    "executionMayContinue": True,
+                    "message": "部分后台任务可能仍在退出，请稍后检查运行状态。",
+                }
+        removed = await asyncio.to_thread(ctx.get_newapi_account_mgr().logout)
         return ctx.fastapi_json({
             "loggedOut": removed,
             "account": ctx.get_newapi_account_mgr().public_session(),
+            "cleanup": cleanup,
         })

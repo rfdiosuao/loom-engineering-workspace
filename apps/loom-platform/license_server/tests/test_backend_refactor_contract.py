@@ -26,6 +26,10 @@ EXPECTED_TABLE_COLUMNS = {
     "settings": {"key", "value_json", "updated_at"},
     "audit_logs": {"id", "action", "before_json", "after_json", "created_at"},
     "publish_relay_packets": {"packet_id", "status", "packet_json", "lease_id", "attempts"},
+    "account_entitlement_redemptions": {
+        "code_hash", "account_id", "plan", "features_json", "devices",
+        "concurrent_tasks", "expires_at", "code_label", "redeemed_at",
+    },
 }
 REPORT_PATH = (
     Path(__file__).resolve().parents[2]

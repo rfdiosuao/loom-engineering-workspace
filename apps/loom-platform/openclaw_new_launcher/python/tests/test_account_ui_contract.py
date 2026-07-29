@@ -117,7 +117,7 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("const DEFAULT_BASE_URL = 'https://api.heang.top'", source)
         self.assertNotIn("const DEFAULT_BASE_URL = 'https://api-cn.heang.top'", source)
 
-    def test_account_api_exposes_register_and_subscription(self) -> None:
+    def test_account_api_exposes_register_subscription_and_entitlement_redemption(self) -> None:
         with open(API_FILE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
@@ -127,6 +127,14 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("api('/api/account/subscription')", source)
         self.assertIn("capabilities: ()", source)
         self.assertIn("api('/api/account/capabilities')", source)
+        self.assertIn("accountEntitlement?: AccountEntitlementSnapshot", source)
+        self.assertIn("source?: string", source)
+        self.assertIn("plan?: string", source)
+        self.assertIn("limits?: {", source)
+        self.assertIn("devices?: number", source)
+        self.assertIn("expiresAt?: string | number | null", source)
+        self.assertIn("redeemEntitlement: (params: { code: string })", source)
+        self.assertIn("api('/api/account/entitlement/redeem', 'POST', params)", source)
 
     def test_account_page_uses_cached_safe_snapshot_before_manual_refresh(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
@@ -141,6 +149,9 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("sanitizeAccountForCache", cache_source)
         self.assertIn("delete safe.tokenMasked", cache_source)
         self.assertIn("delete safe.gatewayBaseUrl", cache_source)
+        self.assertIn("delete entitlement.code", cache_source)
+        self.assertIn("delete entitlement.licenseCode", cache_source)
+        self.assertIn("delete entitlement.redeemCode", cache_source)
         self.assertNotIn("已显示上一次账号快照", page_source)
         self.assertNotIn("LoggedInPanel", page_source)
 
@@ -164,15 +175,38 @@ class AccountUiContractTests(unittest.TestCase):
                             violations.append(os.path.relpath(path, REPO_ROOT))
         self.assertEqual(violations, [])
 
-    def test_legacy_local_authorization_flow_is_not_exposed(self) -> None:
+    def test_logged_in_account_can_redeem_commercial_matrix_entitlement(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertNotIn("setLicenseInfo", source)
         self.assertNotIn("setAuthorized", source)
-        self.assertNotIn("checkLicense", source)
         self.assertNotIn("licenseApi.activate", source)
-        self.assertNotIn("授权码", source)
+        self.assertIn("checkLicense", source)
+        self.assertIn("accountApi.redeemEntitlement({ code })", source)
+        self.assertIn("await checkLicense()", source)
+        after_logged_in_guard = source.split("if (loggedIn) {", 1)[1]
+        logged_in, logged_out = after_logged_in_guard.split("\n  return (", 1)
+        self.assertIn("商业矩阵授权", logged_in)
+        self.assertIn("未激活", logged_in)
+        self.assertIn("已激活", logged_in)
+        self.assertIn("不限", logged_in)
+        self.assertIn("0 台", logged_in)
+        self.assertIn("手机数上限", logged_in)
+        self.assertIn("到期时间", logged_in)
+        self.assertIn("accountEntitlement?.source", source)
+        self.assertIn("accountEntitlement?.features?.includes('matrix.devices')", source)
+        self.assertIn('aria-label="商业矩阵授权码"', logged_in)
+        self.assertIn('type="password"', logged_in)
+        self.assertIn('autoComplete="off"', logged_in)
+        self.assertNotIn('aria-label="商业矩阵授权码"', logged_out)
+        self.assertNotIn("licenseApi.activate", source)
+
+    def test_entitlement_expiry_accepts_signed_epoch_seconds(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("value * 1000", source)
 
     def test_login_returns_on_auth_success_and_reports_background_sync(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:

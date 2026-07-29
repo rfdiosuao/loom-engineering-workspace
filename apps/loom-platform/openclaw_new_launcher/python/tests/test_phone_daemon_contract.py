@@ -21,6 +21,25 @@ from api import routes_phone
 from api.routes_phone import register_phone_routes
 
 
+class _AllowEntitlement:
+    def current_state(self, _feature=None):
+        return {
+            "authorized": True,
+            "source": "account_entitlement",
+            "features": ["matrix.devices"],
+            "limits": {"devices": 1000, "concurrentTasks": 8},
+        }
+
+    def claimed_phone_device_ids(self):
+        return ["phone-test"]
+
+    def authorize_phone_devices(self, _device_ids, _operation, *, session=None):
+        return {
+            "authorized": True,
+            "limits": {"devices": 1000, "concurrentTasks": 8},
+        }
+
+
 class PhoneDaemonContractTest(unittest.TestCase):
     def test_phone_agent_command_uses_daemon_auto_flag(self) -> None:
         cmd = routes_phone.build_phone_agent_command(
@@ -171,11 +190,13 @@ class PhoneDaemonContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = FastAPI()
             logs: list[str] = []
+            entitlement_mgr = _AllowEntitlement()
             ctx = SimpleNamespace(
                 append_log=logs.append,
                 auth_error=lambda _request: None,
                 body=lambda _request: {},
                 fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+                get_entitlement_mgr=lambda: entitlement_mgr,
                 read_json=lambda _path, default: default,
                 paths=SimpleNamespace(base_path=temp_dir, launcher_dir=temp_dir, node_exe="node-test.exe"),
             )

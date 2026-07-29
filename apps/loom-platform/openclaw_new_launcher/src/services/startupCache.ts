@@ -97,6 +97,15 @@ export function sanitizeAccountForCache(account: AccountSnapshot): AccountSnapsh
   delete safe.baseUrl;
   delete safe.gatewayBaseUrl;
   delete safe.syncResults;
+  if (safe.accountEntitlement) {
+    const entitlement = { ...safe.accountEntitlement } as Record<string, unknown>;
+    delete entitlement.code;
+    delete entitlement.licenseCode;
+    delete entitlement.redeemCode;
+    delete entitlement.activationCode;
+    delete entitlement.authorizationCode;
+    safe.accountEntitlement = entitlement;
+  }
   if (safe.subscription) {
     safe.subscription = {
       ...safe.subscription,

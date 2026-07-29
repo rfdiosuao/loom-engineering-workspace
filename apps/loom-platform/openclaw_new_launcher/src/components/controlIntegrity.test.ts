@@ -270,12 +270,23 @@ test('named form controls expose accessible labels', () => {
   assert.ok(settingsSource.includes('aria-label={copy.appearance.languageTitle}'));
 });
 
-test('account login no longer exposes the legacy license-code activation block', () => {
+test('account login exposes account entitlement redemption without the legacy activation block', () => {
   const licenseSource = readSource('./license/LicensePage.tsx');
 
   assert.doesNotMatch(licenseSource, /handleLegacyActivate/);
   assert.doesNotMatch(licenseSource, /licenseApi\.activate/);
   assert.doesNotMatch(licenseSource, /aria-label="旧授权码"/);
+  assert.match(licenseSource, /aria-label="商业矩阵授权码"/);
+});
+
+test('phone matrix gate sends authorization binding through the logged-in account page', () => {
+  const gateSource = readSource('./license/PhoneMatrixAccessGate.tsx');
+  const paywallSource = readSource('./license/LicensePaywall.tsx');
+
+  assert.match(gateSource, /accountBindingOnly/);
+  assert.match(paywallSource, /accountBindingOnly/);
+  assert.match(paywallSource, /setCurrentPage\('license'\)/);
+  assert.match(paywallSource, /登录模型账号并绑定授权码/);
 });
 
 test('shared modal, confirmation, and toast controls expose accessibility contracts', () => {

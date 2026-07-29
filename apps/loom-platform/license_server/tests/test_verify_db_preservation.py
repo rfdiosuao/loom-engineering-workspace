@@ -34,6 +34,7 @@ REQUIRED_TABLES = (
     "account_gateway_settings",
     "publish_relay_packets",
     "plans",
+    "account_entitlement_redemptions",
 )
 
 
@@ -63,6 +64,21 @@ def insert_code_record(path: Path, code_hash: str) -> None:
                       '2099-01-01', '2026-01-01T00:00:00+00:00')
             """,
             (code_hash,),
+        )
+        connection.commit()
+
+
+def insert_account_entitlement(path: Path, account_id: str) -> None:
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            """
+            insert into account_entitlement_redemptions (
+                code_hash, account_id, plan, features_json, devices,
+                concurrent_tasks, expires_at, code_label, redeemed_at
+            ) values (?, ?, 'matrix_pro', '["matrix.devices"]', 2, 3,
+                      '2099-01-01', 'TEST-LABEL', '2026-07-29T00:00:00+00:00')
+            """,
+            ("entitlement-" + account_id, account_id),
         )
         connection.commit()
 
@@ -176,6 +192,43 @@ class VerifyDatabasePreservationTests(unittest.TestCase):
             )
             self.assertTrue(all(item.equal for item in comparisons))
 
+    def test_allows_first_deploy_to_add_the_entitlement_redemption_table(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            before, after = create_matching_pair(Path(directory))
+            with closing(sqlite3.connect(before)) as connection:
+                connection.execute("drop table account_entitlement_redemptions")
+                connection.commit()
+
+            comparisons, failures = MODULE.verify_databases(
+                str(before),
+                str(after),
+            )
+
+            self.assertEqual([], failures)
+            redemption = next(
+                item
+                for item in comparisons
+                if item.table == "account_entitlement_redemptions"
+            )
+            self.assertEqual(0, redemption.before_count)
+            self.assertTrue(redemption.equal)
+            self.assertTrue(redemption.expected_change)
+
+    def test_first_deploy_rejects_unexpected_rows_in_new_entitlement_table(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            before, after = create_matching_pair(Path(directory))
+            with closing(sqlite3.connect(before)) as connection:
+                connection.execute("drop table account_entitlement_redemptions")
+                connection.commit()
+            insert_account_entitlement(after, "unexpected-account")
+
+            _comparisons, failures = MODULE.verify_databases(
+                str(before),
+                str(after),
+            )
+
+            self.assertEqual(["account_entitlement_redemptions"], failures)
+
     def test_allows_plan_change_when_authorization_data_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             before, after = create_matching_pair(Path(directory))
@@ -202,6 +255,19 @@ class VerifyDatabasePreservationTests(unittest.TestCase):
             _comparisons, failures = MODULE.verify_databases(str(before), str(after))
 
             self.assertEqual(["codes"], failures)
+
+    def test_rejects_changed_account_entitlement_redemptions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            before, after = create_matching_pair(Path(directory))
+            insert_account_entitlement(before, "account-before")
+            insert_account_entitlement(after, "account-after")
+
+            _comparisons, failures = MODULE.verify_databases(
+                str(before),
+                str(after),
+            )
+
+            self.assertEqual(["account_entitlement_redemptions"], failures)
 
 
 if __name__ == "__main__":

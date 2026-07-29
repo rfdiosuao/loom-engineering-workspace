@@ -189,14 +189,14 @@ def register_cli_routes(app, ctx) -> None:
         command = CLI_COMMANDS.get(command_id)
         if not command:
             return ctx.fastapi_json({"error": "未知能力命令"}, 400)
-        if feature_for_cli_command(command_id):
-            if error := ctx.protected_error("/api/phone"):
-                return error
 
         try:
             args = _normalize_args(body.get("args") or [])
         except ValueError as exc:
             return ctx.fastapi_json({"error": str(exc)}, 400)
+        if feature_for_cli_command(command_id, args):
+            if error := ctx.protected_error("/api/phone"):
+                return error
 
         prefix = [str(item) for item in command.get("prefix")] if isinstance(command.get("prefix"), list) else []
         full_args = prefix + args

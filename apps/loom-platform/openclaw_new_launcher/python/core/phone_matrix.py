@@ -226,8 +226,23 @@ class MatrixTargetError(Exception):
 
 
 class MatrixControlPlane:
-    def __init__(self, paths: AppPaths):
+    def __init__(
+        self,
+        paths: AppPaths,
+        *,
+        phone_authorizer: Callable[[list[str], str], Any] | None = None,
+    ):
         self.paths = paths
+        self._phone_authorizer = phone_authorizer
+
+    def _authorize_phone_devices(self, device_ids: list[str], operation: str) -> None:
+        if self._phone_authorizer is None:
+            raise MatrixSafetyError(
+                "matrix_authorizer_required",
+                "矩阵手机授权器未配置，已拒绝设备操作",
+            )
+        normalized = sorted({_device_id(value) for value in device_ids if str(value or "").strip()})
+        self._phone_authorizer(normalized, operation)
 
     @property
     def devices_path(self) -> str:
@@ -274,6 +289,8 @@ class MatrixControlPlane:
         devices = self._load_registered_devices()
         device_id = _device_id(raw.get("deviceId") or raw.get("id") or raw.get("name") or "phone-1")
         existing = next((item for item in devices if item.get("deviceId") == device_id), {})
+        if not existing:
+            self._authorize_phone_devices([device_id], "matrix.device.claim")
         raw_groups = raw.get("groups") if isinstance(raw.get("groups"), list) else None
         groups = raw_groups if raw_groups is not None else list(existing.get("groups") or [])
         group = str(
@@ -432,6 +449,10 @@ class MatrixControlPlane:
         action = _direct_action(raw.get("action") or raw.get("directAction"), prompt)
         layer = _execution_layer(mode=mode, action=action, template=template, prompt=prompt)
         devices = self._target_devices(target)
+        self._authorize_phone_devices(
+            [str(device.get("deviceId") or "") for device in devices],
+            "matrix.task.start",
+        )
         now = _now_iso()
         campaign_id = f"campaign_{uuid.uuid4().hex[:12]}"
         mission_id = f"mission_{uuid.uuid4().hex[:12]}"
@@ -622,7 +643,13 @@ class MatrixControlPlane:
         campaigns = tasks.get("campaigns") if isinstance(tasks.get("campaigns"), list) else []
         if any(str(item.get("campaignId") or "") == campaign_id for item in campaigns if isinstance(item, dict)):
             raise MatrixTargetError("matrix_campaign_exists", f"campaignId already exists: {campaign_id}")
-        self._exact_canonical_devices([assignment["deviceId"] for assignment in assignments])
+        exact_devices = self._exact_canonical_devices(
+            [assignment["deviceId"] for assignment in assignments]
+        )
+        self._authorize_phone_devices(
+            [str(device.get("deviceId") or "") for device in exact_devices],
+            "matrix.task.start",
+        )
 
         now = _now_iso()
         mission_id = f"mission_{uuid.uuid4().hex[:12]}"
@@ -1464,7 +1491,13 @@ class MatrixControlPlane:
         }
 
     @_matrix_state_guard
-    def release_lease(self, device_id: str, lease_id: str) -> Json:
+    def release_lease(
+        self,
+        device_id: str,
+        lease_id: str,
+        *,
+        resume_paused_task: bool = True,
+    ) -> Json:
         safe_device_id = _device_id(device_id)
         safe_lease_id = _clip(lease_id, 100)
         state = self._load_leases()
@@ -1497,7 +1530,7 @@ class MatrixControlPlane:
         paused_task_id = ""
         if isinstance(released_lease, dict) and released_lease.get("holderType") == "human":
             paused_task_id = _clip(released_lease.get("pausedDeviceTaskId"), 200)
-        if paused_task_id:
+        if paused_task_id and resume_paused_task:
             tasks = self._load_tasks()
             found = self._find_device_task(paused_task_id, tasks=tasks)
             if (

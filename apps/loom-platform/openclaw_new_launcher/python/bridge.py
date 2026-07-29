@@ -112,6 +112,9 @@ def _get_newapi_account_mgr() -> NewApiAccountManager:
         _newapi_account_mgr = NewApiAccountManager(paths, append_log)
     return _newapi_account_mgr
 
+def _get_entitlement_mgr():
+    return _get_newapi_account_mgr().account_entitlement
+
 def _get_process_svc() -> OpenClawProcessService:
     global _process_svc
     if _process_svc is None:
@@ -221,6 +224,84 @@ def _shutdown_agent_service() -> dict:
         if result["drained"] and _agent_service is service:
             _agent_service = None
         return result
+
+
+def _account_logout_cleanup() -> dict:
+    from api.routes_phone import stop_all_phone_event_syncs, stop_phone_daemon
+    from core.phone_matrix import MatrixControlPlane
+
+    result: dict = {
+        "performed": True,
+        "agent": {},
+        "matrix": {},
+        "cancelledJobIds": [],
+        "eventSync": {},
+        "daemon": {},
+        "errors": [],
+    }
+
+    def record_error(component: str, exc: Exception) -> None:
+        result["errors"].append({
+            "component": component,
+            "code": f"{component}_cleanup_failed",
+        })
+        append_log(
+            f"[Account] logout cleanup failed for {component}: "
+            f"{type(exc).__name__}\n"
+        )
+
+    try:
+        result["agent"] = _shutdown_agent_service()
+    except Exception as exc:
+        record_error("agent", exc)
+
+    try:
+        result["matrix"] = MatrixControlPlane(paths).emergency_stop(all_tasks=True)
+    except Exception as exc:
+        record_error("matrix", exc)
+
+    try:
+        account_job_kinds = {"agent", "cli", "image", "video", "media.transfer", "storyboard"}
+        result["cancelledJobIds"] = sorted(_get_job_mgr().cancel_matching(
+            lambda job: (
+                str(job.get("kind") or "") in account_job_kinds
+                or str(job.get("kind") or "").startswith(("agent.", "phone.", "matrix.", "storyboard."))
+            ),
+            wait_for_workers=True,
+        ))
+    except Exception as exc:
+        record_error("jobs", exc)
+
+    try:
+        result["eventSync"] = stop_all_phone_event_syncs()
+    except Exception as exc:
+        record_error("event_sync", exc)
+
+    try:
+        result["daemon"] = stop_phone_daemon(base_root=paths.base_path)
+    except Exception as exc:
+        record_error("daemon", exc)
+
+    agent_may_continue = bool(
+        isinstance(result.get("agent"), Mapping)
+        and result["agent"].get("executionMayContinue")
+    )
+    event_may_continue = bool(
+        isinstance(result.get("eventSync"), Mapping)
+        and result["eventSync"].get("executionMayContinue")
+    )
+    daemon_may_continue = bool(
+        isinstance(result.get("daemon"), Mapping)
+        and result["daemon"].get("running")
+    )
+    result["executionMayContinue"] = bool(
+        result["errors"]
+        or agent_may_continue
+        or event_may_continue
+        or daemon_may_continue
+    )
+    result["ok"] = not result["executionMayContinue"]
+    return result
 
 
 def _get_bridge_identity() -> dict:
@@ -871,8 +952,12 @@ def _fastapi_auth_error(request):
     return None
 
 
-def _fastapi_protected_error(path: str):
-    denial = commercial_feature_denial(path, _get_license_mgr())
+def _fastapi_protected_error(path: str, *, method: str | None = None):
+    denial = commercial_feature_denial(
+        path,
+        _get_entitlement_mgr(),
+        method=method,
+    )
     if denial:
         return _fastapi_json(denial, 403)
     return None
@@ -921,6 +1006,7 @@ def _build_fastapi_context():
         get_image_client=_get_image_client,
         get_desktop_agent_svc=_get_desktop_agent_svc,
         get_job_mgr=_get_job_mgr,
+        get_entitlement_mgr=_get_entitlement_mgr,
         get_license_mgr=_get_license_mgr,
         get_member_mgr=_get_member_mgr,
         get_newapi_account_mgr=_get_newapi_account_mgr,
@@ -931,6 +1017,7 @@ def _build_fastapi_context():
         get_app_updater=_get_app_updater,
         get_agent_service=_get_agent_service,
         get_bridge_identity=_get_bridge_identity,
+        account_logout_cleanup=_account_logout_cleanup,
         shutdown_agent_service=_shutdown_agent_service,
         get_storyboard_svc=_get_storyboard_svc,
         get_video_client=_get_video_client,

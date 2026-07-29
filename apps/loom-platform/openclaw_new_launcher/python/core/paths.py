@@ -338,6 +338,18 @@ class AppPaths:
         return os.path.join(self.data_dir, "license.json")
 
     @property
+    def account_entitlement_file(self) -> str:
+        return os.path.join(self.data_dir, "account-entitlement.json")
+
+    @property
+    def account_entitlement_state_file(self) -> str:
+        return os.path.join(self.data_dir, "account-entitlement-state.json")
+
+    @property
+    def account_phone_seat_lease_file(self) -> str:
+        return os.path.join(self.data_dir, "account-phone-seat-lease.json")
+
+    @property
     def install_id_file(self) -> str:
         return os.path.join(self.data_dir, "install_id.txt")
 

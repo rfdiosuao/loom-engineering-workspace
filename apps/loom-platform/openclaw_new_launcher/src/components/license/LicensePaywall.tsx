@@ -124,6 +124,7 @@ const PHONE_MATRIX_COPY: Record<LicenseGateStatus, { eyebrow: string; title: str
 
 interface LicensePaywallProps {
   scope?: 'application' | 'phone-matrix';
+  accountBindingOnly?: boolean;
   featureDenied?: boolean;
   featureChecking?: boolean;
   gateError?: string;
@@ -151,6 +152,7 @@ function displayDate(value: string | null | undefined): string {
 
 export const LicensePaywall: React.FC<LicensePaywallProps> = ({
   scope = 'application',
+  accountBindingOnly = false,
   featureDenied = false,
   featureChecking = false,
   gateError = '',
@@ -158,7 +160,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
   onEmergencyStop,
   emergencyStopping = false,
 }) => {
-  const { licenseGate, isLicenseChecking, checkLicense } = useAppStore();
+  const { licenseGate, isLicenseChecking, checkLicense, setCurrentPage } = useAppStore();
   const [code, setCode] = React.useState('');
   const [activating, setActivating] = React.useState(false);
   const [diagnosing, setDiagnosing] = React.useState(false);
@@ -319,32 +321,49 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
               <p className="mt-2 text-[12px] font-semibold leading-5 opacity-80">{copy.action}</p>
             </div>
 
-            <form className="mt-6" onSubmit={activateLicense}>
-              <label htmlFor="commercial-license-code" className="text-[12px] font-black text-text">
-                商业授权码
-              </label>
-              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                <input
-                  id="commercial-license-code"
-                  data-license-code-input
-                  type="password"
-                  value={code}
-                  onChange={(event) => setCode(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="请输入服务方提供的授权码"
-                  className="h-11 min-w-0 flex-1 rounded-[6px] border border-border-strong bg-input px-3 text-[14px] font-semibold text-text outline-none transition placeholder:text-text-subtle focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
-                />
+            {accountBindingOnly ? (
+              <div className="mt-6 rounded-[6px] border border-info bg-info-soft p-4">
+                <div className="text-[13px] font-black text-text">授权码绑定模型账号</div>
+                <p className="mt-1 text-[12px] font-semibold leading-5 text-text-muted">
+                  未激活账号不能连接或控制手机。请先登录模型账号并绑定一次授权码；激活后不限制手机数量，以后在其他电脑登录同一账号即可恢复权益。
+                </p>
                 <button
-                  data-license-activate
-                  type="submit"
-                  disabled={activating || isLicenseChecking}
-                  className="h-11 shrink-0 rounded-[6px] bg-accent px-5 text-[13px] font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
+                  data-account-entitlement-link
+                  type="button"
+                  onClick={() => setCurrentPage('license')}
+                  className="mt-3 h-10 rounded-[6px] bg-accent px-4 text-[12px] font-black text-accent-ink transition hover:bg-accent-hover"
                 >
-                  {activating ? '激活中...' : phoneMatrixScope ? '激活手机矩阵' : '激活并进入'}
+                  登录模型账号并绑定授权码
                 </button>
               </div>
-            </form>
+            ) : (
+              <form className="mt-6" onSubmit={activateLicense}>
+                <label htmlFor="commercial-license-code" className="text-[12px] font-black text-text">
+                  商业授权码
+                </label>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    id="commercial-license-code"
+                    data-license-code-input
+                    type="password"
+                    value={code}
+                    onChange={(event) => setCode(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="请输入服务方提供的授权码"
+                    className="h-11 min-w-0 flex-1 rounded-[6px] border border-border-strong bg-input px-3 text-[14px] font-semibold text-text outline-none transition placeholder:text-text-subtle focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
+                  />
+                  <button
+                    data-license-activate
+                    type="submit"
+                    disabled={activating || isLicenseChecking}
+                    className="h-11 shrink-0 rounded-[6px] bg-accent px-5 text-[13px] font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
+                  >
+                    {activating ? '激活中...' : phoneMatrixScope ? '激活手机矩阵' : '激活并进入'}
+                  </button>
+                </div>
+              </form>
+            )}
 
             <div className="mt-5 grid grid-cols-2 border-l border-t border-border text-[12px]">
               <div className="min-w-0 border-b border-r border-border p-3">

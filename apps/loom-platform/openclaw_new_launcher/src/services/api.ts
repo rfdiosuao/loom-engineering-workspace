@@ -793,6 +793,21 @@ export const diagnosticsApi = {
 };
 
 // === Account / NewAPI ===
+export interface AccountEntitlementSnapshot {
+  source?: string;
+  accountId?: string;
+  plan?: string;
+  features?: string[];
+  limits?: {
+    devices?: number;
+    concurrentTasks?: number;
+    [key: string]: unknown;
+  };
+  expiresAt?: string | number | null;
+  offlineGraceUntil?: string | number | null;
+  entitlementVersion?: number;
+}
+
 export interface AccountSnapshot {
   loggedIn: boolean;
   source?: string;
@@ -819,6 +834,7 @@ export interface AccountSnapshot {
   lastOnlineAt?: string;
   graceExpiresAt?: string;
   subscription?: AccountSubscriptionSnapshot;
+  accountEntitlement?: AccountEntitlementSnapshot;
   purchaseUrl?: string;
   syncResults?: Array<{ target?: string; ok?: boolean; error?: string }>;
 }
@@ -875,6 +891,8 @@ export const accountApi = {
     api('/api/account/bind-ticket', 'POST', params),
   sync: (): Promise<{ account: AccountSnapshot; syncResults?: Array<{ target?: string; ok?: boolean; error?: string }> }> => api('/api/account/sync', 'POST'),
   subscription: (): Promise<{ subscription: AccountSubscriptionSnapshot }> => api('/api/account/subscription'),
+  redeemEntitlement: (params: { code: string }): Promise<AccountLoginResponse> =>
+    api('/api/account/entitlement/redeem', 'POST', params),
   selectModels: (params: { textModel?: string; imageModel?: string; videoModel?: string }): Promise<{ account: AccountSnapshot; syncResults?: Array<{ target?: string; ok?: boolean; error?: string }> }> =>
     api('/api/account/models/select', 'POST', params),
   logout: (): Promise<{ account: AccountSnapshot; loggedOut?: boolean }> => api('/api/account/logout', 'POST'),
