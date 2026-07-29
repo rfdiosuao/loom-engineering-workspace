@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from unittest.mock import Mock
 
 
 PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +35,229 @@ from core.storage import read_json
 
 
 class NewApiAccountManagerTests(unittest.TestCase):
+    def test_redeem_entitlement_code_requires_login_and_never_persists_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            manager = EntitlementRedeemFakeManager(paths)
+
+            with self.assertRaisesRegex(NewApiAccountError, "尚未登录"):
+                manager.redeem_entitlement_code("LM-PRO-UNUSED")
+
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberName": "user@example.invalid",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "42",
+                    "account": "user@example.invalid",
+                },
+            })
+            manager.account_entitlement.accept_lease = Mock(return_value={
+                "features": ["matrix.devices", "matrix.tasks"],
+                "limits": {"devices": 5, "concurrentTasks": 3},
+                "plan": "pro",
+                "expiresAt": 1_900_000_000,
+                "offlineGraceUntil": 1_900_259_200,
+                "entitlementVersion": 7,
+            })
+
+            session = manager.redeem_entitlement_code("  LM-PRO-UNUSED  ")
+
+            self.assertEqual(session["accountEntitlement"]["plan"], "pro")
+            self.assertEqual(session["accountEntitlement"]["limits"]["devices"], 5)
+            request = manager.requests[-1]
+            self.assertTrue(request["url"].endswith("/api/openclaw/entitlements/redeem"))
+            self.assertEqual(request["body"]["code"], "LM-PRO-UNUSED")
+            self.assertEqual(request["body"]["installId"], manager.license_mgr.get_install_id())
+            self.assertEqual(
+                request["headers"]["Authorization"],
+                "Bearer sk-account-token-not-real",
+            )
+            self.assertNotIn("LM-PRO-UNUSED", repr(read_json(paths.member_session_file, {})))
+            self.assertEqual(
+                manager.public_session()["accountEntitlement"]["limits"]["devices"],
+                5,
+            )
+
+    def test_redeem_entitlement_code_rejects_blank_or_oversized_codes_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = EntitlementRedeemFakeManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {"baseUrl": "https://api.heang.top", "userId": "42"},
+            })
+
+            for value in ("", " " * 4, "A" * 257):
+                with self.subTest(value_length=len(value)):
+                    with self.assertRaises(NewApiAccountError):
+                        manager.redeem_entitlement_code(value)
+
+            self.assertEqual(manager.requests, [])
+
+    def test_signed_legacy_license_migrates_to_current_account_without_persisting_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            manager = EntitlementRedeemFakeManager(paths)
+            proof = {
+                "schema": "loom.license.v1",
+                "licenseId": "legacy-license-id",
+                "licensee": "Legacy Customer",
+                "installId": "legacy-install",
+                "deviceId": "legacy-device",
+                "expires": "2030-01-01",
+                "features": ["matrix.devices"],
+                "signature": "legacy-signature-do-not-persist",
+            }
+            manager.license_mgr.legacy_migration_proof = Mock(return_value=proof)
+            manager.account_entitlement.accept_lease = Mock(return_value={
+                "features": ["matrix.devices", "matrix.tasks"],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 3,
+                    "unlimitedDevices": True,
+                },
+                "plan": "matrix_pro",
+                "expiresAt": 1_900_000_000,
+                "offlineGraceUntil": 1_900_259_200,
+                "entitlementVersion": 8,
+            })
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberName": "user@example.invalid",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "42",
+                },
+                "accountEntitlement": {
+                    "source": "authorization_required",
+                    "plan": "inactive",
+                    "features": [],
+                    "limits": {"devices": 0, "concurrentTasks": 0},
+                },
+            })
+
+            session = manager.migrate_legacy_entitlement()
+
+            self.assertEqual("matrix_pro", session["accountEntitlement"]["plan"])
+            request = manager.requests[-1]
+            self.assertTrue(
+                request["url"].endswith(
+                    "/api/openclaw/entitlements/migrate-legacy"
+                )
+            )
+            self.assertEqual(proof, request["body"]["legacyLicense"])
+            persisted = repr(read_json(paths.member_session_file, {}))
+            self.assertNotIn(proof["signature"], persisted)
+            self.assertNotIn("legacyLicense", persisted)
+
+    def test_login_automatically_migrates_valid_legacy_license(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = EntitlementRedeemFakeManager(AppPaths(temp_dir))
+            manager.license_mgr.legacy_migration_proof = Mock(return_value={
+                "schema": "loom.license.v1",
+                "licenseId": "legacy-license-id",
+                "licensee": "Legacy Customer",
+                "installId": "legacy-install",
+                "deviceId": "legacy-device",
+                "expires": "2030-01-01",
+                "features": ["matrix.devices"],
+                "signature": "legacy-signature",
+            })
+            manager.account_entitlement.accept_lease = Mock(return_value={
+                "features": ["matrix.devices", "matrix.tasks"],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 3,
+                    "unlimitedDevices": True,
+                },
+                "plan": "matrix_pro",
+                "expiresAt": 1_900_000_000,
+                "offlineGraceUntil": 1_900_259_200,
+                "entitlementVersion": 8,
+            })
+
+            session = manager._persist_authenticated_session(
+                {
+                    "source": ACCOUNT_SOURCE,
+                    "memberId": "newapi:42",
+                    "memberName": "user@example.invalid",
+                    "memberToken": "sk-account-token-not-real",
+                    "newApi": {
+                        "baseUrl": "https://api.heang.top",
+                        "userId": "42",
+                    },
+                    "_accountEntitlement": {
+                        "source": "authorization_required",
+                        "plan": "inactive",
+                    },
+                },
+                sync_runtime=False,
+            )
+
+            self.assertEqual("signed_lease", session["accountEntitlement"]["source"])
+            self.assertEqual(1, len(manager.requests))
+            self.assertTrue(
+                manager.requests[0]["url"].endswith(
+                    "/api/openclaw/entitlements/migrate-legacy"
+                )
+            )
+
+    def test_missing_legacy_proof_does_not_block_login_or_send_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = EntitlementRedeemFakeManager(AppPaths(temp_dir))
+            manager.license_mgr.legacy_migration_proof = Mock(return_value=None)
+
+            session = manager._persist_authenticated_session(
+                {
+                    "source": ACCOUNT_SOURCE,
+                    "memberId": "newapi:42",
+                    "memberToken": "sk-account-token-not-real",
+                    "newApi": {
+                        "baseUrl": "https://api.heang.top",
+                        "userId": "42",
+                    },
+                    "_accountEntitlement": {
+                        "source": "authorization_required",
+                        "plan": "inactive",
+                    },
+                },
+                sync_runtime=False,
+            )
+
+            self.assertEqual("inactive", session["accountEntitlement"]["plan"])
+            self.assertEqual([], manager.requests)
+
+    def test_legacy_migration_proof_returns_exact_verified_file_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            manager = LicenseManager(paths)
+            proof = {
+                "schema": "loom.license.v1",
+                "licenseId": "legacy-license-id",
+                "licensee": "Legacy Customer",
+                "installId": "legacy-install",
+                "deviceId": "legacy-device",
+                "expires": "2030-01-01",
+                "features": ["matrix.devices"],
+                "signature": "signed-proof",
+            }
+            os.makedirs(os.path.dirname(paths.license_file), exist_ok=True)
+            with open(paths.license_file, "w", encoding="utf-8") as file:
+                json.dump(proof, file, ensure_ascii=False)
+            manager.verify = Mock(return_value=True)
+
+            result = manager.legacy_migration_proof()
+            result["licenseId"] = "changed-locally"
+
+            self.assertEqual(proof, read_json(paths.license_file, {}))
+            manager.verify.assert_called_once_with(proof)
+
     def test_launcher_permission_contract_accepts_only_the_account_routing_group(self) -> None:
         base = {
             "tokenKind": "launcher",
@@ -1436,6 +1660,8 @@ class LauncherTokenFakeManager(NewApiAccountManager):
                     },
                 }
             raise NewApiAccountError("http_404")
+        if url.endswith("/api/openclaw/entitlements/refresh"):
+            raise NewApiAccountError("http_404")
         if url.endswith("/api/user/self"):
             return {
                 "success": True,
@@ -1476,6 +1702,57 @@ class LauncherTokenFakeManager(NewApiAccountManager):
         self.synced_targets = targets
         session["lastSyncResults"] = [{"target": "openclaw", "ok": True}]
         return session["lastSyncResults"]
+
+
+class EntitlementRedeemFakeManager(NewApiAccountManager):
+    def __init__(self, paths: AppPaths):
+        super().__init__(paths)
+        self.requests: list[dict] = []
+
+    def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
+        del opener
+        self.requests.append({
+            "url": url,
+            "method": method,
+            "body": body or {},
+            "headers": headers or {},
+            "timeout": timeout,
+        })
+        if url.endswith("/api/openclaw/entitlements/redeem"):
+            return {
+                "success": True,
+                "data": {
+                    "entitlement": {
+                        "plan": "pro",
+                        "limits": {"devices": 5, "concurrentTasks": 3},
+                    },
+                    "entitlementLease": {
+                        "schema": "loom.entitlement_lease.v1",
+                        "accountId": "42",
+                        "signature": "test-signature",
+                    },
+                },
+            }
+        if url.endswith("/api/openclaw/entitlements/migrate-legacy"):
+            return {
+                "success": True,
+                "data": {
+                    "entitlement": {
+                        "plan": "matrix_pro",
+                        "limits": {
+                            "devices": 1000,
+                            "concurrentTasks": 3,
+                            "unlimitedDevices": True,
+                        },
+                    },
+                    "entitlementLease": {
+                        "schema": "loom.entitlement_lease.v1",
+                        "accountId": "42",
+                        "signature": "test-migration-signature",
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected request: {url}")
 
 
 class EmailCodeFakeManager(NewApiAccountManager):

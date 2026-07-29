@@ -18,7 +18,13 @@ from luming_license.http import handler as http_handler
 from luming_license.http import responses as http_responses
 from luming_license.http.handler import ROUTE_INVENTORY
 from luming_license.http.responses import ResponseMixin
-from luming_license.http import routes_admin, routes_auth, routes_public, routes_relay
+from luming_license.http import (
+    routes_admin,
+    routes_auth,
+    routes_public,
+    routes_relay,
+    routes_service,
+)
 from test_license_flow import load_server
 
 EXPECTED_ROUTE_MARKERS = {
@@ -76,6 +82,9 @@ EXPECTED_ROUTE_MARKERS = {
     "/api/member/refresh",
     "/api/member/usage",
     "/api/public/config",
+    "/api/service/account-entitlements/current",
+    "/api/service/account-entitlements/migrate-legacy",
+    "/api/service/account-entitlements/redeem",
     "/api/templates",
     "/api/v1/member/activate",
     "/api/v1/member/current",
@@ -183,7 +192,13 @@ class HttpRouteInventoryTests(unittest.TestCase):
         self.assertEqual(set(), EXPECTED_ROUTE_MARKERS - set(ROUTE_INVENTORY))
 
     def test_router_registry_is_exact_union_of_exact_path_tables(self) -> None:
-        modules = (routes_public, routes_auth, routes_admin, routes_relay)
+        modules = (
+            routes_public,
+            routes_auth,
+            routes_admin,
+            routes_relay,
+            routes_service,
+        )
         registered: set[str] = set()
         for module in modules:
             for attribute in ("GET_ROUTES", "POST_ROUTES"):

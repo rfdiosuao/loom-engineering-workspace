@@ -61,6 +61,84 @@ class CliPhoneRuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(checked_paths, ["/api/phone"] * 3)
 
+    def test_phone_video_stop_requires_local_auth_and_an_explicit_device_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_path = os.path.join(temp_dir, "openclaw-phone-video.mjs")
+            open(script_path, "w", encoding="utf-8").close()
+            app = _FakeApp()
+            jobs = JobManager(lambda _message: None)
+            auth_calls = []
+            protected_calls = []
+            ctx = SimpleNamespace(
+                auth_error=lambda request: auth_calls.append(request) or None,
+                body=lambda _request: None,
+                fastapi_json=lambda data, status_code=200: {"status": status_code, **data},
+                get_job_mgr=lambda: jobs,
+                protected_error=lambda path: protected_calls.append(path) or {
+                    "status": 403,
+                    "code": "LICENSE_FEATURE_REQUIRED",
+                },
+                sanitize_text=lambda text: text,
+                paths=SimpleNamespace(
+                    base_path=temp_dir,
+                    scripts_dir=temp_dir,
+                    script_roots=(),
+                    node_exe=sys.executable,
+                    launcher_dir=temp_dir,
+                ),
+                read_json=lambda _path, default: default,
+                write_json=lambda _path, _data: None,
+            )
+            register_cli_routes(app, ctx)
+            handler = app.handlers[(("POST",), "/api/cli/run")]
+            request = SimpleNamespace()
+
+            async def explicit_stop(_request):
+                return {
+                    "command": "phone:video",
+                    "args": ["stop", "--device-id", "phone-a", "--json"],
+                    "confirmed": True,
+                }
+
+            ctx.body = explicit_stop
+            with patch(
+                "api.routes_cli.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="{}", stderr=""),
+            ):
+                response = __import__("asyncio").run(handler(request))
+                job_id = response["jobId"]
+                for _ in range(100):
+                    job = jobs.get(job_id)
+                    if job and job.get("status") in {"succeeded", "failed"}:
+                        break
+                    __import__("time").sleep(0.01)
+
+            self.assertEqual(len(auth_calls), 1)
+            self.assertEqual(protected_calls, [])
+            self.assertEqual(jobs.get(job_id)["status"], "succeeded")
+
+            async def unscoped_stop(_request):
+                return {
+                    "command": "phone:video",
+                    "args": ["stop", "--json"],
+                    "confirmed": True,
+                }
+
+            ctx.body = unscoped_stop
+            response = __import__("asyncio").run(handler(request))
+            self.assertEqual(response["status"], 403)
+            self.assertEqual(response["code"], "LICENSE_FEATURE_REQUIRED")
+            self.assertEqual(protected_calls, ["/api/phone"])
+
+            ctx.auth_error = lambda _request: {
+                "status": 401,
+                "code": "LOCAL_API_AUTH_REQUIRED",
+            }
+            ctx.body = explicit_stop
+            response = __import__("asyncio").run(handler(request))
+            self.assertEqual(response["status"], 401)
+            self.assertEqual(response["code"], "LOCAL_API_AUTH_REQUIRED")
+
     def test_phone_cli_route_passes_decrypted_runtime_config_to_node(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             script_path = os.path.join(temp_dir, "openclaw-phone-fleet.mjs")

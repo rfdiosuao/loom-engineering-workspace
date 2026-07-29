@@ -18,10 +18,14 @@ from fastapi.responses import StreamingResponse
 from api.routes_phone import (
     _PHONE_OBSERVE_TIMEOUT_SEC,
     _PHONE_SCREENSHOT_REQUEST_TIMEOUT_MS,
+    _account_task_slot,
+    _account_entitlement_error_response,
+    _authorize_phone_entitlement,
     _build_phone_task_plan,
     _ensure_phone_event_syncs_for_saved_devices,
     _phone_args_for_device,
     _phone_stdout_payload,
+    _require_phone_entitlement,
     _run_phone_process_with_matrix_stream,
     _sanitize_cli_output,
     _script_path,
@@ -34,6 +38,7 @@ from api.routes_realtime import (
     stream_request_subject,
     stream_ticket_from_request,
 )
+from core.account_entitlement import AccountEntitlementError
 from core.phone_matrix import MatrixControlPlane, MatrixSafetyError, MatrixTargetError
 from core.feishu_integration import FeishuAcquisitionIntegration
 from core.acquisition_templates import AcquisitionTemplateLibrary
@@ -73,7 +78,11 @@ def _matrix_stream_fingerprint(payload: dict) -> str:
     return json.dumps(stable(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _matrix_concurrency_limit(body: dict, device_count: int) -> int:
+def _matrix_concurrency_limit(
+    body: dict,
+    device_count: int,
+    entitlement_limit: int | None = None,
+) -> int:
     safe_device_count = max(1, int(device_count or 0))
     requested = body.get("concurrency")
     if requested in (None, ""):
@@ -84,7 +93,10 @@ def _matrix_concurrency_limit(body: dict, device_count: int) -> int:
         value = int(requested)
     except (TypeError, ValueError):
         value = _MATRIX_DEFAULT_CONCURRENCY
-    return max(1, min(value, safe_device_count, _MATRIX_MAX_CONCURRENCY))
+    limits = [value, safe_device_count, _MATRIX_MAX_CONCURRENCY]
+    if type(entitlement_limit) is int and entitlement_limit > 0:
+        limits.append(entitlement_limit)
+    return max(1, min(limits))
 
 
 def _matrix_execution_is_uncertain(result: dict) -> bool:
@@ -101,6 +113,10 @@ def register_matrix_routes(app, ctx) -> None:
     async def matrix_status(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "matrix.status.read")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         body = await ctx.body(request) if request.method == "POST" else {}
         campaign_id = str(
             body.get("campaignId")
@@ -118,6 +134,8 @@ def register_matrix_routes(app, ctx) -> None:
         options = _matrix_screen_capture_options(request.query_params, focused=True)
         try:
             screen = await asyncio.to_thread(_capture_matrix_screen, ctx, device_id, **options)
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
         return ctx.fastapi_json(_matrix_screen_for_known_hash(screen, known_hash))
@@ -154,6 +172,12 @@ def register_matrix_routes(app, ctx) -> None:
                     screen,
                     str(item.get("knownHash") or "").strip(),
                 )
+            except AccountEntitlementError as exc:
+                return "error", {
+                    "deviceId": device_id,
+                    "errorCode": exc.code,
+                    "error": str(exc),
+                }
             except MatrixTargetError as exc:
                 return "error", {
                     "deviceId": device_id,
@@ -183,7 +207,10 @@ def register_matrix_routes(app, ctx) -> None:
         except (TypeError, ValueError):
             limit = 100
         try:
+            _authorize_phone_entitlement(ctx, [device_id], "matrix.timeline.read")
             return ctx.fastapi_json(_matrix(ctx).timeline(device_id, limit=limit))
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
 
@@ -194,9 +221,11 @@ def register_matrix_routes(app, ctx) -> None:
         matrix = _matrix(ctx)
         try:
             if request.method == "GET":
+                _authorize_phone_entitlement(ctx, [device_id], "matrix.lease.manage")
                 return ctx.fastapi_json(matrix.get_lease(device_id))
             body = await ctx.body(request)
             if request.method == "POST":
+                _authorize_phone_entitlement(ctx, [device_id], "matrix.lease.manage")
                 device_task_id = str(body.get("deviceTaskId") or "").strip()
                 if device_task_id:
                     return ctx.fastapi_json(matrix.takeover_task(device_id, device_task_id, body))
@@ -204,12 +233,24 @@ def register_matrix_routes(app, ctx) -> None:
             lease_id = str(body.get("leaseId") or "").strip()
             if not lease_id:
                 return ctx.fastapi_json({"error": "leaseId is required", "code": "matrix_invalid_lease"}, 400)
-            released = matrix.release_lease(device_id, lease_id)
+            resume_allowed = True
+            try:
+                _authorize_phone_entitlement(ctx, [device_id], "matrix.lease.manage")
+            except AccountEntitlementError:
+                resume_allowed = False
+            released = matrix.release_lease(
+                device_id,
+                lease_id,
+                resume_paused_task=resume_allowed,
+            )
+            released["resumeBlockedByEntitlement"] = not resume_allowed
             resumed_task_id = str(released.get("resumedDeviceTaskId") or "")
-            if resumed_task_id:
+            if resumed_task_id and resume_allowed:
                 job = _submit_matrix_resume_job(ctx, matrix, resumed_task_id)
                 released.update({"jobId": job.get("id"), "job": job})
             return ctx.fastapi_json(released)
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
 
@@ -220,6 +261,7 @@ def register_matrix_routes(app, ctx) -> None:
         body = await ctx.body(request)
         matrix = _matrix(ctx)
         try:
+            _authorize_phone_entitlement(ctx, [device_id], "matrix.control.execute")
             command = _normalize_matrix_control_request(body)
             claim = await asyncio.to_thread(
                 _execute_matrix_manual_control_serialized,
@@ -243,6 +285,8 @@ def register_matrix_routes(app, ctx) -> None:
                 },
             )
             return ctx.fastapi_json(completed)
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
 
@@ -267,9 +311,17 @@ def register_matrix_routes(app, ctx) -> None:
             return error
         try:
             matrix = _matrix(ctx)
+            execution = matrix.task_execution_context(device_task_id)
+            _authorize_phone_entitlement(
+                ctx,
+                [str(execution["deviceTask"].get("deviceId") or "")],
+                "matrix.task.resume",
+            )
             resumed = matrix.resume_task(device_task_id)
             job = _submit_matrix_resume_job(ctx, matrix, device_task_id)
             return ctx.fastapi_json({**resumed, "jobId": job.get("id"), "job": job})
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
 
@@ -278,8 +330,12 @@ def register_matrix_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         body = await ctx.body(request)
-        device = _matrix(ctx).register_device(body)
-        return ctx.fastapi_json({"device": device, "status": _matrix(ctx).status()})
+        try:
+            matrix = _matrix(ctx)
+            device = matrix.register_device(body)
+            return ctx.fastapi_json({"device": device, "status": matrix.status()})
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
 
     @app.post("/api/matrix/dispatch")
     async def matrix_dispatch(request: Request):
@@ -289,6 +345,8 @@ def register_matrix_routes(app, ctx) -> None:
         matrix = _matrix(ctx)
         try:
             task = matrix.dispatch(body)
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except MatrixSafetyError as exc:
             return ctx.fastapi_json({"error": exc.message, "code": exc.code}, 403)
         except MatrixTargetError as exc:
@@ -323,6 +381,10 @@ def register_matrix_routes(app, ctx) -> None:
     async def matrix_watch(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "matrix.watch.read")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         body = await ctx.body(request) if request.method == "POST" else {}
         campaign_id = str(body.get("campaignId") or request.query_params.get("campaignId") or "").strip()
         limit_raw = body.get("limit") or request.query_params.get("limit") or 100
@@ -358,6 +420,10 @@ def register_matrix_routes(app, ctx) -> None:
                 {"error": "A valid one-time Matrix stream ticket is required", "code": "stream_ticket_invalid"},
                 401,
             )
+        try:
+            _require_phone_entitlement(ctx, "matrix.events.read")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         _matrix_event_sync_best_effort(ctx)
         try:
             after_seq = max(0, int(request.query_params.get("afterSeq") or 0))
@@ -528,6 +594,8 @@ def register_matrix_routes(app, ctx) -> None:
         matrix = _matrix(ctx)
         try:
             retry = matrix.retry_failed(campaign_id, body)
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except MatrixSafetyError as exc:
             return ctx.fastapi_json({"error": exc.message, "code": exc.code}, 403)
         except MatrixTargetError as exc:
@@ -775,6 +843,8 @@ def register_matrix_routes(app, ctx) -> None:
         matrix = _matrix(ctx)
         try:
             task = matrix.dispatch(payload)
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         except MatrixSafetyError as exc:
             return ctx.fastapi_json({"error": exc.message, "code": exc.code}, 403)
         except MatrixTargetError as exc:
@@ -812,6 +882,10 @@ def register_matrix_routes(app, ctx) -> None:
     async def matrix_experience(request: Request):
         if error := ctx.auth_error(request):
             return error
+        try:
+            _require_phone_entitlement(ctx, "matrix.experience.read")
+        except AccountEntitlementError as exc:
+            return _account_entitlement_error_response(ctx, exc)
         return ctx.fastapi_json(_matrix(ctx).experience_report())
 
 
@@ -860,7 +934,14 @@ def _matrix_job_matches_emergency_scope(
 
 
 def _matrix(ctx) -> MatrixControlPlane:
-    return MatrixControlPlane(ctx.paths)
+    return MatrixControlPlane(
+        ctx.paths,
+        phone_authorizer=lambda device_ids, operation: _authorize_phone_entitlement(
+            ctx,
+            device_ids,
+            operation,
+        ),
+    )
 
 
 def _submit_matrix_resume_job(ctx, matrix: MatrixControlPlane, device_task_id: str) -> dict:
@@ -1113,6 +1194,11 @@ def _capture_matrix_screen(
     max_long_side: int = 960,
     cache_ttl_ms: int = 700,
 ) -> dict:
+    entitlement = _authorize_phone_entitlement(
+        ctx,
+        [device_id],
+        "matrix.screen.read",
+    )
     script_path = _script_path(ctx, "openclaw-phone-vision.mjs")
     node_exe = str(getattr(ctx.paths, "node_exe", "") or "")
     if not os.path.exists(script_path):
@@ -1135,15 +1221,17 @@ def _capture_matrix_screen(
         ],
         device_id,
     )
-    with _MATRIX_SCREEN_CAPTURE_GATE:
-        process = _run_phone_process_with_matrix_stream(
-            ctx,
-            [node_exe, script_path, *args],
-            kind="phone.screenshot",
-            layer="direct",
-            timeout_sec=_PHONE_OBSERVE_TIMEOUT_SEC,
-            device_id=device_id,
-        )
+    with _account_task_slot(ctx, entitlement, "matrix.screen.read"):
+        with _MATRIX_SCREEN_CAPTURE_GATE:
+            process = _run_phone_process_with_matrix_stream(
+                ctx,
+                [node_exe, script_path, *args],
+                kind="phone.screenshot",
+                layer="direct",
+                timeout_sec=_PHONE_OBSERVE_TIMEOUT_SEC,
+                device_id=device_id,
+                allowed_device_ids=[device_id],
+            )
     if process.get("returncode") != 0:
         failure = _phone_stdout_payload(process.get("stdout") or "")
         error_code = str(failure.get("errorCode") or failure.get("code") or "").strip()
@@ -1234,7 +1322,7 @@ def _sync_matrix_screen_presence(ctx, device_id: str, frame: dict) -> None:
     elif foreground_app:
         update["foregroundApp"] = foreground_app
     try:
-        MatrixControlPlane(ctx.paths).register_device(update)
+        _matrix(ctx).register_device(update)
     except Exception:
         return
 
@@ -1275,7 +1363,22 @@ def _run_matrix_campaign(ctx, matrix: MatrixControlPlane, task: dict, body: dict
             "status": matrix.status(),
             "error": "没有可执行的目标手机，请重新检测连接后再发布任务。",
         }
-    concurrency = _matrix_concurrency_limit(body, len(device_tasks))
+    entitlement = _authorize_phone_entitlement(
+        ctx,
+        [str(item.get("deviceId") or "") for item in device_tasks],
+        "matrix.task.execute",
+    )
+    entitlement_limits = (
+        entitlement.get("limits")
+        if isinstance(entitlement, dict)
+        and isinstance(entitlement.get("limits"), dict)
+        else {}
+    )
+    concurrency = _matrix_concurrency_limit(
+        body,
+        len(device_tasks),
+        entitlement_limits.get("concurrentTasks"),
+    )
     results_by_index: dict[int, dict] = {}
     ctx.get_job_mgr().progress(
         job_id,

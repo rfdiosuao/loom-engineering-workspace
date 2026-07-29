@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable
 
 from .responses import ResponseMixin
-from . import routes_admin, routes_auth, routes_public, routes_relay
+from . import routes_admin, routes_auth, routes_public, routes_relay, routes_service
 
 
 Route = Callable[[Any, Any], None]
@@ -25,12 +25,14 @@ GET_ROUTES = _merge_route_tables(
     routes_auth.GET_ROUTES,
     routes_admin.GET_ROUTES,
     routes_relay.GET_ROUTES,
+    routes_service.GET_ROUTES,
 )
 POST_ROUTES = _merge_route_tables(
     routes_public.POST_ROUTES,
     routes_auth.POST_ROUTES,
     routes_admin.POST_ROUTES,
     routes_relay.POST_ROUTES,
+    routes_service.POST_ROUTES,
 )
 HEAD_ROUTES = _merge_route_tables(routes_public.HEAD_ROUTES)
 ROUTE_INVENTORY = frozenset(GET_ROUTES) | frozenset(POST_ROUTES)

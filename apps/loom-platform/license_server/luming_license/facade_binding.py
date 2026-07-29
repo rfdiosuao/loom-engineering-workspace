@@ -41,6 +41,7 @@ _VALUE_NAMES = (
     "bounded_int_env",
     "ActivationError",
     "accounts",
+    "account_entitlements",
     "activations",
     "licenses",
     "plans",
@@ -284,6 +285,11 @@ _BUSINESS_FUNCTION_NAMES = (
     "member_response",
     "find_member_license",
     "activate_code",
+    "account_redeem_service_configured",
+    "account_redeem_service_token_valid",
+    "redeem_account_entitlement",
+    "current_account_entitlement",
+    "migrate_legacy_account_entitlement",
 )
 
 _STATIC_FUNCTION_GROUPS = (
@@ -313,6 +319,9 @@ class FacadeBindings:
     update_public_settings: Callable[..., Any]
     activate_code: Callable[..., Any]
     find_member_license: Callable[..., Any]
+    redeem_account_entitlement: Callable[..., Any]
+    current_account_entitlement: Callable[..., Any]
+    migrate_legacy_account_entitlement: Callable[..., Any]
     publish_relay_enqueue: Callable[..., Any]
     publish_relay_claim: Callable[..., Any]
     publish_relay_complete: Callable[..., Any]
@@ -428,6 +437,9 @@ def bind_facade(target: ModuleType) -> FacadeBindings:
         update_public_settings=namespace["update_public_settings"],
         activate_code=namespace["activate_code"],
         find_member_license=namespace["find_member_license"],
+        redeem_account_entitlement=namespace["redeem_account_entitlement"],
+        current_account_entitlement=namespace["current_account_entitlement"],
+        migrate_legacy_account_entitlement=namespace["migrate_legacy_account_entitlement"],
         publish_relay_enqueue=namespace["publish_relay_enqueue"],
         publish_relay_claim=namespace["publish_relay_claim"],
         publish_relay_complete=namespace["publish_relay_complete"],

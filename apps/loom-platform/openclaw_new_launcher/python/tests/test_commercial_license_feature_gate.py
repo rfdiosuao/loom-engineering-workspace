@@ -64,23 +64,85 @@ class CommercialFeaturePathContractTests(unittest.TestCase):
             "/api/process/start",
             "/api/image/generate/submit",
             "/api/video/generate",
-            "/api/matrix/cancel",
-            "/api/matrix/emergency-stop",
-            "/api/phone/daemon/stop",
-            "/api/phone/events/stop",
             "/api/matrixevil/status",
             "/api/phonebook/task",
         ):
             with self.subTest(path=path):
                 self.assertIsNone(feature_for_path(path))
+        for path in (
+            "/api/matrix/cancel",
+            "/api/matrix/emergency-stop",
+            "/api/phone/daemon/stop",
+            "/api/phone/events/stop",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(feature_for_path(path, method="POST"))
         self.assertEqual(feature_for_path("/api/matrix/acquisitionevil"), "matrix.devices")
 
-    def test_all_phone_cli_commands_use_the_phone_matrix_feature_gate(self) -> None:
+    def test_method_scoped_cleanup_routes_remain_available_without_entitlement(self) -> None:
+        feature_for_path = feature_module().feature_for_path
+        cleanup_requests = (
+            ("DELETE", "/api/phone/config/device/phone-a"),
+            ("POST", "/api/phone/usb/disconnect"),
+            ("POST", "/api/phone/daemon/stop"),
+            ("POST", "/api/phone/events/stop"),
+            ("DELETE", "/api/matrix/devices/phone-a/lease"),
+            ("POST", "/api/matrix/tasks/task-a/pause"),
+        )
+
+        for method, path in cleanup_requests:
+            with self.subTest(method=method, path=path):
+                self.assertIsNone(feature_for_path(path, method=method))
+
+        protected_requests = (
+            ("GET", "/api/phone/config/device/phone-a"),
+            ("POST", "/api/phone/usb/connect"),
+            ("POST", "/api/phone/daemon/start"),
+            ("POST", "/api/phone/events/start"),
+            ("POST", "/api/matrix/devices/phone-a/lease"),
+            ("POST", "/api/matrix/tasks/task-a/resume"),
+        )
+        for method, path in protected_requests:
+            with self.subTest(method=method, path=path):
+                self.assertEqual(feature_for_path(path, method=method), "matrix.devices")
+
+    def test_only_explicit_phone_video_stop_cleanup_bypasses_the_phone_matrix_feature_gate(self) -> None:
         feature_for_cli_command = feature_module().feature_for_cli_command
         self.assertEqual(feature_for_cli_command("phone:publish"), "matrix.devices")
         self.assertEqual(feature_for_cli_command("loom:phone:publish"), "matrix.devices")
         self.assertEqual(feature_for_cli_command("phone:read"), "matrix.devices")
         self.assertEqual(feature_for_cli_command("openclaw:phone:status"), "matrix.devices")
+        self.assertIsNone(
+            feature_for_cli_command(
+                "phone:video",
+                ["stop", "--device-id", "phone-a", "--json"],
+            )
+        )
+        self.assertIsNone(
+            feature_for_cli_command(
+                "phone:video",
+                ["--device-id=phone-a", "stop"],
+            )
+        )
+        for args in (
+            ["stop"],
+            ["stop", "--device-id", ""],
+            ["stop", "--device-id", "phone-a", "--phone-url", "http://127.0.0.1:9527"],
+            ["start", "--device-id", "phone-a"],
+            ["status", "--device-id", "phone-a"],
+        ):
+            with self.subTest(args=args):
+                self.assertEqual(
+                    feature_for_cli_command("phone:video", args),
+                    "matrix.devices",
+                )
+        self.assertEqual(
+            feature_for_cli_command(
+                "loom:phone:video",
+                ["stop", "--device-id", "phone-a"],
+            ),
+            "matrix.devices",
+        )
         self.assertIsNone(feature_for_cli_command("desktop:agent"))
         self.assertIsNone(feature_for_cli_command(""))
 
@@ -128,6 +190,31 @@ class CommercialFeatureDecisionTests(unittest.TestCase):
         self.assertIsNone(commercial_feature_denial("/api/diagnostics/export", manager))
         self.assertEqual(manager.requested, ["matrix.devices"])
 
+    def test_denial_preserves_actionable_account_entitlement_state(self) -> None:
+        commercial_feature_denial = feature_module().commercial_feature_denial
+        manager = StateAwareLicenseManager(
+            {
+                "authorized": False,
+                "source": "account_entitlement",
+                "code": "authorization_required",
+                "message": "当前账号尚未激活手机矩阵，请输入授权码绑定当前账号。",
+                "action": "bind_authorization_code",
+                "details": {
+                    "accountId": "account-safe",
+                    "accessToken": "must-not-leak",
+                },
+            }
+        )
+
+        denial = commercial_feature_denial("/api/matrix/status", manager)
+
+        self.assertEqual("authorization_required", denial["code"])
+        self.assertEqual("bind_authorization_code", denial["action"])
+        self.assertEqual("account_entitlement", denial["source"])
+        self.assertEqual({"accountId": "account-safe"}, denial["details"])
+        self.assertNotIn("must-not-leak", repr(denial))
+        self.assertEqual(["matrix.devices"], manager.requested)
+
     def test_gateway_account_profile_cannot_replace_a_signed_commercial_license(self) -> None:
         from core.license_manager import LicenseManager
 
@@ -149,7 +236,10 @@ class CommercialFeatureDecisionTests(unittest.TestCase):
 
         self.assertIn("commercial_feature_denial", bridge_source)
         self.assertIn("commercial_feature_guard", route_source)
-        self.assertIn("ctx.protected_error(request.url.path)", route_source)
+        self.assertIn(
+            "ctx.protected_error(request.url.path, method=request.method)",
+            route_source,
+        )
         self.assertIn("feature_for_cli_command", cli_source)
         self.assertIn("ctx.protected_error(\"/api/phone\")", cli_source)
         self.assertNotIn("get_license_mgr().is_authorized()", cli_source)
@@ -166,6 +256,20 @@ class RecordingLicenseManager:
         if feature:
             self.requested.append(feature)
         return bool(feature and feature in self.authorized_features)
+
+
+class StateAwareLicenseManager:
+    def __init__(self, state: dict[str, object]) -> None:
+        self.state = state
+        self.requested: list[str] = []
+
+    def current_state(self, feature: str | None = None) -> dict[str, object]:
+        if feature:
+            self.requested.append(feature)
+        return dict(self.state)
+
+    def is_authorized(self, feature: str | None = None) -> bool:
+        raise AssertionError("state-aware managers must be evaluated through current_state")
 
 
 if __name__ == "__main__":

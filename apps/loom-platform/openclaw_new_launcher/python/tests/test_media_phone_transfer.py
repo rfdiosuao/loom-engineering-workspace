@@ -21,6 +21,7 @@ if str(PYTHON_ROOT) not in sys.path:
 
 from core.paths import AppPaths
 from core.phone_matrix import MatrixControlPlane
+from tests.matrix_test_support import matrix_for_test
 
 
 routes_media = importlib.import_module("api.routes_media")
@@ -84,7 +85,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         }
 
     def test_selected_online_phone_uses_upload_only_script_without_secret_args(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(
             returncode=0,
             stdout=json.dumps({
@@ -151,8 +152,8 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.assertNotIn("TOP_SECRET_PHONE_TOKEN", json.dumps(result))
 
     def test_sync_and_async_http_generation_without_target_stays_local(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-b", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-b", "online": True})
         selected = {"value": "phone-a"}
         jobs = ImmediateJobManager()
 
@@ -421,7 +422,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.assertNotIn("TOP_SECRET", json.dumps(result))
 
     def test_zero_exit_with_invalid_json_is_not_reported_as_uploaded(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(returncode=0, stdout="not-json", stderr="")
 
         with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch.object(
@@ -436,7 +437,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.assertEqual(result["uploadedCount"], 0)
 
     def test_ok_response_requires_exact_uploaded_count(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(
             returncode=0,
             stdout=json.dumps({
@@ -465,7 +466,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.assertEqual(result["uploadedFiles"], ["one.png"])
 
     def test_partial_upload_failure_returns_only_safe_filename_summary(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(
             returncode=1,
             stdout=json.dumps({
@@ -511,7 +512,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_stale_offline_matrix_presence_does_not_block_real_upload(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": False})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": False})
         completed = SimpleNamespace(
             returncode=0,
             stdout=json.dumps({
@@ -536,7 +537,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         run.assert_called_once()
 
     def test_upload_failure_is_nonfatal_and_secret_safe(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(
             returncode=1,
             stdout=json.dumps({

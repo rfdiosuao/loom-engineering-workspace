@@ -35,7 +35,7 @@ def register_fastapi_routes(app, ctx) -> None:
 
     @app.middleware("http")
     async def commercial_feature_guard(request: Request, call_next):
-        if error := ctx.protected_error(request.url.path):
+        if error := ctx.protected_error(request.url.path, method=request.method):
             return error
         return await call_next(request)
 

@@ -269,7 +269,44 @@ fn path_check(id: &str, label: &str, path: &std::path::Path, required: bool) -> 
     }
 }
 
-fn protected_feature(path: &str) -> Option<&'static str> {
+fn is_safety_cleanup_request(path: &str, method: &str) -> bool {
+    let normalized_method = method.trim().to_ascii_uppercase();
+    if normalized_method == "POST"
+        && matches!(
+            path,
+            "api/matrix/cancel"
+                | "api/matrix/emergency-stop"
+                | "api/phone/usb/disconnect"
+                | "api/phone/daemon/stop"
+                | "api/phone/events/stop"
+        )
+    {
+        return true;
+    }
+    if normalized_method == "POST" {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() == 5
+            && parts[..3] == ["api", "matrix", "tasks"]
+            && !parts[3].is_empty()
+            && parts[4] == "pause"
+        {
+            return true;
+        }
+    }
+    if normalized_method != "DELETE" {
+        return false;
+    }
+    if let Some(device_id) = path.strip_prefix("api/phone/config/device/") {
+        return !device_id.is_empty() && !device_id.contains('/');
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.len() == 5
+        && parts[..3] == ["api", "matrix", "devices"]
+        && !parts[3].is_empty()
+        && parts[4] == "lease"
+}
+
+fn protected_feature(path: &str, method: &str) -> Option<&'static str> {
     const RULES: [(&str, &str); 5] = [
         ("api/matrix/acquisition/feishu", "acquisition.feishu"),
         ("api/matrix/acquisition/templates", "templates.cloud"),
@@ -277,20 +314,13 @@ fn protected_feature(path: &str) -> Option<&'static str> {
         ("api/matrix", "matrix.devices"),
         ("api/phone", "matrix.devices"),
     ];
-    const PUBLIC_SAFETY_PATHS: [&str; 4] = [
-        "api/matrix/cancel",
-        "api/matrix/emergency-stop",
-        "api/phone/daemon/stop",
-        "api/phone/events/stop",
-    ];
-
     let normalized = path
         .split('?')
         .next()
         .unwrap_or("")
         .trim_start_matches('/')
         .trim_end_matches('/');
-    if PUBLIC_SAFETY_PATHS.contains(&normalized) {
+    if is_safety_cleanup_request(normalized, method) {
         return None;
     }
     for (prefix, feature) in RULES {
@@ -306,24 +336,27 @@ fn protected_feature(path: &str) -> Option<&'static str> {
     None
 }
 
-fn protected_feature_for_request(path: &str, body: Option<&str>) -> Option<&'static str> {
-    if let Some(feature) = protected_feature(path) {
+fn protected_feature_for_request(
+    path: &str,
+    method: &str,
+    body: Option<&str>,
+) -> Option<&'static str> {
+    if let Some(feature) = protected_feature(path, method) {
         return Some(feature);
     }
-    let normalized = path
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .trim_matches('/');
+    let normalized = path.split('?').next().unwrap_or("").trim_matches('/');
     if normalized != "api/cli/run" {
         return None;
     }
-    let command = serde_json::from_str::<serde_json::Value>(body?)
-        .ok()?
+    let payload = serde_json::from_str::<serde_json::Value>(body?).ok()?;
+    let command = payload
         .get("command")?
         .as_str()?
         .trim()
         .to_ascii_lowercase();
+    if is_phone_video_stop_cleanup(&command, payload.get("args")) {
+        return None;
+    }
     if command.starts_with("phone:")
         || command.starts_with("loom:phone:")
         || command.starts_with("openclaw:phone:")
@@ -333,6 +366,61 @@ fn protected_feature_for_request(path: &str, body: Option<&str>) -> Option<&'sta
     None
 }
 
+fn is_phone_video_stop_cleanup(command: &str, args: Option<&serde_json::Value>) -> bool {
+    if command != "phone:video" {
+        return false;
+    }
+    let Some(args) = args.and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+
+    let mut saw_stop = false;
+    let mut device_id = "";
+    let mut index = 0;
+    while index < args.len() {
+        let Some(raw) = args[index].as_str().map(str::trim) else {
+            return false;
+        };
+        let normalized = raw.to_ascii_lowercase();
+        if normalized == "stop" {
+            if saw_stop {
+                return false;
+            }
+            saw_stop = true;
+        } else if normalized == "--json" {
+        } else if normalized == "--device-id" {
+            if !device_id.is_empty() || index + 1 >= args.len() {
+                return false;
+            }
+            let Some(candidate) = args[index + 1].as_str().map(str::trim) else {
+                return false;
+            };
+            if candidate.is_empty() || candidate.starts_with('-') {
+                return false;
+            }
+            device_id = candidate;
+            index += 1;
+        } else if normalized.starts_with("--device-id=") {
+            if !device_id.is_empty() {
+                return false;
+            }
+            let Some((_, candidate)) = raw.split_once('=') else {
+                return false;
+            };
+            let candidate = candidate.trim();
+            if candidate.is_empty() || candidate.starts_with('-') {
+                return false;
+            }
+            device_id = candidate;
+        } else {
+            return false;
+        }
+        index += 1;
+    }
+
+    saw_stop && !device_id.is_empty()
+}
+
 #[cfg(test)]
 mod commercial_feature_path_tests {
     use super::protected_feature_for_request;
@@ -340,15 +428,28 @@ mod commercial_feature_path_tests {
     #[test]
     fn maps_commercial_routes_with_longest_prefix_precedence() {
         let cases = [
-            ("/api/matrix/acquisition/feishu/status", Some("acquisition.feishu")),
-            ("/api/matrix/acquisition/templates/upload", Some("templates.cloud")),
-            ("/api/matrix/acquisition/agent/result", Some("acquisition.workbench")),
+            (
+                "/api/matrix/acquisition/feishu/status",
+                Some("acquisition.feishu"),
+            ),
+            (
+                "/api/matrix/acquisition/templates/upload",
+                Some("templates.cloud"),
+            ),
+            (
+                "/api/matrix/acquisition/agent/result",
+                Some("acquisition.workbench"),
+            ),
             ("/api/matrix/status", Some("matrix.devices")),
             ("/api/phone/task", Some("matrix.devices")),
         ];
 
         for (path, expected) in cases {
-            assert_eq!(protected_feature_for_request(path, None), expected, "path={path}");
+            assert_eq!(
+                protected_feature_for_request(path, "GET", None),
+                expected,
+                "path={path}"
+            );
         }
     }
 
@@ -364,43 +465,116 @@ mod commercial_feature_path_tests {
             "/api/process/start",
             "/api/image/generate/submit",
             "/api/video/generate",
+            "/api/matrixevil/status",
+            "/api/phonebook/task",
+        ] {
+            assert_eq!(
+                protected_feature_for_request(path, "GET", None),
+                None,
+                "path={path}"
+            );
+        }
+        for path in [
             "/api/matrix/cancel",
             "/api/matrix/emergency-stop",
             "/api/phone/daemon/stop",
             "/api/phone/events/stop",
-            "/api/matrixevil/status",
-            "/api/phonebook/task",
         ] {
-            assert_eq!(protected_feature_for_request(path, None), None, "path={path}");
+            assert_eq!(
+                protected_feature_for_request(path, "POST", None),
+                None,
+                "path={path}"
+            );
         }
         assert_eq!(
-            protected_feature_for_request("/api/matrix/acquisitionevil", None),
+            protected_feature_for_request("/api/matrix/acquisitionevil", "GET", None),
             Some("matrix.devices")
         );
     }
 
     #[test]
-    fn gates_all_phone_commands_on_the_shared_cli_endpoint() {
+    fn allows_only_explicit_phone_video_stop_cleanup_on_the_shared_cli_endpoint() {
         let publish = r#"{"command":"phone:publish","confirmed":true}"#;
         let read = r#"{"command":"phone:agent","args":["history"]}"#;
         let desktop = r#"{"command":"desktop:agent","args":["status"]}"#;
+        let video_stop = r#"{"command":"phone:video","args":["stop","--device-id","phone-a","--json"],"confirmed":true}"#;
+        let video_stop_equals =
+            r#"{"command":"phone:video","args":["--device-id=phone-a","stop"],"confirmed":true}"#;
+        let video_stop_without_target =
+            r#"{"command":"phone:video","args":["stop","--json"],"confirmed":true}"#;
+        let video_start = r#"{"command":"phone:video","args":["start","--device-id","phone-a"],"confirmed":true}"#;
+        let video_stop_with_direct_url = r#"{"command":"phone:video","args":["stop","--device-id","phone-a","--phone-url","http://127.0.0.1:9527"],"confirmed":true}"#;
+        let video_stop_alias = r#"{"command":"loom:phone:video","args":["stop","--device-id","phone-a"],"confirmed":true}"#;
 
         assert_eq!(
-            protected_feature_for_request("/api/cli/run", Some(publish)),
+            protected_feature_for_request("/api/cli/run", "POST", Some(publish)),
             Some("matrix.devices")
         );
         assert_eq!(
-            protected_feature_for_request("/api/cli/run", Some(read)),
+            protected_feature_for_request("/api/cli/run", "POST", Some(read)),
             Some("matrix.devices")
         );
         assert_eq!(
-            protected_feature_for_request("/api/cli/run", Some(desktop)),
+            protected_feature_for_request("/api/cli/run", "POST", Some(desktop)),
             None
         );
         assert_eq!(
-            protected_feature_for_request("/api/cli/run", Some("not-json")),
+            protected_feature_for_request("/api/cli/run", "POST", Some(video_stop)),
             None
         );
+        assert_eq!(
+            protected_feature_for_request("/api/cli/run", "POST", Some(video_stop_equals)),
+            None
+        );
+        for body in [
+            video_stop_without_target,
+            video_start,
+            video_stop_with_direct_url,
+            video_stop_alias,
+        ] {
+            assert_eq!(
+                protected_feature_for_request("/api/cli/run", "POST", Some(body)),
+                Some("matrix.devices"),
+                "body={body}"
+            );
+        }
+        assert_eq!(
+            protected_feature_for_request("/api/cli/run", "POST", Some("not-json")),
+            None
+        );
+    }
+
+    #[test]
+    fn allows_only_method_scoped_cleanup_requests_without_commercial_access() {
+        for (method, path) in [
+            ("DELETE", "/api/phone/config/device/phone-a"),
+            ("POST", "/api/phone/usb/disconnect"),
+            ("POST", "/api/phone/daemon/stop"),
+            ("POST", "/api/phone/events/stop"),
+            ("DELETE", "/api/matrix/devices/phone-a/lease"),
+            ("POST", "/api/matrix/tasks/task-a/pause"),
+        ] {
+            assert_eq!(
+                protected_feature_for_request(path, method, None),
+                None,
+                "{method} {path}"
+            );
+        }
+
+        for (method, path) in [
+            ("GET", "/api/phone/config/device/phone-a"),
+            ("POST", "/api/phone/usb/connect"),
+            ("POST", "/api/phone/daemon/start"),
+            ("POST", "/api/phone/events/start"),
+            ("POST", "/api/matrix/devices/phone-a/lease"),
+            ("POST", "/api/matrix/tasks/task-a/resume"),
+        ] {
+            assert_eq!(
+                protected_feature_for_request(path, method, None),
+                Some("matrix.devices"),
+                "{method} {path}"
+            );
+        }
     }
 }
 
@@ -889,7 +1063,7 @@ async fn proxy_request(
     method: String,
     body: Option<String>,
 ) -> Result<String, String> {
-    if let Some(feature) = protected_feature_for_request(&path, body.as_deref()) {
+    if let Some(feature) = protected_feature_for_request(&path, &method, body.as_deref()) {
         let base_dir = portable_base_dir()?;
         license::ensure_authorized(&base_dir, Some(feature))?;
     }
@@ -1012,7 +1186,10 @@ async fn open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -> Result<String, String> {
+async fn prepare_update_install(
+    app: tauri::AppHandle,
+    installer_path: String,
+) -> Result<String, String> {
     #[cfg(not(windows))]
     {
         let _ = (app, installer_path);
@@ -1042,8 +1219,8 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
             .ok_or_else(|| "LOCALAPPDATA 不可用，无法创建安全更新目录".to_string())?;
         let update_state_root = local_app_data.join(update_recovery_dir_name());
         let cache_root = update_state_root.join("updates");
-        let canonical_cache = std::fs::canonicalize(&cache_root)
-            .map_err(|e| format!("更新缓存目录不可用: {e}"))?;
+        let canonical_cache =
+            std::fs::canonicalize(&cache_root).map_err(|e| format!("更新缓存目录不可用: {e}"))?;
         if !installer.starts_with(&canonical_cache) {
             return Err(format!(
                 "拒绝启动更新：安装包不在 {BRAND_DISPLAY_NAME} 外部更新缓存中"
@@ -1063,9 +1240,9 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
             .ok_or_else(|| "拒绝启动更新：无法从安装包名称读取目标版本".to_string())?;
         let version_parts = target_version.split('.').collect::<Vec<_>>();
         if version_parts.len() != 3
-            || version_parts
-                .iter()
-                .any(|part| part.is_empty() || !part.chars().all(|character| character.is_ascii_digit()))
+            || version_parts.iter().any(|part| {
+                part.is_empty() || !part.chars().all(|character| character.is_ascii_digit())
+            })
         {
             return Err("拒绝启动更新：目标版本格式无效".to_string());
         }
@@ -1115,7 +1292,9 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
         command.arg("-RecoveryRoot").arg(&recovery_root);
         command.arg("-MarkerPath").arg(&marker_path);
         command.arg("-ReadyPath").arg(&ready_path);
-        command.arg("-ParentPid").arg(std::process::id().to_string());
+        command
+            .arg("-ParentPid")
+            .arg(std::process::id().to_string());
         command.arg("-Version").arg(&target_version);
         command.arg("-BrandId").arg(BRAND_ID);
         command.arg("-BrandDisplayName").arg(BRAND_DISPLAY_NAME);

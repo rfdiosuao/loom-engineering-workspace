@@ -77,6 +77,7 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
     return (
       <LicensePaywall
         scope="phone-matrix"
+        accountBindingOnly
         featureDenied={licenseGate.authorized && featureAuthorized === false}
         featureChecking={licenseGate.authorized && featureAuthorized === null}
         gateError={featureError}

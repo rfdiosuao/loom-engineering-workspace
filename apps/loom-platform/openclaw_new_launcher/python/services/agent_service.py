@@ -130,7 +130,12 @@ class AgentService:
         self.event_bus = AgentEventBus(self.repository)
         self.context_factory = context_factory
         self.job_manager = job_manager
-        self._matrix_factory = matrix_factory or (lambda: MatrixControlPlane(self.paths))
+        self._matrix_factory = matrix_factory or (
+            lambda: MatrixControlPlane(
+                self.paths,
+                phone_authorizer=self._authorize_matrix_phone_devices,
+            )
+        )
         self._campaign_links: dict[str, Json] = {}
         self._matrix_monitor_stop = threading.Event()
         self.account_manager = account_manager
@@ -171,6 +176,7 @@ class AgentService:
             max_workers=max(1, min(int(max_workers), 16)),
             thread_name_prefix="loom-agent-run",
         )
+
         self._futures: dict[str, Future[Any]] = {}
         self._pending_continuations: dict[str, RunContinuation] = {}
         self._resume_requests: set[str] = set()
@@ -194,6 +200,21 @@ class AgentService:
             daemon=True,
         )
         self._matrix_monitor_thread.start()
+
+    def _authorize_matrix_phone_devices(
+        self,
+        device_ids: list[str],
+        operation: str,
+    ) -> dict | None:
+        if not callable(self.context_factory):
+            return None
+        from api.routes_phone import _authorize_phone_entitlement
+
+        return _authorize_phone_entitlement(
+            self.context_factory(),
+            device_ids,
+            operation,
+        )
 
     def bootstrap(self) -> Json:
         runtime_status = redact_sensitive(self.runtime.status(NATIVE_RUNTIME_PROFILE_ID))

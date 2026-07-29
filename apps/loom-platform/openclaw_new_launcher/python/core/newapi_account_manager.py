@@ -14,6 +14,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from core.account_entitlement import AccountEntitlementError, AccountEntitlementManager
 from core.license_manager import LicenseManager
 from core.model_catalog import (
     ModelDescriptor,
@@ -888,6 +889,10 @@ class NewApiAccountManager:
     def __init__(self, paths: AppPaths, append_log=None):
         self.paths = paths
         self.license_mgr = LicenseManager(paths)
+        self.account_entitlement = AccountEntitlementManager(
+            paths,
+            legacy_license_manager=self.license_mgr,
+        )
         self.append_log = append_log or (lambda _text: None)
         self._auth_capabilities_cache: tuple[float, str, dict[str, Any]] | None = None
 
@@ -969,6 +974,25 @@ class NewApiAccountManager:
             headers["New-Api-User"] = user_id
         return headers
 
+    def _lease_identity_payload(self) -> dict[str, str]:
+        host_device_id = self.license_mgr.device_id()
+        return {
+            "installId": self.license_mgr.get_install_id(),
+            "deviceId": host_device_id,
+            "hostDeviceId": host_device_id,
+        }
+
+    @staticmethod
+    def _entitlement_meta(data: Any) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+        lease = data.get("entitlementLease")
+        entitlement = data.get("entitlement")
+        return {
+            "entitlementLease": dict(lease) if isinstance(lease, dict) else None,
+            "entitlement": dict(entitlement) if isinstance(entitlement, dict) else None,
+        }
+
     def _request_launcher_token_bridge(
         self,
         opener: urllib.request.OpenerDirector,
@@ -982,6 +1006,7 @@ class NewApiAccountManager:
             username,
             password,
             timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+            extra_body=self._lease_identity_payload(),
         )
         data = _unwrap(payload)
         token = _extract_best_api_key(payload)
@@ -1007,6 +1032,7 @@ class NewApiAccountManager:
             "remainQuota": data.get("remainQuota") if isinstance(data, dict) else None,
             "sessionCookie": _pick_text(data.get("sessionCookie") if isinstance(data, dict) else ""),
             "apiBaseUrl": _pick_text(api.get("baseUrl")),
+            **self._entitlement_meta(data),
         }
         legacy_contract_missing = bool(
             token_meta.get("tokenKind") == "launcher"
@@ -1038,7 +1064,7 @@ class NewApiAccountManager:
             opener,
             f"{base_url}/api/openclaw/launcher-token/ensure",
             method="POST",
-            body={},
+            body=self._lease_identity_payload(),
             headers={"Authorization": f"Bearer {api_token}"},
             timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
         )
@@ -1066,6 +1092,7 @@ class NewApiAccountManager:
             "account": _pick_text(data.get("account") if isinstance(data, dict) else ""),
             "group": _pick_text(data.get("group") if isinstance(data, dict) else "", "default"),
             "apiBaseUrl": _pick_text(api.get("baseUrl")),
+            **self._entitlement_meta(data),
         }
         if not _launcher_permission_contract_satisfied(token_meta):
             raise NewApiAccountError("launcher_token_permission_contract_invalid")
@@ -1079,13 +1106,15 @@ class NewApiAccountManager:
         password: str,
         *,
         timeout: int = 20,
+        extra_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        extra = dict(extra_body or {})
         try:
             return self._request_json(
                 opener,
                 url,
                 method="POST",
-                body={"username": username, "password": password},
+                body={"username": username, "password": password, **extra},
                 timeout=timeout,
             )
         except NewApiAccountError as error:
@@ -1096,7 +1125,7 @@ class NewApiAccountManager:
                 opener,
                 url,
                 method="POST",
-                body={"email": username, "password": password},
+                body={"email": username, "password": password, **extra},
                 timeout=timeout,
             )
 
@@ -1110,7 +1139,7 @@ class NewApiAccountManager:
             opener,
             f"{base_url}/api/openclaw/bind/claim",
             method="POST",
-            body={"ticket": ticket},
+            body={"ticket": ticket, **self._lease_identity_payload()},
             timeout=35,
         )
         data = _unwrap(payload)
@@ -1125,6 +1154,7 @@ class NewApiAccountManager:
             "data": data if isinstance(data, dict) else {},
             "token": token,
             "models": models,
+            **self._entitlement_meta(data),
         }
 
     def _request_openclaw_auth_endpoint(
@@ -1393,6 +1423,7 @@ class NewApiAccountManager:
             "tokenName": data.get("tokenName") or "",
             "tokenKind": data.get("tokenKind") or "",
             "models": flat_models,
+            **self._entitlement_meta(data),
         }
         session = self._build_session(
             session_base_url,
@@ -1488,6 +1519,7 @@ class NewApiAccountManager:
                     "authType": "email_code_login",
                     "product": "LOOM",
                     "app": "LOOM",
+                    **self._lease_identity_payload(),
                 },
             )
         except NewApiAccountError as error:
@@ -1534,6 +1566,7 @@ class NewApiAccountManager:
                 "verification_code": code,
                 "product": "LOOM",
                 "app": "LOOM",
+                **self._lease_identity_payload(),
             },
         )
         try:
@@ -1842,6 +1875,16 @@ class NewApiAccountManager:
             },
             "updatedAt": _iso(now),
             "managedBy": ACCOUNT_SOURCE,
+            "_entitlementLease": (
+                dict(token_meta["entitlementLease"])
+                if isinstance(token_meta.get("entitlementLease"), dict)
+                else None
+            ),
+            "_accountEntitlement": (
+                dict(token_meta["entitlement"])
+                if isinstance(token_meta.get("entitlement"), dict)
+                else None
+            ),
         }
 
     @staticmethod
@@ -2014,8 +2057,103 @@ class NewApiAccountManager:
         session = self._build_session(base_url, username, api_token_value, login_payload, self_payload, token_meta, models, cookie_jar)
         return self._persist_authenticated_session(session, sync_runtime=sync_runtime)
 
+    def _apply_entitlement_lease(
+        self,
+        session: dict[str, Any],
+        entitlement_lease: dict[str, Any],
+    ) -> None:
+        try:
+            verified = self.account_entitlement.accept_lease(
+                entitlement_lease,
+                session=session,
+            )
+        except AccountEntitlementError as error:
+            raise NewApiAccountError(
+                f"账号登录成功，但矩阵权益校验失败：{error}",
+                status_code=error.status_code,
+            ) from error
+        session["accountEntitlement"] = {
+            "source": "signed_lease",
+            "accountId": entitlement_lease.get("accountId"),
+            "features": verified["features"],
+            "limits": verified["limits"],
+            "plan": verified["plan"],
+            "expiresAt": verified["expiresAt"],
+            "offlineGraceUntil": verified["offlineGraceUntil"],
+            "entitlementVersion": verified["entitlementVersion"],
+        }
+
+    def _migrate_legacy_entitlement_for_session(
+        self,
+        session: dict[str, Any],
+    ) -> bool:
+        account_entitlement = (
+            session.get("accountEntitlement")
+            if isinstance(session.get("accountEntitlement"), dict)
+            else {}
+        )
+        if account_entitlement.get("source") == "signed_lease":
+            return False
+        proof = self.license_mgr.legacy_migration_proof()
+        if not isinstance(proof, dict):
+            return False
+        newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
+        base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
+        api_token = _pick_text(session.get("memberToken"))
+        if not api_token:
+            return False
+        payload = self._request_json(
+            urllib.request.build_opener(),
+            f"{base_url}/api/openclaw/entitlements/migrate-legacy",
+            method="POST",
+            body={
+                "legacyLicense": proof,
+                **self._lease_identity_payload(),
+            },
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+        )
+        data = _unwrap(payload)
+        lease = data.get("entitlementLease") if isinstance(data, dict) else None
+        if not isinstance(lease, dict):
+            raise NewApiAccountError(
+                "旧版授权迁移成功，但服务未返回可验证的账号权益",
+                status_code=502,
+            )
+        self._apply_entitlement_lease(session, dict(lease))
+        session["legacyEntitlementMigratedAt"] = _iso(_utc_now())
+        return True
+
     def _persist_authenticated_session(self, session: dict[str, Any], *, sync_runtime: bool) -> dict[str, Any]:
         session["managedGatewayMigrationVersion"] = MANAGED_GATEWAY_MIGRATION_VERSION
+        entitlement_lease = session.pop("_entitlementLease", None)
+        entitlement_snapshot = session.pop("_accountEntitlement", None)
+        if isinstance(entitlement_lease, dict):
+            self._apply_entitlement_lease(session, entitlement_lease)
+        elif isinstance(entitlement_snapshot, dict):
+            session["accountEntitlement"] = {
+                "source": str(
+                    entitlement_snapshot.get("source")
+                    or "authorization_required"
+                ),
+                "plan": str(entitlement_snapshot.get("plan") or "inactive"),
+                "features": [],
+                "limits": {
+                    "devices": 0,
+                    "concurrentTasks": 0,
+                    "unlimitedDevices": False,
+                },
+            }
+        try:
+            if self._migrate_legacy_entitlement_for_session(session):
+                self.append_log(
+                    "[Account] legacy commercial authorization migrated to the current account.\n"
+                )
+        except Exception as error:
+            self.append_log(
+                "[Account] legacy authorization migration deferred; "
+                f"account login remains available: {_redact_secret_text(error)}\n"
+            )
         self._write_session(session)
         if sync_runtime:
             self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
@@ -2054,11 +2192,10 @@ class NewApiAccountManager:
             "tokenName": data.get("tokenName") or "",
             "tokenKind": data.get("tokenKind") or "",
             "models": models,
+            **self._entitlement_meta(data),
         }
         session = self._build_session(base_url, username, api_token_value, login_payload, self_payload, token_meta, models, cookie_jar)
-        self._write_session(session)
-        self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
-        return session
+        return self._persist_authenticated_session(session, sync_runtime=True)
 
     def ensure_launcher_token(
         self,
@@ -2086,6 +2223,9 @@ class NewApiAccountManager:
             current_token,
         )
         models = token_meta["models"]
+        entitlement_lease = token_meta.get("entitlementLease")
+        if isinstance(entitlement_lease, dict):
+            session["_entitlementLease"] = entitlement_lease
         classified = _classify_models(models)
         now = _utc_now()
         api_base_url = _trusted_managed_api_base(token_meta.get("apiBaseUrl"), base_url)
@@ -2164,9 +2304,59 @@ class NewApiAccountManager:
         })
         session["newApi"] = newapi
         session["updatedAt"] = _iso(now)
+        return self._persist_authenticated_session(session, sync_runtime=sync_runtime)
+
+    def redeem_entitlement_code(self, code: str) -> dict[str, Any]:
+        normalized_code = str(code or "").strip()
+        if not normalized_code:
+            raise NewApiAccountError("请输入商业授权码", status_code=400)
+        if len(normalized_code) > 256:
+            raise NewApiAccountError("授权码格式无效", status_code=400)
+
+        session = self.current()
+        if not session:
+            raise NewApiAccountError("尚未登录模型账号", status_code=401)
+        newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
+        base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
+        api_token = _pick_text(session.get("memberToken"))
+        if not api_token:
+            raise NewApiAccountError("本机会话缺少 API Token，请重新登录", status_code=401)
+
+        payload = self._request_json(
+            urllib.request.build_opener(),
+            f"{base_url}/api/openclaw/entitlements/redeem",
+            method="POST",
+            body={
+                "code": normalized_code,
+                **self._lease_identity_payload(),
+            },
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+        )
+        data = _unwrap(payload)
+        lease = data.get("entitlementLease") if isinstance(data, dict) else None
+        if not isinstance(lease, dict):
+            raise NewApiAccountError(
+                "授权服务未返回可验证的账号权益，请稍后重试",
+                status_code=502,
+            )
+        session["_entitlementLease"] = dict(lease)
+        session["updatedAt"] = _iso(_utc_now())
+        return self._persist_authenticated_session(session, sync_runtime=False)
+
+    def migrate_legacy_entitlement(self) -> dict[str, Any]:
+        session = self.current()
+        if not session:
+            raise NewApiAccountError("尚未登录模型账号", status_code=401)
+        if not self.license_mgr.legacy_migration_proof():
+            raise NewApiAccountError(
+                "本机没有可迁移的有效旧版商业授权",
+                status_code=404,
+            )
+        if not self._migrate_legacy_entitlement_for_session(session):
+            return session
+        session["updatedAt"] = _iso(_utc_now())
         self._write_session(session)
-        if sync_runtime:
-            self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
         return session
 
     def refresh_current(self) -> dict[str, Any]:
@@ -2181,6 +2371,27 @@ class NewApiAccountManager:
 
         opener = urllib.request.build_opener()
         headers = self._session_headers(session)
+        try:
+            entitlement_payload = self._request_json(
+                opener,
+                f"{base_url}/api/openclaw/entitlements/refresh",
+                method="POST",
+                body=self._lease_identity_payload(),
+                headers={"Authorization": f"Bearer {api_token}"},
+                timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+            )
+            entitlement_data = _unwrap(entitlement_payload)
+            refreshed_lease = (
+                entitlement_data.get("entitlementLease")
+                if isinstance(entitlement_data, dict)
+                else None
+            )
+            if isinstance(refreshed_lease, dict):
+                session["_entitlementLease"] = refreshed_lease
+        except NewApiAccountError as error:
+            self.append_log(
+                f"[Account] entitlement refresh unavailable; keeping verified offline lease: {_redact_secret_text(error)}\n"
+            )
         try:
             self_payload = self._request_json(opener, f"{base_url}/api/user/self", headers=headers)
         except NewApiAccountError:
@@ -2277,9 +2488,7 @@ class NewApiAccountManager:
         })
         session["newApi"] = newapi
         session["updatedAt"] = _iso(now)
-        self._write_session(session)
-        self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
-        return session
+        return self._persist_authenticated_session(session, sync_runtime=True)
 
     def _write_session(self, session: dict[str, Any]) -> None:
         os.makedirs(os.path.dirname(self.session_path), exist_ok=True)
@@ -2338,6 +2547,16 @@ class NewApiAccountManager:
                 "models": {"text": [], "image": [], "video": []},
                 "selectedModels": {"text": "", "image": "", "videoDraft": ""},
                 "usage": {},
+                "accountEntitlement": {
+                    "source": "authorization_required",
+                    "plan": "inactive",
+                    "features": [],
+                    "limits": {
+                        "devices": 0,
+                        "concurrentTasks": 0,
+                        "unlimitedDevices": False,
+                    },
+                },
                 "lastSyncResults": [],
             }
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
@@ -2393,6 +2612,20 @@ class NewApiAccountManager:
                 ),
             },
             "usage": session.get("usage") if isinstance(session.get("usage"), dict) else {},
+            "accountEntitlement": (
+                dict(session.get("accountEntitlement"))
+                if isinstance(session.get("accountEntitlement"), dict)
+                else {
+                    "source": "authorization_required",
+                    "plan": "inactive",
+                    "features": [],
+                    "limits": {
+                        "devices": 0,
+                        "concurrentTasks": 0,
+                        "unlimitedDevices": False,
+                    },
+                }
+            ),
             "subscription": subscription,
             "purchaseUrl": subscription.get("purchaseUrl"),
             "lastOnlineAt": _pick_text(newapi.get("lastOnlineAt")),
@@ -2562,6 +2795,7 @@ class NewApiAccountManager:
             os.remove(self.session_path)
         except FileNotFoundError:
             pass
+        self.account_entitlement.clear_active()
         self._clear_synced_configs()
         return True
 

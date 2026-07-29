@@ -14,12 +14,14 @@ PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PYTHON_DIR not in sys.path:
     sys.path.insert(0, PYTHON_DIR)
 
+from tests.matrix_test_support import matrix_for_test
+
 
 def _register_matrix_devices_from_process(base_path: str, prefix: str, count: int) -> list[str]:
     from core.paths import AppPaths
     from core.phone_matrix import MatrixControlPlane
 
-    matrix = MatrixControlPlane(AppPaths(base_path=base_path))
+    matrix = matrix_for_test(AppPaths(base_path=base_path))
     device_ids = []
     for index in range(count):
         device_id = f"{prefix}-{index}"
@@ -29,6 +31,19 @@ def _register_matrix_devices_from_process(base_path: str, prefix: str, count: in
 
 
 class MatrixControlPlaneTests(unittest.TestCase):
+    def test_phone_mutation_fails_closed_without_an_authorizer(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane as StrictMatrixControlPlane
+        from core.phone_matrix import MatrixSafetyError
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = StrictMatrixControlPlane(AppPaths(base_path=temp_dir))
+
+            with self.assertRaises(MatrixSafetyError) as raised:
+                matrix.register_device({"deviceId": "phone-a", "online": True})
+
+        self.assertEqual(raised.exception.code, "matrix_authorizer_required")
+
     def test_matrix_workbench_contains_phone_app_download_entry(self) -> None:
         repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         page_path = os.path.join(repo_root, "src", "components", "matrix", "MatrixTaskDrawer.tsx")
@@ -144,7 +159,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             event = matrix.append_runtime_event(
                 "phone.snapshot",
                 "phone-a",
@@ -166,7 +181,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             first = matrix.append_runtime_event(
                 "phone.events.snapshot",
                 "phone-a",
@@ -192,7 +207,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             first = matrix.append_runtime_event(
                 "phone.events.snapshot",
                 "phone-a",
@@ -222,7 +237,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             with patch("core.phone_matrix.MATRIX_EVENT_FILE_MAX_BYTES", 700):
                 for index in range(80):
                     matrix.append_runtime_event(
@@ -248,7 +263,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             os.makedirs(os.path.dirname(matrix.events_path), exist_ok=True)
             with open(matrix.events_path, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps({"type": "large", "message": "x" * 1000}) + "\n")
@@ -267,7 +282,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             os.makedirs(os.path.dirname(matrix.events_path), exist_ok=True)
             first = json.dumps({"type": "first", "message": "x" * 240}) + "\n"
             second = json.dumps({"type": "latest", "message": "kept"}) + "\n"
@@ -288,7 +303,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             for index in range(3):
                 matrix.append_runtime_event("task.step", "phone-a", f"step-{index}")
 
@@ -304,7 +319,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             os.makedirs(os.path.dirname(matrix.devices_path), exist_ok=True)
             with open(matrix.devices_path, "wb") as handle:
                 handle.write(b'{"schema":"loom.matrix.devices.v1","devices":[' + bytes([0x80]))
@@ -324,7 +339,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             os.makedirs(os.path.dirname(matrix.phone_devices_path), exist_ok=True)
             with open(matrix.phone_devices_path, "wb") as handle:
                 handle.write(b'{"devices":' + bytes([0x80]))
@@ -354,7 +369,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
                     for future in futures
                     for device_id in future.result(timeout=30)
                 }
-            status = MatrixControlPlane(AppPaths(base_path=temp_dir)).status()
+            status = matrix_for_test(AppPaths(base_path=temp_dir)).status()
             actual = {item["deviceId"] for item in status["devices"]}
 
         self.assertEqual(actual, expected)
@@ -364,7 +379,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "name": "Phone A", "online": True})
             matrix.append_runtime_event("phone.task.complete", "phone-a", "done")
 
@@ -379,7 +394,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             device = matrix.register_device(
                 {
                     "deviceId": "phone-a",
@@ -411,7 +426,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device(
                 {
                     "deviceId": "phone-progress",
@@ -447,7 +462,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
 
         stale = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device(
                 {
                     "deviceId": "phone-stale",
@@ -481,7 +496,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
 
         stale = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device(
                 {
                     "deviceId": "phone-heartbeat-only",
@@ -500,7 +515,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device(
                 {
                     "deviceId": "phone-a",
@@ -533,7 +548,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device(
                 {
                     "deviceId": "phone-a",
@@ -564,7 +579,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device(
                 {
                     "deviceId": "phone-a",
@@ -606,7 +621,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
                     ensure_ascii=False,
                 )
 
-            status = MatrixControlPlane(paths).status()
+            status = matrix_for_test(paths).status()
 
         self.assertEqual(status["summary"]["total"], 1)
         device = status["devices"][0]
@@ -641,7 +656,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
                     ensure_ascii=False,
                 )
 
-            matrix = MatrixControlPlane(paths)
+            matrix = matrix_for_test(paths)
             matrix.register_device({"deviceId": "phone-a", "name": "共享旧名称", "online": True})
             matrix.register_device({"deviceId": "phone-b", "name": "共享旧名称", "online": True})
             devices = matrix.status()["devices"]
@@ -672,7 +687,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
                     handle,
                 )
 
-            matrix = MatrixControlPlane(paths)
+            matrix = matrix_for_test(paths)
             matrix.register_device(
                 {
                     "deviceId": "phone-active",
@@ -715,7 +730,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "group": "demo", "online": True})
             task = matrix.dispatch(
                 {
@@ -738,12 +753,76 @@ class MatrixControlPlaneTests(unittest.TestCase):
         self.assertEqual(status["devices"][0]["currentTaskId"], "")
         self.assertEqual([event["type"] for event in events["events"][:2]], ["queued", "assigned"])
 
+    def test_first_device_registration_claims_entitlement_seat_once(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane
+
+        authorizations: list[tuple[list[str], str]] = []
+
+        def authorize(device_ids: list[str], operation: str) -> None:
+            authorizations.append((list(device_ids), operation))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = matrix_for_test(
+                AppPaths(base_path=temp_dir),
+                phone_authorizer=authorize,
+            )
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            matrix.register_device({"deviceId": "phone-a", "online": True, "heartbeatAt": "2026-07-29T12:00:00Z"})
+
+        self.assertEqual(authorizations, [(["phone-a"], "matrix.device.claim")])
+
+    def test_dispatch_authorizes_exact_phone_targets_before_state_mutation(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane
+
+        authorizations: list[tuple[list[str], str]] = []
+
+        def authorize(device_ids: list[str], operation: str) -> None:
+            authorizations.append((list(device_ids), operation))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = matrix_for_test(
+                AppPaths(base_path=temp_dir),
+                phone_authorizer=authorize,
+            )
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            authorizations.clear()
+
+            task = matrix.dispatch(
+                {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
+            )
+
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(authorizations, [(["phone-a"], "matrix.task.start")])
+
+    def test_entitlement_denial_creates_no_campaign_or_event(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane
+
+        def deny_dispatch(_device_ids: list[str], operation: str) -> None:
+            if operation == "matrix.task.start":
+                raise RuntimeError("device_limit_exceeded")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(base_path=temp_dir)
+            matrix = matrix_for_test(paths, phone_authorizer=deny_dispatch)
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+
+            with self.assertRaisesRegex(RuntimeError, "device_limit_exceeded"):
+                matrix.dispatch(
+                    {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
+                )
+
+            self.assertFalse(os.path.exists(matrix.tasks_path))
+            self.assertFalse(os.path.exists(matrix.events_path))
+
     def test_dispatch_stays_queued_until_a_worker_actually_starts(self) -> None:
         from core.paths import AppPaths
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch(
                 {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
@@ -763,7 +842,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
 
@@ -826,7 +905,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
 
             with self.assertRaises(MatrixTargetError) as raised:
@@ -860,7 +939,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
 
             with self.assertRaises(MatrixTargetError) as raised:
@@ -893,7 +972,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-offline", "online": False})
 
             with self.assertRaises(MatrixTargetError) as raised:
@@ -911,7 +990,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
 
             with self.assertRaises(MatrixTargetError) as raised:
@@ -924,7 +1003,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "group": "lab", "online": True})
 
             with self.assertRaises(MatrixTargetError) as raised:
@@ -940,7 +1019,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "group": "lab", "online": True})
             matrix.register_device({"deviceId": "phone-b", "group": "sales", "online": True})
 
@@ -963,7 +1042,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
 
             with self.assertRaises(MatrixTargetError) as raised:
@@ -984,7 +1063,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             for index in range(6):
                 matrix.register_device({"deviceId": f"phone-{index + 1}", "online": True})
 
@@ -1001,7 +1080,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             first = matrix.dispatch(
                 {"prompt": "读取当前屏幕", "target": {"deviceIds": ["phone-a"]}}
@@ -1028,7 +1107,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch(
                 {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
@@ -1052,7 +1131,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
 
             with self.assertRaises(MatrixTargetError) as raised:
                 matrix.cancel("campaign-missing")
@@ -1064,7 +1143,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(
@@ -1100,7 +1179,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(
@@ -1129,7 +1208,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(
@@ -1153,7 +1232,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(
@@ -1182,7 +1261,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(
@@ -1212,7 +1291,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(
@@ -1240,7 +1319,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
 
         for scope in ("device", "deviceTask"):
             with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
-                matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+                matrix = matrix_for_test(AppPaths(base_path=temp_dir))
                 matrix.register_device({"deviceId": "phone-a", "online": True})
                 matrix.register_device({"deviceId": "phone-b", "online": True})
                 task = matrix.dispatch(
@@ -1273,7 +1352,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch(
                 {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
@@ -1313,7 +1392,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch(
                 {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
@@ -1332,7 +1411,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch(
                 {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
@@ -1352,7 +1431,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "group": "demo", "online": True})
             template_task = matrix.dispatch({"prompt": "打开系统设置", "target": {"deviceIds": ["phone-a"]}})
             agent_task = matrix.dispatch({"prompt": "完成一个复杂多步骤任务", "target": {"deviceIds": ["phone-a"]}, "mode": "full"})
@@ -1365,7 +1444,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixSafetyError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "group": "demo", "online": True})
             with self.assertRaises(MatrixSafetyError) as raised:
                 matrix.dispatch({"prompt": "批量私信所有客户并自动回复", "target": {"groups": ["demo"]}})
@@ -1378,7 +1457,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "group": "demo", "online": True})
             task = matrix.dispatch(
                 {
@@ -1402,7 +1481,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             lead = matrix.record_lead(
                 {
                     "source": "task",
@@ -1432,7 +1511,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "group": "demo", "online": True})
             task = matrix.dispatch(
                 {
@@ -1469,7 +1548,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
 
             with self.assertRaises(MatrixTargetError) as raised:
                 matrix.retry_failed("campaign-missing", {})
@@ -1481,7 +1560,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch(
                 {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
@@ -1516,7 +1595,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(

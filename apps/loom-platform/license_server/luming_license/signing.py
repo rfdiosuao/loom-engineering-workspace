@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import os
 from typing import Any
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -35,3 +37,30 @@ def sign_license(payload: dict[str, Any], *, private_key_file: str | None = None
     license_data = dict(payload)
     license_data["signature"] = base64.b64encode(signature).decode("ascii")
     return license_data
+
+
+def verify_license(
+    license_data: dict[str, Any],
+    *,
+    private_key_file: str | None = None,
+) -> bool:
+    try:
+        signature = base64.b64decode(
+            str(license_data["signature"]).encode("ascii"),
+            validate=True,
+        )
+        payload = dict(license_data)
+        payload.pop("signature", None)
+        load_private_key(
+            private_key_file=private_key_file
+        ).public_key().verify(signature, canonical(payload))
+        return True
+    except (
+        KeyError,
+        UnicodeEncodeError,
+        binascii.Error,
+        InvalidSignature,
+        TypeError,
+        ValueError,
+    ):
+        return False

@@ -22,11 +22,96 @@ from fastapi.testclient import TestClient
 
 from api.routes_jobs import register_job_routes
 from api.routes_matrix import _last_json_object, _matrix_stream_fingerprint, register_matrix_routes
+from core.account_entitlement import AccountEntitlementError
 from core.stream_tickets import StreamTicketIssuer
 from services.jobs import JobManager
+from tests.matrix_test_support import matrix_for_test
 
 
 class MatrixRouteContractTests(unittest.TestCase):
+    def test_unactivated_account_cannot_read_matrix_state_but_can_emergency_stop(self) -> None:
+        class UnactivatedEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "code": "authorization_required",
+                    "message": "当前账号尚未激活手机矩阵。",
+                    "action": "bind_authorization_code",
+                    "details": {},
+                }
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                raise AccountEntitlementError(
+                    "当前账号尚未激活手机矩阵。",
+                    code="authorization_required",
+                    action="bind_authorization_code",
+                    details={"phoneDeviceIds": list(device_ids), "operation": operation},
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app, client = _client(
+                temp_dir,
+                entitlement_mgr=UnactivatedEntitlement(),
+            )
+            status = client.get("/api/matrix/status")
+            watch = client.get("/api/matrix/watch")
+            ticket = app.state.stream_ticket_issuer.issue(
+                topic="matrix",
+                resource="all",
+                subject="local-ui:testclient",
+            )
+            stream = client.get(
+                "/api/matrix/events/stream?once=1",
+                headers={"Authorization": f"Bearer {ticket}"},
+            )
+            emergency = client.post("/api/matrix/emergency-stop", json={"all": True})
+
+        self.assertEqual(status.status_code, 403)
+        self.assertEqual(watch.status_code, 403)
+        self.assertEqual(stream.status_code, 403)
+        self.assertEqual(status.json()["code"], "authorization_required")
+        self.assertEqual(watch.json()["code"], "authorization_required")
+        self.assertEqual(stream.json()["code"], "authorization_required")
+        self.assertEqual(emergency.status_code, 200)
+
+    def test_inactive_account_can_release_device_lease_without_starting_new_work(self) -> None:
+        class ToggleEntitlement:
+            active = True
+
+            def current_state(self, _feature=None):
+                return {"authorized": self.active}
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                if not self.active:
+                    raise AccountEntitlementError(
+                        "当前账号尚未激活手机矩阵。",
+                        code="authorization_required",
+                        action="bind_authorization_code",
+                        details={"phoneDeviceIds": list(device_ids), "operation": operation},
+                    )
+                return {"authorized": True}
+
+        entitlement = ToggleEntitlement()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(temp_dir, entitlement_mgr=entitlement)
+            client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
+            acquired = client.post(
+                "/api/matrix/devices/phone-a/lease",
+                json={"holderType": "human", "holderId": "operator-a", "mode": "control"},
+            )
+            entitlement.active = False
+
+            released = client.request(
+                "DELETE",
+                "/api/matrix/devices/phone-a/lease",
+                json={"leaseId": acquired.json()["lease"]["leaseId"]},
+            )
+
+            self.assertEqual(released.status_code, 200)
+            self.assertTrue(released.json()["released"])
+            self.assertTrue(released.json()["resumeBlockedByEntitlement"])
+
     def test_matrix_manual_back_and_home_use_supported_direct_phone_actions(self) -> None:
         from api.routes_matrix import _execute_matrix_manual_action
 
@@ -112,7 +197,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "group": "demo", "online": True})
             from core.phone_matrix import MatrixControlPlane
 
-            MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path="")).append_runtime_event(
+            matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path="")).append_runtime_event(
                 "phone.online",
                 "phone-a",
                 "Phone registered",
@@ -183,6 +268,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(result["results"][0]["executionLayer"], "direct")
             self.assertIn("--device-id", result["results"][0]["stdoutPreview"])
+
             self.assertIn("phone-a", result["results"][0]["stdoutPreview"])
 
             watched = client.get(f"/api/matrix/watch?campaignId={campaign_id}")
@@ -195,6 +281,103 @@ class MatrixRouteContractTests(unittest.TestCase):
             self.assertEqual(ledger["source"], "bridge")
             self.assertEqual(ledger["tool"], "bridge:matrix.dispatch")
             self.assertEqual(ledger["actionTraceId"], trace["traceId"])
+
+    def test_matrix_dispatch_returns_entitlement_denial_before_queueing_job(self) -> None:
+        class DeniedEntitlement:
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                if operation == "matrix.task.start":
+                    raise AccountEntitlementError(
+                        "当前账号绑定的手机数量超过系统安全上限。",
+                        code="device_limit_exceeded",
+                        action="contact_support",
+                        details={"limit": 1000, "phoneDeviceIds": list(device_ids)},
+                    )
+                return {"authorized": True}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app, client = _client(
+                temp_dir,
+                entitlement_mgr=DeniedEntitlement(),
+            )
+            registered = client.post(
+                "/api/matrix/device/register",
+                json={"deviceId": "phone-a", "online": True},
+            )
+            response = client.post(
+                "/api/matrix/dispatch",
+                json={"prompt": "read", "target": {"deviceIds": ["phone-a"]}},
+            )
+            if response.status_code == 202:
+                _wait_for_job(client, response.json()["jobId"])
+            client.close()
+
+        self.assertEqual(registered.status_code, 200)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "device_limit_exceeded")
+        self.assertEqual(app.state.job_mgr.list(), [])
+
+    def test_matrix_screen_rejects_unclaimed_device_before_starting_phone_process(self) -> None:
+        class DeniedEntitlement:
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                raise AccountEntitlementError(
+                    "该手机未绑定到当前账号。",
+                    code="phone_device_not_claimed",
+                    action="select_claimed_phone",
+                    details={"phoneDeviceIds": list(device_ids), "operation": operation},
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(
+                temp_dir,
+                entitlement_mgr=DeniedEntitlement(),
+            )
+            with patch(
+                "api.routes_matrix._run_phone_process_with_matrix_stream"
+            ) as phone_process:
+                response = client.get("/api/matrix/devices/phone-b/screen")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "phone_device_not_claimed")
+        phone_process.assert_not_called()
+
+    def test_matrix_dispatch_clamps_worker_concurrency_to_entitlement_limit(self) -> None:
+        class LimitedEntitlement:
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                return {
+                    "authorized": True,
+                    "limits": {"devices": 4, "concurrentTasks": 2},
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _app, client = _client(
+                temp_dir,
+                entitlement_mgr=LimitedEntitlement(),
+            )
+            for index in range(4):
+                registered = client.post(
+                    "/api/matrix/device/register",
+                    json={"deviceId": f"phone-{index}", "online": True},
+                )
+                self.assertEqual(registered.status_code, 200)
+            with patch(
+                "api.routes_matrix._submit_phone_job",
+                return_value={"success": True, "stdout": "ok", "stderr": ""},
+            ):
+                submitted = client.post(
+                    "/api/matrix/dispatch",
+                    json={
+                        "prompt": "read screen",
+                        "concurrency": 8,
+                        "target": {
+                            "deviceIds": [f"phone-{index}" for index in range(4)]
+                        },
+                    },
+                )
+                job = _wait_for_job(client, submitted.json()["jobId"])
+
+        self.assertEqual(submitted.status_code, 202)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["result"]["concurrency"], 2)
 
     def test_canonical_dispatch_executes_only_assigned_device_with_assignment_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -353,7 +536,7 @@ class MatrixRouteContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
             client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             campaign_ids = [
                 matrix.dispatch(
                     {
@@ -797,7 +980,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             first = matrix.dispatch(
                 {"prompt": "读取当前屏幕", "target": {"deviceIds": ["phone-a"]}}
             )
@@ -834,7 +1017,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             task = matrix.dispatch(
                 {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
             )
@@ -924,7 +1107,7 @@ class MatrixRouteContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             task = matrix.dispatch(
                 {"prompt": "read selected", "target": {"deviceIds": ["phone-a"]}}
@@ -949,7 +1132,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             _app, client = _client(temp_dir)
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             selected = matrix.dispatch(
@@ -1072,7 +1255,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             app, client = _client(temp_dir)
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(
@@ -1172,7 +1355,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             _app, client = _client(temp_dir)
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-b", "online": True})
             task = matrix.dispatch(
@@ -1308,7 +1491,7 @@ class MatrixRouteContractTests(unittest.TestCase):
             client.post("/api/matrix/device/register", json={"deviceId": "phone-a", "online": True})
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             task = matrix.dispatch(
                 {"prompt": "read screen", "target": {"deviceIds": ["phone-a"]}}
             )
@@ -1346,11 +1529,12 @@ def _client(
     state_path: str | None = None,
     *,
     auth_error=None,
+    entitlement_mgr=None,
 ) -> tuple[FastAPI, TestClient]:
     logs: list[str] = []
     job_mgr = JobManager(logs.append, state_path=state_path)
     app = FastAPI()
-    ctx = _context(base_path, job_mgr, logs)
+    ctx = _context(base_path, job_mgr, logs, entitlement_mgr=entitlement_mgr)
     issuer = StreamTicketIssuer()
     ctx.stream_ticket_issuer = issuer
     app.state.job_mgr = job_mgr
@@ -1362,7 +1546,31 @@ def _client(
     return app, TestClient(app)
 
 
-def _context(base_path: str, job_mgr: JobManager, logs: list[str]) -> SimpleNamespace:
+def _context(
+    base_path: str,
+    job_mgr: JobManager,
+    logs: list[str],
+    *,
+    entitlement_mgr=None,
+) -> SimpleNamespace:
+    if entitlement_mgr is None:
+        class AllowEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 8},
+                }
+
+            def authorize_phone_devices(self, _device_ids, _operation, *, session=None):
+                return {
+                    "authorized": True,
+                    "limits": {"devices": 1000, "concurrentTasks": 8},
+                }
+
+        entitlement_mgr = AllowEntitlement()
+
     async def body(request):
         try:
             payload = await request.json()
@@ -1375,7 +1583,7 @@ def _context(base_path: str, job_mgr: JobManager, logs: list[str]) -> SimpleName
         payload["_meta"] = {"ok": 200 <= status_code < 400 and "error" not in payload, "status": status_code}
         return JSONResponse(status_code=status_code, content=payload)
 
-    return SimpleNamespace(
+    context = SimpleNamespace(
         append_log=logs.append,
         auth_error=lambda _request: None,
         body=body,
@@ -1384,6 +1592,8 @@ def _context(base_path: str, job_mgr: JobManager, logs: list[str]) -> SimpleName
         paths=SimpleNamespace(base_path=base_path, launcher_dir=base_path, node_exe=sys.executable),
         sanitize_text=lambda text: text,
     )
+    context.get_entitlement_mgr = lambda: entitlement_mgr
+    return context
 
 
 def _wait_for_job(client: TestClient, job_id: str, timeout: float = 10.0) -> dict:

@@ -28,6 +28,34 @@ class DatabaseModuleTests(unittest.TestCase):
         with self.server.connect() as second:
             self.assertEqual(1, second.execute("select count(*) from settings where key='proof'").fetchone()[0])
 
+    def test_connect_migrates_existing_database_without_losing_authorization_rows(self) -> None:
+        code = self.server.create_code_records(
+            count=1,
+            licensee="Migration",
+            edition="pro",
+            features=["openclaw"],
+            expires="2099-01-01",
+            max_activations=1,
+        )[0]
+        with self.server.connect() as before:
+            before.execute("drop table account_entitlement_redemptions")
+            before.commit()
+
+        with self.server.connect() as migrated:
+            table = migrated.execute(
+                """
+                select name from sqlite_master
+                where type = 'table' and name = 'account_entitlement_redemptions'
+                """
+            ).fetchone()
+            preserved = migrated.execute(
+                "select full_code from codes where code_hash = ?",
+                (self.server.code_hash(code),),
+            ).fetchone()
+
+        self.assertIsNotNone(table)
+        self.assertEqual(code, preserved["full_code"])
+
     def test_online_backup_preserves_authorization_rows(self) -> None:
         code = self.server.create_code_records(
             count=1, licensee="Backup", edition="pro", features=["openclaw"],

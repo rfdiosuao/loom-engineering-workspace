@@ -55,10 +55,11 @@ function usageValue(account: AccountSnapshot | null, keys: string[], fallback = 
   return fallback;
 }
 
-function formatTime(value?: string): string {
-  if (!value) return '暂无';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+function formatTime(value?: string | number | null): string {
+  if (value === undefined || value === null || value === '') return '暂无';
+  const normalized = typeof value === 'number' && value < 10_000_000_000 ? value * 1000 : value;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleString();
 }
 
@@ -113,10 +114,11 @@ export const LicensePage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [emailCode, setEmailCode] = useState('');
   const [password, setPassword] = useState('');
+  const [entitlementCode, setEntitlementCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(() => !hasCachedAccount);
   const [statusText, setStatusText] = useState('');
-  const { setCurrentPage } = useAppStore();
+  const { checkLicense, setCurrentPage } = useAppStore();
 
   const loggedIn = Boolean(account?.loggedIn);
   const totalModels = modelTotal(account);
@@ -128,6 +130,12 @@ export const LicensePage: React.FC = () => {
   const purchaseUrl = subscription?.purchaseUrl || account?.purchaseUrl || DEFAULT_ACCOUNT_CENTER_URL;
   const subscriptionUrl = useMemo(() => safeSubscriptionUrl(purchaseUrl), [purchaseUrl]);
   const accountStateText = loading ? '读取中' : loggedIn ? '已登录' : '未登录';
+  const accountEntitlement = account?.accountEntitlement;
+  const entitlementActive = accountEntitlement?.source === 'signed_lease'
+    && accountEntitlement?.features?.includes('matrix.devices') === true;
+  const entitlementExpiresAt = entitlementActive
+    ? formatTime(accountEntitlement?.expiresAt)
+    : '未激活';
 
   const applyAccount = useCallback((next: AccountSnapshot | null) => {
     subscriptionRequestVersion.current += 1;
@@ -331,6 +339,31 @@ export const LicensePage: React.FC = () => {
     }
   };
 
+  const handleRedeemEntitlement = async () => {
+    const code = entitlementCode.trim();
+    if (!code) {
+      showToast('请输入商业矩阵授权码', 'error');
+      return;
+    }
+    setBusy(true);
+    setStatusText('正在绑定商业矩阵授权...');
+    try {
+      const resp = await accountApi.redeemEntitlement({ code });
+      applyAccount(resp.account || null);
+      await checkLicense();
+      setEntitlementCode('');
+      const message = '商业矩阵授权已绑定当前账号';
+      setStatusText(message);
+      showToast(message, 'success');
+    } catch (error) {
+      const message = errorMessage(error);
+      setStatusText(message);
+      showToast(message || '商业矩阵授权绑定失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const logout = async () => {
     subscriptionRequestVersion.current += 1;
     setBusy(true);
@@ -339,6 +372,7 @@ export const LicensePage: React.FC = () => {
       await accountApi.logout();
       applyAccount(null);
       setSubscription(null);
+      setEntitlementCode('');
       setStatusText('已退出账号');
       showToast('已退出模型账号', 'info');
     } catch (error) {
@@ -454,6 +488,59 @@ export const LicensePage: React.FC = () => {
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div data-account-entitlement className="border-y border-border/70 py-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-black text-text">商业矩阵授权</div>
+                    <div className="mt-1 text-xs leading-5 text-text-muted">授权绑定当前账号，可在已登录设备上使用。</div>
+                  </div>
+                  <span className={[
+                    'shrink-0 rounded-full px-3 py-1 text-xs font-black',
+                    entitlementActive ? 'bg-accent/12 text-accent' : 'bg-surface-alt text-text-muted',
+                  ].join(' ')}>
+                    {entitlementActive ? '已激活' : '未激活'}
+                  </span>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-border/70 py-4">
+                  <div>
+                    <div className="text-xs font-bold text-text-subtle">手机数上限</div>
+                    <div className="mt-1 text-sm font-black text-text">
+                      {entitlementActive ? '不限' : '0 台'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-text-subtle">到期时间</div>
+                    <div className="mt-1 break-words text-sm font-black text-text">{entitlementExpiresAt}</div>
+                  </div>
+                </div>
+
+                <label className="mt-4 block">
+                  <span className="mb-2 block text-xs font-bold text-text-subtle">授权码</span>
+                  <input
+                    aria-label="商业矩阵授权码"
+                    value={entitlementCode}
+                    onChange={(event) => setEntitlementCode(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void handleRedeemEntitlement();
+                    }}
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="h-11 w-full rounded-[8px] border border-border bg-surface-alt px-3 text-sm text-text outline-none transition placeholder:text-text-subtle focus:border-accent focus:ring-2 focus:ring-accent/20"
+                    placeholder="请输入商业矩阵授权码"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={handleRedeemEntitlement}
+                  disabled={busy || !entitlementCode.trim()}
+                  className="mt-3 h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
+                >
+                  {busy ? '正在绑定...' : '绑定当前账号'}
+                </button>
               </div>
 
               <div className="border-y border-border/70 py-5">

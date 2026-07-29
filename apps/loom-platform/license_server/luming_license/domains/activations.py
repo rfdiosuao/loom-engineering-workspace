@@ -235,6 +235,7 @@ def build_signed_license(
     code_label = str(code_row["code_label"] or "").strip()
     code_last8 = "".join(ch for ch in (full_code or code_label).upper() if ch.isalnum())[-8:]
     payload = {
+        "schema": "loom.license.v1",
         "licenseId": license_id or secrets.token_hex(12),
         "licensee": code_row["licensee"],
         "edition": code_row["edition"],

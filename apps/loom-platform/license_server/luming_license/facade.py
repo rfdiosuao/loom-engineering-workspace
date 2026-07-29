@@ -25,6 +25,9 @@ client_public_config = _BINDINGS.client_public_config
 update_public_settings = _BINDINGS.update_public_settings
 activate_code = _BINDINGS.activate_code
 find_member_license = _BINDINGS.find_member_license
+redeem_account_entitlement = _BINDINGS.redeem_account_entitlement
+current_account_entitlement = _BINDINGS.current_account_entitlement
+migrate_legacy_account_entitlement = _BINDINGS.migrate_legacy_account_entitlement
 publish_relay_enqueue = _BINDINGS.publish_relay_enqueue
 publish_relay_claim = _BINDINGS.publish_relay_claim
 publish_relay_complete = _BINDINGS.publish_relay_complete
@@ -47,6 +50,9 @@ __all__ = [
     "create_code_records",
     "create_codes",
     "find_member_license",
+    "redeem_account_entitlement",
+    "current_account_entitlement",
+    "migrate_legacy_account_entitlement",
     "get_activation_rows",
     "get_code_rows",
     "get_code_secret_rows",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import ctypes
 import hashlib
 import json
@@ -23,6 +24,7 @@ from core.secret_store import unprotect_secret
 from core.storage import read_json, write_json
 
 LICENSE_PUBLIC_KEY_B64 = "njEIf3io24DAXRYVp37p2gIT5u2KZaWoGvBPD0JlTZ4="
+LEGACY_LICENSE_SCHEMA = "loom.license.v1"
 
 
 class LicenseError(RuntimeError):
@@ -59,6 +61,26 @@ class LicenseManager:
                     merged[key] = meta[key]
             return merged
         return license_data
+
+    @staticmethod
+    def _legacy_payload_valid(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        schema = str(payload.get("schema") or "").strip()
+        if schema and schema != LEGACY_LICENSE_SCHEMA:
+            return False
+        if any(
+            not str(payload.get(field) or "").strip()
+            for field in ("licenseId", "licensee", "installId", "expires")
+        ):
+            return False
+        if not isinstance(payload.get("features"), list):
+            return False
+        try:
+            date.fromisoformat(str(payload["expires"]))
+        except (TypeError, ValueError):
+            return False
+        return True
 
     def get_install_id(self) -> str:
         os.makedirs(self.paths.data_dir, exist_ok=True)
@@ -131,6 +153,13 @@ class LicenseManager:
         if isinstance(license_data, dict) and self.verify(license_data):
             return self._with_license_meta(license_data)
         return None
+
+    def legacy_migration_proof(self) -> dict[str, Any] | None:
+        """Return an exact verified copy of the legacy signed license payload."""
+        license_data = read_json(self.paths.license_file, None)
+        if not isinstance(license_data, dict) or not self.verify(license_data):
+            return None
+        return copy.deepcopy(license_data)
 
     def current_gateway_profile(self) -> dict[str, Any] | None:
         def build_profile(source: dict[str, Any], *, fallback_name: str) -> dict[str, Any] | None:
@@ -453,6 +482,14 @@ class LicenseManager:
                 "detail": self.paths.license_file,
                 "license": None,
             }
+        if not self._legacy_payload_valid(license_data):
+            return {
+                "ok": False,
+                "code": "license_schema_invalid",
+                "message": "授权文件类型无效，不能作为本机商业许可证使用",
+                "detail": self.paths.license_file,
+                "license": license_data,
+            }
 
         try:
             signature = base64.b64decode(license_data["signature"], validate=True)
@@ -537,6 +574,8 @@ class LicenseManager:
 
     def verify(self, license_data: dict[str, Any]) -> bool:
         try:
+            if not self._legacy_payload_valid(license_data):
+                return False
             signature = base64.b64decode(license_data["signature"], validate=True)
             payload = dict(license_data)
             payload.pop("signature", None)

@@ -2434,6 +2434,65 @@ class AgentServiceTests(unittest.TestCase):
         self.assertFalse(second["stopped"])
         self.assertEqual(service.shutdown_calls, 1)
 
+    def test_bridge_account_logout_cleanup_stops_every_account_runtime(self) -> None:
+        import bridge
+
+        cancelled: list[str] = []
+
+        class FakeMatrix:
+            def __init__(self, _paths) -> None:
+                pass
+
+            def emergency_stop(self, *, all_tasks: bool = False):
+                self.assert_all = all_tasks
+                return {"cancelled": True, "affectedTaskCount": 2}
+
+        class FakeJobs:
+            def cancel_matching(self, predicate, *, wait_for_workers=True):
+                self.wait_for_workers = wait_for_workers
+                candidates = [
+                    {"id": "job-phone", "kind": "phone.task"},
+                    {"id": "job-image", "kind": "image"},
+                    {"id": "job-update", "kind": "component.update"},
+                ]
+                cancelled.extend(
+                    item["id"] for item in candidates if predicate(item)
+                )
+                return list(cancelled)
+
+        jobs = FakeJobs()
+        with (
+            patch.object(bridge, "_shutdown_agent_service", return_value={
+                "drained": True,
+                "executionMayContinue": False,
+            }),
+            patch.object(bridge, "_get_job_mgr", return_value=jobs),
+            patch("core.phone_matrix.MatrixControlPlane", FakeMatrix),
+            patch("api.routes_phone.stop_all_phone_event_syncs", return_value={
+                "ok": True,
+                "executionMayContinue": False,
+            }),
+            patch("api.routes_phone.stop_phone_daemon", return_value={
+                "ok": True,
+                "running": False,
+            }),
+        ):
+            result = bridge._account_logout_cleanup()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["executionMayContinue"])
+        self.assertEqual(result["cancelledJobIds"], ["job-image", "job-phone"])
+        self.assertTrue(jobs.wait_for_workers)
+        self.assertNotIn("job-update", cancelled)
+
+    def test_bridge_context_exposes_account_logout_cleanup(self) -> None:
+        import bridge
+
+        self.assertIs(
+            bridge._build_fastapi_context().account_logout_cleanup,
+            bridge._account_logout_cleanup,
+        )
+
     def test_bridge_keeps_global_service_until_shutdown_is_truly_drained(self) -> None:
         import bridge
 
