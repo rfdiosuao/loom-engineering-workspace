@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import sqlite3
 import tempfile
 import threading
@@ -8,6 +9,8 @@ import unittest
 from pathlib import Path
 
 import bcrypt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
 
 
 MODULE_PATH = Path(__file__).with_name("openclaw_newapi_bridge.py")
@@ -34,6 +37,21 @@ class BindTicketTests(unittest.TestCase):
         self.original_authenticate_user = self.bridge.authenticate_user
         self.original_auth_failure_limit = self.bridge.AUTH_FAILURE_RATE_LIMIT
         self.original_public_api_base = self.bridge.PUBLIC_API_BASE
+        self.original_entitlement_private_key_b64 = getattr(self.bridge, "ENTITLEMENT_PRIVATE_KEY_B64", "")
+        self.original_entitlement_key_id = getattr(self.bridge, "ENTITLEMENT_KEY_ID", "")
+        self.original_lease_ttl = getattr(self.bridge, "ENTITLEMENT_LEASE_TTL_SEC", 0)
+        self.original_offline_grace = getattr(self.bridge, "ENTITLEMENT_OFFLINE_GRACE_SEC", 0)
+        private_key = Ed25519PrivateKey.generate()
+        private_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        self.signing_public_key = private_key.public_key()
+        self.bridge.ENTITLEMENT_PRIVATE_KEY_B64 = base64.b64encode(private_bytes).decode("ascii")
+        self.bridge.ENTITLEMENT_KEY_ID = "test-ed25519-v1"
+        self.bridge.ENTITLEMENT_LEASE_TTL_SEC = 3600
+        self.bridge.ENTITLEMENT_OFFLINE_GRACE_SEC = 72 * 3600
         self._init_newapi_db()
 
     def tearDown(self) -> None:
@@ -44,7 +62,20 @@ class BindTicketTests(unittest.TestCase):
         self.bridge.authenticate_user = self.original_authenticate_user
         self.bridge.AUTH_FAILURE_RATE_LIMIT = self.original_auth_failure_limit
         self.bridge.PUBLIC_API_BASE = self.original_public_api_base
+        self.bridge.ENTITLEMENT_PRIVATE_KEY_B64 = self.original_entitlement_private_key_b64
+        self.bridge.ENTITLEMENT_KEY_ID = self.original_entitlement_key_id
+        self.bridge.ENTITLEMENT_LEASE_TTL_SEC = self.original_lease_ttl
+        self.bridge.ENTITLEMENT_OFFLINE_GRACE_SEC = self.original_offline_grace
         self.tmp.cleanup()
+
+    def verify_lease_signature(self, lease):
+        signature = base64.b64decode(lease["signature"])
+        signed = dict(lease)
+        signed.pop("signature")
+        self.signing_public_key.verify(
+            signature,
+            self.bridge.canonical_json(signed).encode("utf-8"),
+        )
 
     def _init_newapi_db(self) -> None:
         connection = sqlite3.connect(self.bridge.DB_PATH)
@@ -220,6 +251,152 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(token["group"], "pro")
         self.assertEqual(token["cross_group_retry"], 0)
         self.assertEqual(payload["data"]["tokenGroup"], "pro")
+
+    def test_launcher_payload_includes_signed_entitlement_lease_bound_to_install_and_device(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+
+        status, payload = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="default",
+            install_id="install-a",
+            device_id="phone-a",
+        )
+
+        self.assertEqual(status, 200)
+        data = payload["data"]
+        lease = data["entitlementLease"]
+        self.assertEqual(lease["schema"], "loom.entitlement_lease.v1")
+        self.assertEqual(lease["accountId"], "42")
+        self.assertEqual(lease["installId"], "install-a")
+        self.assertEqual(lease["deviceId"], "phone-a")
+        self.assertIn("matrix.devices", lease["features"])
+        self.assertEqual(lease["limits"]["devices"], 1)
+        self.assertEqual(lease["limits"]["concurrentTasks"], 1)
+        self.assertEqual(lease["entitlementVersion"], 1)
+        self.assertEqual(lease["keyId"], "test-ed25519-v1")
+        self.assertGreater(lease["expiresAt"], lease["issuedAt"])
+        self.assertGreater(lease["offlineGraceUntil"], lease["expiresAt"])
+        self.verify_lease_signature(lease)
+        self.assertEqual(data["entitlementKey"]["keyId"], "test-ed25519-v1")
+        self.assertNotIn("sk-test-secret-value", repr(lease))
+
+    def test_free_account_second_device_is_rejected_with_quota_error_and_audit_log(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        self.assertEqual(
+            self.bridge.build_launcher_payload(
+                user_id="42",
+                account="user@example.com",
+                group="default",
+                install_id="install-a",
+                device_id="phone-a",
+            )[0],
+            200,
+        )
+
+        status, payload = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="default",
+            install_id="install-b",
+            device_id="phone-b",
+        )
+
+        self.assertEqual(status, 403)
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["code"], "device_limit_exceeded")
+        self.assertIn("免费账号最多绑定 1 台手机", payload["message"])
+        self.assertEqual(payload["action"], "upgrade_or_unbind_device")
+        self.assertEqual(payload["details"]["limit"], 1)
+        self.assertEqual(payload["details"]["used"], 1)
+        self.assertEqual(
+            self.bridge.entitlement_audit_events("42")[-1]["code"],
+            "device_limit_exceeded",
+        )
+
+    def test_paid_account_receives_service_authoritative_entitlement_limits(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+
+        status, payload = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="svip",
+            install_id="install-a",
+            device_id="phone-a",
+        )
+
+        self.assertEqual(status, 200)
+        lease = payload["data"]["entitlementLease"]
+        self.assertGreaterEqual(lease["limits"]["devices"], 5)
+        self.assertGreaterEqual(lease["limits"]["concurrentTasks"], 3)
+        self.assertEqual(payload["data"]["entitlement"]["source"], "server_group_mapping")
+
+    def test_entitlement_version_revokes_previous_lease(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        _, payload = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="default",
+            install_id="install-a",
+            device_id="phone-a",
+        )
+        old_lease = payload["data"]["entitlementLease"]
+
+        new_version = self.bridge.revoke_account_entitlements("42", reason="password-reset")
+
+        self.assertEqual(new_version, 2)
+        status, check = self.bridge.authorize_entitlement_operation(old_lease, "matrix.task.start")
+        self.assertEqual(status, 403)
+        self.assertEqual(check["code"], "lease_revoked")
+
+    def test_expired_lease_blocks_new_matrix_tasks_but_allows_safety_operations(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        original_ttl = self.bridge.ENTITLEMENT_LEASE_TTL_SEC
+        self.bridge.ENTITLEMENT_LEASE_TTL_SEC = -1
+        try:
+            _, payload = self.bridge.build_launcher_payload(
+                user_id="42",
+                account="user@example.com",
+                group="default",
+                install_id="install-a",
+                device_id="phone-a",
+            )
+        finally:
+            self.bridge.ENTITLEMENT_LEASE_TTL_SEC = original_ttl
+        lease = payload["data"]["entitlementLease"]
+
+        status, check = self.bridge.authorize_entitlement_operation(lease, "matrix.task.start")
+        self.assertEqual(status, 403)
+        self.assertEqual(check["code"], "lease_expired")
+
+        status, check = self.bridge.authorize_entitlement_operation(lease, "matrix.emergency_stop")
+        self.assertEqual(status, 200)
+        self.assertTrue(check["success"])
+
+    def test_concurrent_free_device_claim_only_allows_one_device(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        results = []
+        lock = threading.Lock()
+
+        def claim(index):
+            result = self.bridge.build_launcher_payload(
+                user_id="42",
+                account="user@example.com",
+                group="default",
+                install_id=f"install-{index}",
+                device_id=f"phone-{index}",
+            )
+            with lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=claim, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sum(1 for status, _ in results if status == 200), 1)
+        self.assertEqual(sum(1 for status, payload in results if status == 403 and payload["code"] == "device_limit_exceeded"), 7)
 
     def test_launcher_token_in_account_group_is_reused(self):
         connection = sqlite3.connect(self.bridge.DB_PATH)
