@@ -96,6 +96,15 @@ class AgentRepositoryProtocol(Protocol):
         remove_fields: tuple[str, ...] = (),
     ) -> Json: ...
     def recover_unfinished_runs(self) -> list[Json]: ...
+    def finalize_run_with_message(
+        self,
+        session_id: str,
+        run_id: str,
+        message: Json,
+        changes: Json,
+        *,
+        lease_id: str,
+    ) -> Json: ...
     def create_approval(self, approval: Json) -> Json: ...
     def get_approval(self, approval_id: str, session_id: str | None = None) -> Json: ...
     def update_approval(self, approval_id: str, changes: Json, session_id: str | None = None) -> Json: ...
@@ -1945,20 +1954,25 @@ class AgentOrchestrator:
             control = self._control(run_id)
             if control.cancel.is_set():
                 return self._finish_control_request(session_id, run_id, control)
-            message = self._append_assistant_message(session_id, safe_final, message_id=message_id)
-            event_data = {"message": message} if message is not None else {"text": _final_text(safe_final)}
-            run = self._update_claimed_run(
+            message = self._assistant_message(session_id, safe_final, message_id=message_id)
+            lease_id = _run_lease_id(checkpoint)
+            if not lease_id:
+                raise RepositoryConflictError(f"run {run_id} has no execution lease")
+            finalized = self.repository.finalize_run_with_message(
                 session_id,
                 run_id,
-                checkpoint,
+                message,
                 {
                     "status": "completed",
                     "completedAt": _utc_now(),
                     "executionState": _execution_state("terminal"),
                     "checkpoint": _dump_checkpoint(checkpoint),
                 },
-                release_lease=True,
+                lease_id=lease_id,
             )
+            message = finalized["message"]
+            run = finalized["run"]
+            event_data = {"message": message}
         event_degraded = False
         try:
             self._emit(session_id, run_id, "message.completed", event_data)
@@ -1976,9 +1990,7 @@ class AgentOrchestrator:
             )
         return run
 
-    def _append_assistant_message(self, session_id: str, final: Any, *, message_id: str | None = None) -> Json | None:
-        if not hasattr(self.repository, "append_message"):
-            return None
+    def _assistant_message(self, session_id: str, final: Any, *, message_id: str | None = None) -> Json:
         blocks = final.get("blocks") if isinstance(final, Mapping) else None
         if not isinstance(blocks, list):
             text = final.get("text") if isinstance(final, Mapping) else str(final)
@@ -1994,7 +2006,7 @@ class AgentOrchestrator:
             "createdAt": now,
             "completedAt": now,
         }
-        return self.repository.append_message(session_id, message)
+        return message
 
     def _runtime_event(self, session_id: str, run_id: str, event: Any) -> None:
         if not isinstance(event, Mapping):

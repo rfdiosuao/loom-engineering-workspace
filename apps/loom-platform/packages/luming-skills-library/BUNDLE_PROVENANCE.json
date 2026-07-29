@@ -2,7 +2,7 @@
   "schema": "loom.skill_bundle_provenance.v1",
   "version": "2026.07.29",
   "archive": "luming-skills-library-20260729.zip",
-  "sha256": "77096F186C88EA2043B193285D327BA5FCEB1992A62A2E406421F5E7C2B61773",
+  "sha256": "0120B6D2F81B0FADE00DB4C6791570B3BD5D64B9DA6BB97CC0FAB8404C5857D0",
   "entryTimestamps": {
     "manifest.json": "2026-07-29T01:20:00",
     "README.md": "2026-07-29T03:00:00",

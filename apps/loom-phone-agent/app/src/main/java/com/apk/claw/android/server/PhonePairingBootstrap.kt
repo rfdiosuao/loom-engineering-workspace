@@ -19,7 +19,7 @@ import javax.crypto.spec.SecretKeySpec
  */
 object PhonePairingBootstrap {
     const val DEFAULT_TTL_MS = 5 * 60_000L
-    internal const val PENDING_CREDENTIAL_VALID_UNTIL = Long.MAX_VALUE
+    internal const val PREVIOUS_CREDENTIAL_GRACE_MS = 30 * 60_000L
     private const val MAX_ATTEMPTS_PER_REMOTE = 5
     private const val MAX_TOTAL_ATTEMPTS = 12
     private const val MAX_ATTEMPTS_PER_SOURCE_WINDOW = 8
@@ -295,7 +295,7 @@ object PhonePairingBootstrap {
             launcherSecret = randomHex(32),
             pairedAt = now
         )
-        credentialPromoter(credentials, PENDING_CREDENTIAL_VALID_UNTIL)
+        credentialPromoter(credentials, now + PREVIOUS_CREDENTIAL_GRACE_MS)
         session.claimed = true
         if (transport == "usb") {
             return ClaimResult(

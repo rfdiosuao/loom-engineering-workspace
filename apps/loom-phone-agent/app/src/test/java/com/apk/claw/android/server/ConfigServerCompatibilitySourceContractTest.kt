@@ -38,6 +38,18 @@ class ConfigServerCompatibilitySourceContractTest {
     }
 
     @Test
+    fun legacy_pairing_is_usb_only_and_disabled_after_secure_bootstrap() {
+        val source = File("src/main/java/com/apk/claw/android/server/LumiSecurityController.kt").readText()
+        val handler = source.substringAfter("fun handlePair")
+            .substringBefore("fun handleStatus")
+
+        assertTrue(handler.contains("UsbIdentityChallenge.isLoopbackPeer(session.remoteIpAddress)"))
+        assertTrue(handler.contains("KVUtils.isSecurePhonePairingEstablished()"))
+        assertTrue(handler.contains("phone_legacy_pairing_usb_required"))
+        assertTrue(handler.contains("phone_secure_pairing_required"))
+    }
+
+    @Test
     fun config_server_remains_available_for_usb_without_a_lan_address() {
         val source = File("src/main/java/com/apk/claw/android/server/ConfigServerManager.kt").readText()
         val startHandler = source.substringAfter("fun start(context: Context)")

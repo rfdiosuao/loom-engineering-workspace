@@ -716,6 +716,95 @@ class AgentSessionRepositoryTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             restarted.get_run("run_duplicate")
 
+    def test_run_finalization_commits_terminal_state_and_assistant_message_idempotently(self) -> None:
+        self.repository.create_session(title="Finalization", session_id="session_finalization")
+        self.repository.create_run(self._run("run_finalization", "session_finalization"))
+        self.repository.claim_run(
+            "run_finalization",
+            lease_id="lease-finalization",
+            expected_statuses=("queued",),
+            session_id="session_finalization",
+        )
+        message = self._message(
+            "message_finalization",
+            "session_finalization",
+            "Completed answer",
+            extra={"role": "assistant"},
+        )
+        changes = {
+            "status": "completed",
+            "completedAt": "2026-07-28T00:00:00+00:00",
+            "executionState": {"phase": "terminal"},
+        }
+
+        first = self.repository.finalize_run_with_message(
+            "session_finalization",
+            "run_finalization",
+            message,
+            changes,
+            lease_id="lease-finalization",
+        )
+        second = self.repository.finalize_run_with_message(
+            "session_finalization",
+            "run_finalization",
+            message,
+            changes,
+            lease_id="lease-finalization",
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["run"]["status"], "completed")
+        self.assertEqual(first["run"]["finalMessageId"], "message_finalization")
+        self.assertNotIn("runLease", json.loads(first["run"]["checkpoint"]))
+        self.assertEqual(
+            [item["messageId"] for item in self.repository.page_messages("session_finalization")["messages"]],
+            ["message_finalization"],
+        )
+
+    def test_run_finalization_recovers_before_read_after_message_append_failure(self) -> None:
+        self.repository.create_session(title="Finalization recovery", session_id="session_finalize_crash")
+        self.repository.create_run(self._run("run_finalize_crash", "session_finalize_crash"))
+        self.repository.claim_run(
+            "run_finalize_crash",
+            lease_id="lease-finalize-crash",
+            expected_statuses=("queued",),
+            session_id="session_finalize_crash",
+        )
+        message = self._message(
+            "message_finalize_crash",
+            "session_finalize_crash",
+            "Recovered answer",
+            extra={"role": "assistant"},
+        )
+
+        with patch("python.core.agent_sessions._append_jsonl", side_effect=OSError("simulated crash")):
+            with self.assertRaises(OSError):
+                self.repository.finalize_run_with_message(
+                    "session_finalize_crash",
+                    "run_finalize_crash",
+                    message,
+                    {
+                        "status": "completed",
+                        "completedAt": "2026-07-28T00:00:00+00:00",
+                        "executionState": {"phase": "terminal"},
+                    },
+                    lease_id="lease-finalize-crash",
+                )
+
+        messages = self.repository.page_messages("session_finalize_crash")["messages"]
+        run = self.repository.get_run("run_finalize_crash", session_id="session_finalize_crash")
+        self.assertEqual([item["messageId"] for item in messages], ["message_finalize_crash"])
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["finalMessageId"], "message_finalize_crash")
+        transactions_dir = os.path.join(
+            self.temp_dir.name,
+            "agent",
+            "sessions",
+            "session_finalize_crash",
+            "transactions",
+        )
+        self.assertEqual(os.listdir(transactions_dir), [])
+
     def test_session_metadata_is_sanitized_before_persistence(self) -> None:
         created = self.repository.create_session(
             title="Secret sk-session-title-123456789",

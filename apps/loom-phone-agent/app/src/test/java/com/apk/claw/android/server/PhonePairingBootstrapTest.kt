@@ -56,9 +56,10 @@ class PhonePairingBootstrapTest {
         assertTrue(first.success)
         assertEquals(1, promoted.size)
         assertEquals(
-            PhonePairingBootstrap.PENDING_CREDENTIAL_VALID_UNTIL,
+            now + PhonePairingBootstrap.PREVIOUS_CREDENTIAL_GRACE_MS,
             previousCredentialDeadlines.single()
         )
+        assertTrue(previousCredentialDeadlines.single() < Long.MAX_VALUE)
         assertNull(first.credentials)
         assertEquals("AES-256-GCM-HKDF-SHA256", first.encryptedCredentials!!.algorithm)
         assertFalse(first.encryptedCredentials!!.ciphertext.contains(promoted.single().phoneToken))

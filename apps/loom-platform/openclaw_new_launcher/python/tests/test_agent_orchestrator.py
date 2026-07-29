@@ -2788,6 +2788,30 @@ class AgentOrchestratorTests(unittest.TestCase):
         runtime = ScriptedRuntime([{"final": {"text": "Frontend-ready answer"}}])
         with tempfile.TemporaryDirectory() as root:
             repository, bus, registry, policy, _calls = self._dependencies(root, runtime)
+            finalization_calls: list[tuple[str, str]] = []
+            original_finalize = repository.finalize_run_with_message
+
+            def track_finalize(
+                session_id: str,
+                run_id: str,
+                message: dict,
+                changes: dict,
+                *,
+                lease_id: str,
+            ) -> dict:
+                finalization_calls.append((session_id, run_id))
+                return original_finalize(
+                    session_id,
+                    run_id,
+                    message,
+                    changes,
+                    lease_id=lease_id,
+                )
+
+            repository.finalize_run_with_message = track_finalize  # type: ignore[method-assign]
+            repository.append_message = lambda *_args, **_kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+                AssertionError("terminal assistant messages must use the finalization transaction")
+            )
             orchestrator = AgentOrchestrator(repository, bus, runtime, registry, policy)
             orchestrator.queue_run("session-1", run_id="run-message-contract")
             orchestrator.execute_run("session-1", "run-message-contract", {"prompt": "answer"})
@@ -2800,6 +2824,7 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(event["data"]["message"], persisted)
         self.assertEqual(event["data"]["message"]["schema"], "loom.agent.message.v1")
         self.assertEqual(event["data"]["message"]["blocks"][0]["data"]["text"], "Frontend-ready answer")
+        self.assertEqual(finalization_calls, [("session-1", "run-message-contract")])
 
     def test_final_message_reuses_runtime_message_id_for_stream_identity(self) -> None:
         from core.agent_orchestrator import AgentOrchestrator

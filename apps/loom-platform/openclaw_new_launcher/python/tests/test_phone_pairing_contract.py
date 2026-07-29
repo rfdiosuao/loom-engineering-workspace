@@ -433,15 +433,41 @@ class PhonePairingContractTests(unittest.TestCase):
                     status_code=409,
                 ),
             ) as bounded_confirm:
-                exhausted_store = {}
+                continuing_store = {}
                 for attempt in range(7):
-                    exhausted_store = retry(ctx, force=True, now_ms=3_000 + attempt)
+                    continuing_store = retry(ctx, force=True, now_ms=3_000 + attempt)
 
-            exhausted_public = routes_phone._public_store(exhausted_store)["devices"][0]
-            self.assertEqual(routes_phone._PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS, bounded_confirm.call_count)
-            self.assertTrue(exhausted_public["confirmationPending"])
-            self.assertFalse(exhausted_public["confirmed"])
-            self.assertIn("达到上限", exhausted_public["confirmationStatus"])
+            continuing_public = routes_phone._public_store(continuing_store)["devices"][0]
+            self.assertEqual(7, bounded_confirm.call_count)
+            self.assertTrue(continuing_public["confirmationPending"])
+            self.assertFalse(continuing_public["confirmed"])
+            self.assertGreater(
+                continuing_store["devices"][0]["pairingConfirmationNextRetryAt"],
+                3_006,
+            )
+            self.assertIn("持续自动重试", continuing_public["confirmationStatus"])
+
+    def test_pending_confirmation_has_a_periodic_background_retry_task(self) -> None:
+        source = Path(routes_phone.__file__).read_text(encoding="utf-8")
+
+        self.assertIn("async def retry_pending_phone_pairing_confirmations_forever()", source)
+        self.assertIn("phone_pairing_confirmation_retry_task", source)
+        self.assertIn("app.router.on_shutdown.append(stop_phone_pairing_confirmation_retry)", source)
+
+    def test_legacy_cli_pairing_never_sends_old_token_over_lan(self) -> None:
+        secure_client = (
+            APPS_DIR
+            / "loom-platform"
+            / "openclaw_new_launcher"
+            / "scripts"
+            / "openclaw-phone-secure.mjs"
+        ).read_text(encoding="utf-8")
+        pairing_function = secure_client.split(
+            "export async function pairLumiLauncher", 1
+        )[1].split("export async function signedJsonRequest", 1)[0]
+
+        self.assertIn("assertLegacyPairingUsbOnly(config)", pairing_function)
+        self.assertIn("phone_legacy_pairing_usb_required", secure_client)
 
     def test_phone_pairing_ui_separates_lan_payload_from_usb_code_and_uses_pairing_icon(self) -> None:
         activity = (

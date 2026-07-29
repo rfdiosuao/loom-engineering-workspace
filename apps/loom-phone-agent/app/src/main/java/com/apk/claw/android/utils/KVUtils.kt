@@ -319,6 +319,7 @@ object KVUtils {
     private const val KEY_LUMI_LAUNCHER_NAME = "KEY_LUMI_LAUNCHER_NAME"
     private const val KEY_LUMI_LAUNCHER_SECRET = "KEY_LUMI_LAUNCHER_SECRET"
     private const val KEY_LUMI_LAUNCHER_PAIRED_AT = "KEY_LUMI_LAUNCHER_PAIRED_AT"
+    private const val KEY_SECURE_PHONE_PAIRING_ESTABLISHED = "KEY_SECURE_PHONE_PAIRING_ESTABLISHED"
     private const val KEY_PREVIOUS_LUMI_LAUNCHER_ID = "KEY_PREVIOUS_LUMI_LAUNCHER_ID"
     private const val KEY_PREVIOUS_LUMI_LAUNCHER_SECRET = "KEY_PREVIOUS_LUMI_LAUNCHER_SECRET"
 
@@ -358,6 +359,8 @@ object KVUtils {
     }
     fun getLumiLauncherPairedAt(): Long = getLong(KEY_LUMI_LAUNCHER_PAIRED_AT, 0L)
     fun setLumiLauncherPairedAt(value: Long) = putLong(KEY_LUMI_LAUNCHER_PAIRED_AT, value)
+    fun isSecurePhonePairingEstablished(): Boolean =
+        getBoolean(KEY_SECURE_PHONE_PAIRING_ESTABLISHED, false)
     fun getPreviousLumiLauncherId(): String = PhoneCredentialVault.get(
         KEY_PREVIOUS_LUMI_LAUNCHER_ID,
         migratePlaintext = { getString(KEY_PREVIOUS_LUMI_LAUNCHER_ID, "") },
@@ -419,6 +422,7 @@ object KVUtils {
         ) { "Unable to persist encrypted phone pairing credentials" }
         setLumiLauncherName(launcherName)
         setLumiLauncherPairedAt(pairedAt)
+        putBoolean(KEY_SECURE_PHONE_PAIRING_ESTABLISHED, true)
         sync()
     }
 

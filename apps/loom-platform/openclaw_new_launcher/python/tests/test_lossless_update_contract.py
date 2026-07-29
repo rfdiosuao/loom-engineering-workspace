@@ -453,6 +453,11 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("if ready_path.is_file()", source)
         self.assertIn("handoff_process.try_wait()", source)
         self.assertIn("app_handle.exit(0)", source)
+        self.assertNotIn("Duration::from_millis(1200)", source)
+        self.assertIn(
+            "shutdown_backend().await;\n                app_handle.exit(0);",
+            source,
+        )
         self.assertLess(
             source.index("if ready_path.is_file()"),
             source.index("shutdown_backend().await"),

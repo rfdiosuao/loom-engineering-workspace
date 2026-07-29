@@ -261,6 +261,85 @@ function Test-MatchingOwnerMarker {
   )
 }
 
+function Test-InstallTransactionOwnerMarker {
+  param(
+    [string]$Target,
+    [string]$Parent,
+    [string]$Kind,
+    [string]$InstallId
+  )
+
+  try {
+    if (-not (Test-Path -LiteralPath $Target -PathType Container)) {
+      return $false
+    }
+    $targetPath = Get-NormalizedPath -Path $Target
+    $parentPath = Get-NormalizedPath -Path $Parent
+    if (
+      -not [StringComparer]::OrdinalIgnoreCase.Equals(
+        (Get-NormalizedPath -Path (Split-Path -Parent $targetPath)),
+        $parentPath
+      )
+    ) {
+      return $false
+    }
+
+    $nameMatch = [regex]::Match(
+      (Split-Path -Leaf $targetPath),
+      '^\.luming-skills-install-([0-9a-f]{32})$',
+      [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if (-not $nameMatch.Success) {
+      return $false
+    }
+    $directoryInstallId = $nameMatch.Groups[1].Value.ToLowerInvariant()
+    if ($InstallId -and $directoryInstallId -cne $InstallId.ToLowerInvariant()) {
+      return $false
+    }
+
+    $marker = Read-JsonDocument `
+      -Path (Join-Path $targetPath ".loom-install-transaction-owner.json") `
+      -Context "LOOM Skill install transaction ownership marker"
+    return (
+      $null -ne $marker -and
+      [string]$marker.schema -ceq "loom.skills.install_transaction_owner.v1" -and
+      [string]$marker.package -ceq "luming-skills-library" -and
+      [string]$marker.installId -ceq $directoryInstallId -and
+      [string]$marker.kind -ceq $Kind -and
+      [StringComparer]::OrdinalIgnoreCase.Equals(
+        (Get-NormalizedPath -Path ([string]$marker.root)),
+        $targetPath
+      ) -and
+      [StringComparer]::OrdinalIgnoreCase.Equals(
+        (Get-NormalizedPath -Path ([string]$marker.parent)),
+        $parentPath
+      )
+    )
+  } catch {
+    return $false
+  }
+}
+
+function Write-InstallTransactionOwnerMarker {
+  param(
+    [string]$Target,
+    [string]$Parent,
+    [string]$Kind,
+    [string]$InstallId
+  )
+
+  Write-AtomicJson `
+    -Path (Join-Path $Target ".loom-install-transaction-owner.json") `
+    -Document ([ordered]@{
+      schema = "loom.skills.install_transaction_owner.v1"
+      package = "luming-skills-library"
+      installId = $InstallId
+      root = $Target
+      parent = $Parent
+      kind = $Kind
+    })
+}
+
 function Test-OwnedSkillTarget {
   param(
     [string]$Target,
@@ -374,13 +453,28 @@ function Remove-StaleInstallTransactions {
     [string]$StateRoot
   )
 
-  foreach ($root in @($Destination, $StateRoot)) {
+  foreach ($entry in @(
+    [pscustomobject]@{ Root = $Destination; Kind = "destination" },
+    [pscustomobject]@{ Root = $StateRoot; Kind = "state" }
+  )) {
+    $root = [string]$entry.Root
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {
       continue
     }
     Get-ChildItem -LiteralPath $root -Directory -Force |
       Where-Object { $_.Name -like ".luming-skills-install-*" } |
-      ForEach-Object { Remove-OwnedTarget -Path $_.FullName }
+      ForEach-Object {
+        if (
+          Test-InstallTransactionOwnerMarker `
+            -Target $_.FullName `
+            -Parent $root `
+            -Kind ([string]$entry.Kind)
+        ) {
+          Remove-OwnedTarget -Path $_.FullName
+        } else {
+          Write-Verbose "Preserving unowned directory that resembles a LOOM Skill transaction: $($_.FullName)"
+        }
+      }
   }
 }
 
@@ -429,6 +523,20 @@ function Recover-InstallTransaction {
     -Parent $StateRoot `
     -Child $stateTransactionRoot `
     -ExpectedName (Split-Path -Leaf $stateTransactionRoot)
+  if (
+    -not (Test-InstallTransactionOwnerMarker `
+      -Target $transactionRoot `
+      -Parent $Destination `
+      -Kind "destination" `
+      -InstallId ([string]$journal.installId)) -or
+    -not (Test-InstallTransactionOwnerMarker `
+      -Target $stateTransactionRoot `
+      -Parent $StateRoot `
+      -Kind "state" `
+      -InstallId ([string]$journal.installId))
+  ) {
+    throw "Refusing to recover an unowned or mismatched Skill transaction directory"
+  }
 
   if ([string]$journal.phase -cne "committed") {
     $records = @($journal.records)
@@ -694,6 +802,16 @@ try {
   $stateStagingRoot = Join-Path $stateTransactionRoot "staged"
   $stateBackupRoot = Join-Path $stateTransactionRoot "backups"
   New-Item -ItemType Directory -Force -Path $stagingRoot, $destinationBackupRoot, $stateStagingRoot, $stateBackupRoot | Out-Null
+  Write-InstallTransactionOwnerMarker `
+    -Target $transactionRoot `
+    -Parent $destinationPath `
+    -Kind "destination" `
+    -InstallId $installId
+  Write-InstallTransactionOwnerMarker `
+    -Target $stateTransactionRoot `
+    -Parent $stateRootPath `
+    -Kind "state" `
+    -InstallId $installId
 
   $ownerMarker = [ordered]@{
     schema = "loom.skills.owner.v1"

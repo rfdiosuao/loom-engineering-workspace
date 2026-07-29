@@ -45,7 +45,7 @@
 - Permanent credentials remain protected by DPAPI on Windows and private app storage/keystore on Android.
 - Credential rotation is transactional: existing credentials remain valid until the desktop has persisted and verified the new credentials and confirms the pairing. Failed or abandoned pairing cannot disconnect an existing device.
 - USB and LAN use the same saved device identity and execution channel.
-- Recovery is bounded and observable: reconnect uses backoff plus a finite retry budget, preserves the last verified identity, and reports actionable USB/LAN/authentication error codes instead of a generic “connection failed”.
+- Recovery is bounded and observable per attempt: reconnect uses device-level backoff, request deadlines and low-frequency continuous recovery, preserves the last verified identity, and reports actionable USB/LAN/authentication error codes instead of a generic “connection failed”. A transient outage must not permanently exhaust recovery, and retries must not block the UI or form a hot loop.
 - Pairing has one user-facing entrypoint: the phone's **与 LOOM 配对** page and the desktop's **手机连接** page. Legacy Skills, prompts and docs must never request a phone URL, port or permanent token.
 - Reconnect is per-device and non-blocking. One unreachable phone cannot freeze the Phone, Matrix or Agent UI or delay healthy phones.
 - The controlled acceptance target is >= 98% first-pair success, >= 99% restart recovery, P95 recovery <= 15 seconds, and zero false-online states.

@@ -217,6 +217,22 @@ object LumiSecurityController {
     }
 
     fun handlePair(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+        if (!UsbIdentityChallenge.isLoopbackPeer(session.remoteIpAddress)) {
+            return pairingErrorResponse(
+                NanoHTTPD.Response.Status.FORBIDDEN,
+                "phone_legacy_pairing_usb_required",
+                "旧版连接迁移仅允许通过 USB 本机通道进行，请使用“与 LOOM 配对”。",
+                false
+            )
+        }
+        if (KVUtils.isSecurePhonePairingEstablished()) {
+            return pairingErrorResponse(
+                NanoHTTPD.Response.Status.FORBIDDEN,
+                "phone_secure_pairing_required",
+                "此手机已启用安全配对，旧版配对接口已关闭。请生成新的配对码。",
+                false
+            )
+        }
         val authError = ToolApiController.checkAuth(session)
         if (authError != null) return authError
 

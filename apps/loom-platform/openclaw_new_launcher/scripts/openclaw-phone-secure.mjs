@@ -512,6 +512,7 @@ export async function pairLumiLauncher(config, options = {}) {
   const key = pairingCacheKey(config);
   const cached = pairingCache.get(key);
   if (!forceRefresh && cached?.launcherId && cached?.launcherSecret) return publicPairing(cached);
+  assertLegacyPairingUsbOnly(config);
 
   const failure = pairingFailures.get(key);
   if (failure && failure.until > Date.now()) throw new Error(failure.message);
@@ -564,6 +565,23 @@ export async function pairLumiLauncher(config, options = {}) {
     throw error;
   } finally {
     pairingInflight.delete(key);
+  }
+}
+
+function assertLegacyPairingUsbOnly(config) {
+  const hostname = new URL(normalizePhoneUrl(config.phoneUrl)).hostname
+    .replace(/^\[|\]$/g, '')
+    .toLowerCase();
+  if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
+    throw new PhoneBridgeError(
+      'phone_legacy_pairing_usb_required',
+      '旧版手机凭据不能通过局域网发送。请连接 USB，并在手机“与 LOOM 配对”页生成 6 位配对码。',
+      {
+        retryable: false,
+        currentStep: 'secure_pairing',
+        details: { url: safePhoneUrl(config.phoneUrl) },
+      },
+    );
   }
 }
 

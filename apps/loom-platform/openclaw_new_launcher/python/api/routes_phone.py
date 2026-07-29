@@ -152,9 +152,9 @@ _PHONE_PAIRING_SECRET_KEYS = {
 }
 _PHONE_PAIRING_PROTOCOL_VERSION = "3"
 _PHONE_PAIRING_ENCRYPTION_ALGORITHM = "AES-256-GCM-HKDF-SHA256"
-_PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS = 5
 _PHONE_PAIRING_CONFIRMATION_RETRY_DELAYS_MS = (5_000, 30_000, 120_000, 300_000, 900_000)
 _PHONE_PAIRING_CONFIRMATION_TIMEOUT_SEC = 3
+_PHONE_PAIRING_CONFIRMATION_BACKGROUND_INTERVAL_SEC = 30
 
 OPENCLAW_ROOT = Path(__file__).resolve().parents[2]
 
@@ -860,7 +860,7 @@ def _phone_pairing_confirmation_patch(
     attempts: int,
     now_ms: int,
 ) -> dict:
-    safe_attempts = max(0, min(int(attempts), _PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS))
+    safe_attempts = max(0, int(attempts))
     if confirmed:
         return {
             "pairingConfirmed": True,
@@ -870,17 +870,12 @@ def _phone_pairing_confirmation_patch(
             "pairingConfirmationNextRetryAt": 0,
             "pairingConfirmationStatus": "手机已确认新凭据，旧凭据已安全清理。",
         }
-    exhausted = safe_attempts >= _PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS
     delay_index = max(0, min(safe_attempts - 1, len(_PHONE_PAIRING_CONFIRMATION_RETRY_DELAYS_MS) - 1))
-    next_retry_at = 0 if exhausted else now_ms + _PHONE_PAIRING_CONFIRMATION_RETRY_DELAYS_MS[delay_index]
+    next_retry_at = now_ms + _PHONE_PAIRING_CONFIRMATION_RETRY_DELAYS_MS[delay_index]
     status = (
-        "手机暂未确认，旧凭据仍保留。自动重试已达到上限；"
-        "请保持手机配对服务在线后重新配对。"
-        if exhausted
-        else (
-            "桌面凭据已安全保存；手机暂未确认，旧凭据仍保留。"
-            f"LOOM 将自动重试（{safe_attempts}/{_PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS}）。"
-        )
+        "桌面凭据已安全保存；手机暂未确认，"
+        "旧凭据会在安全宽限期后自动失效。"
+        f"LOOM 将持续自动重试（已尝试 {safe_attempts} 次）。"
     )
     return {
         "pairingConfirmed": False,
@@ -920,7 +915,6 @@ def _retry_pending_phone_pairing_confirmations(
         can_attempt = (
             pending
             and matches_target
-            and attempts < _PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS
             and attempted_devices < max(1, int(max_devices))
             and (force or next_retry_at <= current_ms)
         )
@@ -943,13 +937,13 @@ def _retry_pending_phone_pairing_confirmations(
             ctx.append_log(
                 f"[phone-pairing] confirmation pending for "
                 f"{_normalize_device_id(device.get('id'))} "
-                f"({next_attempt}/{_PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS}, {exc.code})"
+                f"(attempt {next_attempt}, {exc.code})"
             )
         except Exception:
             ctx.append_log(
                 f"[phone-pairing] confirmation retry failed for "
                 f"{_normalize_device_id(device.get('id'))} "
-                f"({next_attempt}/{_PHONE_PAIRING_CONFIRMATION_MAX_ATTEMPTS})"
+                f"(attempt {next_attempt})"
             )
 
         device.update(
@@ -5212,9 +5206,39 @@ def register_phone_routes(app, ctx) -> None:
         except Exception:
             ctx.append_log("[phone-pairing] startup confirmation retry deferred")
 
+    async def retry_pending_phone_pairing_confirmations_forever() -> None:
+        while True:
+            await asyncio.sleep(_PHONE_PAIRING_CONFIRMATION_BACKGROUND_INTERVAL_SEC)
+            try:
+                await run_in_threadpool(
+                    _retry_pending_phone_pairing_confirmations,
+                    ctx,
+                    max_devices=4,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                ctx.append_log("[phone-pairing] background confirmation retry deferred")
+
+    async def start_phone_pairing_confirmation_retry() -> None:
+        task = getattr(app.state, "phone_pairing_confirmation_retry_task", None)
+        if task is None or task.done():
+            app.state.phone_pairing_confirmation_retry_task = asyncio.create_task(
+                retry_pending_phone_pairing_confirmations_forever()
+            )
+
+    async def stop_phone_pairing_confirmation_retry() -> None:
+        task = getattr(app.state, "phone_pairing_confirmation_retry_task", None)
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
     app.router.on_startup.append(reconcile_usb_transport_on_startup)
     app.router.on_startup.append(retry_pending_phone_pairing_confirmations_on_startup)
+    app.router.on_startup.append(start_phone_pairing_confirmation_retry)
     app.router.on_startup.append(start_saved_usb_transport_restore)
+    app.router.on_shutdown.append(stop_phone_pairing_confirmation_retry)
     app.router.on_shutdown.append(stop_saved_usb_transport_restore)
 
     @app.middleware("http")

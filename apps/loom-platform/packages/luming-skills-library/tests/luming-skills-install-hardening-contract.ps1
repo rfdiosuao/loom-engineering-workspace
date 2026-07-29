@@ -107,9 +107,39 @@ try {
   $destination = Join-Path $tempRoot "protected-destination"
   $stateRoot = Join-Path $tempRoot "protected-state"
   $thirdParty = Join-Path $destination "phone-agent"
+  $unownedTransactionDestination = Join-Path $destination ".luming-skills-install-user-data"
+  $unownedTransactionState = Join-Path $stateRoot ".luming-skills-install-user-state"
+  $staleInstallId = [guid]::NewGuid().ToString("N")
+  $ownedTransactionDestination = Join-Path $destination ".luming-skills-install-$staleInstallId"
+  $ownedTransactionState = Join-Path $stateRoot ".luming-skills-install-$staleInstallId"
   New-Item -ItemType Directory -Force -Path $thirdParty | Out-Null
+  New-Item -ItemType Directory -Force -Path `
+    $unownedTransactionDestination, `
+    $unownedTransactionState, `
+    $ownedTransactionDestination, `
+    $ownedTransactionState | Out-Null
   [IO.File]::WriteAllText((Join-Path $thirdParty "SKILL.md"), "third party phone agent", $utf8)
   [IO.File]::WriteAllText((Join-Path $thirdParty "keep.txt"), "must survive", $utf8)
+  [IO.File]::WriteAllText((Join-Path $unownedTransactionDestination "keep.txt"), "unowned destination", $utf8)
+  [IO.File]::WriteAllText((Join-Path $unownedTransactionState "keep.txt"), "unowned state", $utf8)
+  foreach ($ownedTransaction in @(
+    @{ Path = $ownedTransactionDestination; Parent = $destination; Kind = "destination" },
+    @{ Path = $ownedTransactionState; Parent = $stateRoot; Kind = "state" }
+  )) {
+    $transactionMarker = [ordered]@{
+      schema = "loom.skills.install_transaction_owner.v1"
+      package = "luming-skills-library"
+      installId = $staleInstallId
+      root = [IO.Path]::GetFullPath([string]$ownedTransaction.Path)
+      parent = [IO.Path]::GetFullPath([string]$ownedTransaction.Parent)
+      kind = [string]$ownedTransaction.Kind
+    }
+    [IO.File]::WriteAllText(
+      (Join-Path ([string]$ownedTransaction.Path) ".loom-install-transaction-owner.json"),
+      ($transactionMarker | ConvertTo-Json -Depth 4),
+      $utf8
+    )
+  }
 
   $first = Invoke-Installer -Destination $destination -StateRoot $stateRoot
   Assert-Succeeded -Result $first -Context "First protected install"
@@ -119,6 +149,18 @@ try {
   $firstDocument = $first.StdOut | ConvertFrom-Json
   if (@($firstDocument.skippedUnowned) -cnotcontains "phone-agent") {
     throw "Installer did not report the unowned replacement it preserved"
+  }
+  if (
+    -not (Test-Path -LiteralPath (Join-Path $unownedTransactionDestination "keep.txt") -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $unownedTransactionState "keep.txt") -PathType Leaf)
+  ) {
+    throw "Installer removed an unowned directory whose name resembled a stale transaction"
+  }
+  if (
+    (Test-Path -LiteralPath $ownedTransactionDestination) -or
+    (Test-Path -LiteralPath $ownedTransactionState)
+  ) {
+    throw "Installer did not remove a verified LOOM-owned stale transaction"
   }
   Assert-OwnedInstall -Destination $destination -StateRoot $stateRoot
 

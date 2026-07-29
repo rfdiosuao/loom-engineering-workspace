@@ -27,7 +27,7 @@ must not receive new product changes. Packages are generated through
 `scripts/build-luming-skills-library.ps1` from the main repository root.
 
 The generated `luming-skills-library-20260729.zip` must reproduce SHA256
-`77096F186C88EA2043B193285D327BA5FCEB1992A62A2E406421F5E7C2B61773` until the
+`0120B6D2F81B0FADE00DB4C6791570B3BD5D64B9DA6BB97CC0FAB8404C5857D0` until the
 manifest version or Skill source changes intentionally. CI and release builds
 recreate the archive from the manifest/provenance timestamp map and reject any
 byte-level difference.

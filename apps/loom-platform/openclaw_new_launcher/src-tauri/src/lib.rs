@@ -1164,15 +1164,11 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
             handoff_guard.reset_on_drop = false;
             std::mem::forget(system_mutex);
 
-            // Start cleanup only after the detached updater confirms it is
-            // alive. The bounded exit prevents a slow Bridge endpoint from
-            // leaving the UI stuck on "restarting".
+            // Exit only after the Bridge has drained Agent work and released
+            // packaged runtimes, so the detached installer can replace them.
+            let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 shutdown_backend().await;
-            });
-            let app_handle = app.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(1200));
                 app_handle.exit(0);
             });
         }
