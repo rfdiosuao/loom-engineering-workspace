@@ -11,6 +11,7 @@ OpenAI-compatible gateway.
 from __future__ import annotations
 
 import http.cookiejar
+import base64
 import hashlib
 import hmac
 import json
@@ -26,6 +27,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import bcrypt
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 try:
     import psycopg2
@@ -61,6 +65,94 @@ TEXT_MODEL_PRIORITY = (
     "MiniMax-M2.5",
 )
 DUMMY_PASSWORD_HASH = b"$2b$12$r8bkOL9d2uvfwYy6HLOTfetYMOqQwrlwXkXL774PW/7LFPTy90hju"
+ENTITLEMENT_LEASE_TTL_SEC = int(os.environ.get("OPENCLAW_ENTITLEMENT_LEASE_TTL_SEC", "3600"))
+ENTITLEMENT_OFFLINE_GRACE_SEC = int(os.environ.get("OPENCLAW_ENTITLEMENT_OFFLINE_GRACE_SEC", str(72 * 3600)))
+ENTITLEMENT_KEY_ID = os.environ.get("OPENCLAW_ENTITLEMENT_KEY_ID", "openclaw-ed25519-v1")
+ENTITLEMENT_PRIVATE_KEY_B64 = (
+    os.environ.get("OPENCLAW_ENTITLEMENT_PRIVATE_KEY_B64")
+    or os.environ.get("LICENSE_PRIVATE_KEY_B64")
+    or ""
+).strip()
+ENTITLEMENT_PRIVATE_KEY_FILE = (
+    os.environ.get("OPENCLAW_ENTITLEMENT_PRIVATE_KEY_FILE")
+    or os.environ.get("LICENSE_PRIVATE_KEY_FILE")
+    or ""
+).strip()
+SAFETY_ENTITLEMENT_OPERATIONS = {
+    "diagnostics",
+    "matrix.cancel",
+    "matrix.diagnostics",
+    "matrix.emergency_stop",
+    "matrix.task.cancel",
+    "matrix.task.stop",
+}
+ENTITLEMENT_GROUP_POLICIES: dict[str, dict[str, Any]] = {
+    "default": {
+        "plan": "free",
+        "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics", "legacy.license.migration"],
+        "limits": {"devices": 1, "concurrentTasks": 1},
+    },
+    "free": {
+        "plan": "free",
+        "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics", "legacy.license.migration"],
+        "limits": {"devices": 1, "concurrentTasks": 1},
+    },
+    "standard": {
+        "plan": "standard",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 3, "concurrentTasks": 2},
+    },
+    "pro": {
+        "plan": "pro",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 5, "concurrentTasks": 3},
+    },
+    "vip": {
+        "plan": "vip",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 5, "concurrentTasks": 3},
+    },
+    "svip": {
+        "plan": "svip",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 10, "concurrentTasks": 5},
+    },
+    "enterprise": {
+        "plan": "enterprise",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 50, "concurrentTasks": 20},
+    },
+}
 
 
 class BridgeUpstreamError(RuntimeError):
@@ -238,6 +330,99 @@ def upstream_error_response(error: BridgeUpstreamError, *, authentication: bool 
     else:
         public_status = 502
     return public_status, {"success": False, "error": str(error)}
+
+
+def canonical_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def entitlement_policy_for_group(group: str) -> dict[str, Any]:
+    normalized = str(group or "default").strip().lower() or "default"
+    if normalized not in ENTITLEMENT_GROUP_POLICIES:
+        if "svip" in normalized:
+            normalized = "svip"
+        elif "vip" in normalized:
+            normalized = "vip"
+        elif "enterprise" in normalized or "company" in normalized:
+            normalized = "enterprise"
+        elif "pro" in normalized:
+            normalized = "pro"
+        elif "standard" in normalized:
+            normalized = "standard"
+        else:
+            normalized = "default"
+    policy = ENTITLEMENT_GROUP_POLICIES[normalized]
+    return {
+        "group": str(group or "default").strip() or "default",
+        "plan": policy["plan"],
+        "source": "server_group_mapping",
+        "features": list(policy["features"]),
+        "limits": dict(policy["limits"]),
+    }
+
+
+def entitlement_error(
+    code: str,
+    message: str,
+    action: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "code": code,
+        "message": message,
+        "error": message,
+        "action": action,
+        "details": details or {},
+    }
+
+
+def _private_key_from_bytes(raw: bytes) -> Ed25519PrivateKey:
+    stripped = raw.strip()
+    if b"-----BEGIN" in stripped:
+        loaded = serialization.load_pem_private_key(stripped, password=None)
+    elif len(stripped) == 32:
+        return Ed25519PrivateKey.from_private_bytes(stripped)
+    else:
+        loaded = serialization.load_der_private_key(stripped, password=None)
+    if not isinstance(loaded, Ed25519PrivateKey):
+        raise ValueError("entitlement signing key must be Ed25519")
+    return loaded
+
+
+def entitlement_private_key() -> Ed25519PrivateKey:
+    if ENTITLEMENT_PRIVATE_KEY_B64:
+        return _private_key_from_bytes(base64.b64decode(ENTITLEMENT_PRIVATE_KEY_B64))
+    if ENTITLEMENT_PRIVATE_KEY_FILE:
+        with open(ENTITLEMENT_PRIVATE_KEY_FILE, "rb") as handle:
+            return _private_key_from_bytes(handle.read())
+    raise RuntimeError("entitlement signing key is not configured")
+
+
+def entitlement_public_key_b64() -> str:
+    public_key = entitlement_private_key().public_key()
+    raw = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return base64.b64encode(raw).decode("ascii")
+
+
+def entitlement_key_payload() -> dict[str, Any]:
+    return {"keyId": ENTITLEMENT_KEY_ID, "publicKey": entitlement_public_key_b64()}
+
+
+def sign_entitlement_payload(payload: dict[str, Any]) -> str:
+    signed = dict(payload)
+    signed.pop("signature", None)
+    signature = entitlement_private_key().sign(canonical_json(signed).encode("utf-8"))
+    return base64.b64encode(signature).decode("ascii")
+
+
+def lease_identity_from_body(body: dict[str, Any]) -> tuple[str, str]:
+    install_id = str(body.get("installId") or body.get("install_id") or "").strip()
+    device_id = str(body.get("deviceId") or body.get("device_id") or body.get("phoneId") or "").strip()
+    return install_id, device_id
 
 
 def _newapi_fetchall(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -549,6 +734,7 @@ def handle_launcher_token(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     username = str(body.get("username") or body.get("email") or "").strip()
     password = str(body.get("password") or "")
     preferred_name = str(body.get("tokenName") or "").strip()
+    install_id, device_id = lease_identity_from_body(body)
     if not username or not password:
         return 400, {"success": False, "error": "username and password are required"}
     if not reserve_auth_attempt(username, "password"):
@@ -572,11 +758,13 @@ def handle_launcher_token(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         account=str(user.get("email") or user.get("username") or username),
         group=str(user.get("group") or "default"),
         preferred_name=preferred_name,
+        install_id=install_id,
+        device_id=device_id,
     )
 
 
 def handle_ensure_launcher_token(
-    _body: dict[str, Any],
+    body: dict[str, Any],
     authorization: str = "",
 ) -> tuple[int, dict[str, Any]]:
     owner = api_token_owner(authorization)
@@ -595,7 +783,14 @@ def handle_ensure_launcher_token(
         return 401, {"success": False, "error": "API token owner is unavailable"}
     account = str(owner.get("email") or owner.get("username") or user_id)
     group = str(owner.get("user_group") or "default")
-    return build_launcher_payload(user_id=user_id, account=account, group=group)
+    install_id, device_id = lease_identity_from_body(body)
+    return build_launcher_payload(
+        user_id=user_id,
+        account=account,
+        group=group,
+        install_id=install_id,
+        device_id=device_id,
+    )
 
 
 def build_launcher_payload(
@@ -605,6 +800,8 @@ def build_launcher_payload(
     group: str = "default",
     preferred_name: str = "",
     session_cookie: str = "",
+    install_id: str = "",
+    device_id: str = "",
 ) -> tuple[int, dict[str, Any]]:
     token = select_token(user_id, preferred_name, group)
     expected_group = str(group or "default").strip()
@@ -621,38 +818,54 @@ def build_launcher_payload(
     models = fetch_models(key)
     if not models:
         return 503, {"success": False, "error": "model catalog is temporarily unavailable"}
-    return 200, {
+    entitlement = entitlement_policy_for_group(group)
+    lease_payload: dict[str, Any] = {
         "success": True,
-        "data": {
-            "userId": user_id,
-            "account": account,
-            "group": group or "default",
-            "sessionCookie": session_cookie,
-            "key": key,
+        "entitlement": entitlement,
+    }
+    if install_id or device_id:
+        entitlement_status, lease_payload = issue_entitlement_lease(
+            account_id=str(user_id),
+            group=group,
+            install_id=install_id,
+            device_id=device_id,
+        )
+        if entitlement_status != 200:
+            return entitlement_status, lease_payload
+    data = {
+        "userId": user_id,
+        "account": account,
+        "group": group or "default",
+        "sessionCookie": session_cookie,
+        "key": key,
+        "apiKey": key,
+        "apiToken": key,
+        "tokenMasked": mask_secret(key),
+        "tokenId": token.get("id"),
+        "tokenName": token.get("name"),
+        "tokenKind": "launcher",
+        "permissionMode": token.get("permissionMode") or "default",
+        "tokenGroup": token.get("tokenGroup") or "",
+        "source": token.get("source") or source,
+        "remainQuota": token.get("remainQuota"),
+        "unlimitedQuota": token.get("unlimitedQuota"),
+        "modelLimitsEnabled": token.get("modelLimitsEnabled"),
+        "modelLimits": token.get("modelLimits"),
+        "models": models,
+        "api": {
+            "token": key,
             "apiKey": key,
-            "apiToken": key,
-            "tokenMasked": mask_secret(key),
-            "tokenId": token.get("id"),
-            "tokenName": token.get("name"),
-            "tokenKind": "launcher",
-            "permissionMode": token.get("permissionMode") or "default",
-            "tokenGroup": token.get("tokenGroup") or "",
-            "source": token.get("source") or source,
-            "remainQuota": token.get("remainQuota"),
-            "unlimitedQuota": token.get("unlimitedQuota"),
-            "modelLimitsEnabled": token.get("modelLimitsEnabled"),
-            "modelLimits": token.get("modelLimits"),
-            "models": models,
-            "api": {
-                "token": key,
-                "apiKey": key,
-                "baseUrl": PUBLIC_API_BASE,
-            },
-            "defaults": {
-                "textModel": default_text_model(models),
-            },
+            "baseUrl": PUBLIC_API_BASE,
+        },
+        "entitlement": lease_payload["entitlement"],
+        "defaults": {
+            "textModel": default_text_model(models),
         },
     }
+    if "entitlementLease" in lease_payload:
+        data["entitlementLease"] = lease_payload["entitlementLease"]
+        data["entitlementKey"] = lease_payload["entitlementKey"]
+    return 200, {"success": True, "data": data}
 
 
 def handle_email_code_register(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -719,11 +932,14 @@ def handle_email_code_register(body: dict[str, Any]) -> tuple[int, dict[str, Any
         return 500, {"success": False, "error": "registration succeeded but the account was not found"}
     user_id = candidate_user_id(login_payload) or str(user.get("id") or "")
     group = user_group(login_payload) or str(user.get("group") or "default")
+    install_id, device_id = lease_identity_from_body(body)
     status, payload = build_launcher_payload(
         user_id=user_id,
         account=email,
         group=group,
         session_cookie=cookie_header(cookie_jar),
+        install_id=install_id,
+        device_id=device_id,
     )
     if status != 200:
         return status, payload
@@ -1092,10 +1308,13 @@ def handle_email_code_login(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     if int(user.get("status") or 0) != 1:
         return 403, {"success": False, "error": "账号当前不可用，请联系管理员"}
     account = str(user.get("email") or user.get("username") or email)
+    install_id, device_id = lease_identity_from_body(body)
     return build_launcher_payload(
         user_id=str(user["id"]),
         account=account,
         group=str(user.get("group") or "default"),
+        install_id=install_id,
+        device_id=device_id,
     )
 
 
@@ -1109,7 +1328,7 @@ def _bind_connection() -> sqlite3.Connection:
         os.makedirs(directory, mode=0o700, exist_ok=True)
     connection = sqlite3.connect(BIND_DB_PATH)
     connection.row_factory = sqlite3.Row
-    connection.execute(
+    connection.executescript(
         """
         create table if not exists bind_tickets (
             ticket_hash text primary key,
@@ -1117,7 +1336,33 @@ def _bind_connection() -> sqlite3.Connection:
             created_at integer not null,
             expires_at integer not null,
             claimed_at integer
-        )
+        );
+        create table if not exists entitlement_accounts (
+            account_id text primary key,
+            entitlement_version integer not null default 1,
+            updated_at integer not null,
+            revoked_at integer not null default 0
+        );
+        create table if not exists entitlement_devices (
+            account_id text not null,
+            install_id text not null,
+            device_id text not null,
+            first_seen_at integer not null,
+            last_seen_at integer not null,
+            entitlement_version integer not null,
+            revoked_at integer not null default 0,
+            primary key(account_id, install_id, device_id)
+        );
+        create table if not exists entitlement_audit (
+            id integer primary key autoincrement,
+            account_id text not null,
+            install_id text,
+            device_id text,
+            action text not null,
+            code text not null,
+            details_json text not null,
+            created_at integer not null
+        );
         """
     )
     try:
@@ -1125,6 +1370,367 @@ def _bind_connection() -> sqlite3.Connection:
     except OSError:
         pass
     return connection
+
+
+def ensure_entitlement_account(connection: sqlite3.Connection, account_id: str, now: int) -> int:
+    row = connection.execute(
+        "select entitlement_version from entitlement_accounts where account_id = ?",
+        (account_id,),
+    ).fetchone()
+    if row:
+        return int(row["entitlement_version"] or 1)
+    connection.execute(
+        """
+        insert into entitlement_accounts(account_id, entitlement_version, updated_at, revoked_at)
+        values(?, 1, ?, 0)
+        """,
+        (account_id, now),
+    )
+    return 1
+
+
+def record_entitlement_audit(
+    connection: sqlite3.Connection,
+    *,
+    account_id: str,
+    install_id: str = "",
+    device_id: str = "",
+    action: str,
+    code: str,
+    details: dict[str, Any] | None = None,
+    now: int | None = None,
+) -> None:
+    connection.execute(
+        """
+        insert into entitlement_audit(account_id, install_id, device_id, action, code, details_json, created_at)
+        values(?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account_id,
+            install_id,
+            device_id,
+            action,
+            code,
+            json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
+            int(now or time.time()),
+        ),
+    )
+
+
+def entitlement_audit_events(account_id: str) -> list[dict[str, Any]]:
+    connection = _bind_connection()
+    try:
+        rows = connection.execute(
+            """
+            select account_id, install_id, device_id, action, code, details_json, created_at
+            from entitlement_audit
+            where account_id = ?
+            order by id
+            """,
+            (str(account_id),),
+        ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["details"] = json.loads(item.pop("details_json") or "{}")
+            except json.JSONDecodeError:
+                item["details"] = {}
+            events.append(item)
+        return events
+    finally:
+        connection.close()
+
+
+def signed_entitlement_lease(
+    *,
+    account_id: str,
+    install_id: str,
+    device_id: str,
+    policy: dict[str, Any],
+    entitlement_version: int,
+    now: int,
+) -> dict[str, Any]:
+    expires_at = now + int(ENTITLEMENT_LEASE_TTL_SEC)
+    lease = {
+        "schema": "loom.entitlement_lease.v1",
+        "accountId": account_id,
+        "installId": install_id,
+        "deviceId": device_id,
+        "features": list(policy["features"]),
+        "limits": dict(policy["limits"]),
+        "issuedAt": now,
+        "expiresAt": expires_at,
+        "offlineGraceUntil": expires_at + int(ENTITLEMENT_OFFLINE_GRACE_SEC),
+        "entitlementVersion": int(entitlement_version),
+        "keyId": ENTITLEMENT_KEY_ID,
+    }
+    lease["signature"] = sign_entitlement_payload(lease)
+    return lease
+
+
+def issue_entitlement_lease(
+    *,
+    account_id: str,
+    group: str,
+    install_id: str,
+    device_id: str,
+) -> tuple[int, dict[str, Any]]:
+    if not install_id or not device_id:
+        return 400, entitlement_error(
+            "device_identity_required",
+            "矩阵授权需要 installId 和 deviceId，请升级 LOOM 后重新登录。",
+            "relogin_with_device_identity",
+            {"accountId": account_id, "hasInstallId": bool(install_id), "hasDeviceId": bool(device_id)},
+        )
+
+    policy = entitlement_policy_for_group(group)
+    device_limit = int(policy["limits"]["devices"])
+    now = int(time.time())
+    try:
+        key_payload = entitlement_key_payload()
+    except Exception:
+        return 503, entitlement_error(
+            "entitlement_signing_unavailable",
+            "服务器权益签名密钥未配置，暂时无法签发矩阵授权。",
+            "contact_support",
+            {"accountId": account_id},
+        )
+
+    connection = _bind_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        version = ensure_entitlement_account(connection, account_id, now)
+        rows = connection.execute(
+            """
+            select install_id, device_id
+            from entitlement_devices
+            where account_id = ? and revoked_at = 0
+            """,
+            (account_id,),
+        ).fetchall()
+        current_registered = any(
+            row["install_id"] == install_id and row["device_id"] == device_id
+            for row in rows
+        )
+        used_devices = len(rows)
+        if not current_registered and used_devices >= device_limit:
+            details = {
+                "accountId": account_id,
+                "installId": install_id,
+                "deviceId": device_id,
+                "limit": device_limit,
+                "used": used_devices,
+                "group": policy["group"],
+                "plan": policy["plan"],
+            }
+            record_entitlement_audit(
+                connection,
+                account_id=account_id,
+                install_id=install_id,
+                device_id=device_id,
+                action="issue_lease",
+                code="device_limit_exceeded",
+                details=details,
+                now=now,
+            )
+            connection.commit()
+            return 403, entitlement_error(
+                "device_limit_exceeded",
+                f"{policy['plan']} 账号最多绑定 {device_limit} 台手机；免费账号最多绑定 1 台手机。",
+                "upgrade_or_unbind_device",
+                details,
+            )
+        connection.execute(
+            """
+            insert into entitlement_devices(
+                account_id, install_id, device_id, first_seen_at, last_seen_at,
+                entitlement_version, revoked_at
+            )
+            values(?, ?, ?, ?, ?, ?, 0)
+            on conflict(account_id, install_id, device_id) do update set
+                last_seen_at = excluded.last_seen_at,
+                entitlement_version = excluded.entitlement_version,
+                revoked_at = 0
+            """,
+            (account_id, install_id, device_id, now, now, version),
+        )
+        lease = signed_entitlement_lease(
+            account_id=account_id,
+            install_id=install_id,
+            device_id=device_id,
+            policy=policy,
+            entitlement_version=version,
+            now=now,
+        )
+        record_entitlement_audit(
+            connection,
+            account_id=account_id,
+            install_id=install_id,
+            device_id=device_id,
+            action="issue_lease",
+            code="ok",
+            details={
+                "group": policy["group"],
+                "plan": policy["plan"],
+                "limits": policy["limits"],
+                "entitlementVersion": version,
+            },
+            now=now,
+        )
+        connection.commit()
+        return 200, {
+            "success": True,
+            "entitlement": policy,
+            "entitlementLease": lease,
+            "entitlementKey": key_payload,
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def revoke_account_entitlements(account_id: str, *, reason: str = "") -> int:
+    now = int(time.time())
+    account = str(account_id)
+    connection = _bind_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        version = ensure_entitlement_account(connection, account, now) + 1
+        connection.execute(
+            """
+            update entitlement_accounts
+            set entitlement_version = ?, updated_at = ?, revoked_at = ?
+            where account_id = ?
+            """,
+            (version, now, now, account),
+        )
+        connection.execute(
+            "update entitlement_devices set revoked_at = ? where account_id = ? and revoked_at = 0",
+            (now, account),
+        )
+        record_entitlement_audit(
+            connection,
+            account_id=account,
+            action="revoke_entitlements",
+            code="ok",
+            details={"reason": reason, "entitlementVersion": version},
+            now=now,
+        )
+        connection.commit()
+        return version
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def verify_entitlement_lease(lease: Any) -> tuple[int, dict[str, Any]]:
+    if not isinstance(lease, dict):
+        return 401, entitlement_error(
+            "entitlement_required",
+            "缺少有效的账号权益租约，请重新登录。",
+            "relogin",
+        )
+    required = {
+        "accountId",
+        "installId",
+        "deviceId",
+        "features",
+        "limits",
+        "issuedAt",
+        "expiresAt",
+        "offlineGraceUntil",
+        "entitlementVersion",
+        "keyId",
+        "signature",
+    }
+    missing = sorted(key for key in required if key not in lease)
+    if missing:
+        return 401, entitlement_error(
+            "lease_malformed",
+            "账号权益租约字段不完整，请重新登录。",
+            "relogin",
+            {"missing": missing},
+        )
+    signature = str(lease.get("signature") or "")
+    signed = dict(lease)
+    signed.pop("signature", None)
+    try:
+        entitlement_private_key().public_key().verify(
+            base64.b64decode(signature),
+            canonical_json(signed).encode("utf-8"),
+        )
+    except (InvalidSignature, ValueError, TypeError, RuntimeError):
+        return 401, entitlement_error(
+            "lease_signature_invalid",
+            "账号权益租约验签失败，请重新登录。",
+            "relogin",
+        )
+    return 200, {"success": True, "lease": lease}
+
+
+def authorize_entitlement_operation(lease: Any, operation: str = "matrix.task.start") -> tuple[int, dict[str, Any]]:
+    status, payload = verify_entitlement_lease(lease)
+    if status != 200:
+        return status, payload
+    checked_lease = payload["lease"]
+    account_id = str(checked_lease["accountId"])
+    install_id = str(checked_lease["installId"])
+    device_id = str(checked_lease["deviceId"])
+    now = int(time.time())
+    connection = _bind_connection()
+    try:
+        row = connection.execute(
+            """
+            select entitlement_version
+            from entitlement_accounts
+            where account_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        if not row or int(row["entitlement_version"] or 0) != int(checked_lease["entitlementVersion"]):
+            return 403, entitlement_error(
+                "lease_revoked",
+                "账号权益已刷新或撤销，请重新同步账号。",
+                "refresh_entitlement",
+                {"accountId": account_id},
+            )
+        device = connection.execute(
+            """
+            select 1 from entitlement_devices
+            where account_id = ? and install_id = ? and device_id = ? and revoked_at = 0
+            """,
+            (account_id, install_id, device_id),
+        ).fetchone()
+        if not device:
+            return 403, entitlement_error(
+                "device_not_registered",
+                "当前设备未在账号权益中登记，请重新登录。",
+                "relogin",
+                {"accountId": account_id, "installId": install_id, "deviceId": device_id},
+            )
+    finally:
+        connection.close()
+
+    normalized_operation = str(operation or "matrix.task.start").strip()
+    if normalized_operation not in SAFETY_ENTITLEMENT_OPERATIONS and int(checked_lease["expiresAt"]) <= now:
+        return 403, entitlement_error(
+            "lease_expired",
+            "账号权益租约已过期，不能启动新的矩阵任务；请联网重新同步账号。",
+            "refresh_entitlement",
+            {"accountId": account_id, "expiredAt": checked_lease["expiresAt"]},
+        )
+    return 200, {
+        "success": True,
+        "code": "ok",
+        "operation": normalized_operation,
+        "features": checked_lease["features"],
+        "limits": checked_lease["limits"],
+    }
 
 
 def cleanup_bind_tickets(now: int | None = None) -> None:
@@ -1221,6 +1827,27 @@ def handle_bind_claim(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return 200, payload
 
 
+def entitlement_public_key_response() -> tuple[int, dict[str, Any]]:
+    try:
+        return 200, {"success": True, "data": entitlement_key_payload()}
+    except Exception:
+        return 503, entitlement_error(
+            "entitlement_signing_unavailable",
+            "服务器权益签名密钥未配置，暂时无法提供矩阵授权公钥。",
+            "contact_support",
+        )
+
+
+def handle_entitlement_refresh(body: dict[str, Any], authorization: str = "") -> tuple[int, dict[str, Any]]:
+    return handle_ensure_launcher_token(body, authorization)
+
+
+def handle_entitlement_check(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    lease = body.get("entitlementLease") or body.get("lease")
+    operation = str(body.get("operation") or "matrix.task.start")
+    return authorize_entitlement_operation(lease, operation)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         # Keep default access logging quiet to avoid accidental sensitive context.
@@ -1254,6 +1881,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/openclaw/auth/capabilities":
             self._send(200, {"success": True, "data": auth_capabilities_payload()})
             return
+        if self.path == "/api/openclaw/entitlements/public-key":
+            status, payload = entitlement_public_key_response()
+            self._send(status, payload)
+            return
         if self.path in ("/api/openclaw/bind/page", "/openclaw-bind"):
             self._send_html(200, BIND_PAGE_HTML)
             return
@@ -1266,6 +1897,11 @@ class Handler(BaseHTTPRequestHandler):
                 body,
                 self.headers.get("Authorization") or "",
             ),
+            "/api/openclaw/entitlements/refresh": lambda body: handle_entitlement_refresh(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/entitlements/check": handle_entitlement_check,
             "/api/openclaw/bind/start": handle_bind_start,
             "/api/openclaw/bind/claim": handle_bind_claim,
             "/api/openclaw/auth/email-code/send": handle_email_code_send,
