@@ -82,6 +82,16 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
             release.index("- name: Check Rust"),
         )
 
+    def test_windows_release_installs_skill_validation_dependencies_before_build(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+
+        dependency_step = "- name: Install release Python dependencies"
+        skill_step = "- name: Build and verify bundled Skill library"
+        self.assertIn(dependency_step, release)
+        self.assertIn('"cryptography>=42,<47"', release)
+        self.assertIn('"jsonschema>=4.23,<5.0"', release)
+        self.assertLess(release.index(dependency_step), release.index(skill_step))
+
     def test_windows_release_downloads_webview2_before_portable_build(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
 
