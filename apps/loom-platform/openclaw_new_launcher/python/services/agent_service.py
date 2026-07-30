@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -26,6 +28,7 @@ from core.loom_model_client import LoomModelClient, extract_explicit_capability_
 from core.native_agent_runtime import LoomNativeRuntimeAdapter
 from core.newapi_account_manager import NewApiAccountManager
 from core.phone_matrix import MatrixControlPlane
+from core.job_ownership import current_account_job_identity, job_visible_to_account
 from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
 from services.skills import SkillService
 
@@ -63,6 +66,29 @@ _SCOPE_INDEPENDENT_MEDIA_TERMS = (
     "做视频",
     "生视频",
 )
+_MAX_USER_ATTACHMENTS = 8
+_MAX_USER_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024
+_MAX_USER_IMAGE_BYTES = 8 * 1024 * 1024
+_MAX_USER_TEXT_CHARS = 32_768
+_USER_IMAGE_MIME_EXTENSIONS = {
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+_USER_TEXT_EXTENSIONS = {
+    ".csv",
+    ".json",
+    ".jsonl",
+    ".log",
+    ".markdown",
+    ".md",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
 
 def _native_runtime_profile_id(_value: Any = None) -> str:
@@ -106,6 +132,44 @@ def _is_scope_continuation(text: str) -> bool:
     return continuation and not independent_media
 
 
+def _account_id_from_session(session: Any) -> str:
+    if not isinstance(session, Mapping) or session.get("loggedIn") is not True:
+        return ""
+    entitlement = (
+        session.get("accountEntitlement")
+        if isinstance(session.get("accountEntitlement"), Mapping)
+        else {}
+    )
+    account_id = str(
+        entitlement.get("accountId")
+        or session.get("accountId")
+        or ""
+    ).strip()
+    if account_id:
+        return account_id
+    member_id = str(session.get("memberId") or "").strip()
+    return member_id.partition(":")[2].strip() if member_id.startswith("newapi:") else ""
+
+
+def _safe_attachment_name(value: Any) -> str:
+    name = os.path.basename(str(value or "").replace("\\", "/")).replace("\x00", "").strip()
+    if not name:
+        raise ValueError("AGENT_ATTACHMENT_INVALID: attachment name is required")
+    return name[:160]
+
+
+def _image_signature_matches(mime: str, payload: bytes) -> bool:
+    if mime == "image/png":
+        return payload.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime == "image/jpeg":
+        return payload.startswith(b"\xff\xd8\xff")
+    if mime == "image/gif":
+        return payload.startswith((b"GIF87a", b"GIF89a"))
+    if mime == "image/webp":
+        return len(payload) >= 12 and payload.startswith(b"RIFF") and payload[8:12] == b"WEBP"
+    return False
+
+
 class AgentService:
     """Join persistence, runtime execution, policy, tools, and API envelopes."""
 
@@ -126,16 +190,9 @@ class AgentService:
         self.paths = paths
         self.brand_identity = load_brand_identity(paths)
         self.native_runtime_name = self.brand_identity.native_agent_name
-        self.repository = AgentSessionRepository(paths)
-        self.event_bus = AgentEventBus(self.repository)
         self.context_factory = context_factory
         self.job_manager = job_manager
-        self._matrix_factory = matrix_factory or (
-            lambda: MatrixControlPlane(
-                self.paths,
-                phone_authorizer=self._authorize_matrix_phone_devices,
-            )
-        )
+        self._matrix_factory = matrix_factory or self._default_matrix_factory
         self._campaign_links: dict[str, Json] = {}
         self._matrix_monitor_stop = threading.Event()
         self.account_manager = account_manager
@@ -143,6 +200,29 @@ class AgentService:
         if runtime is None:
             self.account_manager = account_manager or NewApiAccountManager(paths, lambda _text: None)
             self.model_client = model_client or LoomModelClient(self.account_manager)
+        public_session: Mapping[str, Any] = {}
+        public_session_reader = getattr(self.account_manager, "public_session", None)
+        if callable(public_session_reader):
+            try:
+                candidate = public_session_reader()
+                if isinstance(candidate, Mapping):
+                    public_session = candidate
+            except Exception:
+                public_session = {}
+        self._account_scoped = bool(
+            isinstance(self.account_manager, NewApiAccountManager)
+            or (
+                self.account_manager is not None
+                and "loggedIn" in public_session
+            )
+        )
+        self.owner_account_id = _account_id_from_session(public_session)
+        self.repository = AgentSessionRepository(
+            paths,
+            owner_account_id=self.owner_account_id if self._account_scoped else None,
+        )
+        self.event_bus = AgentEventBus(self.repository)
+        if runtime is None:
             self.runtime = LoomNativeRuntimeAdapter(
                 self.model_client,
                 runtime_name=self.native_runtime_name,
@@ -185,7 +265,12 @@ class AgentService:
         self._closed = False
         self._executor_shutdown = False
 
-        recovered = self.orchestrator.recover_unfinished_runs()
+        execution_permitted = self._execution_permitted()
+        recovered = (
+            self.orchestrator.recover_unfinished_runs()
+            if execution_permitted
+            else []
+        )
         for run in recovered:
             if run.get("status") == "queued":
                 self._submit_run(
@@ -193,13 +278,26 @@ class AgentService:
                     str(run["runId"]),
                     self._request_from_run(run),
                 )
-        self._restore_matrix_campaign_links()
+        if execution_permitted:
+            self._restore_matrix_campaign_links()
         self._matrix_monitor_thread = threading.Thread(
             target=self._monitor_matrix_campaigns,
             name="loom-agent-matrix-monitor",
             daemon=True,
         )
         self._matrix_monitor_thread.start()
+
+    def _default_matrix_factory(self) -> MatrixControlPlane:
+        ctx = self.context_factory() if callable(self.context_factory) else None
+        owner_account_id, owner_binding = (
+            current_account_job_identity(ctx) if ctx is not None else ("", "")
+        )
+        return MatrixControlPlane(
+            self.paths,
+            phone_authorizer=self._authorize_matrix_phone_devices,
+            owner_account_id=owner_account_id,
+            owner_account_binding=owner_binding,
+        )
 
     def _authorize_matrix_phone_devices(
         self,
@@ -217,6 +315,7 @@ class AgentService:
         )
 
     def bootstrap(self) -> Json:
+        self._require_current_account()
         runtime_status = redact_sensitive(self.runtime.status(NATIVE_RUNTIME_PROFILE_ID))
         if not isinstance(runtime_status, Mapping):
             runtime_status = {}
@@ -252,9 +351,11 @@ class AgentService:
         }
 
     def list_sessions(self, *, query: str | None = None, cursor: str | None = None, limit: int = 50) -> Json:
+        self._require_current_account()
         return self.repository.list_sessions(query=query, cursor=cursor, limit=limit)
 
     def create_session(self, body: Mapping[str, Any] | None = None) -> Json:
+        self._require_execution_access()
         data = dict(body or {})
         model_id = str(data.get("modelId") or "").strip()
         if model_id:
@@ -266,6 +367,7 @@ class AgentService:
         )
 
     def update_session(self, session_id: str, body: Mapping[str, Any] | None = None) -> Json:
+        self._require_execution_access()
         data = dict(body or {})
         if "modelId" in data:
             model_id = str(data.get("modelId") or "").strip()
@@ -276,6 +378,7 @@ class AgentService:
         return self.repository.update_session(session_id, data)
 
     def session_detail(self, session_id: str, *, cursor: str | None = None, limit: int = 100) -> Json:
+        self._require_current_account()
         page = self.repository.page_messages(session_id, cursor=cursor, limit=limit)
         return {
             "session": self.repository.get_session(session_id),
@@ -285,6 +388,7 @@ class AgentService:
         }
 
     def send_message(self, session_id: str, body: Mapping[str, Any]) -> Json:
+        self._require_execution_access()
         with self._lock:
             if self._closed:
                 raise RuntimeError("agent service is closed")
@@ -293,8 +397,8 @@ class AgentService:
         if not client_message_id:
             raise ValueError("clientMessageId is required")
         text = str(request.get("text") or "").strip()
-        attachments = request.get("attachments") if isinstance(request.get("attachments"), list) else []
-        if not text and not attachments:
+        raw_attachments = request.get("attachments") if isinstance(request.get("attachments"), list) else []
+        if not text and not raw_attachments:
             raise ValueError("message text or attachment is required")
         session = self.repository.get_session(session_id)
         existing = self.repository.find_message_run(session_id, client_message_id)
@@ -327,6 +431,7 @@ class AgentService:
                     break
         if requested_mode == "manual" and scope_resolution.status != "resolved":
             raise ValueError(f"AGENT_SCOPE_INVALID: {scope_resolution.summary}")
+        attachments = self._normalize_user_attachments(session_id, raw_attachments)
         session_artifacts = self._session_artifacts(session_id)
         now = _utc_now()
         message_id = f"message_{uuid.uuid4().hex}"
@@ -417,6 +522,152 @@ class AgentService:
                 )
                 self._submit_run(session_id, str(result["run"]["runId"]), persisted_request)
         return {"message": result["message"], "run": result["run"]}
+
+    def _normalize_user_attachments(self, session_id: str, values: list[Any]) -> list[Json]:
+        if len(values) > _MAX_USER_ATTACHMENTS:
+            raise ValueError(
+                f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: at most {_MAX_USER_ATTACHMENTS} attachments are allowed"
+            )
+        normalized: list[Json] = []
+        total_bytes = 0
+        for value in values:
+            if not isinstance(value, Mapping):
+                raise ValueError("AGENT_ATTACHMENT_INVALID: attachment must be an object")
+            name = _safe_attachment_name(value.get("name"))
+            try:
+                size = max(0, int(value.get("size") or 0))
+            except (TypeError, ValueError):
+                raise ValueError(f"AGENT_ATTACHMENT_INVALID: invalid size for {name}") from None
+            total_bytes += size
+            if total_bytes > _MAX_USER_ATTACHMENT_TOTAL_BYTES:
+                raise ValueError(
+                    "AGENT_ATTACHMENT_LIMIT_EXCEEDED: attachment total exceeds 16 MB"
+                )
+            supplied_type = str(value.get("type") or value.get("mime") or "").strip().lower()
+            extension = os.path.splitext(name)[1].lower()
+            kind = str(value.get("kind") or "").strip().lower()
+
+            if kind == "image" or supplied_type.startswith("image/"):
+                encoded = str(value.get("dataUrl") or "")
+                header = f"data:{supplied_type};base64,"
+                encoded_bytes = max(0, len(encoded) - len(header))
+                estimated_bytes = (encoded_bytes * 3) // 4
+                total_bytes += max(0, estimated_bytes - size)
+                if total_bytes > _MAX_USER_ATTACHMENT_TOTAL_BYTES:
+                    raise ValueError(
+                        "AGENT_ATTACHMENT_LIMIT_EXCEEDED: attachment total exceeds 16 MB"
+                    )
+                normalized.append(self._materialize_user_image_attachment(
+                    session_id,
+                    name=name,
+                    mime=supplied_type,
+                    size=size,
+                    last_modified=value.get("lastModified"),
+                    data_url=encoded,
+                ))
+                continue
+
+            is_text = (
+                kind in {"", "text"}
+                and (
+                    supplied_type.startswith("text/")
+                    or supplied_type in {
+                        "",
+                        "application/javascript",
+                        "application/json",
+                        "application/ld+json",
+                        "application/xml",
+                        "application/x-yaml",
+                        "application/yaml",
+                    }
+                    or extension in _USER_TEXT_EXTENSIONS
+                )
+            )
+            if is_text:
+                content = str(value.get("content") or "")[:_MAX_USER_TEXT_CHARS]
+                normalized.append({
+                    "name": name,
+                    "size": size,
+                    "type": supplied_type or "text/plain",
+                    "mime": supplied_type or "text/plain",
+                    "kind": "text",
+                    "lastModified": value.get("lastModified"),
+                    "content": content,
+                    "truncated": bool(
+                        value.get("truncated")
+                        or value.get("contentTruncated")
+                        or len(str(value.get("content") or "")) > _MAX_USER_TEXT_CHARS
+                    ),
+                })
+                continue
+
+            raise ValueError(
+                f"AGENT_ATTACHMENT_TYPE_UNSUPPORTED: {name} is not a supported image or text attachment"
+            )
+        return normalized
+
+    def _materialize_user_image_attachment(
+        self,
+        session_id: str,
+        *,
+        name: str,
+        mime: str,
+        size: int,
+        last_modified: Any,
+        data_url: Any,
+    ) -> Json:
+        if mime not in _USER_IMAGE_MIME_EXTENSIONS:
+            raise ValueError(f"AGENT_ATTACHMENT_TYPE_UNSUPPORTED: unsupported image type for {name}")
+        if size > _MAX_USER_IMAGE_BYTES:
+            raise ValueError(f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: {name} exceeds 8 MB")
+        encoded = str(data_url or "")
+        expected_header = f"data:{mime};base64,"
+        if not encoded.startswith(expected_header):
+            raise ValueError(f"AGENT_ATTACHMENT_INVALID: image data is missing for {name}")
+        raw_base64 = encoded[len(expected_header):]
+        if len(raw_base64) > ((_MAX_USER_IMAGE_BYTES + 2) // 3) * 4 + 8:
+            raise ValueError(f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: {name} exceeds 8 MB")
+        try:
+            payload = base64.b64decode(raw_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError(f"AGENT_ATTACHMENT_INVALID: image data is invalid for {name}") from None
+        if not payload or len(payload) > _MAX_USER_IMAGE_BYTES:
+            raise ValueError(f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: {name} exceeds 8 MB")
+        if size and size != len(payload):
+            raise ValueError(f"AGENT_ATTACHMENT_INVALID: image size mismatch for {name}")
+        if not _image_signature_matches(mime, payload):
+            raise ValueError(f"AGENT_ATTACHMENT_INVALID: image signature mismatch for {name}")
+
+        attachment_dir = os.path.join(
+            self.paths.data_dir,
+            "agent",
+            "attachments",
+            session_id,
+        )
+        os.makedirs(attachment_dir, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}{_USER_IMAGE_MIME_EXTENSIONS[mime]}"
+        path = os.path.abspath(os.path.join(attachment_dir, filename))
+        if os.path.commonpath([path, os.path.abspath(attachment_dir)]) != os.path.abspath(attachment_dir):
+            raise ValueError("AGENT_ATTACHMENT_INVALID: unsafe attachment path")
+        temporary_path = f"{path}.tmp"
+        try:
+            with open(temporary_path, "xb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+        return {
+            "name": name,
+            "size": len(payload),
+            "type": mime,
+            "mime": mime,
+            "kind": "image",
+            "lastModified": last_modified,
+            "path": path,
+        }
 
     def _session_artifacts(self, session_id: str, *, limit: int = 20) -> list[Json]:
         try:
@@ -510,9 +761,11 @@ class AgentService:
         return "", "account-default"
 
     def get_run(self, run_id: str) -> Json:
+        self._require_current_account()
         return self.repository.get_run(run_id)
 
     def get_trace(self, run_id: str) -> Json:
+        self._require_current_account()
         run = self.repository.get_run(run_id)
         session_id = str(run["sessionId"])
         events = self.repository.replay_events(session_id)
@@ -530,9 +783,11 @@ class AgentService:
         }
 
     def pause_run(self, run_id: str) -> Json:
+        self._require_execution_access()
         return self.orchestrator.pause_run(run_id)
 
     def resume_run(self, run_id: str) -> Json:
+        self._require_execution_access()
         with self._lock:
             run = self.repository.get_run(run_id)
             pause_requested = (
@@ -553,6 +808,7 @@ class AgentService:
         return self.repository.get_run(run_id)
 
     def cancel_run(self, run_id: str) -> Json:
+        self._require_execution_access()
         run = self.repository.get_run(run_id)
         campaign_ids = [
             str(campaign_id)
@@ -598,6 +854,7 @@ class AgentService:
         return self.orchestrator.cancel_run(run_id)
 
     def resolve_approval(self, approval_id: str, body: Mapping[str, Any]) -> Json:
+        self._require_execution_access()
         approval = self.repository.get_approval(approval_id)
         decision = str(body.get("decision") or "").strip().lower()
         decision = {"approve": "approved", "reject": "rejected"}.get(decision, decision)
@@ -627,6 +884,7 @@ class AgentService:
                         self._matrix_confirmation_tokens.pop(input_hash, None)
 
     def queue_approval_resolution(self, approval_id: str, body: Mapping[str, Any]) -> Json:
+        self._require_execution_access()
         approval = self.repository.get_approval(approval_id)
         decision = str(body.get("decision") or "").strip().lower()
         decision = {"approve": "approved", "reject": "rejected"}.get(decision, decision)
@@ -677,7 +935,47 @@ class AgentService:
             raise
 
     def events_after(self, *, session_id: str, after_seq: int) -> list[Json]:
+        self._require_current_account()
         return self.event_bus.replay(session_id, after_seq=after_seq, limit=500)
+
+    def _public_account_session(self) -> Mapping[str, Any]:
+        reader = getattr(self.account_manager, "public_session", None)
+        if not callable(reader):
+            return {}
+        try:
+            value = reader()
+        except Exception:
+            return {}
+        return value if isinstance(value, Mapping) else {}
+
+    def _require_current_account(self) -> None:
+        if not self._account_scoped:
+            return
+        current = _account_id_from_session(self._public_account_session())
+        if not current or current != self.owner_account_id:
+            raise KeyError("agent account scope")
+
+    def _execution_permitted(self) -> bool:
+        try:
+            self._require_current_account()
+        except KeyError:
+            return False
+        entitlement = getattr(self.account_manager, "account_entitlement", None)
+        current_state = getattr(entitlement, "current_state", None)
+        if not callable(current_state):
+            return True
+        try:
+            state = current_state()
+        except Exception:
+            return False
+        return isinstance(state, Mapping) and state.get("authorized") is True
+
+    def _require_execution_access(self) -> None:
+        self._require_current_account()
+        if not self._execution_permitted():
+            raise PermissionError(
+                "AGENT_ENTITLEMENT_REQUIRED: account entitlement is inactive"
+            )
 
     def shutdown(self, *, grace_seconds: float = 2.0) -> Json:
         with self._lock:
@@ -891,6 +1189,7 @@ class AgentService:
         node = {
             "traceId": str(event.get("eventId") or f"trace_{uuid.uuid4().hex}"),
             "runId": run_id,
+            "ownerAccountId": str(event.get("ownerAccountId") or "").strip(),
             "kind": kind,
             "name": event_type,
             "status": status,
@@ -977,8 +1276,18 @@ class AgentService:
         campaign_id_set = set(campaign_ids)
         if self.job_manager is not None:
             try:
+                account_id, owner_binding = self._current_job_owner_identity()
                 self.job_manager.cancel_matching(
-                    lambda job: str((job.get("progress") or {}).get("campaignId") or "") in campaign_id_set
+                    lambda job: (
+                        self._matrix_job_visible_to_identity(
+                            job,
+                            account_id=account_id,
+                            owner_binding=owner_binding,
+                        )
+                        and str(
+                            (job.get("progress") or {}).get("campaignId") or ""
+                        ) in campaign_id_set
+                    )
                 )
             except Exception:
                 incomplete.append("jobs")
@@ -1279,8 +1588,18 @@ class AgentService:
         if not campaign_id:
             raise ValueError("campaignId is required")
         if self.job_manager is not None:
+            account_id, owner_binding = self._current_job_owner_identity()
             self.job_manager.cancel_matching(
-                lambda job: str((job.get("progress") or {}).get("campaignId") or "") == campaign_id
+                lambda job: (
+                    self._matrix_job_visible_to_identity(
+                        job,
+                        account_id=account_id,
+                        owner_binding=owner_binding,
+                    )
+                    and str(
+                        (job.get("progress") or {}).get("campaignId") or ""
+                    ) == campaign_id
+                )
             )
         return self._matrix_factory().cancel(campaign_id)
 
@@ -1331,7 +1650,10 @@ class AgentService:
     def _start_matrix_job(self, kind: str, title: str, matrix: MatrixControlPlane, task: Json, body: Json) -> Json | None:
         if self.job_manager is None or self.context_factory is None:
             return None
-        from api.routes_matrix import _run_matrix_campaign
+        from api.routes_matrix import _matrix_job_metadata, _run_matrix_campaign
+
+        context = self.context_factory()
+        job_metadata = _matrix_job_metadata(context, task)
 
         def run(job_id: str) -> Json:
             return _run_matrix_campaign(self.context_factory(), matrix, task, body, job_id)
@@ -1346,6 +1668,7 @@ class AgentService:
                     "phase": f"{kind}.queued",
                     "commandId": kind,
                     "campaignId": task.get("campaignId"),
+                    **job_metadata,
                 },
             )
         except Exception as exc:
@@ -1366,6 +1689,31 @@ class AgentService:
                 execution_may_continue=True,
             )
         return job
+
+    def _current_job_owner_identity(self) -> tuple[str, str]:
+        if not callable(self.context_factory):
+            return "", ""
+        try:
+            context = self.context_factory()
+        except Exception:
+            return "", ""
+        return current_account_job_identity(context)
+
+    @staticmethod
+    def _matrix_job_visible_to_identity(
+        job: dict,
+        *,
+        account_id: str,
+        owner_binding: str,
+    ) -> bool:
+        return bool(
+            str(job.get("kind") or "").startswith("matrix.")
+            and job_visible_to_account(
+                job,
+                account_id=account_id,
+                owner_binding=owner_binding,
+            )
+        )
 
     def _matrix_attachment(self, task: Json, job: Json | None) -> Json:
         rows = [

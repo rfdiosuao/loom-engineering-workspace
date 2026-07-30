@@ -157,12 +157,17 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
             gateway_image_model text not null default '', gateway_video_model text not null default '',
             gateway_models_json text not null default '[]', created_at text not null, updated_at text not null)""",
         """create table if not exists publish_relay_packets (
-            seq integer primary key autoincrement, packet_id text not null unique, channel_id text not null,
+            seq integer primary key autoincrement, packet_id text not null unique,
+            account_id text not null default '', channel_id text not null,
             packet_json text not null, status text not null default 'pending', attempts integer not null default 0,
             created_at text not null, updated_at text not null, leased_by text not null default '',
             lease_id text not null default '', lease_until_ms integer not null default 0,
             next_available_at_ms integer not null default 0, completed_at text not null default '',
-            result_json text not null default '', last_error text not null default '')""",
+            result_json text not null default '', last_error text not null default '',
+            commit_token_hash text not null default '', commit_authorized_at text not null default '',
+            commit_expires_at_ms integer not null default 0, commit_lease_id text not null default '',
+            commit_client_id text not null default '', commit_state text not null default '',
+            outcome_indeterminate integer not null default 0)""",
     )
     for statement in statements:
         conn.execute(statement)
@@ -198,6 +203,14 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
         ("plans", "gateway_video_model", "text not null default ''"),
         ("plans", "gateway_models_json", "text not null default '[]'"),
         ("plans", "quotas_json", "text not null default '{}'"),
+        ("publish_relay_packets", "account_id", "text not null default ''"),
+        ("publish_relay_packets", "commit_token_hash", "text not null default ''"),
+        ("publish_relay_packets", "commit_authorized_at", "text not null default ''"),
+        ("publish_relay_packets", "commit_expires_at_ms", "integer not null default 0"),
+        ("publish_relay_packets", "commit_lease_id", "text not null default ''"),
+        ("publish_relay_packets", "commit_client_id", "text not null default ''"),
+        ("publish_relay_packets", "commit_state", "text not null default ''"),
+        ("publish_relay_packets", "outcome_indeterminate", "integer not null default 0"),
     ):
         ensure_column(conn, table, name, definition)
     seed_default_settings(conn, defaults=active_defaults)

@@ -67,11 +67,13 @@ EXPECTED_ROUTE_MARKERS = {
     "/api/beta/claim",
     "/api/beta/status",
     "/api/client/config",
+    "/api/lumi/publish/commit-authorize",
     "/api/lumi/publish/complete",
     "/api/lumi/publish/health",
     "/api/lumi/publish/packet",
     "/api/lumi/publish/poll",
     "/api/lumi/publish/status",
+    "/api/lumi/relay/commit-authorize",
     "/api/lumi/relay/complete",
     "/api/lumi/relay/health",
     "/api/lumi/relay/packet",
@@ -277,6 +279,20 @@ class HttpRouteInventoryTests(unittest.TestCase):
         self.assertEqual("no-store", probe.header("Cache-Control"))
         self.assertEqual("session=value", probe.header("Set-Cookie"))
         self.assertTrue(transaction.response_sent)
+
+    def test_account_entitlement_service_response_is_private_and_not_cached(self) -> None:
+        for path in (
+            "/api/service/account-entitlements/redeem",
+            "/api/service/account-entitlements/current?accountId=account-1",
+            "/api/service/account-entitlements/migrate-legacy",
+        ):
+            with self.subTest(path=path):
+                probe = ResponseProbe(path)
+                probe.send_json(200, {"ok": True, "entitlement": {}})
+                self.assertEqual(
+                    "no-store, private",
+                    probe.header("Cache-Control"),
+                )
 
     def test_missing_file_head_keeps_error_content_length_without_body(self) -> None:
         probe = ResponseProbe("/logo.ico")

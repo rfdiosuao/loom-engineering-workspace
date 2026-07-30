@@ -31,6 +31,86 @@ def _register_matrix_devices_from_process(base_path: str, prefix: str, count: in
 
 
 class MatrixControlPlaneTests(unittest.TestCase):
+    def test_account_scoped_matrix_state_never_exposes_other_account(self) -> None:
+        from core.job_ownership import account_job_binding
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane, MatrixTargetError
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(base_path=temp_dir)
+            account_a = MatrixControlPlane(
+                paths,
+                phone_authorizer=lambda _ids, _operation: None,
+                owner_account_id="account-a",
+                owner_account_binding=account_job_binding("account-a", temp_dir),
+            )
+            account_b = MatrixControlPlane(
+                paths,
+                phone_authorizer=lambda _ids, _operation: None,
+                owner_account_id="account-b",
+                owner_account_binding=account_job_binding("account-b", temp_dir),
+            )
+            account_a.register_device({"deviceId": "phone-a", "online": True})
+            account_b.register_device({"deviceId": "phone-b", "online": True})
+            campaign = account_a.dispatch({
+                "prompt": "读取当前页面",
+                "deviceIds": ["phone-a"],
+            })
+
+            status_a = account_a.status()
+            status_b = account_b.status()
+
+            self.assertEqual(
+                [item["deviceId"] for item in status_a["devices"]],
+                ["phone-a"],
+            )
+            self.assertEqual(
+                [item["deviceId"] for item in status_b["devices"]],
+                ["phone-b"],
+            )
+            self.assertEqual(
+                [item["campaignId"] for item in status_a["campaigns"]],
+                [campaign["campaignId"]],
+            )
+            self.assertEqual(status_b["campaigns"], [])
+            with self.assertRaises(MatrixTargetError):
+                account_b.cancel(campaign["campaignId"])
+
+    def test_matrix_status_does_not_adopt_legacy_state_without_explicit_owner_identity(self) -> None:
+        from core.job_ownership import account_job_binding
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(base_path=temp_dir)
+            legacy_path = os.path.join(paths.launcher_dir, "matrix-devices.json")
+            os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+            legacy_state = {
+                "schema": "loom.matrix.devices.v1",
+                "devices": [
+                    {
+                        "deviceId": "phone-legacy",
+                        "name": "Legacy phone",
+                        "online": True,
+                    }
+                ],
+            }
+            with open(legacy_path, "w", encoding="utf-8") as handle:
+                json.dump(legacy_state, handle, ensure_ascii=False)
+            matrix = MatrixControlPlane(
+                paths,
+                phone_authorizer=lambda _ids, _operation: None,
+                owner_account_id="account-a",
+                owner_account_binding=account_job_binding("account-a", temp_dir),
+            )
+
+            status = matrix.status()
+
+            self.assertEqual(status["devices"], [])
+            self.assertTrue(os.path.isfile(legacy_path))
+            with open(legacy_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), legacy_state)
+
     def test_phone_mutation_fails_closed_without_an_authorizer(self) -> None:
         from core.paths import AppPaths
         from core.phone_matrix import MatrixControlPlane as StrictMatrixControlPlane
@@ -249,7 +329,8 @@ class MatrixControlPlaneTests(unittest.TestCase):
             archives = [
                 name
                 for name in os.listdir(os.path.dirname(matrix.events_path))
-                if name.startswith("matrix-events.jsonl.")
+                if name.startswith("matrix-events-")
+                and ".jsonl." in name
             ]
             visible_events = matrix.watch(limit=500)["events"]
 
@@ -328,7 +409,8 @@ class MatrixControlPlaneTests(unittest.TestCase):
             quarantined = [
                 name
                 for name in os.listdir(os.path.dirname(matrix.devices_path))
-                if name.startswith("matrix-devices.json.corrupt-")
+                if name.startswith("matrix-devices-")
+                and ".json.corrupt-" in name
             ]
 
         self.assertEqual(status["summary"]["total"], 0)
@@ -753,7 +835,7 @@ class MatrixControlPlaneTests(unittest.TestCase):
         self.assertEqual(status["devices"][0]["currentTaskId"], "")
         self.assertEqual([event["type"] for event in events["events"][:2]], ["queued", "assigned"])
 
-    def test_first_device_registration_claims_entitlement_seat_once(self) -> None:
+    def test_every_device_registration_revalidates_the_current_entitlement_seat(self) -> None:
         from core.paths import AppPaths
         from core.phone_matrix import MatrixControlPlane
 
@@ -770,7 +852,13 @@ class MatrixControlPlaneTests(unittest.TestCase):
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.register_device({"deviceId": "phone-a", "online": True, "heartbeatAt": "2026-07-29T12:00:00Z"})
 
-        self.assertEqual(authorizations, [(["phone-a"], "matrix.device.claim")])
+        self.assertEqual(
+            authorizations,
+            [
+                (["phone-a"], "matrix.device.claim"),
+                (["phone-a"], "matrix.device.claim"),
+            ],
+        )
 
     def test_dispatch_authorizes_exact_phone_targets_before_state_mutation(self) -> None:
         from core.paths import AppPaths

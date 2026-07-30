@@ -29,9 +29,18 @@ from core.wire_config import WireService, clear_agent_user_env_keys
 
 
 class NewApiAccountError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str = "",
+        details: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.code = str(code or "").strip().lower()
+        self.details = dict(details) if isinstance(details, dict) else {}
 
 
 DEFAULT_BASE_URL = "https://api.heang.top"
@@ -91,6 +100,22 @@ DEFAULT_RUNTIME_SYNC_TARGETS = ("openclaw", "opencode", "claude", "image", "desk
 FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS = 5
 NATIVE_PASSWORD_LOGIN_TIMEOUT_SECONDS = 10
 AUTH_CAPABILITIES_CACHE_SECONDS = 300
+PERMANENT_ENTITLEMENT_ERROR_CODES = frozenset({
+    "account_entitlement_not_found",
+    "account_entitlement_revoked",
+    "account_mismatch",
+    "account_session_mismatch",
+    "authorization_code_disabled",
+    "authorization_code_expired",
+    "authorization_code_revoked",
+    "authorization_required",
+    "entitlement_required",
+    "lease_expired",
+    "lease_revoked",
+    "license_disabled",
+    "license_expired",
+    "license_invalid",
+})
 
 
 def _utc_now() -> datetime:
@@ -109,6 +134,41 @@ def _pick_text(*values: Any) -> str:
         if text and text.lower() != "none":
             return text
     return ""
+
+
+def _error_payload_fields(payload: Any) -> tuple[str, str, dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return "", "", {}
+    nested = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    code = _pick_text(payload.get("code"), nested.get("code")).lower()
+    message = _pick_text(
+        payload.get("message"),
+        nested.get("message"),
+        payload.get("error") if isinstance(payload.get("error"), str) else "",
+    )
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = nested.get("details")
+    return code, message, dict(details) if isinstance(details, dict) else {}
+
+
+def _inactive_entitlement_snapshot(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    source = str(value.get("source") or "").strip().lower()
+    plan = str(value.get("plan") or "").strip().lower()
+    if source not in PERMANENT_ENTITLEMENT_ERROR_CODES and plan != "inactive":
+        return None
+    return {
+        "source": source or "authorization_required",
+        "plan": "inactive",
+        "features": [],
+        "limits": {
+            "devices": 0,
+            "concurrentTasks": 0,
+            "unlimitedDevices": False,
+        },
+    }
 
 
 def _looks_like_email(value: Any) -> bool:
@@ -947,13 +1007,17 @@ class NewApiAccountManager:
                 try:
                     raw = error.read().decode("utf-8", errors="replace")
                     payload = json.loads(raw) if raw.strip() else {}
-                    message = _pick_text(
-                        payload.get("message") if isinstance(payload, dict) else "",
-                        payload.get("error") if isinstance(payload, dict) else "",
-                    )
+                    code, message, details = _error_payload_fields(payload)
                 except Exception:
+                    code = ""
                     message = ""
-                raise NewApiAccountError(message or f"http_{error.code}", status_code=error.code) from error
+                    details = {}
+                raise NewApiAccountError(
+                    message or f"http_{error.code}",
+                    status_code=error.code,
+                    code=code,
+                    details=details,
+                ) from error
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
                 if index + 1 < len(candidates):
                     self.append_log("NewAPI 国内加速线路连接失败，正在切换兼容线路。")
@@ -963,7 +1027,12 @@ class NewApiAccountManager:
                 raise NewApiAccountError(f"newapi_network_error:{error}") from error
 
         if isinstance(payload, dict) and payload.get("success") is False:
-            raise NewApiAccountError(_pick_text(payload.get("message"), payload.get("error"), "newapi_request_failed"))
+            code, message, details = _error_payload_fields(payload)
+            raise NewApiAccountError(
+                message or "newapi_request_failed",
+                code=code,
+                details=details,
+            )
         return payload if isinstance(payload, dict) else {"data": payload}
 
     def _auth_headers(self, access_token: str = "", user_id: str = "") -> dict[str, str]:
@@ -2087,42 +2156,8 @@ class NewApiAccountManager:
         self,
         session: dict[str, Any],
     ) -> bool:
-        account_entitlement = (
-            session.get("accountEntitlement")
-            if isinstance(session.get("accountEntitlement"), dict)
-            else {}
-        )
-        if account_entitlement.get("source") == "signed_lease":
-            return False
-        proof = self.license_mgr.legacy_migration_proof()
-        if not isinstance(proof, dict):
-            return False
-        newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
-        base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
-        api_token = _pick_text(session.get("memberToken"))
-        if not api_token:
-            return False
-        payload = self._request_json(
-            urllib.request.build_opener(),
-            f"{base_url}/api/openclaw/entitlements/migrate-legacy",
-            method="POST",
-            body={
-                "legacyLicense": proof,
-                **self._lease_identity_payload(),
-            },
-            headers={"Authorization": f"Bearer {api_token}"},
-            timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
-        )
-        data = _unwrap(payload)
-        lease = data.get("entitlementLease") if isinstance(data, dict) else None
-        if not isinstance(lease, dict):
-            raise NewApiAccountError(
-                "旧版授权迁移成功，但服务未返回可验证的账号权益",
-                status_code=502,
-            )
-        self._apply_entitlement_lease(session, dict(lease))
-        session["legacyEntitlementMigratedAt"] = _iso(_utc_now())
-        return True
+        del session
+        return False
 
     def _persist_authenticated_session(self, session: dict[str, Any], *, sync_runtime: bool) -> dict[str, Any]:
         session["managedGatewayMigrationVersion"] = MANAGED_GATEWAY_MIGRATION_VERSION
@@ -2144,16 +2179,6 @@ class NewApiAccountManager:
                     "unlimitedDevices": False,
                 },
             }
-        try:
-            if self._migrate_legacy_entitlement_for_session(session):
-                self.append_log(
-                    "[Account] legacy commercial authorization migrated to the current account.\n"
-                )
-        except Exception as error:
-            self.append_log(
-                "[Account] legacy authorization migration deferred; "
-                f"account login remains available: {_redact_secret_text(error)}\n"
-            )
         self._write_session(session)
         if sync_runtime:
             self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
@@ -2348,16 +2373,10 @@ class NewApiAccountManager:
         session = self.current()
         if not session:
             raise NewApiAccountError("尚未登录模型账号", status_code=401)
-        if not self.license_mgr.legacy_migration_proof():
-            raise NewApiAccountError(
-                "本机没有可迁移的有效旧版商业授权",
-                status_code=404,
-            )
-        if not self._migrate_legacy_entitlement_for_session(session):
-            return session
-        session["updatedAt"] = _iso(_utc_now())
-        self._write_session(session)
-        return session
+        raise NewApiAccountError(
+            "旧版静态授权不能自动迁移，请在当前账号中输入原授权码完成绑定。",
+            status_code=410,
+        )
 
     def refresh_current(self) -> dict[str, Any]:
         session = self.current()
@@ -2388,10 +2407,45 @@ class NewApiAccountManager:
             )
             if isinstance(refreshed_lease, dict):
                 session["_entitlementLease"] = refreshed_lease
+            else:
+                entitlement_snapshot = (
+                    entitlement_data.get("entitlement")
+                    if isinstance(entitlement_data, dict)
+                    else None
+                )
+                inactive_snapshot = _inactive_entitlement_snapshot(
+                    entitlement_snapshot
+                )
+                if inactive_snapshot is not None:
+                    self.account_entitlement.clear_active()
+                    session.pop("_entitlementLease", None)
+                    session["_accountEntitlement"] = inactive_snapshot
+                    self.append_log(
+                        "[Account] entitlement was permanently deactivated; "
+                        "local phone and matrix access has been removed.\n"
+                    )
         except NewApiAccountError as error:
-            self.append_log(
-                f"[Account] entitlement refresh unavailable; keeping verified offline lease: {_redact_secret_text(error)}\n"
-            )
+            if error.code in PERMANENT_ENTITLEMENT_ERROR_CODES:
+                self.account_entitlement.clear_active()
+                session.pop("_entitlementLease", None)
+                session["_accountEntitlement"] = {
+                    "source": error.code or "authorization_required",
+                    "plan": "inactive",
+                    "features": [],
+                    "limits": {
+                        "devices": 0,
+                        "concurrentTasks": 0,
+                        "unlimitedDevices": False,
+                    },
+                }
+                self.append_log(
+                    "[Account] entitlement refresh confirmed a permanent "
+                    f"deactivation ({error.code}); local access has been removed.\n"
+                )
+            else:
+                self.append_log(
+                    f"[Account] entitlement refresh unavailable; keeping verified offline lease: {_redact_secret_text(error)}\n"
+                )
         try:
             self_payload = self._request_json(opener, f"{base_url}/api/user/self", headers=headers)
         except NewApiAccountError:

@@ -83,7 +83,8 @@ class CommercialLicenseGateStateContractTests(unittest.TestCase):
         self.assertIn("LicenseAuthorizationResponse", api_source)
         self.assertIn("LicenseActivationResponse", api_source)
         self.assertIn("expiresAt?: string | null", types_source)
-        self.assertIn("deviceLimit?: number", types_source)
+        self.assertIn("deviceLimit?: number | null", types_source)
+        self.assertIn("unlimitedDevices?: boolean", types_source)
         self.assertIn("status?: string", types_source)
         self.assertIn("code?: string", types_source)
 

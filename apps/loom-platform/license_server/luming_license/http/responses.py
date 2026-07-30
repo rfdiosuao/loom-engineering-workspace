@@ -30,6 +30,11 @@ class ResponseMixin:
 
     def send_security_headers(self, *, cache_control: str | None = None) -> None:
         path = self.facade.urlparse(self.path).path
+        default_cache_control = (
+            "no-store, private"
+            if path.startswith("/api/service/account-entitlements/")
+            else ("no-store" if path.startswith("/admin") else "no-cache")
+        )
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; "
@@ -47,7 +52,7 @@ class ResponseMixin:
         )
         self.send_header(
             "Cache-Control",
-            cache_control or ("no-store" if path.startswith("/admin") else "no-cache"),
+            cache_control or default_cache_control,
         )
 
     def _send_bytes(

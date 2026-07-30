@@ -35,6 +35,23 @@ MAX_LEASE_WINDOW_SEC = 8 * 24 * 3600
 ENTITLEMENT_ANCHOR_SCHEMA = "loom.entitlement_anchor.v1"
 _ACCOUNT_TASK_CONDITION = threading.Condition()
 _ACCOUNT_TASK_ACTIVE: dict[str, int] = {}
+_ACCOUNT_DEVICE_ACTIVE: set[tuple[str, str]] = set()
+PERMANENT_ONLINE_ENTITLEMENT_ERROR_CODES = frozenset({
+    "account_entitlement_not_found",
+    "account_entitlement_revoked",
+    "account_mismatch",
+    "account_session_mismatch",
+    "authorization_code_disabled",
+    "authorization_code_expired",
+    "authorization_code_revoked",
+    "authorization_required",
+    "entitlement_required",
+    "lease_expired",
+    "lease_revoked",
+    "license_disabled",
+    "license_expired",
+    "license_invalid",
+})
 
 
 def _system_uptime_ms() -> int:
@@ -674,7 +691,14 @@ class AccountEntitlementManager:
                 code="phone_seat_lease_malformed",
                 action="refresh_entitlement",
             ) from None
-        if version != entitlement_version or limit < 1 or limit > entitlement_limit:
+        unlimited_devices = (
+            (entitlement_lease.get("limits") or {}).get("unlimitedDevices") is True
+        )
+        if (
+            version != entitlement_version
+            or limit < 1
+            or (not unlimited_devices and limit > entitlement_limit)
+        ):
             raise AccountEntitlementError(
                 "手机席位凭证与当前账号权益不一致。",
                 code="phone_seat_entitlement_mismatch",
@@ -707,7 +731,10 @@ class AccountEntitlementManager:
                 action="refresh_entitlement",
             )
         normalized = sorted({str(value).strip() for value in phone_ids if str(value).strip()})
-        if len(normalized) != len(phone_ids) or len(normalized) > limit:
+        if (
+            len(normalized) != len(phone_ids)
+            or (not unlimited_devices and len(normalized) > limit)
+        ):
             raise AccountEntitlementError(
                 "手机席位凭证设备列表或额度无效。",
                 code="phone_seat_lease_malformed",
@@ -936,8 +963,8 @@ class AccountEntitlementManager:
             "source": "legacy_license" if authorized else "none",
             "accountLeaseSeen": False,
             "code": "ok" if authorized else "entitlement_required",
-            "message": "" if authorized else "请登录模型账号或完成旧授权迁移。",
-            "action": "" if authorized else "login_or_migrate",
+            "message": "" if authorized else "请登录模型账号并输入授权码完成绑定。",
+            "action": "" if authorized else "login_and_bind_authorization_code",
             "details": {},
         }
 
@@ -959,6 +986,52 @@ class AccountEntitlementManager:
             )
         verified = self._verified_phone_seat_lease(current["lease"])
         return list(verified.get("phoneDeviceIds") or []) if isinstance(verified, dict) else []
+
+    def phone_runtime_authorization(
+        self,
+        phone_device_ids: list[str],
+        *,
+        session: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        active_session = session if isinstance(session, dict) else self._raw_session()
+        entitlement_lease = read_json(
+            self.paths.account_entitlement_file,
+            None,
+        )
+        verified = self.verify_lease(
+            entitlement_lease,
+            feature="matrix.devices",
+            session=active_session,
+        )
+        entitlement_lease = verified["lease"]
+        verified_seats = self.verify_phone_seat_lease(
+            read_json(self.paths.account_phone_seat_lease_file, None),
+            entitlement_lease=entitlement_lease,
+        )
+        authorized_ids = list(verified_seats["phoneDeviceIds"])
+        requested_ids = sorted(
+            {
+                str(value).strip()
+                for value in phone_device_ids
+                if str(value).strip()
+            }
+        )
+        unauthorized = sorted(set(requested_ids).difference(authorized_ids))
+        if unauthorized:
+            raise AccountEntitlementError(
+                "所选手机不在当前账号签名席位凭证中。",
+                code="phone_device_not_authorized",
+                action="refresh_entitlement",
+                details={"phoneDeviceIds": unauthorized},
+                status_code=403,
+            )
+        return {
+            "accountId": str(entitlement_lease["accountId"]),
+            "entitlementLease": entitlement_lease,
+            "phoneSeatLease": verified_seats["lease"],
+            "authorizedPhoneDeviceIds": authorized_ids,
+            "requestedPhoneDeviceIds": requested_ids,
+        }
 
     def pending_phone_device_releases(self) -> list[str]:
         state = self._state()
@@ -1070,6 +1143,7 @@ class AccountEntitlementManager:
         operation: str,
         *,
         cancelled=None,
+        device_ids: list[str] | tuple[str, ...] | set[str] | None = None,
     ):
         lease = entitlement.get("lease") if isinstance(entitlement.get("lease"), dict) else {}
         account_id = str(entitlement.get("accountId") or lease.get("accountId") or "").strip()
@@ -1088,19 +1162,35 @@ class AccountEntitlementManager:
                 code="entitlement_account_missing",
                 action="relogin",
             )
+        normalized_device_ids = tuple(sorted({
+            str(device_id or "").strip()
+            for device_id in (device_ids or [])
+            if str(device_id or "").strip()
+        }))
+        device_keys = tuple(
+            (account_id, device_id)
+            for device_id in normalized_device_ids
+        )
         acquired = False
         with _ACCOUNT_TASK_CONDITION:
-            while _ACCOUNT_TASK_ACTIVE.get(account_id, 0) >= limit:
+            while (
+                _ACCOUNT_TASK_ACTIVE.get(account_id, 0) >= limit
+                or any(key in _ACCOUNT_DEVICE_ACTIVE for key in device_keys)
+            ):
                 if callable(cancelled) and cancelled():
                     raise AccountEntitlementError(
                         "任务在等待账号并发席位时已取消。",
                         code="task_cancelled",
                         action="retry",
-                        details={"operation": operation},
+                        details={
+                            "operation": operation,
+                            "deviceIds": list(normalized_device_ids),
+                        },
                         status_code=409,
                     )
                 _ACCOUNT_TASK_CONDITION.wait(timeout=0.1)
             _ACCOUNT_TASK_ACTIVE[account_id] = _ACCOUNT_TASK_ACTIVE.get(account_id, 0) + 1
+            _ACCOUNT_DEVICE_ACTIVE.update(device_keys)
             acquired = True
         try:
             yield
@@ -1112,6 +1202,8 @@ class AccountEntitlementManager:
                         _ACCOUNT_TASK_ACTIVE[account_id] = remaining
                     else:
                         _ACCOUNT_TASK_ACTIVE.pop(account_id, None)
+                    for key in device_keys:
+                        _ACCOUNT_DEVICE_ACTIVE.discard(key)
                     _ACCOUNT_TASK_CONDITION.notify_all()
 
     def _server_check(
@@ -1229,8 +1321,14 @@ class AccountEntitlementManager:
         claimed = set(
             verified_seats.get("phoneDeviceIds") if isinstance(verified_seats, dict) else []
         )
-        limit = max(1, int((current.get("limits") or {}).get("devices") or 1))
-        if operation != "matrix.device.release" and len(claimed.union(normalized)) > limit:
+        limits = current.get("limits") if isinstance(current.get("limits"), dict) else {}
+        limit = max(1, int(limits.get("devices") or 1))
+        unlimited_devices = limits.get("unlimitedDevices") is True
+        if (
+            operation != "matrix.device.release"
+            and not unlimited_devices
+            and len(claimed.union(normalized)) > limit
+        ):
             raise AccountEntitlementError(
                 "当前账号绑定的手机数量超过系统安全上限，请联系技术支持。",
                 code="device_limit_exceeded",
@@ -1257,6 +1355,8 @@ class AccountEntitlementManager:
                     session=active_session,
                 )
             except AccountEntitlementError as error:
+                if error.code in PERMANENT_ONLINE_ENTITLEMENT_ERROR_CODES:
+                    self.clear_active()
                 if error.code != "entitlement_service_unreachable" or needs_online:
                     raise
         if payload is None:

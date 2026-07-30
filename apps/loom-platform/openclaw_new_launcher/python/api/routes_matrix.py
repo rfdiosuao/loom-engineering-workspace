@@ -24,6 +24,7 @@ from api.routes_phone import (
     _build_phone_task_plan,
     _ensure_phone_event_syncs_for_saved_devices,
     _phone_args_for_device,
+    _phone_entitlement_job_metadata,
     _phone_stdout_payload,
     _require_phone_entitlement,
     _run_phone_process_with_matrix_stream,
@@ -39,6 +40,12 @@ from api.routes_realtime import (
     stream_ticket_from_request,
 )
 from core.account_entitlement import AccountEntitlementError
+from core.job_ownership import (
+    capture_account_runtime_identity,
+    current_account_job_identity,
+    job_visible_to_account,
+    public_job_snapshot,
+)
 from core.phone_matrix import MatrixControlPlane, MatrixSafetyError, MatrixTargetError
 from core.feishu_integration import FeishuAcquisitionIntegration
 from core.acquisition_templates import AcquisitionTemplateLibrary
@@ -136,6 +143,8 @@ def register_matrix_routes(app, ctx) -> None:
             screen = await asyncio.to_thread(_capture_matrix_screen, ctx, device_id, **options)
         except AccountEntitlementError as exc:
             return _account_entitlement_error_response(ctx, exc)
+        except MatrixSafetyError as exc:
+            return _matrix_safety_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
         return ctx.fastapi_json(_matrix_screen_for_known_hash(screen, known_hash))
@@ -211,6 +220,8 @@ def register_matrix_routes(app, ctx) -> None:
             return ctx.fastapi_json(_matrix(ctx).timeline(device_id, limit=limit))
         except AccountEntitlementError as exc:
             return _account_entitlement_error_response(ctx, exc)
+        except MatrixSafetyError as exc:
+            return _matrix_safety_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
 
@@ -247,10 +258,14 @@ def register_matrix_routes(app, ctx) -> None:
             resumed_task_id = str(released.get("resumedDeviceTaskId") or "")
             if resumed_task_id and resume_allowed:
                 job = _submit_matrix_resume_job(ctx, matrix, resumed_task_id)
-                released.update({"jobId": job.get("id"), "job": job})
+                released.update(
+                    {"jobId": job.get("id"), "job": public_job_snapshot(job)}
+                )
             return ctx.fastapi_json(released)
         except AccountEntitlementError as exc:
             return _account_entitlement_error_response(ctx, exc)
+        except MatrixSafetyError as exc:
+            return _matrix_safety_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
 
@@ -302,6 +317,8 @@ def register_matrix_routes(app, ctx) -> None:
                     lease_id=str(body.get("leaseId") or "").strip(),
                 )
             )
+        except MatrixSafetyError as exc:
+            return _matrix_safety_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
 
@@ -319,7 +336,13 @@ def register_matrix_routes(app, ctx) -> None:
             )
             resumed = matrix.resume_task(device_task_id)
             job = _submit_matrix_resume_job(ctx, matrix, device_task_id)
-            return ctx.fastapi_json({**resumed, "jobId": job.get("id"), "job": job})
+            return ctx.fastapi_json(
+                {
+                    **resumed,
+                    "jobId": job.get("id"),
+                    "job": public_job_snapshot(job),
+                }
+            )
         except AccountEntitlementError as exc:
             return _account_entitlement_error_response(ctx, exc)
         except MatrixTargetError as exc:
@@ -336,6 +359,8 @@ def register_matrix_routes(app, ctx) -> None:
             return ctx.fastapi_json({"device": device, "status": matrix.status()})
         except AccountEntitlementError as exc:
             return _account_entitlement_error_response(ctx, exc)
+        except MatrixSafetyError as exc:
+            return _matrix_safety_error_response(ctx, exc)
 
     @app.post("/api/matrix/dispatch")
     async def matrix_dispatch(request: Request):
@@ -363,6 +388,7 @@ def register_matrix_routes(app, ctx) -> None:
             )
             return _run_matrix_campaign(ctx, matrix, task, body, job_id)
 
+        job_metadata = _matrix_job_metadata(ctx, task)
         job = ctx.get_job_mgr().submit_progress(
             "matrix.dispatch",
             "Matrix 任务派发",
@@ -372,10 +398,18 @@ def register_matrix_routes(app, ctx) -> None:
                 "phase": "matrix.dispatch.queued",
                 "commandId": "matrix.dispatch",
                 "campaignId": task.get("campaignId"),
-                **_matrix_job_scope(task),
+                **job_metadata,
             },
         )
-        return ctx.fastapi_json({"jobId": job.get("id"), "job": job, "task": task, "status": matrix.status()}, 202)
+        return ctx.fastapi_json(
+            {
+                "jobId": job.get("id"),
+                "job": public_job_snapshot(job),
+                "task": task,
+                "status": matrix.status(),
+            },
+            202,
+        )
 
     @app.api_route("/api/matrix/watch", methods=["GET", "POST"])
     async def matrix_watch(request: Request):
@@ -437,6 +471,10 @@ def register_matrix_routes(app, ctx) -> None:
             while True:
                 if await request.is_disconnected():
                     break
+                try:
+                    _require_phone_entitlement(ctx, "matrix.events.read")
+                except AccountEntitlementError:
+                    break
                 events = matrix.realtime_events(after_seq=cursor, limit=500)
                 now = time.monotonic()
                 for event in events:
@@ -467,11 +505,19 @@ def register_matrix_routes(app, ctx) -> None:
             return error
         body = await ctx.body(request)
         job_manager = ctx.get_job_mgr()
+        account_id, owner_binding = _matrix_account_identity(ctx)
         if body.get("all") is True:
+            try:
+                result = _matrix(ctx).cancel_all()
+            except MatrixSafetyError as exc:
+                return _matrix_safety_error_response(ctx, exc)
             job_ids = job_manager.cancel_matching(
-                lambda job: str(job.get("kind") or "").startswith("matrix.")
+                lambda job: _matrix_job_visible_to_identity(
+                    job,
+                    account_id=account_id,
+                    owner_binding=owner_binding,
+                )
             )
-            result = _matrix(ctx).cancel_all()
             result["cancelledJobIds"] = job_ids
             return ctx.fastapi_json(result)
         campaign_id = str(body.get("campaignId") or body.get("id") or "").strip()
@@ -480,6 +526,8 @@ def register_matrix_routes(app, ctx) -> None:
         matrix = _matrix(ctx)
         try:
             result = matrix.cancel(campaign_id)
+        except MatrixSafetyError as exc:
+            return _matrix_safety_error_response(ctx, exc)
         except MatrixTargetError as exc:
             return _matrix_target_error_response(ctx, exc)
         status = matrix.status(campaign_id)
@@ -504,7 +552,16 @@ def register_matrix_routes(app, ctx) -> None:
                 "executionMayContinue": execution_may_continue,
             }, 409)
         job_ids = job_manager.cancel_matching(
-            lambda job: str((job.get("progress") or {}).get("campaignId") or "") == campaign_id
+            lambda job: (
+                _matrix_job_visible_to_identity(
+                    job,
+                    account_id=account_id,
+                    owner_binding=owner_binding,
+                )
+                and str(
+                    (job.get("progress") or {}).get("campaignId") or ""
+                ) == campaign_id
+            )
         )
         result["cancelledJobIds"] = job_ids
         if not campaign:
@@ -558,19 +615,30 @@ def register_matrix_routes(app, ctx) -> None:
         if not valid_scope:
             return ctx.fastapi_json({"error": "emergency-stop scope must not be empty"}, 400)
 
-        result = _matrix(ctx).emergency_stop(
-            all_tasks=all_tasks,
-            campaign_id=campaign_id,
-            device_ids=device_ids,
-            device_task_ids=device_task_ids,
-            campaign_atomic=campaign_atomic,
-        )
-        job_ids = ctx.get_job_mgr().cancel_matching(
-            lambda job: _matrix_job_matches_emergency_scope(
-                job,
-                result,
-                scope_key=scope_key,
+        try:
+            result = _matrix(ctx).emergency_stop(
+                all_tasks=all_tasks,
+                campaign_id=campaign_id,
+                device_ids=device_ids,
+                device_task_ids=device_task_ids,
                 campaign_atomic=campaign_atomic,
+            )
+        except MatrixSafetyError as exc:
+            return _matrix_safety_error_response(ctx, exc)
+        account_id, owner_binding = _matrix_account_identity(ctx)
+        job_ids = ctx.get_job_mgr().cancel_matching(
+            lambda job: (
+                _matrix_job_visible_to_identity(
+                    job,
+                    account_id=account_id,
+                    owner_binding=owner_binding,
+                )
+                and _matrix_job_matches_emergency_scope(
+                    job,
+                    result,
+                    scope_key=scope_key,
+                    campaign_atomic=campaign_atomic,
+                )
             ),
             wait_for_workers=False,
         )
@@ -625,6 +693,7 @@ def register_matrix_routes(app, ctx) -> None:
             )
             return _run_matrix_campaign(ctx, matrix, task, dispatch_body, job_id)
 
+        job_metadata = _matrix_job_metadata(ctx, task)
         job = ctx.get_job_mgr().submit_progress(
             "matrix.retry",
             "Matrix 任务重试",
@@ -635,10 +704,18 @@ def register_matrix_routes(app, ctx) -> None:
                 "commandId": "matrix.retry",
                 "campaignId": task.get("campaignId"),
                 "retryOf": campaign_id,
-                **_matrix_job_scope(task),
+                **job_metadata,
             },
         )
-        return ctx.fastapi_json({"jobId": job.get("id"), "job": job, "retry": retry, "status": matrix.status()}, 202)
+        return ctx.fastapi_json(
+            {
+                "jobId": job.get("id"),
+                "job": public_job_snapshot(job),
+                "retry": retry,
+                "status": matrix.status(),
+            },
+            202,
+        )
 
     @app.api_route("/api/matrix/leads", methods=["GET", "POST"])
     async def matrix_leads(request: Request):
@@ -861,6 +938,7 @@ def register_matrix_routes(app, ctx) -> None:
             )
             return _run_matrix_campaign(ctx, matrix, task, payload, job_id)
 
+        job_metadata = _matrix_job_metadata(ctx, task)
         job = ctx.get_job_mgr().submit_progress(
             "matrix.template.run",
             "Matrix 模板任务",
@@ -870,11 +948,16 @@ def register_matrix_routes(app, ctx) -> None:
                 "phase": "matrix.template.queued",
                 "commandId": "matrix.template.run",
                 "campaignId": task.get("campaignId"),
-                **_matrix_job_scope(task),
+                **job_metadata,
             },
         )
         return ctx.fastapi_json(
-            {"jobId": job.get("id"), "job": job, "task": task, "status": matrix.status()},
+            {
+                "jobId": job.get("id"),
+                "job": public_job_snapshot(job),
+                "task": task,
+                "status": matrix.status(),
+            },
             202,
         )
 
@@ -933,7 +1016,24 @@ def _matrix_job_matches_emergency_scope(
     return bool(job_task_ids and job_task_ids.issubset(matched_task_ids))
 
 
+def _matrix_job_visible_to_identity(
+    job: dict,
+    *,
+    account_id: str,
+    owner_binding: str,
+) -> bool:
+    return bool(
+        str(job.get("kind") or "").startswith("matrix.")
+        and job_visible_to_account(
+            job,
+            account_id=account_id,
+            owner_binding=owner_binding,
+        )
+    )
+
+
 def _matrix(ctx) -> MatrixControlPlane:
+    owner_account_id, owner_binding = _matrix_account_identity(ctx)
     return MatrixControlPlane(
         ctx.paths,
         phone_authorizer=lambda device_ids, operation: _authorize_phone_entitlement(
@@ -941,7 +1041,35 @@ def _matrix(ctx) -> MatrixControlPlane:
             device_ids,
             operation,
         ),
+        owner_account_id=owner_account_id,
+        owner_account_binding=owner_binding,
     )
+
+
+def _matrix_account_identity(ctx) -> tuple[str, str]:
+    account_id, owner_binding = current_account_job_identity(ctx)
+    if account_id and owner_binding:
+        return account_id, owner_binding
+    manager_getter = getattr(ctx, "get_newapi_account_mgr", None)
+    manager = manager_getter() if callable(manager_getter) else None
+    if manager is None:
+        return account_id, owner_binding
+    session = None
+    for method_name in ("public_session", "current"):
+        reader = getattr(manager, method_name, None)
+        if not callable(reader):
+            continue
+        try:
+            candidate = reader()
+        except Exception:
+            continue
+        if isinstance(candidate, dict):
+            session = candidate
+            break
+    identity = capture_account_runtime_identity(ctx, session)
+    if identity.resolved and identity.logged_in:
+        return identity.account_id, identity.owner_binding
+    return account_id, owner_binding
 
 
 def _submit_matrix_resume_job(ctx, matrix: MatrixControlPlane, device_task_id: str) -> dict:
@@ -957,6 +1085,13 @@ def _submit_matrix_resume_job(ctx, matrix: MatrixControlPlane, device_task_id: s
         )
 
     device_id = str(execution["deviceTask"].get("deviceId") or "")
+    job_metadata = _matrix_job_metadata_for_scope(
+        ctx,
+        {
+            "matrixDeviceTaskIds": [device_task_id],
+            "matrixDeviceIds": [device_id],
+        },
+    )
     return ctx.get_job_mgr().submit_progress(
         "matrix.resume",
         "Resume Matrix device task",
@@ -968,9 +1103,18 @@ def _submit_matrix_resume_job(ctx, matrix: MatrixControlPlane, device_task_id: s
             "campaignId": execution["campaignId"],
             "deviceTaskId": device_task_id,
             "deviceId": device_id,
-            "matrixDeviceTaskIds": [device_task_id],
-            "matrixDeviceIds": [device_id],
+            **job_metadata,
         },
+    )
+
+
+def _matrix_safety_error_response(ctx, exc: MatrixSafetyError):
+    return ctx.fastapi_json(
+        {
+            "error": exc.message,
+            "code": exc.code,
+        },
+        403,
     )
 
 
@@ -1221,7 +1365,12 @@ def _capture_matrix_screen(
         ],
         device_id,
     )
-    with _account_task_slot(ctx, entitlement, "matrix.screen.read"):
+    with _account_task_slot(
+        ctx,
+        entitlement,
+        "matrix.screen.read",
+        device_ids=[device_id],
+    ):
         with _MATRIX_SCREEN_CAPTURE_GATE:
             process = _run_phone_process_with_matrix_stream(
                 ctx,
@@ -1538,6 +1687,37 @@ def _matrix_job_scope(task: dict) -> dict:
             for item in device_tasks
             if str(item.get("deviceId") or "")
         }),
+    }
+
+
+def _matrix_job_metadata(ctx, task: dict) -> dict:
+    return _matrix_job_metadata_for_scope(ctx, _matrix_job_scope(task))
+
+
+def _matrix_job_metadata_for_scope(ctx, scope: dict) -> dict:
+    device_ids = sorted({
+        str(value or "").strip()
+        for value in scope.get("matrixDeviceIds", [])
+        if str(value or "").strip()
+    })
+    device_task_ids = sorted({
+        str(value or "").strip()
+        for value in scope.get("matrixDeviceTaskIds", [])
+        if str(value or "").strip()
+    })
+    _account_id, owner_binding = current_account_job_identity(ctx)
+    if not owner_binding:
+        raise AccountEntitlementError(
+            "Matrix 任务缺少可信账号绑定，已拒绝进入共享任务队列。",
+            code="matrix_job_owner_required",
+            action="refresh_entitlement",
+            status_code=403,
+        )
+    return {
+        "matrixDeviceTaskIds": device_task_ids,
+        "matrixDeviceIds": device_ids,
+        **_phone_entitlement_job_metadata(ctx, device_ids),
+        "ownerAccountBinding": owner_binding,
     }
 
 

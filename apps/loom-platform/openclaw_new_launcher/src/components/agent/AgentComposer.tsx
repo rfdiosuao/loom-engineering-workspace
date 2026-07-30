@@ -1,9 +1,14 @@
 import { ArrowUp, Paperclip, Play, Square, X } from 'lucide-react';
 import { useRef, useState } from 'react';
 import type { AgentBootstrapResponse, AgentSession } from '../../types/agent';
-import type { AgentAttachmentMetadata, AgentDraft } from '../../stores/agentStore';
+import type { AgentDraft } from '../../stores/agentStore';
 import { AgentModelMenu } from './AgentModelMenu';
 import { AgentScopeMenu } from './AgentScopeMenu';
+import {
+  MAX_AGENT_ATTACHMENT_COUNT,
+  MAX_AGENT_ATTACHMENT_TOTAL_BYTES,
+  prepareAgentAttachments,
+} from './agentAttachments';
 import { APP_TASK_PLACEHOLDER } from '../../version';
 
 interface AgentComposerProps {
@@ -22,51 +27,6 @@ interface AgentComposerProps {
   onSelectModel: (modelId?: string) => Promise<void>;
   onSetDefaultModel: (modelId: string) => Promise<void>;
   onManageModels: () => void;
-}
-
-const MAX_ATTACHMENT_BYTES = 1_048_576;
-const MAX_ATTACHMENT_CHARS = 32_768;
-const TEXT_APPLICATION_TYPES = new Set([
-  'application/json',
-  'application/ld+json',
-  'application/javascript',
-  'application/xml',
-  'application/yaml',
-  'application/x-yaml',
-]);
-
-function isReadableTextFile(file: File): boolean {
-  const type = file.type.toLowerCase();
-  return type.startsWith('text/')
-    || TEXT_APPLICATION_TYPES.has(type)
-    || /\.(?:txt|md|markdown|csv|tsv|json|jsonl|xml|ya?ml|log)$/i.test(file.name);
-}
-
-function readFileText(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error || new Error(`无法读取附件 ${file.name}`));
-    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
-    reader.readAsText(file.slice(0, MAX_ATTACHMENT_BYTES));
-  });
-}
-
-async function fileMetadata(files: readonly File[]): Promise<AgentAttachmentMetadata[]> {
-  const readable = files.filter(isReadableTextFile);
-  return Promise.all(readable.map(async (file) => {
-    const loaded = await readFileText(file);
-    const content = loaded.slice(0, MAX_ATTACHMENT_CHARS);
-    const truncated = file.size > MAX_ATTACHMENT_BYTES || loaded.length > MAX_ATTACHMENT_CHARS;
-    return {
-      name: file.name,
-      size: file.size,
-      type: file.type || 'text/plain',
-      lastModified: file.lastModified,
-      content,
-      truncated,
-      contentTruncated: truncated,
-    };
-  }));
 }
 
 function formatBytes(bytes: number): string {
@@ -156,19 +116,32 @@ export function AgentComposer({
               const files = Array.from(event.currentTarget.files || []);
               event.target.value = '';
               if (!files.length) return;
+              const nextCount = draft.attachments.length + files.length;
+              const nextBytes = draft.attachments.reduce((total, item) => total + item.size, 0)
+                + files.reduce((total, item) => total + item.size, 0);
+              if (nextCount > MAX_AGENT_ATTACHMENT_COUNT) {
+                setAttachmentError(`一条消息最多添加 ${MAX_AGENT_ATTACHMENT_COUNT} 个附件`);
+                return;
+              }
+              if (nextBytes > MAX_AGENT_ATTACHMENT_TOTAL_BYTES) {
+                setAttachmentError('一条消息的附件总大小不能超过 16 MB');
+                return;
+              }
               setAttachmentError('');
               setAttachmentsLoading(true);
-              void fileMetadata(files)
+              void prepareAgentAttachments(files)
                 .then((attachments) => {
-                  if (attachments.length) onChange({ attachments: [...draft.attachments, ...attachments] });
+                  onChange({ attachments: [...draft.attachments, ...attachments] });
                 })
-                .catch(() => setAttachmentError('附件读取失败，请重新选择'))
+                .catch((reason) => setAttachmentError(
+                  reason instanceof Error ? reason.message : '附件读取失败，请重新选择',
+                ))
                 .finally(() => setAttachmentsLoading(false));
             }}
           />
           <button
             type="button"
-            title="添加文本附件"
+            title="添加图片或文本附件"
             aria-label="添加附件"
             disabled={disabled || attachmentsLoading}
             onClick={() => fileInputRef.current?.click()}

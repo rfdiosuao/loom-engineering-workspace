@@ -296,10 +296,15 @@ class AgentSessionRepository:
 
     INDEX_SCHEMA = "loom.agent.sessions-index.v1"
 
-    def __init__(self, data_root: Any) -> None:
+    def __init__(self, data_root: Any, *, owner_account_id: str | None = None) -> None:
         root = getattr(data_root, "data_dir", data_root)
         root = os.fspath(root)
         self.root = root if os.path.basename(os.path.normpath(root)) == "agent" else os.path.join(root, "agent")
+        self.owner_account_id = (
+            str(owner_account_id or "").strip()
+            if owner_account_id is not None
+            else None
+        )
         self.sessions_root = os.path.join(self.root, "sessions")
         self.index_path = os.path.join(self.root, "sessions-index.json")
         self._lock = _path_lock(self.root)
@@ -342,6 +347,7 @@ class AgentSessionRepository:
             "createdAt": now,
             "updatedAt": now,
         }
+        self._stamp_owner(session)
         if safe_model_id:
             session["modelId"] = safe_model_id
         with self._locked():
@@ -360,9 +366,7 @@ class AgentSessionRepository:
 
     def get_session(self, session_id: str) -> JsonObject:
         with self._locked():
-            session = self._load_index_unlocked()["sessions"].get(session_id)
-            if not isinstance(session, dict):
-                raise KeyError(session_id)
+            session = self._require_session_unlocked(session_id)
             return copy.deepcopy(session)
 
     def update_session(self, session_id: str, changes: Optional[JsonObject] = None, **fields: Any) -> JsonObject:
@@ -389,9 +393,7 @@ class AgentSessionRepository:
                 requested[key] = sanitize_for_storage(requested[key])
         with self._locked():
             index = self._load_index_unlocked()
-            current = index["sessions"].get(session_id)
-            if not isinstance(current, dict):
-                raise KeyError(session_id)
+            current = self._require_session_unlocked(session_id, index)
             updated = dict(current)
             if remove_model_id:
                 updated.pop("modelId", None)
@@ -420,6 +422,7 @@ class AgentSessionRepository:
         offset = _decode_cursor(cursor)
         with self._locked():
             sessions = list(self._load_index_unlocked()["sessions"].values())
+        sessions = [item for item in sessions if self._record_visible(item)]
         if status is not None:
             sessions = [item for item in sessions if item.get("status") == status]
         if query:
@@ -440,8 +443,8 @@ class AgentSessionRepository:
 
     def append_message(self, session_id: str, message: JsonObject) -> JsonObject:
         with self._locked():
-            self._require_session_unlocked(session_id)
-            sanitized = sanitize_for_storage(message)
+            session = self._require_session_unlocked(session_id)
+            sanitized = self._owned_record(message, session)
             self._validate_owned_record(sanitized, "messageId", session_id)
             path = self._messages_path(session_id)
             message_id = sanitized["messageId"]
@@ -468,7 +471,8 @@ class AgentSessionRepository:
             raise ValueError("run finalization status must be completed")
         with self._locked():
             index = self._load_index_unlocked()
-            self._require_session_unlocked(session_id, index)
+            session = self._require_session_unlocked(session_id, index)
+            sanitized_message = self._owned_record(sanitized_message, session)
             self._validate_owned_record(sanitized_message, "messageId", session_id)
             transaction_path = self._run_finalization_transaction_path(session_id, run_id)
             pending = _read_json(transaction_path)
@@ -482,6 +486,7 @@ class AgentSessionRepository:
                 "message": sanitized_message,
                 "changes": sanitized_changes,
             }
+            self._stamp_owner(transaction)
             _atomic_write_json(transaction_path, transaction)
             return self._commit_run_finalization_transaction_unlocked(index, transaction)
 
@@ -520,8 +525,9 @@ class AgentSessionRepository:
             owner = session_id or index["runs"].get(run_id)
             if not owner:
                 raise KeyError(run_id)
+            session = self._require_session_unlocked(owner, index)
             run = _read_json(self._run_path(owner, run_id))
-            if not isinstance(run, dict):
+            if not isinstance(run, dict) or not self._record_matches_session_owner(run, session):
                 raise KeyError(run_id)
             return copy.deepcopy(run)
 
@@ -543,6 +549,7 @@ class AgentSessionRepository:
             owner = session_id or index["runs"].get(run_id)
             if not owner:
                 raise KeyError(run_id)
+            self._require_session_unlocked(owner, index)
             path = self._run_path(owner, run_id)
             current = _read_json(path)
             if not isinstance(current, dict):
@@ -582,6 +589,7 @@ class AgentSessionRepository:
             owner = session_id or index["runs"].get(run_id)
             if not owner:
                 raise KeyError(run_id)
+            self._require_session_unlocked(owner, index)
             path = self._run_path(owner, run_id)
             current = _read_json(path)
             if not isinstance(current, dict):
@@ -596,6 +604,7 @@ class AgentSessionRepository:
             sanitized_changes = sanitize_for_storage(changes)
             updated = dict(current)
             updated.update(sanitized_changes)
+            self._stamp_owner(updated)
             if "checkpoint" in sanitized_changes:
                 next_checkpoint = _run_checkpoint(sanitized_changes.get("checkpoint"))
             else:
@@ -627,6 +636,7 @@ class AgentSessionRepository:
             owner = session_id or index["runs"].get(run_id)
             if not owner:
                 raise KeyError(run_id)
+            self._require_session_unlocked(owner, index)
             path = self._run_path(owner, run_id)
             current = _read_json(path)
             if not isinstance(current, dict):
@@ -637,6 +647,7 @@ class AgentSessionRepository:
             sanitized_changes = sanitize_for_storage(changes)
             updated = dict(current)
             updated.update(sanitized_changes)
+            self._stamp_owner(updated)
             checkpoint = _run_checkpoint(
                 sanitized_changes.get("checkpoint", current.get("checkpoint"))
             )
@@ -664,12 +675,14 @@ class AgentSessionRepository:
             owner = session_id or index["runs"].get(run_id)
             if not owner:
                 raise KeyError(run_id)
+            self._require_session_unlocked(owner, index)
             path = self._run_path(owner, run_id)
             current = _read_json(path)
             if not isinstance(current, dict):
                 raise KeyError(run_id)
             updated = dict(current)
             updated.update(sanitize_for_storage(changes))
+            self._stamp_owner(updated)
             for field in remove_fields:
                 if field not in _REMOVABLE_RUN_FIELDS:
                     raise ValueError(f"run field cannot be removed: {field}")
@@ -702,9 +715,17 @@ class AgentSessionRepository:
             index = self._load_index_unlocked()
             recovered_with_times = []
             for run_id, session_id in index["runs"].items():
+                try:
+                    session = self._require_session_unlocked(session_id, index)
+                except KeyError:
+                    continue
                 path = self._run_path(session_id, run_id)
                 run = _read_json(path)
-                if isinstance(run, dict) and run.get("status") in unfinished_statuses:
+                if (
+                    isinstance(run, dict)
+                    and self._record_matches_session_owner(run, session)
+                    and run.get("status") in unfinished_statuses
+                ):
                     try:
                         modified = os.path.getmtime(path)
                     except OSError:
@@ -736,7 +757,8 @@ class AgentSessionRepository:
             approval_id = sanitized.get("approvalId")
             if not isinstance(session_id, str) or not isinstance(approval_id, str):
                 raise ValueError("approvalId and sessionId are required")
-            self._require_session_unlocked(session_id)
+            session = self._require_session_unlocked(session_id)
+            sanitized = self._owned_record(sanitized, session)
             if approval_id in index["approvals"]:
                 raise ValueError("approval already exists")
             _atomic_write_json(self._approval_path(session_id, approval_id), sanitized)
@@ -750,8 +772,9 @@ class AgentSessionRepository:
             owner = session_id or index["approvals"].get(approval_id)
             if not owner:
                 raise KeyError(approval_id)
+            session = self._require_session_unlocked(owner, index)
             approval = _read_json(self._approval_path(owner, approval_id))
-            if not isinstance(approval, dict):
+            if not isinstance(approval, dict) or not self._record_matches_session_owner(approval, session):
                 raise KeyError(approval_id)
             return copy.deepcopy(approval)
 
@@ -766,12 +789,14 @@ class AgentSessionRepository:
             owner = session_id or index["approvals"].get(approval_id)
             if not owner:
                 raise KeyError(approval_id)
+            self._require_session_unlocked(owner, index)
             path = self._approval_path(owner, approval_id)
             current = _read_json(path)
             if not isinstance(current, dict):
                 raise KeyError(approval_id)
             updated = dict(current)
             updated.update(sanitize_for_storage(changes))
+            self._stamp_owner(updated)
             _atomic_write_json(path, updated)
             return copy.deepcopy(updated)
 
@@ -788,6 +813,7 @@ class AgentSessionRepository:
             owner = session_id or index["approvals"].get(approval_id)
             if not owner:
                 raise KeyError(approval_id)
+            self._require_session_unlocked(owner, index)
             path = self._approval_path(owner, approval_id)
             current = _read_json(path)
             if not isinstance(current, dict):
@@ -798,6 +824,7 @@ class AgentSessionRepository:
                 )
             updated = dict(current)
             updated.update(sanitize_for_storage(changes))
+            self._stamp_owner(updated)
             _atomic_write_json(path, updated)
             return copy.deepcopy(updated)
 
@@ -831,7 +858,7 @@ class AgentSessionRepository:
             raise ValueError("history limit must be between 1 and 500")
         with self._locked():
             index = self._load_index_unlocked()
-            self._require_session_unlocked(session_id, index)
+            session = self._require_session_unlocked(session_id, index)
             session_keys = index["clientMessages"].setdefault(session_id, {})
             existing = session_keys.get(client_message_id)
             if isinstance(existing, dict):
@@ -857,7 +884,7 @@ class AgentSessionRepository:
                 if active_runs:
                     raise ValueError("another agent run is already active for this session")
 
-            sanitized_message = sanitize_for_storage(message)
+            sanitized_message = self._owned_record(message, session)
             run_with_history = copy.deepcopy(run)
             if history_limit is not None:
                 request = run_with_history.get("request")
@@ -865,7 +892,7 @@ class AgentSessionRepository:
                     request = {}
                     run_with_history["request"] = request
                 request["history"] = _read_jsonl(self._messages_path(session_id))[-history_limit:]
-            sanitized_run = sanitize_for_storage(run_with_history)
+            sanitized_run = self._owned_record(run_with_history, session)
             self._validate_owned_record(sanitized_message, "messageId", session_id)
             self._validate_owned_record(sanitized_run, "runId", session_id)
             transaction_path = self._message_transaction_path(session_id, client_message_id)
@@ -881,6 +908,7 @@ class AgentSessionRepository:
                 "message": sanitized_message,
                 "run": sanitized_run,
             }
+            self._stamp_owner(transaction)
             _atomic_write_json(transaction_path, transaction)
             return self._commit_message_transaction_unlocked(index, transaction)
 
@@ -901,8 +929,8 @@ class AgentSessionRepository:
 
     def append_event(self, session_id: str, event: JsonObject) -> JsonObject:
         with self._locked():
-            self._require_session_unlocked(session_id)
-            sanitized = sanitize_for_storage(event)
+            session = self._require_session_unlocked(session_id)
+            sanitized = self._owned_record(event, session)
             event_id = sanitized.get("eventId")
             if not isinstance(event_id, str) or not event_id:
                 raise ValueError("eventId is required")
@@ -1107,6 +1135,7 @@ class AgentSessionRepository:
                 )
             updated = dict(current)
             updated.update(changes)
+            self._stamp_owner(updated)
             next_checkpoint = _run_checkpoint(changes.get("checkpoint", current.get("checkpoint")))
             next_checkpoint.pop("runLease", None)
             updated["checkpoint"] = _dump_run_checkpoint(next_checkpoint)
@@ -1174,9 +1203,54 @@ class AgentSessionRepository:
     def _require_session_unlocked(self, session_id: str, index: Optional[JsonObject] = None) -> JsonObject:
         current_index = index or self._load_index_unlocked()
         session = current_index["sessions"].get(session_id)
-        if not isinstance(session, dict):
+        if not isinstance(session, dict) or not self._record_visible(session):
             raise KeyError(session_id)
         return session
+
+    def _record_visible(self, record: Any) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if self.owner_account_id is None:
+            return True
+        stored_owner = str(record.get("ownerAccountId") or "").strip()
+        return bool(
+            self.owner_account_id
+            and stored_owner
+            and stored_owner == self.owner_account_id
+        )
+
+    def _stamp_owner(self, record: JsonObject) -> JsonObject:
+        if self.owner_account_id is None:
+            return record
+        if not self.owner_account_id:
+            raise PermissionError("AGENT_ACCOUNT_REQUIRED: a logged-in account is required")
+        stored_owner = str(record.get("ownerAccountId") or "").strip()
+        if stored_owner and stored_owner != self.owner_account_id:
+            raise KeyError(str(record.get("sessionId") or "agent resource"))
+        record["ownerAccountId"] = self.owner_account_id
+        return record
+
+    def _owned_record(self, value: Any, session: JsonObject) -> JsonObject:
+        record = sanitize_for_storage(value)
+        if not isinstance(record, dict):
+            raise ValueError("agent record must be an object")
+        session_owner = str(session.get("ownerAccountId") or "").strip()
+        if self.owner_account_id is not None and session_owner != self.owner_account_id:
+            raise KeyError(str(session.get("sessionId") or "agent session"))
+        return self._stamp_owner(record)
+
+    def _record_matches_session_owner(
+        self,
+        record: JsonObject,
+        session: JsonObject,
+    ) -> bool:
+        if self.owner_account_id is None:
+            return True
+        return (
+            str(record.get("ownerAccountId") or "").strip()
+            == str(session.get("ownerAccountId") or "").strip()
+            == self.owner_account_id
+        )
 
     @staticmethod
     def _validate_owned_record(record: JsonObject, id_field: str, session_id: str) -> None:
@@ -1195,7 +1269,8 @@ class AgentSessionRepository:
         run_id = run.get("runId")
         if not isinstance(session_id, str) or not isinstance(run_id, str):
             raise ValueError("runId and sessionId are required")
-        self._require_session_unlocked(session_id, index)
+        session = self._require_session_unlocked(session_id, index)
+        run = self._owned_record(run, session)
         if run_id in index["runs"] or os.path.exists(self._run_path(session_id, run_id)):
             raise ValueError("run already exists")
         _atomic_write_json(self._run_path(session_id, run_id), run)
@@ -1279,6 +1354,11 @@ class AgentSessionRepository:
                 "runId": run_id,
                 "message": copy.deepcopy(message),
             },
+            **(
+                {"ownerAccountId": self.owner_account_id}
+                if self.owner_account_id is not None
+                else {}
+            ),
         }
 
     def _empty_index(self) -> JsonObject:

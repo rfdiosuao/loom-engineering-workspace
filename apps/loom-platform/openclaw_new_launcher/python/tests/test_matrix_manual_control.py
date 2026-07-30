@@ -23,23 +23,7 @@ from fastapi.testclient import TestClient
 from api.routes_matrix import register_matrix_routes
 from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 from services.jobs import JobManager
-from tests.matrix_test_support import matrix_for_test
-
-
-class _AllowEntitlement:
-    def current_state(self, _feature=None):
-        return {
-            "authorized": True,
-            "source": "account_entitlement",
-            "features": ["matrix.devices"],
-            "limits": {"devices": 1000, "concurrentTasks": 8},
-        }
-
-    def authorize_phone_devices(self, _device_ids, _operation, *, session=None):
-        return {
-            "authorized": True,
-            "limits": {"devices": 1000, "concurrentTasks": 8},
-        }
+from tests.matrix_test_support import MatrixTestEntitlement, matrix_for_test
 
 
 class MatrixManualControlTests(unittest.TestCase):
@@ -578,7 +562,12 @@ class MatrixManualControlTests(unittest.TestCase):
 def _client(base_path: str) -> tuple[FastAPI, TestClient]:
     app = FastAPI()
     job_mgr = JobManager(lambda _message: None)
-    entitlement_mgr = _AllowEntitlement()
+    paths = SimpleNamespace(
+        base_path=base_path,
+        launcher_dir=base_path,
+        node_exe=sys.executable,
+    )
+    entitlement_mgr = MatrixTestEntitlement(paths)
 
     async def body(request):
         try:
@@ -596,7 +585,7 @@ def _client(base_path: str) -> tuple[FastAPI, TestClient]:
         fastapi_json=fastapi_json,
         get_job_mgr=lambda: job_mgr,
         get_entitlement_mgr=lambda: entitlement_mgr,
-        paths=SimpleNamespace(base_path=base_path, launcher_dir=base_path, node_exe=sys.executable),
+        paths=paths,
     )
     app.state.job_mgr = job_mgr
     register_matrix_routes(app, ctx)

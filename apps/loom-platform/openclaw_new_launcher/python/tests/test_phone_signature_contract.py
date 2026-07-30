@@ -83,6 +83,15 @@ class PhoneSignatureContractTests(unittest.TestCase):
         self.assertIn("reader.cancel()", core_source)
 
     def test_signed_phone_scripts_forward_persisted_lumi_pairing_fields(self) -> None:
+        secure_source = read("scripts/openclaw-phone-secure.mjs")
+        self.assertRegex(
+            secure_source,
+            r"lumiLauncherId:\s*launcherPhone\.lumiLauncherId",
+        )
+        self.assertRegex(
+            secure_source,
+            r"lumiLauncherSecret:\s*launcherPhone\.lumiLauncherSecret",
+        )
         for rel_path in (
             "scripts/openclaw-phone-agent.mjs",
             "scripts/openclaw-phone-vision.mjs",
@@ -91,11 +100,11 @@ class PhoneSignatureContractTests(unittest.TestCase):
         ):
             with self.subTest(script=rel_path):
                 source = read(rel_path)
-                self.assertRegex(source, r"lumiLauncherId:\s*firstNonEmpty")
-                self.assertRegex(source, r"launcherPhone\.lumiLauncherId")
-                self.assertRegex(source, r"lumiLauncherSecret:\s*firstNonEmpty")
-                self.assertRegex(source, r"launcherPhone\.lumiLauncherSecret")
-                self.assertRegex(source, r"source:\s*launcherPhone\.source")
+                self.assertIn("resolveLauncherPhoneConnection", source)
+                self.assertRegex(
+                    source,
+                    r"resolveLauncherPhoneConnection\(args,\s*launcherPhone,\s*runtime",
+                )
 
     def test_phone_agent_supports_template_layer_without_forcing_model_agent(self) -> None:
         agent_source = read("scripts/openclaw-phone-agent.mjs")

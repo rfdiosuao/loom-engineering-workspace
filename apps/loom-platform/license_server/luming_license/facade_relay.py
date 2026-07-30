@@ -68,6 +68,7 @@ def publish_relay_claim(
             timeout=relay.PUBLISH_RELAY_CLAIM_CONNECT_TIMEOUT_SECONDS,
         ),
         lease_id_fn=publish_relay_lease_id,
+        current_entitlement_fn=current_account_entitlement,
     )
 
 
@@ -92,6 +93,16 @@ def publish_relay_complete(body: dict[str, Any]) -> dict[str, Any]:
         defaults=DB_DEFAULTS,
         connect_fn=connect,
         backoff_fn=publish_relay_backoff_ms,
+    )
+
+
+def publish_relay_authorize_commit(body: dict[str, Any]) -> dict[str, Any]:
+    return relay.publish_relay_authorize_commit(
+        body,
+        current_entitlement_fn=current_account_entitlement,
+        settings=SETTINGS,
+        defaults=DB_DEFAULTS,
+        connect_fn=connect,
     )
 
 
@@ -202,6 +213,7 @@ __all__ = [
     "publish_relay_enqueue",
     "publish_relay_claim",
     "publish_relay_wait_for_packet",
+    "publish_relay_authorize_commit",
     "publish_relay_complete",
     "publish_relay_status",
     "publish_relay_stats",

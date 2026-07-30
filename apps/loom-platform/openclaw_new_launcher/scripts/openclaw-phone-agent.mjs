@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,10 +8,13 @@ import {
   authHeaders,
   ensurePhoneConfig,
   fetchWithTimeout,
+  hasLauncherPhoneRuntimeConfig,
   normalizePhoneUrl,
   phoneBridgeErrorPayload,
   readLauncherPhoneConfigByDevice,
   readLauncherPhoneLlmConfig,
+  readLauncherPhoneStore,
+  resolveLauncherPhoneConnection,
   signedJsonRequest,
 } from './openclaw-phone-secure.mjs';
 import {
@@ -100,8 +104,6 @@ Run options:
 
 Debug-only options:
   --device-id <id>             Optional. Select one configured APKClaw device from launcher
-  --phone-url <url>            Optional. Defaults to launcher Phone Control config
-  --phone-token <token>        Optional. Defaults to launcher Phone Control config
 `.trim();
 }
 
@@ -327,19 +329,19 @@ function splitList(value) {
 }
 
 async function resolveConfig(args) {
-  const runtime = await readRuntimeContext();
-  const launcherPhone = args.deviceId && args.phoneUrl
+  const bridgeRuntime = hasLauncherPhoneRuntimeConfig();
+  const runtime = bridgeRuntime ? {} : await readRuntimeContext();
+  const launcherPhone = !bridgeRuntime && args.deviceId && args.phoneUrl
     ? { id: args.deviceId, phoneUrl: args.phoneUrl, phoneToken: args.phoneToken, source: 'explicit' }
     : await readLauncherPhoneConfigByDevice(args.deviceId);
+  const historyOwner = launcherPhone.source === 'bridge-runtime'
+    ? historyOwnerFromVerifiedStore(await readLauncherPhoneStore())
+    : null;
   const phoneLlm = await readLauncherPhoneLlmConfig();
   return {
     ...args,
-    phoneUrl: firstNonEmpty(args.phoneUrl, process.env.OPENCLAW_PHONE_BASE_URL, process.env.APKCLAW_BASE_URL, runtime?.phone?.baseUrl, launcherPhone.phoneUrl),
-    phoneToken: firstNonEmpty(args.phoneToken, process.env.OPENCLAW_PHONE_TOKEN, process.env.APKCLAW_TOKEN, launcherPhone.phoneToken),
-    deviceId: args.deviceId || launcherPhone.id || runtime?.phone?.defaultDeviceId || '',
-    lumiLauncherId: firstNonEmpty(args.lumiLauncherId, process.env.LUMI_LAUNCHER_ID, launcherPhone.lumiLauncherId),
-    lumiLauncherSecret: firstNonEmpty(args.lumiLauncherSecret, process.env.LUMI_LAUNCHER_SECRET, launcherPhone.lumiLauncherSecret),
-    source: launcherPhone.source,
+    ...resolveLauncherPhoneConnection(args, launcherPhone, runtime),
+    historyOwner,
     phoneLlm,
   };
 }
@@ -1039,18 +1041,54 @@ function publicDevice(config) {
   };
 }
 
-async function appendHistory(record) {
+export function historyOwnerFromVerifiedStore(store) {
+  if (!store || store.source !== 'bridge-runtime') return null;
+  const lease = (
+    store.entitlementLease && typeof store.entitlementLease === 'object'
+      ? store.entitlementLease
+      : {}
+  );
+  const accountId = String(store.accountId || '').trim();
+  const leaseAccountId = String(lease.accountId || '').trim();
+  const sessionBinding = String(lease.sessionBinding || '').trim();
+  if (!accountId || accountId !== leaseAccountId || !sessionBinding) return null;
+  return { accountId, sessionBinding };
+}
+
+export function historyPathForOwner(owner, basePath = HISTORY_PATH) {
+  if (!owner?.accountId || !owner?.sessionBinding) {
+    throw new Error('phone_history_identity_required');
+  }
+  const digest = crypto
+    .createHash('sha256')
+    .update('loom.phone-agent.history.owner.v1\0', 'utf8')
+    .update(String(owner.accountId), 'utf8')
+    .update('\0', 'utf8')
+    .update(String(owner.sessionBinding), 'utf8')
+    .digest('hex');
+  const parsed = path.parse(basePath);
+  const extension = parsed.ext || '.jsonl';
+  const name = parsed.ext ? parsed.name : parsed.base;
+  return path.join(parsed.dir, `${name}-${digest}${extension}`);
+}
+
+export async function appendHistory(record, owner, basePath = HISTORY_PATH) {
+  if (!owner?.accountId || !owner?.sessionBinding) return false;
+  const historyPath = historyPathForOwner(owner, basePath);
   try {
-    await fs.mkdir(path.dirname(HISTORY_PATH), { recursive: true });
-    await fs.appendFile(HISTORY_PATH, `${JSON.stringify({ schema: 'openclaw.phone-agent.history.v1', ...record })}\n`, 'utf8');
+    await fs.mkdir(path.dirname(historyPath), { recursive: true });
+    await fs.appendFile(historyPath, `${JSON.stringify({ schema: 'openclaw.phone-agent.history.v2', ...record })}\n`, 'utf8');
+    return true;
   } catch {
     // History must never break a phone task.
+    return false;
   }
 }
 
-async function readHistory(limit) {
+export async function readHistory(limit, owner, basePath = HISTORY_PATH) {
+  const historyPath = historyPathForOwner(owner, basePath);
   try {
-    const raw = await fs.readFile(HISTORY_PATH, 'utf8');
+    const raw = await fs.readFile(historyPath, 'utf8');
     return raw
       .split(/\r?\n/)
       .filter(Boolean)
@@ -1118,13 +1156,14 @@ async function main() {
   lastConfig = config;
 
   if (config.command === 'history') {
-    const rows = await readHistory(config.limit);
+    const historyPath = historyPathForOwner(config.historyOwner);
+    const rows = await readHistory(config.limit, config.historyOwner);
     print(
       config,
-      { ok: true, historyPath: HISTORY_PATH, count: rows.length, rows },
+      { ok: true, historyPath, count: rows.length, rows },
       rows.length
         ? rows.map((row) => `${row.finishedAt || row.submittedAt || row.createdAt || '-'} ${row.status || row.command || 'unknown'} ${row.taskId ? String(row.taskId).slice(0, 8) : ''} ${row.failureClass || ''} ${row.error || row.summary || ''}`.trim()).join('\n')
-        : `No phone Agent history yet.\n${HISTORY_PATH}`,
+        : `No phone Agent history yet.\n${historyPath}`,
     );
     return;
   }
@@ -1205,7 +1244,7 @@ async function main() {
       summary: result.currentStep,
       error: result.message || result.errorCode || '',
       device: publicDevice(config),
-    });
+    }, config.historyOwner);
     print(config, result, result.ok ? `wechat ${result.currentStep}` : (result.message || result.errorCode || 'wechat_reply_failed'));
     return;
   }
@@ -1227,7 +1266,7 @@ async function main() {
       stepTimeoutSec: config.stepTimeoutSec,
       promptPreview: promptPreview(config.prompt),
       device: publicDevice(config),
-    });
+    }, config.historyOwner);
     if (config.command === 'submit') {
       print(config, { ok: true, taskId: submitted.taskId, submitted: submitted.payload }, `submitted task=${submitted.taskId}`);
       return;
@@ -1252,7 +1291,7 @@ async function main() {
           metrics: daemonAttempt.result.metrics || {},
           summary: daemonAttempt.result.currentStep || '',
           error: daemonAttempt.result.error || '',
-        });
+        }, config.historyOwner);
         print(config, daemonAttempt.result, daemonAttempt.result.currentStep || daemonAttempt.result.mode || 'daemon result');
         return;
       }
@@ -1271,7 +1310,7 @@ async function main() {
       metrics: result.metrics || {},
       summary: result.currentStep || '',
       error: result.error || '',
-    });
+    }, config.historyOwner);
     print(config, result, result.ok ? summarizeFastPath(result) : result.error);
     return;
   }
@@ -1299,7 +1338,7 @@ async function main() {
       finishedAt: new Date().toISOString(),
       taskId: config.taskId,
       device: publicDevice(config),
-    });
+    }, config.historyOwner);
     print(config, payload, `cancelled task=${config.taskId.slice(0, 8)}`);
     return;
   }
@@ -1307,13 +1346,15 @@ async function main() {
   throw new Error(`Unknown command: ${config.command}`);
 }
 
-main().catch((error) => {
-  const config = lastConfig || lastArgs || {};
-  const payload = phoneBridgeErrorPayload(error, config, config.command || 'phone');
-  if (config.json || process.argv.includes('--json')) {
-    console.log(JSON.stringify(payload, null, 2));
-  } else {
-    console.error(`ERROR: ${payload.message}`);
-  }
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  main().catch((error) => {
+    const config = lastConfig || lastArgs || {};
+    const payload = phoneBridgeErrorPayload(error, config, config.command || 'phone');
+    if (config.json || process.argv.includes('--json')) {
+      console.log(JSON.stringify(payload, null, 2));
+    } else {
+      console.error(`ERROR: ${payload.message}`);
+    }
+    process.exitCode = 1;
+  });
+}

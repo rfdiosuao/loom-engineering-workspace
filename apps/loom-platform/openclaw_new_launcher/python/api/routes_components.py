@@ -133,6 +133,12 @@ def _truthy(value: object) -> bool:
 
 def _model_config_error_payload(error: Exception, *, custom_provider: bool = False) -> dict[str, str]:
     detail = str(error or "").strip()
+    if detail.startswith("selected_model_not_listed"):
+        return {
+            "error": "所选模型已不在当前账号最新的可用目录中，配置未写入。模型目录已刷新，请重新选择后再试。",
+            "code": "selected_model_not_listed",
+            "action": "choose_compatible_model",
+        }
     if "responses_tool_call_missing" in detail:
         return {
             "error": "该模型能够返回文字，但不能返回 Codex 所需的原生工具调用，配置没有写入。请选择支持 Responses API 与 function_call 的模型。",
@@ -275,12 +281,42 @@ def register_component_routes(app, ctx) -> None:
                 account_manager = account_manager_getter()
                 account_session = account_manager.current()
                 if isinstance(account_session, dict) and account_session.get("source") == ACCOUNT_SOURCE:
-                    await run_in_threadpool(account_manager.ensure_launcher_token)
+                    await run_in_threadpool(
+                        account_manager.ensure_launcher_token,
+                        force_refresh=True,
+                    )
+                    current = _model_config_status(ctx, component_id)
+                    available_models = [
+                        str(item).strip()
+                        for item in current.get("availableModels", [])
+                        if str(item).strip()
+                    ]
+                    if model and available_models:
+                        matched_model = next(
+                            (
+                                item
+                                for item in available_models
+                                if item.casefold() == model.casefold()
+                            ),
+                            "",
+                        )
+                        if not matched_model:
+                            return ctx.fastapi_json({
+                                "error": (
+                                    "所选模型已不在当前账号最新的可用目录中，配置未写入。"
+                                    "模型目录已刷新，请重新选择后再试。"
+                                ),
+                                "code": "selected_model_not_listed",
+                                "action": "choose_compatible_model",
+                                "status": current,
+                            }, 409)
+                        model = matched_model
             except NewApiAccountError as exc:
                 append_log = getattr(ctx, "append_log", None)
                 if callable(append_log):
                     append_log(f"[ModelConfig] launcher API Key preparation failed: {exc}\n")
                 error_text = str(exc or "").strip().lower()
+                upstream_status = getattr(exc, "status_code", None)
                 relogin_required = any(token in error_text for token in (
                     "requires re-login",
                     "permission_contract_invalid",
@@ -288,17 +324,45 @@ def register_component_routes(app, ctx) -> None:
                     "missing_api_token",
                     "http_401",
                     "http_403",
-                )) or getattr(exc, "status_code", None) in {401, 403}
+                )) or upstream_status in {401, 403}
+                rate_limited = upstream_status == 429 or "http_429" in error_text
+                upstream_unavailable = (
+                    upstream_status in {502, 503, 504}
+                    or any(token in error_text for token in (
+                        "http_502",
+                        "http_503",
+                        "http_504",
+                        "network_error",
+                        "timed out",
+                        "timeout",
+                    ))
+                )
+                if rate_limited:
+                    response_error = "模型目录刷新受到限流，原配置未修改。请稍后重试。"
+                    response_code = "model_catalog_rate_limited"
+                    response_action = "retry_model_config"
+                    response_status = 429
+                elif upstream_unavailable:
+                    response_error = "模型站或上游服务暂时不可用，模型目录无法刷新，原配置未修改。请稍后重试。"
+                    response_code = "model_catalog_refresh_unavailable"
+                    response_action = "retry_model_config"
+                    response_status = 503
+                elif relogin_required:
+                    response_error = "模型账号登录状态已过期或版本过旧，配置未写入。请重新登录模型账号后再试"
+                    response_code = "account_relogin_required"
+                    response_action = "open_model_account"
+                    response_status = 400
+                else:
+                    response_error = "无法自动创建可用 API Key，配置未写入。请检查模型账号后重试"
+                    response_code = "api_key_unavailable"
+                    response_action = "retry_model_config"
+                    response_status = 400
                 return ctx.fastapi_json({
-                    "error": (
-                        "模型账号登录状态已过期或版本过旧，配置未写入。请重新登录模型账号后再试"
-                        if relogin_required
-                        else "无法自动创建可用 API Key，配置未写入。请检查模型账号后重试"
-                    ),
-                    "code": "account_relogin_required" if relogin_required else "api_key_unavailable",
-                    "action": "open_model_account" if relogin_required else "retry_model_config",
+                    "error": response_error,
+                    "code": response_code,
+                    "action": response_action,
                     "status": current,
-                }, 400)
+                }, response_status)
         try:
             wire_service = ctx.get_wire_svc()
             status = await run_in_threadpool(

@@ -390,11 +390,28 @@ class LosslessUpdateContractTests(unittest.TestCase):
 
         self.assertIn("prepare_update_install", source)
         self.assertIn("shutdown_backend().await", source)
-        self.assertIn('post_bridge_shutdown("/api/agent/shutdown").await;', source)
-        self.assertLess(
-            source.index('post_bridge_shutdown("/api/agent/shutdown").await;'),
-            source.index('post_bridge_shutdown("/api/process/stop").await;'),
+        self.assertIn(
+            'tauri::async_runtime::spawn(post_bridge_shutdown("/api/agent/shutdown"))',
+            source,
         )
+        self.assertIn(
+            'tauri::async_runtime::spawn(post_bridge_shutdown("/api/process/stop"))',
+            source,
+        )
+        self.assertIn(
+            'tauri::async_runtime::spawn(post_bridge_shutdown("/api/desktop-agent/stop"))',
+            source,
+        )
+        self.assertNotIn(
+            'post_bridge_shutdown("/api/agent/shutdown").await;',
+            source,
+        )
+        self.assertIn("Duration::from_secs(4)", source)
+        self.assertIn("fn update_test_mode_enabled()", source)
+        self.assertIn("#[cfg(debug_assertions)]", source)
+        self.assertIn("#[cfg(not(debug_assertions))]", source)
+        self.assertIn(".spawn();", source)
+        self.assertNotIn("let _ = command.output();", source)
         self.assertIn("upgrade-backups", source)
         self.assertIn('None => "LOOM"', source)
         self.assertIn("update_recovery_dir_name()", source)
@@ -453,11 +470,14 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("if ready_path.is_file()", source)
         self.assertIn("handoff_process.try_wait()", source)
         self.assertIn("app_handle.exit(0)", source)
-        self.assertNotIn("Duration::from_millis(1200)", source)
         self.assertIn(
             "shutdown_backend().await;\n                app_handle.exit(0);",
             source,
         )
+        self.assertIn("let forced_exit_app = app.clone();", source)
+        self.assertIn("std::thread::spawn(move ||", source)
+        self.assertIn("std::thread::sleep(Duration::from_secs(6));", source)
+        self.assertIn("forced_exit_app.exit(0);", source)
         self.assertLess(
             source.index("if ready_path.is_file()"),
             source.index("shutdown_backend().await"),

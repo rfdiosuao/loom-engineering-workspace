@@ -419,6 +419,117 @@ class AccountEntitlementTests(unittest.TestCase):
             ["phone-a", "phone-b"],
         )
 
+    def test_permanent_online_revocation_clears_local_runtime_leases(self):
+        self.manager.accept_lease(self._lease())
+        write_json(
+            self.paths.account_phone_seat_lease_file,
+            self._phone_seat_lease(["phone-a"]),
+        )
+
+        def revoked(**_kwargs):
+            raise AccountEntitlementError(
+                "Account entitlement has been revoked",
+                code="account_entitlement_revoked",
+                action="login_and_bind_authorization_code",
+                status_code=403,
+            )
+
+        self.manager._server_check = revoked
+        with self.assertRaises(AccountEntitlementError) as denied:
+            self.manager.authorize_phone_devices(
+                ["phone-a"],
+                "matrix.task.start",
+                session={
+                    "memberToken": "sk-test-session-token",
+                    "newApi": {"baseUrl": "https://api.heang.top"},
+                },
+            )
+
+        self.assertEqual(denied.exception.code, "account_entitlement_revoked")
+        self.assertFalse(os.path.exists(self.paths.account_entitlement_file))
+        self.assertFalse(os.path.exists(self.paths.account_phone_seat_lease_file))
+        self.assertFalse(self.manager.current_state("matrix.devices")["authorized"])
+
+    def test_unlimited_entitlement_accepts_seat_lease_above_numeric_limit(self):
+        entitlement_lease = self._lease(
+            limits={
+                "devices": 1,
+                "concurrentTasks": 1,
+                "unlimitedDevices": True,
+            }
+        )
+        self.manager.accept_lease(entitlement_lease)
+        write_json(
+            self.paths.account_phone_seat_lease_file,
+            self._phone_seat_lease(
+                ["phone-a", "phone-b"],
+                limit=1,
+            ),
+        )
+
+        result = self.manager.authorize_phone_devices(
+            ["phone-a", "phone-b"],
+            "matrix.task.start",
+        )
+
+        self.assertTrue(result["authorized"])
+        self.assertEqual(
+            result["claimedPhoneDeviceIds"],
+            ["phone-a", "phone-b"],
+        )
+
+    def test_phone_runtime_authorization_returns_only_verified_current_leases(self):
+        entitlement_lease = self._lease()
+        phone_seat_lease = self._phone_seat_lease(["phone-a", "phone-b"])
+        self.manager.accept_lease(entitlement_lease)
+        write_json(
+            self.paths.account_phone_seat_lease_file,
+            phone_seat_lease,
+        )
+
+        runtime = self.manager.phone_runtime_authorization(
+            ["phone-b"],
+            session={
+                "source": "newapi_account",
+                "memberId": "newapi:42",
+                "memberToken": "sk-test-session-token",
+                "newApi": {
+                    "userId": "42",
+                    "baseUrl": "https://api.heang.top",
+                },
+            },
+        )
+
+        self.assertEqual(runtime["accountId"], "42")
+        self.assertEqual(runtime["entitlementLease"], entitlement_lease)
+        self.assertEqual(runtime["phoneSeatLease"], phone_seat_lease)
+        self.assertEqual(runtime["authorizedPhoneDeviceIds"], ["phone-a", "phone-b"])
+        self.assertEqual(runtime["requestedPhoneDeviceIds"], ["phone-b"])
+        self.assertNotIn("memberToken", runtime)
+
+    def test_phone_runtime_authorization_rejects_device_outside_signed_seat(self):
+        self.manager.accept_lease(self._lease())
+        write_json(
+            self.paths.account_phone_seat_lease_file,
+            self._phone_seat_lease(["phone-a"]),
+        )
+
+        with self.assertRaises(AccountEntitlementError) as outside_seat:
+            self.manager.phone_runtime_authorization(
+                ["phone-b"],
+                session={
+                    "source": "newapi_account",
+                    "memberId": "newapi:42",
+                    "memberToken": "sk-test-session-token",
+                    "newApi": {"userId": "42"},
+                },
+            )
+
+        self.assertEqual(
+            outside_seat.exception.code,
+            "phone_device_not_authorized",
+        )
+
     def test_pending_phone_release_is_persisted_and_retried_before_next_online_action(self):
         self.manager.accept_lease(self._lease())
         write_json(
@@ -519,6 +630,81 @@ class AccountEntitlementTests(unittest.TestCase):
         self.assertFalse(second_entered.wait(timeout=0.15))
         release_first.set()
         self.assertTrue(second_entered.wait(timeout=1))
+        first_thread.join(timeout=1)
+        second_thread.join(timeout=1)
+
+    def test_account_task_slot_serializes_overlapping_phone_devices(self):
+        entitlement = {
+            "accountId": "42",
+            "limits": {"concurrentTasks": 2},
+        }
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+
+        def first():
+            with self.manager.account_task_slot(
+                entitlement,
+                "matrix.task.execute",
+                device_ids=["phone-a"],
+            ):
+                first_entered.set()
+                release_first.wait(timeout=2)
+
+        def second():
+            first_entered.wait(timeout=2)
+            with self.manager.account_task_slot(
+                entitlement,
+                "phone.task",
+                device_ids=["phone-a"],
+            ):
+                second_entered.set()
+
+        first_thread = threading.Thread(target=first)
+        second_thread = threading.Thread(target=second)
+        first_thread.start()
+        second_thread.start()
+        self.assertTrue(first_entered.wait(timeout=1))
+        self.assertFalse(second_entered.wait(timeout=0.15))
+        release_first.set()
+        self.assertTrue(second_entered.wait(timeout=1))
+        first_thread.join(timeout=1)
+        second_thread.join(timeout=1)
+
+    def test_account_task_slot_allows_disjoint_phone_devices_with_capacity(self):
+        entitlement = {
+            "accountId": "42",
+            "limits": {"concurrentTasks": 2},
+        }
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+
+        def first():
+            with self.manager.account_task_slot(
+                entitlement,
+                "matrix.task.execute",
+                device_ids=["phone-a"],
+            ):
+                first_entered.set()
+                release_first.wait(timeout=2)
+
+        def second():
+            first_entered.wait(timeout=2)
+            with self.manager.account_task_slot(
+                entitlement,
+                "phone.task",
+                device_ids=["phone-b"],
+            ):
+                second_entered.set()
+
+        first_thread = threading.Thread(target=first)
+        second_thread = threading.Thread(target=second)
+        first_thread.start()
+        second_thread.start()
+        self.assertTrue(first_entered.wait(timeout=1))
+        self.assertTrue(second_entered.wait(timeout=1))
+        release_first.set()
         first_thread.join(timeout=1)
         second_thread.join(timeout=1)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import copy
 import hashlib
 import tempfile
 import threading
@@ -14,9 +13,29 @@ import uuid
 from typing import Callable
 
 from core.reliability import classify_failure
+from core.job_ownership import persisted_job_snapshot
 
 
 MATRIX_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
+
+
+class CancelMatchingResult(list[str]):
+    """Backward-compatible cancellation ids with batch diagnostics."""
+
+    def __init__(
+        self,
+        cancelled_job_ids: list[str],
+        *,
+        errors: list[dict] | None = None,
+        still_running: list[str] | None = None,
+    ) -> None:
+        super().__init__(cancelled_job_ids)
+        self.errors = list(errors or [])
+        self.stillRunning = list(still_running or [])
+
+    @property
+    def still_running(self) -> list[str]:
+        return self.stillRunning
 
 
 class JobManager:
@@ -121,7 +140,10 @@ class JobManager:
         with self._lock:
             event = self._cancel_events.get(job_id)
             job = self._jobs.get(job_id)
-            return bool((event and event.is_set()) or (job and job.get("status") == "cancelled"))
+            return bool(
+                (event and event.is_set())
+                or (job and job.get("status") in {"cancelling", "cancelled"})
+            )
 
     def cancel(self, job_id: str, *, wait_for_worker: bool = True) -> bool:
         now = time.time()
@@ -132,22 +154,21 @@ class JobManager:
             event = self._cancel_events.setdefault(job_id, threading.Event())
             event.set()
             worker = self._threads.get(job_id)
+            job.update({
+                "status": "cancelling",
+                "phase": "cancelling",
+                "message": "cancelling",
+                "finishedAt": None,
+                "updatedAt": now,
+            })
+            self._persist_locked()
         os.makedirs(self._runtime_dir, exist_ok=True)
         with open(self.cancel_file(job_id), "w", encoding="ascii") as handle:
             handle.write("cancelled\n")
         if wait_for_worker and worker and worker is not threading.current_thread():
             worker.join(timeout=1.0)
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job:
-                job.update({
-                    "status": "cancelled",
-                    "phase": "cancelled",
-                    "message": "cancelled",
-                    "finishedAt": now,
-                    "updatedAt": time.time(),
-                })
-                self._persist_locked()
+        if not worker or not worker.is_alive():
+            self._finalize_cancelled(job_id)
         return True
 
     def cancel_matching(
@@ -155,7 +176,7 @@ class JobManager:
         predicate: Callable[[dict], bool],
         *,
         wait_for_workers: bool = True,
-    ) -> list[str]:
+    ) -> CancelMatchingResult:
         with self._lock:
             job_ids = [
                 job_id
@@ -163,11 +184,32 @@ class JobManager:
                 if str(job.get("status") or "") not in {"succeeded", "failed", "cancelled", "needs_manual"}
                 and predicate(dict(job))
             ]
-        return [
-            job_id
-            for job_id in job_ids
-            if self.cancel(job_id, wait_for_worker=wait_for_workers)
-        ]
+        cancelled_job_ids: list[str] = []
+        errors: list[dict] = []
+        for job_id in job_ids:
+            try:
+                cancelled = self.cancel(
+                    job_id,
+                    wait_for_worker=wait_for_workers,
+                )
+            except Exception as error:
+                errors.append({
+                    "jobId": job_id,
+                    "type": type(error).__name__,
+                    "message": str(error),
+                })
+                cancelled = self.is_cancelled(job_id)
+            if cancelled:
+                cancelled_job_ids.append(job_id)
+        return CancelMatchingResult(
+            cancelled_job_ids,
+            errors=errors,
+            still_running=[
+                job_id
+                for job_id in job_ids
+                if self._job_execution_may_continue(job_id)
+            ],
+        )
 
     def progress(self, job_id: str, message: str, tone: str = "neutral", **extra) -> None:
         now = time.time()
@@ -175,7 +217,7 @@ class JobManager:
             job = self._jobs.get(job_id)
             if not job:
                 return
-            if str(job.get("status") or "") == "cancelled":
+            if str(job.get("status") or "") in {"cancelling", "cancelled"}:
                 return
             current = job.get("progress") if isinstance(job.get("progress"), dict) else {}
             history = current.get("history") if isinstance(current.get("history"), list) else []
@@ -210,6 +252,7 @@ class JobManager:
     def _run(self, job_id: str, target: Callable[[str], dict]) -> None:
         self._patch(job_id, status="running", phase="running", startedAt=time.time(), updatedAt=time.time(), message="running")
         if self.is_cancelled(job_id):
+            self._finalize_cancelled(job_id)
             with self._lock:
                 self._threads.pop(job_id, None)
             return
@@ -218,7 +261,29 @@ class JobManager:
         try:
             result = target(job_id)
             if self.is_cancelled(job_id):
+                if _execution_may_continue(result):
+                    error_text = str(
+                        result.get("error")
+                        or result.get("message")
+                        or "任务取消结果不确定，外部执行可能仍在继续"
+                    )
+                    self._patch(
+                        job_id,
+                        status="failed",
+                        phase="outcome_indeterminate",
+                        message=error_text,
+                        result=result,
+                        error=error_text,
+                        failure=_public_failure(classify_failure(result)),
+                        finishedAt=time.time(),
+                        updatedAt=time.time(),
+                    )
+                    self.append_log(
+                        f"{log_prefix} outcome indeterminate: {error_text}\n"
+                    )
+                    return
                 self.append_log(f"{log_prefix} cancelled\n")
+                self._finalize_cancelled(job_id)
                 return
             if isinstance(result, dict) and result.get("manualRequired") is True:
                 self._patch(
@@ -261,6 +326,7 @@ class JobManager:
         except Exception as error:
             if self.is_cancelled(job_id):
                 self.append_log(f"{log_prefix} cancelled\n")
+                self._finalize_cancelled(job_id)
                 return
             technical = f"{type(error).__name__}: {error}"
             self.append_log(f"{log_prefix} failed: {technical}\n{traceback.format_exc()}\n")
@@ -278,6 +344,33 @@ class JobManager:
             with self._lock:
                 self._threads.pop(job_id, None)
 
+    def _finalize_cancelled(self, job_id: str) -> None:
+        now = time.time()
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or str(job.get("status") or "") in {"succeeded", "failed", "needs_manual"}:
+                return
+            job.update({
+                "status": "cancelled",
+                "phase": "cancelled",
+                "message": "cancelled",
+                "finishedAt": now,
+                "updatedAt": now,
+            })
+            self._prune_locked()
+            self._persist_locked()
+
+    def _job_execution_may_continue(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id) or {}
+            worker = self._threads.get(job_id)
+            result = job.get("result")
+            return bool(
+                (worker and worker.is_alive())
+                or str(job.get("status") or "") in {"queued", "running", "cancelling"}
+                or _execution_may_continue(result)
+            )
+
     def _job_log_prefix(self, job_id: str) -> str:
         with self._lock:
             job = self._jobs.get(job_id) or {}
@@ -292,7 +385,14 @@ class JobManager:
             job = self._jobs.get(job_id)
             if not job:
                 return
-            if str(job.get("status") or "") == "cancelled" and updates.get("status") != "cancelled":
+            if (
+                str(job.get("status") or "") in {"cancelling", "cancelled"}
+                and updates.get("status") != "cancelled"
+                and not (
+                    updates.get("status") == "failed"
+                    and _execution_may_continue(updates.get("result"))
+                )
+            ):
                 return
             result = updates.get("result")
             if result is not None:
@@ -307,6 +407,16 @@ class JobManager:
                         "truncated": True,
                         "originalBytes": len(result_bytes),
                         "maxArtifactBytes": artifact_limit,
+                        **(
+                            {"outcomeIndeterminate": True}
+                            if result.get("outcomeIndeterminate") is True
+                            else {}
+                        ),
+                        **(
+                            {"executionMayContinue": True}
+                            if result.get("executionMayContinue") is True
+                            else {}
+                        ),
                     }
                     updates["error"] = error_code
                     updates["failure"] = _public_failure(classify_failure({"error": error_code}))
@@ -381,7 +491,7 @@ class JobManager:
         }
 
     def _job_for_persistence_locked(self, job_id: str, job: dict) -> dict:
-        persisted = copy.deepcopy(job)
+        persisted = persisted_job_snapshot(job)
         result = persisted.get("result")
         if result is None:
             return persisted
@@ -512,7 +622,7 @@ class JobManager:
                         job["failure"] = _public_failure(classify_failure({"error": "job_result_unavailable"}))
                         changed = True
                 status = str(job.get("status") or "")
-                if status in {"queued", "running"}:
+                if status in {"queued", "running", "cancelling"}:
                     progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
                     history = progress.get("history") if isinstance(progress.get("history"), list) else []
                     entry = {
@@ -595,3 +705,10 @@ def _public_failure(failure: dict) -> dict:
         "severity": failure.get("severity") or "warn",
         "suggestion": failure.get("suggestion") or "",
     }
+
+
+def _execution_may_continue(result: object) -> bool:
+    return bool(
+        isinstance(result, dict)
+        and result.get("executionMayContinue") is True
+    )

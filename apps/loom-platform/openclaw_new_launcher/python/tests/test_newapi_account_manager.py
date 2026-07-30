@@ -98,7 +98,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
 
             self.assertEqual(manager.requests, [])
 
-    def test_signed_legacy_license_migrates_to_current_account_without_persisting_proof(self) -> None:
+    def test_manual_legacy_migration_requires_original_authorization_code(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)
             manager = EntitlementRedeemFakeManager(paths)
@@ -113,18 +113,6 @@ class NewApiAccountManagerTests(unittest.TestCase):
                 "signature": "legacy-signature-do-not-persist",
             }
             manager.license_mgr.legacy_migration_proof = Mock(return_value=proof)
-            manager.account_entitlement.accept_lease = Mock(return_value={
-                "features": ["matrix.devices", "matrix.tasks"],
-                "limits": {
-                    "devices": 1000,
-                    "concurrentTasks": 3,
-                    "unlimitedDevices": True,
-                },
-                "plan": "matrix_pro",
-                "expiresAt": 1_900_000_000,
-                "offlineGraceUntil": 1_900_259_200,
-                "entitlementVersion": 8,
-            })
             manager._write_session({
                 "source": ACCOUNT_SOURCE,
                 "memberId": "newapi:42",
@@ -142,21 +130,18 @@ class NewApiAccountManagerTests(unittest.TestCase):
                 },
             })
 
-            session = manager.migrate_legacy_entitlement()
+            with self.assertRaisesRegex(
+                NewApiAccountError,
+                "输入原授权码",
+            ):
+                manager.migrate_legacy_entitlement()
 
-            self.assertEqual("matrix_pro", session["accountEntitlement"]["plan"])
-            request = manager.requests[-1]
-            self.assertTrue(
-                request["url"].endswith(
-                    "/api/openclaw/entitlements/migrate-legacy"
-                )
-            )
-            self.assertEqual(proof, request["body"]["legacyLicense"])
+            self.assertEqual([], manager.requests)
             persisted = repr(read_json(paths.member_session_file, {}))
             self.assertNotIn(proof["signature"], persisted)
             self.assertNotIn("legacyLicense", persisted)
 
-    def test_login_automatically_migrates_valid_legacy_license(self) -> None:
+    def test_login_never_automatically_migrates_legacy_license(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = EntitlementRedeemFakeManager(AppPaths(temp_dir))
             manager.license_mgr.legacy_migration_proof = Mock(return_value={
@@ -169,19 +154,6 @@ class NewApiAccountManagerTests(unittest.TestCase):
                 "features": ["matrix.devices"],
                 "signature": "legacy-signature",
             })
-            manager.account_entitlement.accept_lease = Mock(return_value={
-                "features": ["matrix.devices", "matrix.tasks"],
-                "limits": {
-                    "devices": 1000,
-                    "concurrentTasks": 3,
-                    "unlimitedDevices": True,
-                },
-                "plan": "matrix_pro",
-                "expiresAt": 1_900_000_000,
-                "offlineGraceUntil": 1_900_259_200,
-                "entitlementVersion": 8,
-            })
-
             session = manager._persist_authenticated_session(
                 {
                     "source": ACCOUNT_SOURCE,
@@ -200,13 +172,8 @@ class NewApiAccountManagerTests(unittest.TestCase):
                 sync_runtime=False,
             )
 
-            self.assertEqual("signed_lease", session["accountEntitlement"]["source"])
-            self.assertEqual(1, len(manager.requests))
-            self.assertTrue(
-                manager.requests[0]["url"].endswith(
-                    "/api/openclaw/entitlements/migrate-legacy"
-                )
-            )
+            self.assertEqual("authorization_required", session["accountEntitlement"]["source"])
+            self.assertEqual([], manager.requests)
 
     def test_missing_legacy_proof_does_not_block_login_or_send_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1215,6 +1182,112 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertNotIn("agnes-video-v2.0", public_session["models"]["text"])
             self.assertEqual(refreshed["lease"]["tokenSource"], "created_launcher_after_refresh_model_check")
 
+    def test_refresh_clears_local_lease_when_server_returns_inactive_entitlement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LauncherTokenFakeManager(
+                AppPaths(temp_dir),
+                tokens=[],
+                entitlement_payload={
+                    "success": True,
+                    "data": {
+                        "entitlement": {
+                            "source": "authorization_required",
+                            "plan": "inactive",
+                            "features": [],
+                            "limits": {
+                                "devices": 0,
+                                "concurrentTasks": 0,
+                                "unlimitedDevices": False,
+                            },
+                        },
+                    },
+                },
+                model_by_token={
+                    "fake-old-token-not-real": ["glm-5.2-coding"],
+                },
+            )
+            manager.account_entitlement.clear_active = Mock()
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberToken": "fake-old-token-not-real",
+                "gatewayDefaultModel": "glm-5.2-coding",
+                "gatewayModels": ["glm-5.2-coding"],
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "u_123",
+                    "account": "user@example.invalid",
+                },
+                "accountEntitlement": {
+                    "source": "signed_lease",
+                    "plan": "matrix_pro",
+                    "features": ["matrix.devices", "matrix.tasks"],
+                    "limits": {
+                        "devices": 1000,
+                        "concurrentTasks": 3,
+                        "unlimitedDevices": True,
+                    },
+                },
+            })
+
+            refreshed = manager.refresh_current()
+
+            manager.account_entitlement.clear_active.assert_called_once_with()
+            self.assertEqual(
+                refreshed["accountEntitlement"]["source"],
+                "authorization_required",
+            )
+            self.assertEqual(refreshed["accountEntitlement"]["plan"], "inactive")
+            self.assertEqual(
+                refreshed["accountEntitlement"]["limits"]["devices"],
+                0,
+            )
+
+    def test_refresh_preserves_local_lease_during_transient_authorization_outage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LauncherTokenFakeManager(
+                AppPaths(temp_dir),
+                tokens=[],
+                entitlement_error=NewApiAccountError(
+                    "授权服务暂时不可用",
+                    status_code=503,
+                    code="authorization_service_unavailable",
+                    details={"offlineLeasePreserved": True},
+                ),
+                model_by_token={
+                    "fake-old-token-not-real": ["glm-5.2-coding"],
+                },
+            )
+            manager.account_entitlement.clear_active = Mock()
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberToken": "fake-old-token-not-real",
+                "gatewayDefaultModel": "glm-5.2-coding",
+                "gatewayModels": ["glm-5.2-coding"],
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "u_123",
+                    "account": "user@example.invalid",
+                },
+                "accountEntitlement": {
+                    "source": "signed_lease",
+                    "plan": "matrix_pro",
+                    "features": ["matrix.devices", "matrix.tasks"],
+                    "limits": {
+                        "devices": 1000,
+                        "concurrentTasks": 3,
+                        "unlimitedDevices": True,
+                    },
+                },
+            })
+
+            refreshed = manager.refresh_current()
+
+            manager.account_entitlement.clear_active.assert_not_called()
+            self.assertEqual(refreshed["accountEntitlement"]["plan"], "matrix_pro")
+            self.assertTrue(
+                refreshed["accountEntitlement"]["limits"]["unlimitedDevices"]
+            )
+
     def test_register_with_email_code_builds_session_without_persisting_password(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = EmailCodeFakeManager(AppPaths(temp_dir))
@@ -1603,6 +1676,8 @@ class LauncherTokenFakeManager(NewApiAccountManager):
         bridge_error: NewApiAccountError | None = None,
         bridge_api_base_url: str = "",
         model_by_token: dict[str, list[str]] | None = None,
+        entitlement_payload: dict | None = None,
+        entitlement_error: NewApiAccountError | None = None,
     ):
         super().__init__(paths)
         self.tokens = list(tokens)
@@ -1613,6 +1688,8 @@ class LauncherTokenFakeManager(NewApiAccountManager):
         self.bridge_error = bridge_error
         self.bridge_api_base_url = bridge_api_base_url
         self.model_by_token = model_by_token or {}
+        self.entitlement_payload = entitlement_payload
+        self.entitlement_error = entitlement_error
         self.requests: list[dict] = []
         self.synced_targets: tuple[str, ...] | None = None
 
@@ -1661,6 +1738,10 @@ class LauncherTokenFakeManager(NewApiAccountManager):
                 }
             raise NewApiAccountError("http_404")
         if url.endswith("/api/openclaw/entitlements/refresh"):
+            if self.entitlement_error is not None:
+                raise self.entitlement_error
+            if self.entitlement_payload is not None:
+                return self.entitlement_payload
             raise NewApiAccountError("http_404")
         if url.endswith("/api/user/self"):
             return {

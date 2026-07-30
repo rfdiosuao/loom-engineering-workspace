@@ -111,7 +111,8 @@ class LicenseRoutePublicSafetyTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "authorized")
         self.assertEqual(payload["license"]["plan"], "activated")
-        self.assertEqual(payload["license"]["deviceLimit"], 1000)
+        self.assertIsNone(payload["license"]["deviceLimit"])
+        self.assertTrue(payload["license"]["unlimitedDevices"])
         self.assertEqual(payload["license"]["signature"], "signed-account-lease")
         self.assertEqual(payload["source"], "account_entitlement")
 

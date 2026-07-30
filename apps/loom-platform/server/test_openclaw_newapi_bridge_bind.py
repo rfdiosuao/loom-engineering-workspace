@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import bcrypt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -123,6 +124,12 @@ class BindTicketTests(unittest.TestCase):
             signature,
             self.bridge.canonical_json(signed).encode("utf-8"),
         )
+
+    def resign_lease(self, lease):
+        signed = dict(lease)
+        signed.pop("signature", None)
+        signed["signature"] = self.bridge.sign_entitlement_payload(signed)
+        return signed
 
     def test_raw_entitlement_signing_key_preserves_whitespace_bytes(self):
         private_bytes = b" " + bytes(range(1, 31)) + b"\n"
@@ -427,6 +434,40 @@ class BindTicketTests(unittest.TestCase):
                 "authorization_required",
             )
 
+    def test_legacy_plan_default_grant_cannot_activate_phone_access(self):
+        now = int(time.time())
+        connection = self.bridge._bind_connection()
+        try:
+            connection.execute(
+                """
+                insert into entitlement_account_grants(
+                    account_id, plan, features_json, limits_json, expires_at,
+                    source, code_label, updated_at, revoked_at
+                )
+                values(?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    "42",
+                    "pro",
+                    '["matrix.devices", "matrix.tasks", "matrix.diagnostics"]',
+                    '{"devices": 5, "concurrentTasks": 3}',
+                    now + 86400,
+                    "plan_defaults",
+                    "",
+                    now,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        policy = self.bridge.effective_entitlement_policy("42", "pro")
+
+        self.assertEqual(policy["source"], "authorization_required")
+        self.assertEqual(policy["features"], [])
+        self.assertEqual(policy["limits"]["devices"], 0)
+        self.assertFalse(policy["limits"]["unlimitedDevices"])
+
     def _activated_lease(self, *, install_id="install-a", host_device_id="host-a"):
         self.bridge.persist_account_entitlement_grant(
             "42",
@@ -483,6 +524,262 @@ class BindTicketTests(unittest.TestCase):
             self.bridge.entitlement_audit_events("42")[-1]["code"],
             "ok",
         )
+
+    def test_unlimited_entitlement_does_not_apply_numeric_phone_limit(self):
+        lease = self._activated_lease()
+        lease = self.resign_lease(
+            {
+                **lease,
+                "limits": {
+                    "devices": 1,
+                    "concurrentTasks": 1,
+                    "unlimitedDevices": True,
+                },
+            }
+        )
+
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease,
+            "matrix.device.claim",
+            ["phone-a", "phone-b"],
+        )
+
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(
+            payload["phoneSeatLease"]["phoneDeviceIds"],
+            ["phone-a", "phone-b"],
+        )
+
+    def test_license_service_requires_explicit_success_marker(self):
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = "https://license.example"
+        expires_at = int(time.time()) + 86400
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return self.bridge_payload
+
+        response = Response()
+        response.bridge_payload = self.bridge.json.dumps(
+            {
+                "entitlement": {
+                    "source": "authorization_code",
+                    "plan": "activated",
+                    "features": ["matrix.devices", "matrix.tasks"],
+                    "limits": {
+                        "devices": 1000,
+                        "concurrentTasks": 8,
+                        "unlimitedDevices": True,
+                    },
+                    "expiresAt": expires_at,
+                    "codeLabel": "LM-ACTIVE-****-TEST",
+                }
+            }
+        ).encode("utf-8")
+
+        with patch.object(
+            self.bridge.urllib.request,
+            "urlopen",
+            return_value=response,
+        ), self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge._license_service_json(
+                "/api/service/account-entitlements/current",
+                {"accountId": "42"},
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_license_service_malformed_success_body_is_protocol_error(self):
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = "https://license.example"
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b'{"ok": true, "entitlement":'
+
+        with patch.object(
+            self.bridge.urllib.request,
+            "urlopen",
+            return_value=Response(),
+        ), self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge._license_service_json(
+                "/api/service/account-entitlements/current",
+                {"accountId": "42"},
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_license_service_success_without_complete_entitlement_fails_closed(self):
+        with patch.object(
+            self.bridge,
+            "_license_service_json",
+            return_value={"ok": True, "entitlement": {}},
+        ), self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge.current_authorization_entitlement_from_license_server("42")
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_strict_license_service_response_requires_entitlement_envelope(self):
+        expires_at = int(time.time()) + 86400
+        payload = {
+            "ok": True,
+            "source": "authorization_code",
+            "plan": "activated",
+            "features": ["matrix.devices", "matrix.tasks"],
+            "limits": {
+                "devices": 1000,
+                "concurrentTasks": 8,
+                "unlimitedDevices": True,
+            },
+            "expiresAt": expires_at,
+            "codeLabel": "LM-ACTIVE-****-TEST",
+        }
+
+        with self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge.normalize_authorization_entitlement(
+                payload,
+                strict_service=True,
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_strict_license_service_response_rejects_empty_features(self):
+        expires_at = int(time.time()) + 86400
+        payload = {
+            "ok": True,
+            "entitlement": {
+                "source": "authorization_code",
+                "plan": "activated",
+                "features": [],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 8,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": expires_at,
+                "codeLabel": "LM-ACTIVE-****-TEST",
+            },
+        }
+
+        with self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge.normalize_authorization_entitlement(
+                payload,
+                strict_service=True,
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_strict_license_service_response_rejects_empty_code_label(self):
+        expires_at = int(time.time()) + 86400
+        payload = {
+            "ok": True,
+            "entitlement": {
+                "source": "authorization_code",
+                "plan": "activated",
+                "features": ["matrix.devices", "matrix.tasks"],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 8,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": expires_at,
+                "codeLabel": "",
+            },
+        }
+
+        with self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge.normalize_authorization_entitlement(
+                payload,
+                strict_service=True,
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_current_protocol_error_preserves_cached_entitlement(self):
+        entitlement = {
+            "source": "authorization_code",
+            "plan": "activated",
+            "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+            "limits": {
+                "devices": 1000,
+                "concurrentTasks": 8,
+                "unlimitedDevices": True,
+            },
+            "expiresAt": int(time.time()) + 86400,
+            "codeLabel": "LM-ACTIVE-****-TEST",
+        }
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            entitlement,
+            action="test_seed",
+        )
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC = 0
+
+        with patch.object(
+            self.bridge,
+            "current_authorization_entitlement_from_license_server",
+            side_effect=self.bridge._invalid_entitlement_service_response(
+                "授权服务返回的权益字段不完整或类型无效。",
+            ),
+        ):
+            self.bridge.refresh_account_entitlement_authorization("42")
+
+        policy = self.bridge.effective_entitlement_policy("42", "default")
+        self.assertEqual(policy["source"], "authorization_code")
+        self.assertEqual(policy["plan"], "activated")
+        self.assertTrue(policy["limits"]["unlimitedDevices"])
+
+    def test_server_rejects_signed_malformed_entitlement_lease_metadata(self):
+        lease = self._activated_lease()
+        issued_at = int(lease["issuedAt"])
+        cases = (
+            ({"schema": "loom.entitlement_lease.v0"}, "lease_schema_unsupported"),
+            ({"keyId": "untrusted-key"}, "lease_key_unknown"),
+            ({"hostDeviceId": "other-host"}, "lease_host_mismatch"),
+            ({"issuedAt": False}, "lease_malformed"),
+            ({"expiresAt": issued_at}, "lease_time_window_invalid"),
+            (
+                {"offlineGraceUntil": issued_at + (9 * 24 * 3600)},
+                "lease_time_window_invalid",
+            ),
+            ({"features": {"matrix.devices": True}}, "lease_malformed"),
+            (
+                {
+                    "limits": {
+                        "devices": "1000",
+                        "concurrentTasks": 8,
+                        "unlimitedDevices": True,
+                    }
+                },
+                "lease_malformed",
+            ),
+        )
+
+        for override, expected_code in cases:
+            with self.subTest(override=override):
+                candidate = self.resign_lease({**lease, **override})
+                status, payload = self.bridge.verify_entitlement_lease(candidate)
+                self.assertEqual(status, 401)
+                self.assertEqual(payload["code"], expected_code)
 
     def test_activated_account_phone_claim_is_idempotent_and_release_allows_replacement(self):
         lease = self._activated_lease()
@@ -571,7 +868,7 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(denied["code"], "phone_owned_by_another_account")
         self.assertEqual(denied["action"], "repair_phone")
 
-    def test_verified_repair_transfers_phone_identity_to_current_account(self):
+    def test_direct_reclaim_requires_a_server_verified_transfer_authorization(self):
         first_lease = self._activated_lease()
         status, payload = self.bridge.authorize_entitlement_operation(
             first_lease,
@@ -617,23 +914,19 @@ class BindTicketTests(unittest.TestCase):
             "matrix.device.reclaim",
             ["physical-phone-a"],
         )
-        self.assertEqual(transfer_status, 200, transferred)
+        self.assertEqual(transfer_status, 403, transferred)
         self.assertEqual(
-            transferred["claimedPhoneDeviceIds"],
-            ["physical-phone-a"],
+            transferred["code"],
+            "phone_transfer_authorization_required",
         )
-        self.assertEqual(
-            transferred["reclaimedPhoneDeviceIds"],
-            ["physical-phone-a"],
-        )
+        self.assertEqual(transferred["action"], "release_from_previous_account")
 
         old_status, old_payload = self.bridge.authorize_entitlement_operation(
             first_lease,
             "matrix.task.start",
             ["physical-phone-a"],
         )
-        self.assertEqual(old_status, 409)
-        self.assertEqual(old_payload["code"], "phone_owned_by_another_account")
+        self.assertEqual(old_status, 200, old_payload)
 
     def test_entitlement_check_requires_token_owned_by_lease_account(self):
         lease = self._activated_lease()
@@ -1010,7 +1303,7 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(payload["code"], "authorization_code_expired")
 
-    def test_signed_legacy_license_migration_binds_current_account_without_persisting_proof(self):
+    def test_signed_legacy_license_migration_is_disabled_in_favor_of_code_binding(self):
         self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
         proof = {
             "schema": "loom.license.v1",
@@ -1020,23 +1313,11 @@ class BindTicketTests(unittest.TestCase):
             "expires": "2030-01-01",
             "signature": "legacy-signature-do-not-persist",
         }
-        entitlement = {
-            "source": "authorization_code",
-            "plan": "matrix_pro",
-            "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
-            "limits": {
-                "devices": 1000,
-                "concurrentTasks": 3,
-                "unlimitedDevices": True,
-            },
-            "expiresAt": int(time.time()) + 86400,
-            "codeLabel": "OC-PRO-****-A1B2",
-        }
         seen = []
 
         def migrate(legacy_license, *, account_id):
             seen.append((legacy_license, account_id))
-            return dict(entitlement)
+            raise AssertionError("disabled migration must not call the license server")
 
         self.bridge.migrate_legacy_authorization_with_license_server = migrate
 
@@ -1049,14 +1330,10 @@ class BindTicketTests(unittest.TestCase):
             "Bearer sk-test-secret-value",
         )
 
-        self.assertEqual(200, status, payload)
-        self.assertEqual([(proof, "42")], seen)
-        self.assertEqual("42", payload["entitlementLease"]["accountId"])
-        self.verify_lease_signature(payload["entitlementLease"])
-        self.assertNotIn(
-            proof["signature"].encode("utf-8"),
-            Path(self.bridge.BIND_DB_PATH).read_bytes(),
-        )
+        self.assertEqual(410, status, payload)
+        self.assertEqual("legacy_migration_disabled", payload["code"])
+        self.assertEqual("use_authorization_code", payload["action"])
+        self.assertEqual([], seen)
 
     def test_legacy_license_migration_requires_login_and_valid_proof_shape(self):
         status, payload = self.bridge.handle_entitlement_migrate_legacy(
@@ -1074,8 +1351,8 @@ class BindTicketTests(unittest.TestCase):
             },
             "Bearer sk-test-secret-value",
         )
-        self.assertEqual(400, status)
-        self.assertEqual("legacy_license_proof_invalid", payload["code"])
+        self.assertEqual(410, status)
+        self.assertEqual("legacy_migration_disabled", payload["code"])
 
     def test_permanent_license_revocation_downgrades_account_and_revokes_old_lease(self):
         self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
@@ -1283,23 +1560,7 @@ class BindTicketTests(unittest.TestCase):
         self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
         self.bridge.ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC = 30
         calls = []
-        entitlement = {
-            "source": "authorization_code",
-            "plan": "activated",
-            "features": [
-                "matrix.devices",
-                "matrix.tasks",
-                "matrix.parallel_tasks",
-                "matrix.diagnostics",
-            ],
-            "limits": {
-                "devices": 1000,
-                "concurrentTasks": 8,
-                "unlimitedDevices": True,
-            },
-            "expiresAt": int(time.time()) + 86400,
-            "codeLabel": "LM-ACTIVE-****-TEST",
-        }
+        entitlement = self.bridge.effective_entitlement_policy("42", "default")
 
         def current(account_id):
             calls.append(account_id)
@@ -1386,23 +1647,26 @@ class BindTicketTests(unittest.TestCase):
 
     def test_expired_lease_blocks_new_matrix_tasks_but_allows_safety_operations(self):
         self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
-        original_ttl = self.bridge.ENTITLEMENT_LEASE_TTL_SEC
-        self.bridge.ENTITLEMENT_LEASE_TTL_SEC = -1
-        try:
-            lease = self._activated_lease(
-                install_id="install-a",
-                host_device_id="phone-a",
+        lease = self._activated_lease(
+            install_id="install-a",
+            host_device_id="phone-a",
+        )
+        expired_now = int(lease["expiresAt"]) + 1
+
+        with patch.object(self.bridge.time, "time", return_value=expired_now):
+            status, check = self.bridge.authorize_entitlement_operation(
+                lease,
+                "matrix.task.start",
             )
-        finally:
-            self.bridge.ENTITLEMENT_LEASE_TTL_SEC = original_ttl
+            self.assertEqual(status, 403)
+            self.assertEqual(check["code"], "lease_expired")
 
-        status, check = self.bridge.authorize_entitlement_operation(lease, "matrix.task.start")
-        self.assertEqual(status, 403)
-        self.assertEqual(check["code"], "lease_expired")
-
-        status, check = self.bridge.authorize_entitlement_operation(lease, "matrix.emergency_stop")
-        self.assertEqual(status, 200)
-        self.assertTrue(check["success"])
+            status, check = self.bridge.authorize_entitlement_operation(
+                lease,
+                "matrix.emergency_stop",
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(check["success"])
 
     def test_concurrent_activated_phone_claims_preserve_all_phones(self):
         lease = self._activated_lease()

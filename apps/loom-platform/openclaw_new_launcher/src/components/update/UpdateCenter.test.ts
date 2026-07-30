@@ -63,3 +63,25 @@ test('handoff failures keep the verified installer available for manual recovery
   assert.match(source, /当前版本尚未关闭，已下载并验证的安装包仍然保留/);
   assert.match(source, /完全退出 \$\{APP_DISPLAY_NAME\} 后运行：\$\{installerPath\}/);
 });
+
+test('restart handoff reports a recoverable failure when the old app does not exit', () => {
+  const restartWatchdogMs = (updateCenter as unknown as {
+    RESTART_EXIT_WATCHDOG_MS?: number;
+  }).RESTART_EXIT_WATCHDOG_MS;
+  const source = readFileSync(new URL('./UpdateCenter.tsx', import.meta.url), 'utf8');
+
+  assert.equal(restartWatchdogMs, 15_000);
+  assert.match(source, /window\.setTimeout\(\(\) =>/);
+  assert.match(source, /setErrorCode\('update_restart_timeout'\)/);
+  assert.match(source, /旧版本未能自动退出/);
+  assert.match(source, /已下载并验证的安装包仍然保留/);
+});
+
+test('restart watchdog leaves margin above native ready and forced-exit deadlines', () => {
+  const restartWatchdogMs = (updateCenter as unknown as {
+    RESTART_EXIT_WATCHDOG_MS?: number;
+  }).RESTART_EXIT_WATCHDOG_MS;
+
+  assert.equal(typeof restartWatchdogMs, 'number');
+  assert.ok((restartWatchdogMs || 0) > 5_000 + 6_000);
+});

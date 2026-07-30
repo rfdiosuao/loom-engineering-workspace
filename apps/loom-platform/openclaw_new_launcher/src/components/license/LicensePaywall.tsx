@@ -82,37 +82,37 @@ const PHONE_MATRIX_CAPABILITIES = [
 const PHONE_MATRIX_COPY: Record<LicenseGateStatus, { eyebrow: string; title: string; action: string }> = {
   checking: {
     eyebrow: '正在检查手机矩阵授权',
-    title: '正在核验这台电脑的矩阵使用资格',
-    action: '麓鸣其他功能不受影响，检查完成后会自动进入手机连接。',
+    title: '正在核验当前模型账号的矩阵使用资格',
+    action: '未激活账号可继续使用麓鸣其他功能，检查完成后会自动进入手机连接。',
   },
   authorized: {
     eyebrow: '手机矩阵授权有效',
     title: '手机连接与矩阵控制已经解锁',
-    action: '正在载入设备和任务状态。',
+    action: '当前账号下已连接的全部手机均可使用，正在载入设备和任务状态。',
   },
   unauthorized: {
     eyebrow: '手机矩阵等待激活',
     title: '激活后连接和控制手机',
-    action: '授权只解锁手机连接、矩阵任务和手机素材传输，麓鸣其他功能可继续使用。',
+    action: '未激活账号可用 0 台手机；授权码绑定当前模型账号后，该账号下已连接的全部手机均可使用。',
   },
   expired: {
     eyebrow: '手机矩阵授权已到期',
     title: '续费或更换授权码后继续控制手机',
-    action: '设备配置和任务记录不会删除，诊断能力仍然保留。',
+    action: '账号下的设备配置和任务记录不会删除，恢复授权后可继续使用。',
   },
   disabled: {
     eyebrow: '手机矩阵授权已停用',
     title: '请联系服务方核对授权状态',
-    action: '可以复制机器码或导出脱敏诊断，麓鸣其他功能仍可使用。',
+    action: '可以导出脱敏诊断交给服务方，麓鸣其他功能仍可使用。',
   },
   device_mismatch: {
-    eyebrow: '手机矩阵设备不匹配',
-    title: '当前电脑尚未绑定这份授权',
-    action: '复制本机机器码，联系服务方重新绑定或更换授权码。',
+    eyebrow: '手机矩阵租约不匹配',
+    title: '当前登录账号与本机权益租约不一致',
+    action: '请重新登录当前账号刷新租约；仍未恢复时导出脱敏诊断交给服务方。',
   },
   offline_grace: {
     eyebrow: '离线手机矩阵授权可用',
-    title: '本机签名有效，授权服务暂时离线',
+    title: '账号签名权益有效，授权服务暂时离线',
     action: '手机矩阵可以继续使用；网络恢复后建议重新检查。',
   },
   service_error: {
@@ -325,7 +325,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
               <div className="mt-6 rounded-[6px] border border-info bg-info-soft p-4">
                 <div className="text-[13px] font-black text-text">授权码绑定模型账号</div>
                 <p className="mt-1 text-[12px] font-semibold leading-5 text-text-muted">
-                  未激活账号不能连接或控制手机。请先登录模型账号并绑定一次授权码；激活后不限制手机数量，以后在其他电脑登录同一账号即可恢复权益。
+                  未激活账号可用 0 台手机。请先登录模型账号并绑定一次授权码；激活后该账号下已连接的全部手机均可使用，以后在其他电脑登录同一账号即可恢复权益。
                 </p>
                 <button
                   data-account-entitlement-link

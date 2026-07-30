@@ -7,9 +7,12 @@ import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { createRuntimeState, daemonAuthHeaders, deviceKeyFromConfig, readRuntimeState } from './lib/phone-daemon/runtime-auth.mjs';
+import * as runtimeAuthModule from './lib/phone-daemon/runtime-auth.mjs';
 import { DeviceSession } from './lib/phone-daemon/device-session.mjs';
 import { tryGetMetricsViaDaemon, tryRunViaDaemon, trySyncEventsViaDaemon } from './lib/phone-daemon/client.mjs';
+import * as daemonClientModule from './lib/phone-daemon/client.mjs';
 import { signedJsonRequest } from './openclaw-phone-secure.mjs';
+import { phoneRuntimeTestEnv } from './tests/phone-runtime-auth-fixture.mjs';
 
 const FETCH_FORBIDDEN_PORTS = new Set([
   1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77,
@@ -173,9 +176,46 @@ async function withRuntimeSandbox(handler) {
   }
 }
 
-async function startHttpDaemon() {
+async function withProcessEnv(overrides, handler) {
+  const previous = new Map();
+  for (const [name, value] of Object.entries(overrides)) {
+    previous.set(name, process.env[name]);
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = String(value);
+  }
+  try {
+    return await handler();
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+function runtimeForPhone(phoneUrl, phoneToken, deviceId = 'phone-test') {
+  return {
+    selectedDeviceId: deviceId,
+    devices: [{
+      id: deviceId,
+      baseUrl: phoneUrl,
+      token: phoneToken,
+    }],
+  };
+}
+
+async function startHttpDaemon(
+  runtimeConfig = { selectedDeviceId: '', devices: [] },
+  extraEnv = {},
+  runtimeOptions = {},
+) {
   const daemon = spawn(process.execPath, ['scripts/openclaw-phone-daemon.mjs'], {
     cwd: process.cwd(),
+    env: {
+      ...process.env,
+      ...phoneRuntimeTestEnv(runtimeConfig, runtimeOptions),
+      ...extraEnv,
+    },
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -233,10 +273,89 @@ test('LimitQueue respects configured concurrency', async () => {
   assert.equal(maxActive, 2);
 });
 
+test('daemon request credentials are pinned to the startup-authorized device', () => {
+  assert.equal(typeof runtimeAuthModule.authorizedConfigForRequest, 'function');
+  const authorizedStore = {
+    selectedDeviceId: 'phone-a',
+    devices: [{
+      id: 'phone-a',
+      phoneUrl: 'http://127.0.0.1:19527',
+      phoneToken: 'startup-token',
+      lumiLauncherId: 'startup-launcher',
+      lumiLauncherSecret: 'startup-secret',
+    }],
+  };
+
+  const bound = runtimeAuthModule.authorizedConfigForRequest({
+    deviceId: 'phone-a',
+    phoneUrl: 'http://127.0.0.1:29527',
+    phoneToken: 'request-token',
+    lumiLauncherId: 'request-launcher',
+    lumiLauncherSecret: 'request-secret',
+    prompt: 'open settings',
+  }, authorizedStore);
+
+  assert.equal(bound.phoneUrl, 'http://127.0.0.1:19527');
+  assert.equal(bound.phoneToken, 'startup-token');
+  assert.equal(bound.lumiLauncherId, 'startup-launcher');
+  assert.equal(bound.lumiLauncherSecret, 'startup-secret');
+  assert.equal(bound.prompt, 'open settings');
+});
+
+test('daemon client never serializes raw phone credentials into request bodies', () => {
+  assert.equal(typeof daemonClientModule.daemonRequestConfig, 'function');
+  const request = daemonClientModule.daemonRequestConfig({
+    deviceId: 'phone-a',
+    phoneUrl: 'http://127.0.0.1:19527',
+    phoneToken: 'phone-token',
+    lumiLauncherId: 'launcher-id',
+    lumiLauncherSecret: 'launcher-secret',
+    prompt: 'read screen',
+  });
+
+  assert.deepEqual(request, {
+    deviceId: 'phone-a',
+    prompt: 'read screen',
+  });
+});
+
+test('release daemon fails closed when --stdio-json is requested without the test-only gate', async () => {
+  const fake = await startFakePhone(async (_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ success: true, data: { mode: 'action_fast' } }));
+  });
+  const daemon = spawn(process.execPath, ['scripts/openclaw-phone-daemon.mjs', '--stdio-json'], {
+    cwd: process.cwd(),
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const reader = createDaemonJsonReader(daemon);
+  try {
+    daemon.stdin.write(`${JSON.stringify({
+      command: 'run',
+      phoneUrl: fake.baseUrl,
+      phoneToken: 'request-token',
+      prompt: 'must not reach phone',
+    })}\n`);
+    const payload = await reader.read();
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error, 'daemon_stdio_disabled');
+  } finally {
+    daemon.kill();
+    fake.server.close();
+  }
+});
+
 test('daemon health endpoint requires the random runtime token', async () => {
   await withRuntimeSandbox(async () => {
-    const { daemon, runtime } = await startHttpDaemon();
+    const { daemon, runtime } = await startHttpDaemon(
+      { selectedDeviceId: '', devices: [] },
+      {},
+      { accountId: 'account-test' },
+    );
     try {
+      assert.equal(runtime.accountId, 'account-test');
+      assert.match(runtime.configDigest, /^[a-f0-9]{64}$/);
       const denied = await fetch(`http://127.0.0.1:${runtime.port}/health`);
       const deniedPayload = await denied.json();
       assert.equal(denied.status, 401);
@@ -250,10 +369,231 @@ test('daemon health endpoint requires the random runtime token', async () => {
       assert.equal(allowed.status, 200);
       assert.equal(allowedPayload.ok, true);
       assert.equal(typeof allowedPayload.pid, 'number');
+      assert.equal(allowedPayload.accountId, 'account-test');
+      assert.match(allowedPayload.configDigest, /^[a-f0-9]{64}$/);
     } finally {
       daemon.kill();
     }
   });
+});
+
+test('daemon keeps its startup bearer pinned when the runtime file is replaced', async () => {
+  await withRuntimeSandbox(async () => {
+    const { daemon, runtime } = await startHttpDaemon(
+      { selectedDeviceId: '', devices: [] },
+      {},
+      { accountId: 'account-test' },
+    );
+    const tamperedRuntime = {
+      ...runtime,
+      token: 'attacker-replaced-runtime-token',
+    };
+    try {
+      await fs.writeFile(
+        RUNTIME_PATH,
+        `${JSON.stringify(tamperedRuntime, null, 2)}\n`,
+        'utf8',
+      );
+
+      const attacker = await fetchJson(`http://127.0.0.1:${runtime.port}/health`, {
+        headers: daemonAuthHeaders(tamperedRuntime),
+      });
+      const original = await fetchJson(`http://127.0.0.1:${runtime.port}/health`, {
+        headers: daemonAuthHeaders(runtime),
+      });
+
+      assert.equal(attacker.response.status, 401);
+      assert.equal(attacker.payload.error, 'daemon_unauthorized');
+      assert.equal(original.response.status, 200);
+      assert.equal(original.payload.ok, true);
+    } finally {
+      await fs.writeFile(RUNTIME_PATH, `${JSON.stringify(runtime, null, 2)}\n`, 'utf8');
+      await shutdownRuntimeDaemon(runtime);
+      daemon.kill();
+    }
+  });
+});
+
+test('daemon HTTP request cannot redirect an authorized device to another phone endpoint', async () => {
+  let authorizedRequests = 0;
+  let attackerRequests = 0;
+  const authorizedPhone = await startFakePhone(async (request, response) => {
+    authorizedRequests += 1;
+    if (request.url === '/api/lumi/security/pair') {
+      const body = await readJson(request);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          launcherId: body.launcherId,
+          launcherSecret: 'authorized-launcher-secret',
+        },
+      }));
+      return;
+    }
+    if (request.url === '/api/device/status') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          configServerRunning: true,
+          accessibilityEnabled: true,
+          agentInitialized: true,
+          modelConfigured: true,
+        },
+      }));
+      return;
+    }
+    if (request.url === '/api/lumi/agent/metrics?_lumi=1') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: { metrics: { taskCount: 1, queueDepth: 0 } },
+      }));
+      return;
+    }
+    throw new Error(`unexpected ${request.method} ${request.url}`);
+  });
+  const attackerPhone = await startFakePhone(async (_request, response) => {
+    attackerRequests += 1;
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ success: true, data: { metrics: {} } }));
+  });
+
+  try {
+    await withRuntimeSandbox(async () => {
+      const { daemon, runtime } = await startHttpDaemon(
+        runtimeForPhone(authorizedPhone.baseUrl, 'authorized-token', 'phone-a'),
+      );
+      try {
+        const result = await fetchJson(`http://127.0.0.1:${runtime.port}/v1/metrics`, {
+          method: 'POST',
+          headers: {
+            ...daemonAuthHeaders(runtime),
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          body: JSON.stringify({
+            deviceId: 'phone-a',
+            phoneUrl: attackerPhone.baseUrl,
+            phoneToken: 'attacker-token',
+          }),
+        });
+
+        assert.equal(result.response.status, 200, JSON.stringify(result.payload));
+        assert.equal(result.payload.metrics.taskCount, 1);
+        assert.equal(authorizedRequests, 3);
+        assert.equal(attackerRequests, 0);
+      } finally {
+        daemon.kill();
+      }
+    });
+  } finally {
+    authorizedPhone.server.close();
+    attackerPhone.server.close();
+  }
+});
+
+test('daemon revalidates signed entitlement time for every /v1/run request', async () => {
+  let phoneRequests = 0;
+  const fake = await startFakePhone(async (request, response) => {
+    phoneRequests += 1;
+    if (request.url === '/api/lumi/security/pair') {
+      const body = await readJson(request);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          launcherId: body.launcherId,
+          launcherSecret: 'expiring-launcher-secret',
+        },
+      }));
+      return;
+    }
+    if (request.url === '/api/device/status') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          configServerRunning: true,
+          accessibilityEnabled: true,
+          agentInitialized: true,
+          modelConfigured: false,
+        },
+      }));
+      return;
+    }
+    if (request.url.startsWith('/api/lumi/agent/action_fast')) {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          mode: 'action_fast',
+          success: true,
+          currentStep: 'complete',
+          metrics: { mode: 'action_fast', totalMs: 1, rounds: 0, llmRoundMs: 0 },
+        },
+      }));
+      return;
+    }
+    throw new Error(`unexpected ${request.method} ${request.url}`);
+  });
+
+  try {
+    await withRuntimeSandbox(async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const { daemon, runtime } = await startHttpDaemon(
+        runtimeForPhone(fake.baseUrl, 'expiring-phone-token', 'phone-expiring'),
+        {},
+        {
+          nowSec,
+          entitlementExpiresAt: nowSec + 1,
+          entitlementOfflineGraceUntil: nowSec + 1,
+          phoneSeatExpiresAt: nowSec + 1,
+        },
+      );
+      try {
+        while (Math.floor(Date.now() / 1000) <= nowSec + 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        const result = await fetchJson(`http://127.0.0.1:${runtime.port}/v1/run`, {
+          method: 'POST',
+          headers: {
+            ...daemonAuthHeaders(runtime),
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          body: JSON.stringify({
+            deviceId: 'phone-expiring',
+            prompt: 'open settings',
+            mode: 'safe',
+          }),
+        });
+
+        assert.equal(result.response.status, 500);
+        assert.equal(result.payload.ok, false);
+        assert.match(
+          String(result.payload.errorCode || result.payload.error || ''),
+          /runtime_entitlement_expired|runtime_phone_seat_lease_expired/,
+        );
+        assert.equal(phoneRequests, 0);
+        const shutdown = await fetchJson(`http://127.0.0.1:${runtime.port}/shutdown`, {
+          method: 'POST',
+          headers: {
+            ...daemonAuthHeaders(runtime),
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          body: '{}',
+        });
+        assert.equal(shutdown.response.status, 200);
+        assert.equal(shutdown.payload.ok, true);
+        assert.equal(shutdown.payload.stopping, true);
+      } finally {
+        await shutdownRuntimeDaemon(runtime);
+        daemon.kill();
+      }
+    });
+  } finally {
+    fake.server.close();
+  }
 });
 
 test('daemon client routes metrics and events-sync through authenticated daemon endpoints', async () => {
@@ -300,7 +640,9 @@ test('daemon client routes metrics and events-sync through authenticated daemon 
 
   try {
     await withRuntimeSandbox(async () => {
-      const { daemon } = await startHttpDaemon();
+      const { daemon } = await startHttpDaemon(
+        runtimeForPhone(fake.baseUrl, 'test-token-daemon-events'),
+      );
       try {
         const config = {
           command: 'events-sync',
@@ -393,7 +735,9 @@ test('daemon serializes same-device events-sync streams', async () => {
 
   try {
     await withRuntimeSandbox(async () => {
-      const { daemon } = await startHttpDaemon();
+      const { daemon } = await startHttpDaemon(
+        runtimeForPhone(fake.baseUrl, 'test-token-daemon-event-queue'),
+      );
       try {
         const config = {
           command: 'events-sync',
@@ -463,6 +807,11 @@ test('daemon run routes open-settings through action_fast without async Agent', 
   try {
     const daemon = spawn(process.execPath, ['scripts/openclaw-phone-daemon.mjs', '--stdio-json'], {
       cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...phoneRuntimeTestEnv(runtimeForPhone(fake.baseUrl, 'test-token')),
+        LOOM_PHONE_DAEMON_TEST_ONLY_STDIO: '1',
+      },
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -522,6 +871,11 @@ test('daemon serializes same-device action_fast requests', async () => {
   try {
     const daemon = spawn(process.execPath, ['scripts/openclaw-phone-daemon.mjs', '--stdio-json'], {
       cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...phoneRuntimeTestEnv(runtimeForPhone(fake.baseUrl, 'test-token')),
+        LOOM_PHONE_DAEMON_TEST_ONLY_STDIO: '1',
+      },
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -549,6 +903,119 @@ test('daemon serializes same-device action_fast requests', async () => {
     assert.equal(outputs.every((item) => item.ok), true);
     assert.equal(maxActiveActions, 1);
   } finally {
+    fake.server.close();
+  }
+});
+
+test('daemon revalidates queued work when it reaches the execution boundary', async () => {
+  let actionRequests = 0;
+  let releaseFirstAction;
+  const firstActionBarrier = new Promise((resolve) => {
+    releaseFirstAction = resolve;
+  });
+  let firstActionStarted;
+  const firstActionStartedBarrier = new Promise((resolve) => {
+    firstActionStarted = resolve;
+  });
+  const fake = await startFakePhone(async (request, response) => {
+    if (request.url === '/api/lumi/security/pair') {
+      const body = await readJson(request);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          launcherId: body.launcherId,
+          launcherSecret: 'queued-expiry-secret',
+        },
+      }));
+      return;
+    }
+    if (request.url === '/api/device/status') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          accessibilityEnabled: true,
+          agentInitialized: true,
+          modelConfigured: true,
+        },
+      }));
+      return;
+    }
+    if (request.url.startsWith('/api/lumi/agent/action_fast')) {
+      actionRequests += 1;
+      if (actionRequests === 1) {
+        firstActionStarted();
+        await firstActionBarrier;
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          mode: 'action_fast',
+          success: true,
+          currentStep: 'complete',
+          metrics: { totalMs: 5, rounds: 0 },
+        },
+      }));
+      return;
+    }
+    throw new Error(`unexpected ${request.method} ${request.url}`);
+  });
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const daemon = spawn(process.execPath, ['scripts/openclaw-phone-daemon.mjs', '--stdio-json'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      ...phoneRuntimeTestEnv(
+        runtimeForPhone(fake.baseUrl, 'queued-expiry-token'),
+        {
+          nowSec,
+          entitlementExpiresAt: nowSec + 2,
+          entitlementOfflineGraceUntil: nowSec + 2,
+          phoneSeatExpiresAt: nowSec + 2,
+        },
+      ),
+      LOOM_PHONE_DAEMON_TEST_ONLY_STDIO: '1',
+    },
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const reader = createDaemonJsonReader(daemon);
+  const writeRun = (requestId, prompt) => daemon.stdin.write(`${JSON.stringify({
+    schema: 'loom.phone_daemon.run.v1',
+    requestId,
+    command: 'run',
+    deviceId: 'phone-test',
+    prompt,
+    stepTimeoutSec: 8,
+    timeoutSec: 30,
+    maxWaitSec: 30,
+  })}\n`);
+
+  try {
+    writeRun('queued-before-expiry-a', 'back');
+    await firstActionStartedBarrier;
+    writeRun('queued-before-expiry-b', 'open settings');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    while (Math.floor(Date.now() / 1000) <= nowSec + 2) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    releaseFirstAction();
+
+    const first = await reader.read();
+    const second = await reader.read();
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, false);
+    assert.match(
+      String(second.errorCode || second.error || ''),
+      /runtime_entitlement_expired|runtime_phone_seat_lease_expired/,
+    );
+    assert.equal(actionRequests, 1);
+  } finally {
+    releaseFirstAction();
+    daemon.kill();
     fake.server.close();
   }
 });
@@ -583,6 +1050,11 @@ test('daemon allows concurrent observe_fast reads', async () => {
   try {
     const daemon = spawn(process.execPath, ['scripts/openclaw-phone-daemon.mjs', '--stdio-json'], {
       cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...phoneRuntimeTestEnv(runtimeForPhone(fake.baseUrl, 'test-token')),
+        LOOM_PHONE_DAEMON_TEST_ONLY_STDIO: '1',
+      },
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -1202,6 +1674,194 @@ test('DeviceSession cancels queued daemon work before submitting another APKClaw
   }
 });
 
+test('daemon shutdown cancels and confirms an active APKClaw task before exit', async () => {
+  let submitted = false;
+  let cancellationRequests = 0;
+  let notifySubmitted;
+  const submittedBarrier = new Promise((resolve) => {
+    notifySubmitted = resolve;
+  });
+  const fake = await startFakePhone(async (request, response) => {
+    if (request.url === '/api/lumi/security/pair') {
+      const body = await readJson(request);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          launcherId: body.launcherId,
+          launcherSecret: 'shutdown-cancel-secret',
+        },
+      }));
+      return;
+    }
+    if (request.url === '/api/device/status') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          accessibilityEnabled: true,
+          agentInitialized: true,
+          modelConfigured: true,
+        },
+      }));
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/api/lumi/agent/tasks') {
+      submitted = true;
+      notifySubmitted();
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: { taskId: 'shutdown-task' },
+      }));
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && request.url === '/api/lumi/agent/tasks/shutdown-task/cancel'
+    ) {
+      cancellationRequests += 1;
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: { taskId: 'shutdown-task', status: 'cancelled' },
+      }));
+      return;
+    }
+    if (
+      request.method === 'GET'
+      && request.url === '/api/lumi/agent/tasks/shutdown-task'
+    ) {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          taskId: 'shutdown-task',
+          status: cancellationRequests ? 'cancelled' : 'running',
+        },
+      }));
+      return;
+    }
+    throw new Error(`unexpected ${request.method} ${request.url}`);
+  });
+
+  try {
+    await withRuntimeSandbox(async () => {
+      const { daemon, runtime } = await startHttpDaemon(
+        runtimeForPhone(fake.baseUrl, 'shutdown-cancel-token'),
+      );
+      try {
+        const runPromise = fetchJson(`http://127.0.0.1:${runtime.port}/v1/run`, {
+          method: 'POST',
+          headers: {
+            ...daemonAuthHeaders(runtime),
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          body: JSON.stringify({
+            deviceId: 'phone-test',
+            prompt: 'perform a long running phone task',
+            mode: 'safe',
+            executionLayer: 'agent',
+            pollMs: 100,
+          }),
+        });
+        await submittedBarrier;
+
+        const shutdown = await fetchJson(
+          `http://127.0.0.1:${runtime.port}/shutdown`,
+          {
+            method: 'POST',
+            headers: {
+              ...daemonAuthHeaders(runtime),
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: '{}',
+          },
+        );
+        const run = await runPromise;
+
+        assert.equal(submitted, true);
+        assert.equal(cancellationRequests, 1);
+        assert.equal(shutdown.response.status, 200);
+        assert.equal(shutdown.payload.ok, true);
+        assert.equal(shutdown.payload.stopping, true);
+        assert.equal(shutdown.payload.drained, true);
+        assert.equal(shutdown.payload.executionMayContinue, false);
+        assert.equal(run.response.status, 200);
+        assert.equal(run.payload.ok, false);
+        assert.equal(run.payload.cancelled, true);
+        assert.equal(run.payload.executionMayContinue, false);
+      } finally {
+        daemon.kill();
+      }
+    });
+  } finally {
+    fake.server.close();
+  }
+});
+
+test('DeviceSession shutdown aborts an event stream that has not returned headers', async () => {
+  let notifyEventRequest;
+  const eventRequestBarrier = new Promise((resolve) => {
+    notifyEventRequest = resolve;
+  });
+  const fake = await startFakePhone(async (request, response) => {
+    if (request.url === '/api/lumi/security/pair') {
+      const body = await readJson(request);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          launcherId: body.launcherId,
+          launcherSecret: 'event-shutdown-secret',
+        },
+      }));
+      return;
+    }
+    if (request.url === '/api/device/status') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          accessibilityEnabled: true,
+          agentInitialized: true,
+          modelConfigured: true,
+        },
+      }));
+      return;
+    }
+    if (request.url === '/api/lumi/events') {
+      notifyEventRequest();
+      return;
+    }
+    throw new Error(`unexpected ${request.method} ${request.url}`);
+  });
+
+  try {
+    const session = new DeviceSession('event-shutdown-device');
+    const syncPromise = session.syncEvents({
+      command: 'events-sync',
+      phoneUrl: fake.baseUrl,
+      phoneToken: 'event-shutdown-token',
+      stepTimeoutSec: 8,
+      maxSec: 60,
+      maxEvents: 20,
+    }, () => {});
+    await eventRequestBarrier;
+
+    const shutdown = await session.shutdown({ timeoutMs: 2_000 });
+    const summary = await syncPromise;
+
+    assert.equal(shutdown.ok, true);
+    assert.equal(shutdown.drained, true);
+    assert.equal(shutdown.executionMayContinue, false);
+    assert.equal(summary.cancelled, true);
+    assert.equal(summary.stoppedBy, 'cancelled');
+  } finally {
+    fake.server.close();
+  }
+});
+
 test('DeviceSession remembers recent events', () => {
   const session = new DeviceSession('device-1');
   session.rememberEvent({ type: 'run_complete', result: 'ok' });
@@ -1255,7 +1915,9 @@ test('daemon reports device status after a run completes', async () => {
 
   try {
     await withRuntimeSandbox(async () => {
-      const { daemon, runtime } = await startHttpDaemon();
+      const { daemon, runtime } = await startHttpDaemon(
+        runtimeForPhone(fake.baseUrl, 'test-token'),
+      );
       try {
         const runResponse = await fetch(`http://127.0.0.1:${runtime.port}/v1/run`, {
           method: 'POST',
@@ -1331,7 +1993,9 @@ test('daemon exposes recent run events after a run completes', async () => {
 
   try {
     await withRuntimeSandbox(async () => {
-      const { daemon, runtime } = await startHttpDaemon();
+      const { daemon, runtime } = await startHttpDaemon(
+        runtimeForPhone(fake.baseUrl, 'test-token'),
+      );
       try {
         const runResult = await fetchJson(`http://127.0.0.1:${runtime.port}/v1/run`, {
           method: 'POST',
@@ -1387,7 +2051,10 @@ test('daemon device status no-session fallback returns zero queue depths', async
 });
 
 test('daemon client auto-starts from a non-project current working directory', async () => {
-  await withRuntimeSandbox(async () => withTempCwd(async () => {
+  const authorizedEnv = phoneRuntimeTestEnv(
+    runtimeForPhone('http://127.0.0.1:19527', 'test-token'),
+  );
+  await withRuntimeSandbox(async () => withProcessEnv(authorizedEnv, async () => withTempCwd(async () => {
     await fs.rm(RUNTIME_PATH, { force: true });
     let runtime = null;
     try {
@@ -1409,7 +2076,7 @@ test('daemon client auto-starts from a non-project current working directory', a
     } finally {
       await shutdownRuntimeDaemon(runtime);
     }
-  }));
+  })));
 });
 
 for (const scenario of [
@@ -1459,7 +2126,10 @@ for (const scenario of [
       await listenOnFetchSafePort(server);
       try {
         const { port } = server.address();
-        const runtime = await createRuntimeState(port);
+        const runtime = await createRuntimeState(port, {
+          accountId: 'account-node-test',
+          configDigest: 'a'.repeat(64),
+        });
         expectedToken = runtime.token;
         const result = await tryRunViaDaemon({
           command: 'run',
@@ -1500,7 +2170,10 @@ test('daemon client aborts a stalled daemon request', async () => {
     await listenOnFetchSafePort(server);
     try {
       const { port } = server.address();
-      const runtime = await createRuntimeState(port);
+      const runtime = await createRuntimeState(port, {
+        accountId: 'account-node-test',
+        configDigest: 'a'.repeat(64),
+      });
       expectedToken = runtime.token;
       const started = Date.now();
       const result = await tryRunViaDaemon({

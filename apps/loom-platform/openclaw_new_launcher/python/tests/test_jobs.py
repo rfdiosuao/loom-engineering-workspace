@@ -7,6 +7,12 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 
 
 PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,19 +21,127 @@ if PYTHON_DIR not in sys.path:
 
 
 from services.jobs import JobManager
+from api.routes_jobs import register_job_routes
+from core.job_ownership import account_job_binding
 
 
 def wait_for_terminal(manager: JobManager, job_id: str, timeout: float = 2.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         job = manager.get(job_id)
-        if job and job.get("status") in {"succeeded", "failed", "needs_manual"}:
+        if job and job.get("status") in {"succeeded", "failed", "cancelled", "needs_manual"}:
             return job
         time.sleep(0.02)
     raise AssertionError(f"job did not finish: {job_id}")
 
 
 class JobManagerStateTests(unittest.TestCase):
+    def test_phone_jobs_are_account_scoped_and_internal_owner_binding_is_not_public(self) -> None:
+        manager = JobManager(lambda _message: None)
+        install_id = "install-job-scope"
+        generic = manager.submit(
+            "component.install",
+            "Install",
+            lambda: {"success": True},
+        )
+        account_a = manager.submit_progress(
+            "phone.task",
+            "Phone A",
+            lambda _job_id: {"success": True},
+            initial_progress={
+                "requiresPhoneEntitlement": True,
+                "ownerAccountBinding": account_job_binding("account-a", install_id),
+                "phoneDeviceIds": ["phone-a"],
+            },
+        )
+        account_b = manager.submit_progress(
+            "matrix.dispatch",
+            "Matrix B",
+            lambda _job_id: {"success": True},
+            initial_progress={
+                "requiresPhoneEntitlement": True,
+                "ownerAccountBinding": account_job_binding("account-b", install_id),
+                "phoneDeviceIds": ["phone-b"],
+            },
+        )
+        wait_for_terminal(manager, generic["id"])
+        wait_for_terminal(manager, account_a["id"])
+        wait_for_terminal(manager, account_b["id"])
+
+        active_account = {"id": "account-a"}
+
+        class Entitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "accountId": active_account["id"],
+                    "lease": {
+                        "accountId": active_account["id"],
+                        "installId": install_id,
+                    },
+                }
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            fastapi_json=lambda data, status_code=200: JSONResponse(
+                status_code=status_code,
+                content=data,
+            ),
+            get_job_mgr=lambda: manager,
+            get_entitlement_mgr=lambda: Entitlement(),
+            paths=SimpleNamespace(base_path="D:/loom-test"),
+        )
+        app = FastAPI()
+        register_job_routes(app, ctx)
+        client = TestClient(app)
+
+        listed_a = client.get("/api/jobs/list?limit=10")
+        self.assertEqual(listed_a.status_code, 200)
+        listed_a_jobs = listed_a.json()["jobs"]
+        listed_a_ids = {job["id"] for job in listed_a_jobs}
+        self.assertIn(generic["id"], listed_a_ids)
+        self.assertIn(account_a["id"], listed_a_ids)
+        self.assertNotIn(account_b["id"], listed_a_ids)
+        phone_a_public = next(job for job in listed_a_jobs if job["id"] == account_a["id"])
+        self.assertNotIn("ownerAccountBinding", phone_a_public["progress"])
+        self.assertNotIn("ownerAccountId", phone_a_public["progress"])
+
+        hidden = client.get(f"/api/jobs/{account_b['id']}")
+        self.assertEqual(hidden.status_code, 404)
+
+        active_account["id"] = "account-b"
+        listed_b_ids = {
+            job["id"]
+            for job in client.get("/api/jobs/list?limit=10").json()["jobs"]
+        }
+        self.assertIn(account_b["id"], listed_b_ids)
+        self.assertNotIn(account_a["id"], listed_b_ids)
+
+    def test_persisted_job_state_never_contains_plaintext_owner_account_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = os.path.join(temp_dir, "jobs-state.json")
+            manager = JobManager(lambda _message: None, state_path=state_path)
+            submitted = manager.submit_progress(
+                "phone.task",
+                "Legacy owner metadata",
+                lambda _job_id: {"success": True},
+                initial_progress={
+                    "requiresPhoneEntitlement": True,
+                    "ownerAccountId": "plaintext-account-must-not-persist",
+                    "ownerAccountBinding": account_job_binding(
+                        "plaintext-account-must-not-persist",
+                        "install-persistence",
+                    ),
+                },
+            )
+            wait_for_terminal(manager, submitted["id"])
+            with open(state_path, "r", encoding="utf-8") as handle:
+                persisted = handle.read()
+
+        self.assertNotIn("plaintext-account-must-not-persist", persisted)
+        self.assertNotIn('"ownerAccountId"', persisted)
+        self.assertIn('"ownerAccountBinding"', persisted)
+
     def test_manual_media_result_is_preserved_as_actionable_terminal_state(self) -> None:
         manager = JobManager(lambda _message: None)
 
@@ -75,7 +189,7 @@ class JobManagerStateTests(unittest.TestCase):
             self.assertTrue(finished.is_set())
             self.assertEqual(snapshot["status"], "cancelled")
 
-    def test_cancel_can_publish_terminal_state_without_waiting_for_worker(self) -> None:
+    def test_cancel_without_waiting_stays_cancelling_until_worker_exits(self) -> None:
         manager = JobManager(lambda _message: None)
         started = threading.Event()
         release = threading.Event()
@@ -94,10 +208,197 @@ class JobManagerStateTests(unittest.TestCase):
         self.assertTrue(manager.cancel(submitted["id"], wait_for_worker=False))
         elapsed = time.monotonic() - started_at
         snapshot = manager.get(submitted["id"])
-        release.set()
 
         self.assertLess(elapsed, 0.2)
-        self.assertEqual(snapshot["status"], "cancelled")
+        self.assertEqual(snapshot["status"], "cancelling")
+        self.assertIsNone(snapshot["finishedAt"])
+        self.assertTrue(os.path.exists(manager.cancel_file(submitted["id"])))
+
+        release.set()
+        terminal = wait_for_terminal(manager, submitted["id"])
+        self.assertEqual(terminal["status"], "cancelled")
+        self.assertIsNotNone(terminal["finishedAt"])
+
+    def test_cancel_matching_continues_after_one_job_persistence_failure(self) -> None:
+        manager = JobManager(lambda _message: None)
+        release = threading.Event()
+        all_started = threading.Event()
+        started_ids: set[str] = set()
+        started_lock = threading.Lock()
+
+        def target(job_id: str) -> dict:
+            with started_lock:
+                started_ids.add(job_id)
+                if len(started_ids) == 2:
+                    all_started.set()
+            while not manager.is_cancelled(job_id):
+                time.sleep(0.01)
+            release.wait(2)
+            return {"success": False, "cancelled": True}
+
+        first = manager.submit_progress("phone.task", "First", target)
+        second = manager.submit_progress("phone.task", "Second", target)
+        self.assertTrue(all_started.wait(1))
+
+        original_persist = manager._persist_locked
+        persistence_failed = False
+
+        def fail_first_cancel_persist() -> None:
+            nonlocal persistence_failed
+            first_job = manager._jobs.get(first["id"]) or {}
+            if not persistence_failed and first_job.get("status") == "cancelling":
+                persistence_failed = True
+                raise OSError("simulated jobs-state persistence failure")
+            original_persist()
+
+        manager._persist_locked = fail_first_cancel_persist
+        try:
+            batch = manager.cancel_matching(
+                lambda job: job.get("kind") == "phone.task",
+                wait_for_workers=False,
+            )
+
+            self.assertIsInstance(batch, list)
+            self.assertEqual(batch, [first["id"], second["id"]])
+            self.assertEqual(
+                batch.errors,
+                [{
+                    "jobId": first["id"],
+                    "type": "OSError",
+                    "message": "simulated jobs-state persistence failure",
+                }],
+            )
+            self.assertEqual(batch.stillRunning, [first["id"], second["id"]])
+            self.assertEqual(manager.get(second["id"])["status"], "cancelling")
+        finally:
+            manager._persist_locked = original_persist
+            release.set()
+
+        self.assertEqual(wait_for_terminal(manager, first["id"])["status"], "cancelled")
+        self.assertEqual(wait_for_terminal(manager, second["id"])["status"], "cancelled")
+
+    def test_cancel_matching_continues_after_one_cancel_file_write_failure(self) -> None:
+        manager = JobManager(lambda _message: None)
+        release = threading.Event()
+        all_started = threading.Event()
+        started_ids: set[str] = set()
+        started_lock = threading.Lock()
+
+        def target(job_id: str) -> dict:
+            with started_lock:
+                started_ids.add(job_id)
+                if len(started_ids) == 2:
+                    all_started.set()
+            while not manager.is_cancelled(job_id):
+                time.sleep(0.01)
+            release.wait(2)
+            return {"success": False, "cancelled": True}
+
+        first = manager.submit_progress("phone.task", "First", target)
+        second = manager.submit_progress("phone.task", "Second", target)
+        self.assertTrue(all_started.wait(1))
+
+        failed_path = os.path.normcase(os.path.abspath(manager.cancel_file(first["id"])))
+        real_open = open
+
+        def fail_one_cancel_file(file, *args, **kwargs):
+            candidate = os.path.normcase(os.path.abspath(os.fspath(file)))
+            if candidate == failed_path and "w" in str(args[0] if args else kwargs.get("mode", "r")):
+                raise OSError("simulated cancel-file write failure")
+            return real_open(file, *args, **kwargs)
+
+        try:
+            with patch("builtins.open", side_effect=fail_one_cancel_file):
+                batch = manager.cancel_matching(
+                    lambda job: job.get("kind") == "phone.task",
+                    wait_for_workers=False,
+                )
+
+            self.assertEqual(batch, [first["id"], second["id"]])
+            self.assertEqual(
+                batch.errors,
+                [{
+                    "jobId": first["id"],
+                    "type": "OSError",
+                    "message": "simulated cancel-file write failure",
+                }],
+            )
+            self.assertEqual(batch.stillRunning, [first["id"], second["id"]])
+            self.assertFalse(os.path.exists(manager.cancel_file(first["id"])))
+            self.assertTrue(os.path.exists(manager.cancel_file(second["id"])))
+        finally:
+            release.set()
+
+        self.assertEqual(wait_for_terminal(manager, first["id"])["status"], "cancelled")
+        self.assertEqual(wait_for_terminal(manager, second["id"])["status"], "cancelled")
+
+    def test_cancel_matching_preserves_execution_may_continue_as_uncertain_terminal_result(self) -> None:
+        manager = JobManager(lambda _message: None)
+        started = threading.Event()
+        uncertain_result = {
+            "success": False,
+            "error": "远端任务取消确认超时",
+            "outcomeIndeterminate": True,
+            "executionMayContinue": True,
+            "remoteTaskId": "remote-task-1",
+        }
+
+        def target(job_id: str) -> dict:
+            started.set()
+            while not manager.is_cancelled(job_id):
+                time.sleep(0.01)
+            return dict(uncertain_result)
+
+        submitted = manager.submit_progress("phone.task", "Uncertain phone task", target)
+        self.assertTrue(started.wait(1))
+
+        batch = manager.cancel_matching(
+            lambda job: job.get("id") == submitted["id"],
+            wait_for_workers=True,
+        )
+        finished = wait_for_terminal(manager, submitted["id"])
+
+        self.assertEqual(batch, [submitted["id"]])
+        self.assertEqual(batch.errors, [])
+        self.assertEqual(batch.stillRunning, [submitted["id"]])
+        self.assertEqual(finished["status"], "failed")
+        self.assertEqual(finished["phase"], "outcome_indeterminate")
+        self.assertEqual(finished["error"], "远端任务取消确认超时")
+        self.assertEqual(finished["result"], uncertain_result)
+        self.assertIsNotNone(finished["finishedAt"])
+
+    def test_oversized_uncertain_cancel_result_keeps_exit_blocking_marker(self) -> None:
+        manager = JobManager(
+            lambda _message: None,
+            max_artifact_bytes=64 * 1024,
+        )
+        started = threading.Event()
+
+        def target(job_id: str) -> dict:
+            started.set()
+            while not manager.is_cancelled(job_id):
+                time.sleep(0.01)
+            return {
+                "success": False,
+                "error": "远端任务状态未知",
+                "executionMayContinue": True,
+                "stdout": "x" * 70_000,
+            }
+
+        submitted = manager.submit_progress("phone.task", "Oversized uncertain task", target)
+        self.assertTrue(started.wait(1))
+
+        batch = manager.cancel_matching(
+            lambda job: job.get("id") == submitted["id"],
+            wait_for_workers=True,
+        )
+        finished = wait_for_terminal(manager, submitted["id"])
+
+        self.assertEqual(batch, [submitted["id"]])
+        self.assertEqual(batch.stillRunning, [submitted["id"]])
+        self.assertEqual(finished["status"], "failed")
+        self.assertTrue(finished["result"]["truncated"])
+        self.assertTrue(finished["result"]["executionMayContinue"])
 
     def test_consecutive_identical_progress_keeps_one_history_entry_and_updates_metadata(self) -> None:
         manager = JobManager(lambda _message: None)
@@ -523,6 +824,8 @@ class JobManagerStateTests(unittest.TestCase):
         submitted = manager.submit_progress("matrix.dispatch", "Matrix", target)
         self.assertTrue(started.wait(timeout=3))
         self.assertTrue(manager.cancel(submitted["id"]))
+        self.assertEqual(manager.get(submitted["id"])["status"], "cancelling")
+        self.assertTrue(os.path.exists(manager.cancel_file(submitted["id"])))
         release.set()
         self.assertTrue(cancellation_observed.wait(timeout=3))
 

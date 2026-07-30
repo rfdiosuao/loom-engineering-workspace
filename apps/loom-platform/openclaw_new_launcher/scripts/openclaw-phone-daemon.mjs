@@ -6,12 +6,16 @@ import { DeviceSession } from './lib/phone-daemon/device-session.mjs';
 import { getPhoneMetrics } from './lib/phone-command-core.mjs';
 import {
   createRuntimeState,
+  authorizedConfigForRequest,
   deviceKeyFromConfig,
   isAuthorized,
-  readRuntimeState,
   removeRuntimeStateIfOwned,
 } from './lib/phone-daemon/runtime-auth.mjs';
-import { phoneBridgeErrorPayload } from './openclaw-phone-secure.mjs';
+import {
+  phoneBridgeErrorPayload,
+  phoneRuntimeTestOverridesAllowed,
+  readLauncherPhoneStore,
+} from './openclaw-phone-secure.mjs';
 
 const sessions = new Map();
 const DEFAULT_MAX_ROUNDS_BY_MODE = {
@@ -105,10 +109,12 @@ function normalizeRunConfig(config) {
   };
 }
 
-async function handleRun(config) {
-  const session = sessionFor(config);
-  const normalized = normalizeRunConfig(config);
+async function handleRun(config, authorizedStore, authorizationLifecycle = {}) {
+  const authorized = authorizedConfigForRequest(config, authorizedStore);
+  const session = sessionFor(authorized);
+  const normalized = normalizeRunConfig(authorized);
   return session.run(normalized, {
+    authorize: authorizationLifecycle.authorize,
     onQueued: ({ queueKind, queueDepth }) => {
       session.rememberEvent({
         type: 'run_queued',
@@ -139,8 +145,10 @@ async function handleRun(config) {
   });
 }
 
-async function handleMetrics(config) {
-  const normalized = normalizeRunConfig(config);
+async function handleMetrics(config, authorizedStore) {
+  const normalized = normalizeRunConfig(
+    authorizedConfigForRequest(config, authorizedStore),
+  );
   const result = await getPhoneMetrics(normalized);
   rememberSessionEvent(normalized, {
     type: 'metrics_result',
@@ -149,8 +157,10 @@ async function handleMetrics(config) {
   return result;
 }
 
-async function handleEventsSync(config, lifecycle = {}) {
-  const normalized = normalizeRunConfig(config);
+async function handleEventsSync(config, authorizedStore, lifecycle = {}) {
+  const normalized = normalizeRunConfig(
+    authorizedConfigForRequest(config, authorizedStore),
+  );
   const session = sessionFor(normalized);
   const events = [];
   const maxEvents = Math.max(0, Math.min(200, Number(normalized.maxEvents || normalized.limit || 50) || 50));
@@ -163,6 +173,7 @@ async function handleEventsSync(config, lifecycle = {}) {
     });
     lifecycle.onEvent?.(event);
   }, {
+    authorize: lifecycle.authorize,
     onQueued: ({ queueDepth }) => {
       session.rememberEvent({
         ...runEventContext(normalized),
@@ -231,38 +242,138 @@ function safeErrorPayload(error, fallback = 'daemon_error') {
   };
 }
 
+async function shutdownSessions(timeoutMs = 4_000) {
+  const results = await Promise.all(
+    [...sessions.values()].map((session) => session.shutdown({ timeoutMs })),
+  );
+  const unfinishedOperations = results.reduce(
+    (total, result) => total + Number(result.unfinishedOperations || 0),
+    0,
+  );
+  const indeterminateOperations = results.reduce(
+    (total, result) => total + Number(result.indeterminateOperations || 0),
+    0,
+  );
+  const executionMayContinue = results.some(
+    (result) => (
+      result.executionMayContinue === true
+      || result.outcomeIndeterminate === true
+    ),
+  );
+  return {
+    ok: !executionMayContinue,
+    drained: !executionMayContinue,
+    sessionCount: results.length,
+    unfinishedOperations,
+    indeterminateOperations,
+    executionMayContinue,
+    outcomeIndeterminate: executionMayContinue,
+  };
+}
+
+function useLiveAuthorizationBindingAfterStartup() {
+  if (phoneRuntimeTestOverridesAllowed()) return;
+  const name = 'LOOM_PHONE_RUNTIME_CONFIG_JSON';
+  const raw = String(process.env[name] || '').trim();
+  const runtimeConfig = JSON.parse(raw);
+  delete runtimeConfig.entitlementLease;
+  delete runtimeConfig.phoneSeatLease;
+  process.env[name] = JSON.stringify(runtimeConfig);
+}
+
+async function readAuthorizedStoreForRequest(runtime) {
+  const authorizedStore = await readLauncherPhoneStore();
+  const runtimeAccountId = String(runtime?.accountId || '').trim();
+  if (
+    !runtimeAccountId
+    || String(authorizedStore?.accountId || '').trim() !== runtimeAccountId
+  ) {
+    const error = new Error('phone_daemon_request_identity_mismatch');
+    error.code = 'phone_daemon_request_identity_mismatch';
+    error.errorCode = error.code;
+    error.retryable = false;
+    throw error;
+  }
+  return authorizedStore;
+}
+
 async function startHttpServer() {
+  const startupAuthorizedStore = await readLauncherPhoneStore();
+  assertDaemonStartupIdentity(startupAuthorizedStore);
+  useLiveAuthorizationBindingAfterStartup();
+  let runtime = null;
+  let stopping = false;
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url || '/', 'http://127.0.0.1');
       const pathname = url.pathname;
 
-      const runtime = await readRuntimeOrNull();
       if (!isAuthorized(request, runtime)) {
         sendJson(response, 401, { ok: false, error: 'daemon_unauthorized' });
         return;
       }
 
       if (pathname === '/health') {
-        sendJson(response, 200, { ok: true, pid: process.pid, sessions: sessions.size });
+        sendJson(response, 200, {
+          ok: true,
+          pid: process.pid,
+          sessions: sessions.size,
+          accountId: runtime.accountId || '',
+          configDigest: runtime.configDigest || '',
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && pathname === '/shutdown') {
+        stopping = true;
+        const shutdown = await shutdownSessions();
+        sendJson(response, 200, {
+          ...shutdown,
+          stopping: true,
+          pid: process.pid,
+          ...(!shutdown.ok
+            ? { errorCode: 'phone_daemon_shutdown_unconfirmed' }
+            : {}),
+        });
+        server.close();
+        return;
+      }
+
+      if (stopping) {
+        sendJson(response, 503, {
+          ok: false,
+          error: 'daemon_stopping',
+          errorCode: 'daemon_stopping',
+          retryable: false,
+        });
         return;
       }
 
       if (request.method === 'POST' && pathname === '/v1/run') {
+        const authorizedStore = await readAuthorizedStoreForRequest(runtime);
         const body = await readJsonBody(request);
-        const result = await handleRun(body);
+        const result = await handleRun(body, authorizedStore, {
+          authorize: async (queuedConfig) => {
+            const currentStore = await readAuthorizedStoreForRequest(runtime);
+            return normalizeRunConfig(
+              authorizedConfigForRequest(queuedConfig, currentStore),
+            );
+          },
+        });
         sendJson(response, 200, result);
         return;
       }
 
       if (request.method === 'POST' && pathname === '/v1/metrics') {
+        const authorizedStore = await readAuthorizedStoreForRequest(runtime);
         const body = await readJsonBody(request);
-        const result = await handleMetrics(body);
+        const result = await handleMetrics(body, authorizedStore);
         sendJson(response, 200, result);
         return;
       }
 
       if (request.method === 'POST' && pathname === '/v1/events-sync') {
+        const authorizedStore = await readAuthorizedStoreForRequest(runtime);
         let body;
         try {
           body = await readJsonBody(request);
@@ -272,7 +383,13 @@ async function startHttpServer() {
         }
         startNdjson(response);
         try {
-          await handleEventsSync(body, {
+          await handleEventsSync(body, authorizedStore, {
+            authorize: async (queuedConfig) => {
+              const currentStore = await readAuthorizedStoreForRequest(runtime);
+              return normalizeRunConfig(
+                authorizedConfigForRequest(queuedConfig, currentStore),
+              );
+            },
             onEvent: (event) => writeNdjson(response, { ok: true, type: 'phone_event', event }),
             onSummary: (result) => writeNdjson(response, {
               ok: true,
@@ -312,12 +429,6 @@ async function startHttpServer() {
         return;
       }
 
-      if (request.method === 'POST' && pathname === '/shutdown') {
-        sendJson(response, 200, { ok: true, stopping: true, pid: process.pid });
-        server.close();
-        return;
-      }
-
       sendJson(response, 404, { ok: false, error: 'not_found' });
     } catch (error) {
       const statusCode = error instanceof SyntaxError ? 400 : 500;
@@ -330,9 +441,11 @@ async function startHttpServer() {
 
   const port = await listenOnFetchSafePort(server);
 
-  let runtime = null;
   try {
-    runtime = await createRuntimeState(port);
+    runtime = await createRuntimeState(port, {
+      accountId: startupAuthorizedStore.accountId,
+      configDigest: startupAuthorizedStore.configDigest,
+    });
     process.stdout.write(`${JSON.stringify({ ok: true, type: 'phone_daemon_started', port: runtime.port, pid: runtime.pid })}\n`);
   } catch (error) {
     await new Promise((resolve) => server.close(resolve));
@@ -347,14 +460,6 @@ async function startHttpServer() {
   }
 }
 
-async function readRuntimeOrNull() {
-  try {
-    return await readRuntimeState();
-  } catch {
-    return null;
-  }
-}
-
 async function writeStdoutJson(value) {
   const line = `${JSON.stringify(value)}\n`;
   stdoutTail = stdoutTail.then(() => new Promise((resolve) => {
@@ -365,7 +470,27 @@ async function writeStdoutJson(value) {
 
 let stdoutTail = Promise.resolve();
 
-async function startStdioServer() {
+function assertDaemonStartupIdentity(authorizedStore) {
+  const expectedAccountId = String(process.env.LOOM_PHONE_DAEMON_ACCOUNT_ID || '').trim();
+  const expectedConfigDigest = String(process.env.LOOM_PHONE_DAEMON_CONFIG_DIGEST || '').trim().toLowerCase();
+  if (
+    (expectedAccountId && expectedAccountId !== authorizedStore.accountId)
+    || (expectedConfigDigest && expectedConfigDigest !== authorizedStore.configDigest)
+  ) {
+    const error = new Error('phone_daemon_startup_identity_mismatch');
+    error.code = 'phone_daemon_startup_identity_mismatch';
+    throw error;
+  }
+}
+
+function testOnlyStdioEnabled() {
+  return (
+    String(process.env.LOOM_PHONE_DAEMON_TEST_ONLY_STDIO || '') === '1'
+    && phoneRuntimeTestOverridesAllowed()
+  );
+}
+
+async function startStdioServer(startupAuthorizedStore) {
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
   let closed = false;
   let inflight = 0;
@@ -384,7 +509,25 @@ async function startStdioServer() {
     void (async () => {
       try {
         const body = JSON.parse(line);
-        const result = await handleRun(body);
+        const authorizedStore = await readLauncherPhoneStore();
+        if (authorizedStore.accountId !== startupAuthorizedStore.accountId) {
+          const error = new Error('phone_daemon_request_identity_mismatch');
+          error.code = 'phone_daemon_request_identity_mismatch';
+          throw error;
+        }
+        const result = await handleRun(body, authorizedStore, {
+          authorize: async (queuedConfig) => {
+            const currentStore = await readLauncherPhoneStore();
+            if (currentStore.accountId !== startupAuthorizedStore.accountId) {
+              const error = new Error('phone_daemon_request_identity_mismatch');
+              error.code = 'phone_daemon_request_identity_mismatch';
+              throw error;
+            }
+            return normalizeRunConfig(
+              authorizedConfigForRequest(queuedConfig, currentStore),
+            );
+          },
+        });
         await writeStdoutJson(result);
       } catch (error) {
         await writeStdoutJson(error instanceof SyntaxError ? { ok: false, error: 'invalid_json' } : safeErrorPayload(error, 'daemon_error'));
@@ -404,7 +547,19 @@ async function startStdioServer() {
 }
 
 if (process.argv.includes('--stdio-json')) {
-  await startStdioServer();
+  if (!testOnlyStdioEnabled()) {
+    await writeStdoutJson({
+      ok: false,
+      error: 'daemon_stdio_disabled',
+      errorCode: 'daemon_stdio_disabled',
+      retryable: false,
+    });
+    process.exitCode = 2;
+  } else {
+    const authorizedStore = await readLauncherPhoneStore();
+    assertDaemonStartupIdentity(authorizedStore);
+    await startStdioServer(authorizedStore);
+  }
 } else {
   await startHttpServer();
 }

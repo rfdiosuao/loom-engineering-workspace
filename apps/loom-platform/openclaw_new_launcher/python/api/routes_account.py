@@ -5,9 +5,14 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from contextlib import asynccontextmanager
 
 from fastapi import Request
 
+from core.job_ownership import (
+    AccountRuntimeIdentity,
+    capture_account_runtime_identity,
+)
 from core.newapi_account_manager import NewApiAccountError
 
 
@@ -208,7 +213,128 @@ def _public_logout_cleanup(payload: object) -> dict:
     return safe
 
 
+def _cleanup_execution_may_continue(cleanup: dict) -> bool:
+    if cleanup.get("executionMayContinue") is True:
+        return True
+    if cleanup.get("outcomeIndeterminate") is True:
+        return True
+    if cleanup.get("errors") or cleanup.get("unfinishedJobIds"):
+        return True
+    for key in ("agent", "matrix", "eventSync", "daemon", "usb"):
+        component = cleanup.get(key)
+        if not isinstance(component, dict):
+            continue
+        if (
+            component.get("executionMayContinue") is True
+            or component.get("outcomeIndeterminate") is True
+            or component.get("running") is True
+        ):
+            return True
+    return False
+
+
+def _confirmed_logout_cleanup(payload: object) -> dict:
+    cleanup = _public_logout_cleanup(payload)
+    if _cleanup_execution_may_continue(cleanup):
+        cleanup["ok"] = False
+        cleanup["executionMayContinue"] = True
+    return cleanup
+
+
+async def _read_account_transition_identity(
+    ctx,
+    manager,
+) -> tuple[dict, AccountRuntimeIdentity, dict | None]:
+    try:
+        current = await asyncio.to_thread(manager.public_session)
+    except Exception as exc:
+        ctx.append_log(
+            "[Account] current account identity could not be read: "
+            f"{_redact_secret_text(exc)}\n"
+        )
+        current = {}
+        return (
+            current,
+            capture_account_runtime_identity(ctx, current),
+            {
+                "ok": False,
+                "performed": False,
+                "code": "account_runtime_identity_unavailable",
+                "executionMayContinue": True,
+                "message": "无法确认当前账号及其后台任务归属，已拒绝切换账号。",
+            },
+        )
+    if not isinstance(current, dict):
+        current = {}
+    return current, capture_account_runtime_identity(ctx, current), None
+
+
+async def _drain_existing_account_runtime(
+    ctx,
+    current: dict,
+    identity: AccountRuntimeIdentity,
+    identity_read_error: dict | None = None,
+) -> dict:
+    if identity_read_error is not None:
+        return _confirmed_logout_cleanup(identity_read_error)
+    if not isinstance(current, dict) or current.get("loggedIn") is not True:
+        return {
+            "ok": True,
+            "performed": False,
+            "executionMayContinue": False,
+        }
+    cleanup_callback = getattr(ctx, "account_logout_cleanup", None)
+    if not callable(cleanup_callback):
+        return {
+            "ok": True,
+            "performed": False,
+            "executionMayContinue": False,
+        }
+    try:
+        return _confirmed_logout_cleanup(
+            await asyncio.to_thread(cleanup_callback, identity)
+        )
+    except Exception as exc:
+        ctx.append_log(
+            "[Account] account transition cleanup failed: "
+            f"{_redact_secret_text(exc)}\n"
+        )
+        return {
+            "ok": False,
+            "performed": True,
+            "executionMayContinue": True,
+            "message": "旧账号后台任务仍可能运行，请稍后重试。",
+        }
+
+
+def _account_transition_blocked_response(ctx, cleanup: dict):
+    if cleanup.get("executionMayContinue") is not True:
+        return None
+    return ctx.fastapi_json(
+        {
+            "error": "旧账号后台任务尚未完全停止，已保留当前登录状态，请稍后重试。",
+            "cleanup": cleanup,
+        },
+        409,
+    )
+
+
+@asynccontextmanager
+async def _account_transition_scope(ctx, lock: asyncio.Lock):
+    async with lock:
+        begin = getattr(ctx, "begin_account_transition", None)
+        end = getattr(ctx, "end_account_transition", None)
+        token = begin() if callable(begin) else None
+        try:
+            yield
+        finally:
+            if callable(end):
+                end(token)
+
+
 def register_account_routes(app, ctx) -> None:
+    account_transition_lock = asyncio.Lock()
+
     @app.api_route("/api/account/current", methods=["GET", "POST"])
     async def account_current(request: Request):
         if error := ctx.auth_error(request):
@@ -259,12 +385,30 @@ def register_account_routes(app, ctx) -> None:
         code = str(body.get("code") or body.get("emailCode") or "").strip()
         base_url = str(body.get("baseUrl") or "").strip()
         try:
-            session = ctx.get_newapi_account_mgr().login_with_email_code(
-                email,
-                code,
-                base_url=base_url,
-            )
-            return ctx.fastapi_json(_account_response(account=ctx.get_newapi_account_mgr().public_session(), session=session))
+            manager = ctx.get_newapi_account_mgr()
+            async with _account_transition_scope(ctx, account_transition_lock):
+                current, identity, identity_read_error = await _read_account_transition_identity(
+                    ctx,
+                    manager,
+                )
+                cleanup = await _drain_existing_account_runtime(
+                    ctx,
+                    current,
+                    identity,
+                    identity_read_error,
+                )
+                if response := _account_transition_blocked_response(ctx, cleanup):
+                    return response
+                session = await asyncio.to_thread(
+                    manager.login_with_email_code,
+                    email,
+                    code,
+                    base_url=base_url,
+                )
+                account = await asyncio.to_thread(manager.public_session)
+                return ctx.fastapi_json(
+                    _account_response(account=account, session=session)
+                )
         except NewApiAccountError as exc:
             return ctx.fastapi_json({"error": _friendly_account_error(exc, "email_code_login")}, 400)
 
@@ -278,13 +422,31 @@ def register_account_routes(app, ctx) -> None:
         code = str(body.get("code") or body.get("emailCode") or "").strip()
         base_url = str(body.get("baseUrl") or "").strip()
         try:
-            session = ctx.get_newapi_account_mgr().register_with_email_code(
-                email,
-                password,
-                code,
-                base_url=base_url,
-            )
-            return ctx.fastapi_json(_account_response(account=ctx.get_newapi_account_mgr().public_session(), session=session))
+            manager = ctx.get_newapi_account_mgr()
+            async with _account_transition_scope(ctx, account_transition_lock):
+                current, identity, identity_read_error = await _read_account_transition_identity(
+                    ctx,
+                    manager,
+                )
+                cleanup = await _drain_existing_account_runtime(
+                    ctx,
+                    current,
+                    identity,
+                    identity_read_error,
+                )
+                if response := _account_transition_blocked_response(ctx, cleanup):
+                    return response
+                session = await asyncio.to_thread(
+                    manager.register_with_email_code,
+                    email,
+                    password,
+                    code,
+                    base_url=base_url,
+                )
+                account = await asyncio.to_thread(manager.public_session)
+                return ctx.fastapi_json(
+                    _account_response(account=account, session=session)
+                )
         except NewApiAccountError as exc:
             return ctx.fastapi_json({"error": _friendly_account_error(exc, "register")}, 400)
 
@@ -299,18 +461,35 @@ def register_account_routes(app, ctx) -> None:
         api_token = str(body.get("apiToken") or "").strip()
         try:
             manager = ctx.get_newapi_account_mgr()
-            session = await asyncio.to_thread(
-                manager.login,
-                username,
-                password,
-                base_url=base_url,
-                api_token=api_token,
-                sync_runtime=False,
-            )
-            account = manager.public_session()
-            response = _account_response(account=account, session=session, sync_pending=True)
-            _start_runtime_sync(manager, session, ctx.append_log)
-            return ctx.fastapi_json(response)
+            async with _account_transition_scope(ctx, account_transition_lock):
+                current, identity, identity_read_error = await _read_account_transition_identity(
+                    ctx,
+                    manager,
+                )
+                cleanup = await _drain_existing_account_runtime(
+                    ctx,
+                    current,
+                    identity,
+                    identity_read_error,
+                )
+                if response := _account_transition_blocked_response(ctx, cleanup):
+                    return response
+                session = await asyncio.to_thread(
+                    manager.login,
+                    username,
+                    password,
+                    base_url=base_url,
+                    api_token=api_token,
+                    sync_runtime=False,
+                )
+                account = await asyncio.to_thread(manager.public_session)
+                response = _account_response(
+                    account=account,
+                    session=session,
+                    sync_pending=True,
+                )
+                _start_runtime_sync(manager, session, ctx.append_log)
+                return ctx.fastapi_json(response)
         except NewApiAccountError as exc:
             return ctx.fastapi_json({"error": _friendly_account_error(exc, "password_login")}, 400)
 
@@ -322,11 +501,29 @@ def register_account_routes(app, ctx) -> None:
         ticket = str(body.get("ticket") or body.get("code") or "").strip()
         base_url = str(body.get("baseUrl") or "").strip()
         try:
-            session = ctx.get_newapi_account_mgr().bind_ticket(
-                ticket,
-                base_url=base_url,
-            )
-            return ctx.fastapi_json(_account_response(account=ctx.get_newapi_account_mgr().public_session(), session=session))
+            manager = ctx.get_newapi_account_mgr()
+            async with _account_transition_scope(ctx, account_transition_lock):
+                current, identity, identity_read_error = await _read_account_transition_identity(
+                    ctx,
+                    manager,
+                )
+                cleanup = await _drain_existing_account_runtime(
+                    ctx,
+                    current,
+                    identity,
+                    identity_read_error,
+                )
+                if response := _account_transition_blocked_response(ctx, cleanup):
+                    return response
+                session = await asyncio.to_thread(
+                    manager.bind_ticket,
+                    ticket,
+                    base_url=base_url,
+                )
+                account = await asyncio.to_thread(manager.public_session)
+                return ctx.fastapi_json(
+                    _account_response(account=account, session=session)
+                )
         except NewApiAccountError as exc:
             return ctx.fastapi_json({"error": _friendly_account_error(exc, "bind_ticket")}, 400)
 
@@ -335,13 +532,53 @@ def register_account_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         try:
-            session = ctx.get_newapi_account_mgr().refresh_current()
-            return ctx.fastapi_json(
-                _account_response(
-                    account=ctx.get_newapi_account_mgr().public_session(),
+            manager = ctx.get_newapi_account_mgr()
+            async with _account_transition_scope(ctx, account_transition_lock):
+                current, identity, identity_read_error = await _read_account_transition_identity(
+                    ctx,
+                    manager,
+                )
+                if identity_read_error is not None:
+                    cleanup = await _drain_existing_account_runtime(
+                        ctx,
+                        current,
+                        identity,
+                        identity_read_error,
+                    )
+                    if response := _account_transition_blocked_response(ctx, cleanup):
+                        return response
+                session = await asyncio.to_thread(manager.refresh_current)
+                account = await asyncio.to_thread(manager.public_session)
+                entitlement = (
+                    account.get("accountEntitlement")
+                    if isinstance(account, dict)
+                    and isinstance(account.get("accountEntitlement"), dict)
+                    else {}
+                )
+                cleanup = None
+                if (
+                    str(entitlement.get("plan") or "").strip().lower()
+                    == "inactive"
+                    or str(entitlement.get("source") or "").strip().lower()
+                    == "authorization_required"
+                ):
+                    cleanup = await _drain_existing_account_runtime(
+                        ctx,
+                        current,
+                        identity,
+                    )
+                payload = _account_response(
+                    account=account,
                     session=session,
                 )
-            )
+                if cleanup is not None:
+                    payload["cleanup"] = cleanup
+                    if cleanup.get("executionMayContinue"):
+                        payload["error"] = (
+                            "账号授权已失效，部分后台任务仍在停止，请稍后重试。"
+                        )
+                        return ctx.fastapi_json(payload, 409)
+                return ctx.fastapi_json(payload)
         except NewApiAccountError as exc:
             return ctx.fastapi_json({"error": _friendly_account_error(exc, "sync")}, 400)
         except Exception as exc:
@@ -404,31 +641,29 @@ def register_account_routes(app, ctx) -> None:
     async def account_logout(request: Request):
         if error := ctx.auth_error(request):
             return error
-        cleanup = {
-            "ok": True,
-            "performed": False,
-            "executionMayContinue": False,
-        }
-        cleanup_callback = getattr(ctx, "account_logout_cleanup", None)
-        if callable(cleanup_callback):
-            try:
-                cleanup = _public_logout_cleanup(
-                    await asyncio.to_thread(cleanup_callback)
-                )
-            except Exception as exc:
-                ctx.append_log(
-                    "[Account] logout runtime cleanup failed: "
-                    f"{_redact_secret_text(exc)}\n"
-                )
-                cleanup = {
-                    "ok": False,
-                    "performed": True,
-                    "executionMayContinue": True,
-                    "message": "部分后台任务可能仍在退出，请稍后检查运行状态。",
-                }
-        removed = await asyncio.to_thread(ctx.get_newapi_account_mgr().logout)
-        return ctx.fastapi_json({
-            "loggedOut": removed,
-            "account": ctx.get_newapi_account_mgr().public_session(),
-            "cleanup": cleanup,
-        })
+        manager = ctx.get_newapi_account_mgr()
+        async with _account_transition_scope(ctx, account_transition_lock):
+            current, identity, identity_read_error = await _read_account_transition_identity(
+                ctx,
+                manager,
+            )
+            cleanup = await _drain_existing_account_runtime(
+                ctx,
+                current,
+                identity,
+                identity_read_error,
+            )
+            if cleanup.get("executionMayContinue"):
+                return ctx.fastapi_json({
+                    "loggedOut": False,
+                    "account": current,
+                    "cleanup": cleanup,
+                    "error": "后台任务尚未完全停止，为避免任务失控，本次暂未退出账号。",
+                }, 409)
+            removed = await asyncio.to_thread(manager.logout)
+            account = await asyncio.to_thread(manager.public_session)
+            return ctx.fastapi_json({
+                "loggedOut": removed,
+                "account": account,
+                "cleanup": cleanup,
+            })
