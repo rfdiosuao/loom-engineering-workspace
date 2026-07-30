@@ -31,9 +31,18 @@ export class DeviceSession {
     this.readyStatusCache = null;
     this.coalescedActions = new Map();
     this.events = [];
+    this.stopping = false;
+    this.operationSequence = 0;
+    this.activeOperations = new Map();
+    this.shutdownPromise = null;
   }
 
   run(config, lifecycle = {}) {
+    if (this.stopping) {
+      const result = daemonStoppingResult(config);
+      lifecycle.onResult?.(result);
+      return Promise.resolve(result);
+    }
     this.lastUsedAt = Date.now();
     const kind = commandQueueKind(config);
     const plan = fixedFastPathPlan(config);
@@ -46,17 +55,26 @@ export class DeviceSession {
       queueKind: kind,
       queueDepth: queue.depth,
     });
-    const execute = async () => {
-      if (await cancellationRequested(config.cancelFile)) {
-        const result = cancelledPhoneCommandResult(config);
+    const execute = async (operationConfig) => {
+      if (await cancellationRequested(
+        operationConfig.cancelFile,
+        operationConfig.cancelSignal,
+      )) {
+        const result = cancelledPhoneCommandResult(operationConfig);
         lifecycle.onResult?.(result);
         return result;
       }
-      lifecycle.onRunning?.({
-        queueKind: kind,
-      });
       try {
-        const commandConfig = { ...config };
+        const authorizedConfig = typeof lifecycle.authorize === 'function'
+          ? await lifecycle.authorize(operationConfig)
+          : operationConfig;
+        lifecycle.onRunning?.({
+          queueKind: kind,
+        });
+        const commandConfig = {
+          ...authorizedConfig,
+          cancelSignal: operationConfig.cancelSignal,
+        };
         if (plan) {
           commandConfig.fastPathReadyStatus = await this.fastPathReadyStatus(commandConfig);
         }
@@ -82,7 +100,11 @@ export class DeviceSession {
     if (coalescingKey) {
       const existing = this.coalescedActions.get(coalescingKey);
       if (existing) return existing;
-      const promise = queue.enqueue(execute);
+      const operation = this.createOperation('run', config);
+      const promise = this.trackOperation(
+        operation,
+        queue.enqueue(() => executeOperation(execute, operation, config)),
+      );
       this.coalescedActions.set(coalescingKey, promise);
       promise.finally(() => {
         if (this.coalescedActions.get(coalescingKey) === promise) {
@@ -91,28 +113,124 @@ export class DeviceSession {
       }).catch(() => {});
       return promise;
     }
-    return queue.enqueue(execute);
+    const operation = this.createOperation('run', config);
+    return this.trackOperation(
+      operation,
+      queue.enqueue(() => executeOperation(execute, operation, config)),
+    );
   }
 
   syncEvents(config, onEvent, lifecycle = {}) {
+    if (this.stopping) {
+      return Promise.resolve({
+        ok: true,
+        cancelled: true,
+        stoppedBy: 'daemon_shutdown',
+        eventCount: 0,
+        executionMayContinue: false,
+      });
+    }
     this.lastUsedAt = Date.now();
     lifecycle.onQueued?.({
       queueKind: 'events',
       queueDepth: this.eventQueue.depth,
     });
-    return this.eventQueue.enqueue(async () => {
-      lifecycle.onRunning?.({
-        queueKind: 'events',
-      });
+    const operation = this.createOperation('events', config);
+    return this.trackOperation(operation, this.eventQueue.enqueue(async () => {
       try {
-        const summary = await syncPhoneEvents(config, onEvent);
+        const authorizedConfig = typeof lifecycle.authorize === 'function'
+          ? await lifecycle.authorize({
+            ...config,
+            cancelSignal: operation.controller.signal,
+          })
+          : {
+            ...config,
+            cancelSignal: operation.controller.signal,
+          };
+        lifecycle.onRunning?.({
+          queueKind: 'events',
+        });
+        const summary = await syncPhoneEvents({
+          ...authorizedConfig,
+          cancelSignal: operation.controller.signal,
+        }, onEvent);
         lifecycle.onResult?.(summary);
         return summary;
       } catch (error) {
         lifecycle.onError?.(error);
         throw error;
       }
+    }));
+  }
+
+  createOperation(kind, config) {
+    const id = `${kind}-${++this.operationSequence}`;
+    const operation = {
+      id,
+      kind,
+      controller: new AbortController(),
+      config,
+      promise: null,
+      settlement: null,
+    };
+    this.activeOperations.set(id, operation);
+    return operation;
+  }
+
+  trackOperation(operation, promise) {
+    operation.promise = promise;
+    promise.then(
+      (value) => {
+        operation.settlement = { status: 'fulfilled', value };
+      },
+      (reason) => {
+        operation.settlement = { status: 'rejected', reason };
+      },
+    ).finally(() => {
+      this.activeOperations.delete(operation.id);
     });
+    return promise;
+  }
+
+  shutdown(options = {}) {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.stopping = true;
+    const operations = [...this.activeOperations.values()];
+    for (const operation of operations) {
+      operation.controller.abort('phone_daemon_shutdown');
+    }
+    this.shutdownPromise = this.finishShutdown(
+      operations,
+      positiveFiniteNumber(options.timeoutMs, 4_000),
+    );
+    return this.shutdownPromise;
+  }
+
+  async finishShutdown(operations, timeoutMs) {
+    const completedWithinDeadline = await settleWithin(
+      operations.map((operation) => operation.promise).filter(Boolean),
+      timeoutMs,
+    );
+    const indeterminate = operations.filter((operation) => (
+      !operation.settlement
+      || operation.settlement.status === 'rejected'
+      || resultMayContinue(operation.settlement.value)
+    ));
+    const drained = (
+      completedWithinDeadline
+      && this.activeOperations.size === 0
+      && indeterminate.length === 0
+    );
+    return {
+      ok: drained,
+      stopped: true,
+      drained,
+      requestedOperations: operations.length,
+      unfinishedOperations: this.activeOperations.size,
+      indeterminateOperations: indeterminate.length,
+      executionMayContinue: !drained,
+      outcomeIndeterminate: !drained,
+    };
   }
 
   async waitForReadToActionQuiet() {
@@ -180,8 +298,59 @@ export class DeviceSession {
         eventDepth: this.eventQueue.depth,
       },
       recentEventCount: this.events.length,
+      stopping: this.stopping,
+      activeOperations: this.activeOperations.size,
     };
   }
+}
+
+async function executeOperation(execute, operation, config) {
+  if (operation.controller.signal.aborted) {
+    return cancelledPhoneCommandResult({
+      ...config,
+      cancelSignal: operation.controller.signal,
+    });
+  }
+  return execute({
+    ...config,
+    cancelSignal: operation.controller.signal,
+  });
+}
+
+function daemonStoppingResult(config = {}) {
+  return {
+    ...cancelledPhoneCommandResult(config),
+    error: 'daemon_stopping',
+    errorCode: 'daemon_stopping',
+  };
+}
+
+function resultMayContinue(value) {
+  return (
+    value?.executionMayContinue === true
+    || value?.outcomeIndeterminate === true
+    || value?.final?.executionMayContinue === true
+    || value?.final?.outcomeIndeterminate === true
+  );
+}
+
+function settleWithin(promises, timeoutMs) {
+  if (!promises.length) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      resolve(false);
+    }, Math.max(1, timeoutMs));
+    timer.unref?.();
+    Promise.allSettled(promises).then(() => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
 }
 
 function positiveFiniteNumber(value, fallback) {

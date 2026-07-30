@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -52,6 +53,12 @@ class RecordingJobManager:
     def cancel(self, job_id):
         self.cancelled.append(job_id)
         return True
+
+    def cancel_file(self, job_id):
+        return os.path.join("job-runtime", f"{job_id}.cancel")
+
+    def is_cancelled(self, _job_id):
+        return False
 
 
 class PendingJobManager(RecordingJobManager):
@@ -133,10 +140,66 @@ class LicenseManager:
         return {"ok": True}
 
 
+class AllowPhoneEntitlement:
+    def __init__(self) -> None:
+        self.slot_calls: list[dict] = []
+
+    def current_state(self, _feature=None):
+        return {
+            "authorized": True,
+            "source": "account_entitlement",
+            "accountId": "account-agent-test",
+            "limits": {"devices": 1000, "concurrentTasks": 100},
+        }
+
+    def authorize_phone_devices(self, device_ids, operation, *, session=None):
+        del session
+        return {
+            "authorized": True,
+            "accountId": "account-agent-test",
+            "phoneDeviceIds": list(device_ids),
+            "operation": operation,
+        }
+
+    def claimed_phone_device_ids(self):
+        return ["phone-1", "phone-2"]
+
+    @contextmanager
+    def account_task_slot(
+        self,
+        entitlement,
+        operation,
+        *,
+        cancelled=None,
+        device_ids=None,
+    ):
+        self.slot_calls.append({
+            "entitlement": dict(entitlement),
+            "operation": operation,
+            "deviceIds": list(device_ids or []),
+        })
+        yield
+
+
 class AgentBuiltinCapabilityTests(unittest.TestCase):
     @staticmethod
     def _context(root, jobs, image_client=None, video_client=None, protected_error=None):
+        import json
+
         from core.paths import AppPaths
+
+        entitlement = AllowPhoneEntitlement()
+
+        def read_json(path, default):
+            if not os.path.isfile(path):
+                return default
+            with open(path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+
+        def write_json(path, data):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
 
         return SimpleNamespace(
             paths=AppPaths(root),
@@ -145,7 +208,10 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             get_video_client=lambda: video_client,
             get_license_mgr=lambda: LicenseManager(),
             get_job_mgr=lambda: jobs,
+            get_entitlement_mgr=lambda: entitlement,
             data_url_to_temp_file=lambda value: (value, ""),
+            read_json=read_json,
+            write_json=write_json,
         )
 
     def test_default_agent_service_connects_media_capabilities(self) -> None:
@@ -246,8 +312,13 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             context.read_json = read_json
             observed: dict = {}
 
-            def transfer(_ctx, kind, files, *, phone_snapshot=None):
-                observed.update({"kind": kind, "files": files, "snapshot": phone_snapshot})
+            def transfer(_ctx, kind, files, *, phone_snapshot=None, cancel_file=""):
+                observed.update({
+                    "kind": kind,
+                    "files": files,
+                    "snapshot": phone_snapshot,
+                    "cancelFile": cancel_file,
+                })
                 return {
                     "status": "succeeded",
                     "message": "transferred",
@@ -280,6 +351,88 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
         self.assertEqual(observed["kind"], "image")
         self.assertTrue(transferred_same_file)
         self.assertEqual([item["id"] for item in observed["snapshot"]["devices"]], ["phone-2"])
+        self.assertTrue(observed["cancelFile"].endswith("job-media.transfer-1.cancel"))
+        self.assertTrue(jobs.submissions[0]["initialProgress"]["requiresPhoneEntitlement"])
+        self.assertRegex(
+            jobs.submissions[0]["initialProgress"]["ownerAccountBinding"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertNotIn("ownerAccountId", jobs.submissions[0]["initialProgress"])
+        self.assertEqual(jobs.submissions[0]["initialProgress"]["phoneDeviceIds"], ["phone-2"])
+
+    def test_agent_phone_media_and_publish_reject_unactivated_account_before_submission(self) -> None:
+        import json
+
+        from core.account_entitlement import AccountEntitlementError
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.paths import AppPaths
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+        from services.media_library import MediaLibrary
+
+        class DenyPhoneEntitlement(AllowPhoneEntitlement):
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del device_ids, operation, session
+                raise AccountEntitlementError(
+                    "当前账号尚未激活手机矩阵。",
+                    code="authorization_required",
+                    action="bind_authorization_code",
+                    status_code=403,
+                )
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            os.makedirs(paths.launcher_dir, exist_ok=True)
+            with open(os.path.join(paths.launcher_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "selectedDeviceId": "phone-1",
+                    "devices": [{"id": "phone-1", "name": "Phone One"}],
+                }, handle)
+            image_dir = os.path.join(paths.data_dir, "generated-images")
+            os.makedirs(image_dir, exist_ok=True)
+            image_path = os.path.join(image_dir, "existing-poster.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"existing-image")
+            asset = MediaLibrary(paths.data_dir).record(image_path, {"prompt": "招聘海报"})
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs)
+            context.get_entitlement_mgr = lambda: DenyPhoneEntitlement()
+
+            def read_json(path, default):
+                if not os.path.isfile(path):
+                    return default
+                with open(path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+
+            context.read_json = read_json
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: None,
+            )
+
+            calls = (
+                lambda: provider._submit_media_asset_transfer({
+                    "assetId": asset["id"],
+                    "targets": {"deviceIds": ["phone-1"]},
+                }),
+                lambda: provider._submit_media(
+                    "image",
+                    {"prompt": "招聘海报", "deviceIds": ["phone-1"]},
+                ),
+                lambda: provider._submit_phone_publish({
+                    "platform": "douyin",
+                    "title": "招聘海报",
+                    "mediaPaths": [image_path],
+                    "deviceId": "phone-1",
+                    "draftOnly": True,
+                }),
+            )
+            for call in calls:
+                with self.subTest(call=call), self.assertRaises(CapabilityExecutionError) as raised:
+                    call()
+                self.assertEqual(raised.exception.code, "authorization_required")
+
+        self.assertEqual(jobs.submissions, [])
 
     def test_disconnected_agent_service_hides_media_from_model_catalog(self) -> None:
         from core.paths import AppPaths
@@ -441,6 +594,14 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             self.assertEqual(image_client.calls[1]["editImagePath"], reference_path)
             self.assertEqual(video_client.calls[0]["imagePath"], reference_path)
             self.assertEqual(video_client.calls[0]["duration"], 5)
+            for submission in jobs.submissions:
+                self.assertFalse(submission["initialProgress"]["requiresPhoneEntitlement"])
+                self.assertNotIn("ownerAccountId", submission["initialProgress"])
+                self.assertRegex(
+                    submission["initialProgress"]["ownerAccountBinding"],
+                    r"^[0-9a-f]{64}$",
+                )
+                self.assertEqual(submission["initialProgress"]["phoneDeviceIds"], [])
             for result in jobs.results.values():
                 self.assertNotIn("images", result)
                 self.assertNotIn("video", result)
@@ -492,8 +653,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             context.read_json = read_json
             observed: dict = {}
 
-            def transfer(_ctx, _kind, _files, *, phone_snapshot=None):
+            def transfer(_ctx, _kind, _files, *, phone_snapshot=None, cancel_file=""):
                 observed["snapshot"] = phone_snapshot
+                observed["cancelFile"] = cancel_file
                 return {
                     "status": "skipped",
                     "reason": phone_snapshot.get("reason"),
@@ -519,6 +681,14 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
 
         self.assertEqual(observed["snapshot"]["devices"], [])
         self.assertEqual(observed["snapshot"]["reason"], "local_only")
+        self.assertTrue(observed["cancelFile"].endswith("job-image-1.cancel"))
+        self.assertFalse(jobs.submissions[0]["initialProgress"]["requiresPhoneEntitlement"])
+        self.assertNotIn("ownerAccountId", jobs.submissions[0]["initialProgress"])
+        self.assertRegex(
+            jobs.submissions[0]["initialProgress"]["ownerAccountBinding"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertEqual(jobs.submissions[0]["initialProgress"]["phoneDeviceIds"], [])
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["phoneTransfer"]["reason"], "local_only")
 
@@ -551,8 +721,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             context.read_json = read_json
             observed: dict = {}
 
-            def transfer(_ctx, _kind, _files, *, phone_snapshot=None):
+            def transfer(_ctx, _kind, _files, *, phone_snapshot=None, cancel_file=""):
                 observed["snapshot"] = phone_snapshot
+                observed["cancelFile"] = cancel_file
                 return {
                     "status": "succeeded",
                     "message": "transferred",
@@ -574,6 +745,7 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             [item["id"] for item in observed["snapshot"]["devices"]],
             ["phone-1"],
         )
+        self.assertTrue(observed["cancelFile"].endswith("job-image-1.cancel"))
 
     def test_media_generation_rejects_unknown_phone_before_generation(self) -> None:
         import json
@@ -690,8 +862,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             context.read_json = read_json
             observed: dict = {}
 
-            def transfer(_ctx, _kind, _files, *, phone_snapshot=None):
+            def transfer(_ctx, _kind, _files, *, phone_snapshot=None, cancel_file=""):
                 observed["snapshot"] = phone_snapshot
+                observed["cancelFile"] = cancel_file
                 return {
                     "status": "succeeded",
                     "message": "transferred",
@@ -713,6 +886,7 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             [item["id"] for item in observed["snapshot"]["devices"]],
             ["phone-1"],
         )
+        self.assertTrue(observed["cancelFile"].endswith("job-image-1.cancel"))
 
     def test_media_group_resolution_does_not_expand_group_inputs_quadratically(self) -> None:
         from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
@@ -1106,6 +1280,17 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             self.assertEqual(publish_payload["platform"], "douyin")
             self.assertEqual(publish_payload["mediaPaths"], [media_path])
             self.assertEqual(jobs.results["job-publish-1"]["draftSaved"], True)
+            self.assertTrue(jobs.submissions[0]["initialProgress"]["requiresPhoneEntitlement"])
+            self.assertRegex(
+                jobs.submissions[0]["initialProgress"]["ownerAccountBinding"],
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertNotIn("ownerAccountId", jobs.submissions[0]["initialProgress"])
+            self.assertEqual(jobs.submissions[0]["initialProgress"]["phoneDeviceIds"], ["phone-1"])
+            self.assertEqual(
+                context.get_entitlement_mgr().slot_calls[-1]["deviceIds"],
+                ["phone-1"],
+            )
 
     def test_phone_publish_requires_phone_matrix_authorization_before_submit(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
@@ -1199,6 +1384,45 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.code, "LICENSE_FEATURE_REQUIRED")
             self.assertIn("手机连接页", str(raised.exception))
+
+    def test_agent_matrix_job_records_account_owned_phone_scope(self) -> None:
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        with tempfile.TemporaryDirectory() as root:
+            jobs = RecordingJobManager()
+            context = self._context(root, jobs)
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: None,
+            )
+            task = {
+                "campaignId": "campaign-account-scope",
+                "missions": [{
+                    "deviceTasks": [{
+                        "deviceTaskId": "device-task-1",
+                        "deviceId": "phone-1",
+                    }],
+                }],
+            }
+            with patch(
+                "api.routes_matrix._run_matrix_campaign",
+                return_value={"success": True},
+            ):
+                provider._start_matrix_job(
+                    "matrix.retry",
+                    "Agent Matrix retry",
+                    SimpleNamespace(),
+                    task,
+                    {},
+                )
+
+        progress = jobs.submissions[0]["initialProgress"]
+        self.assertTrue(progress["requiresPhoneEntitlement"])
+        self.assertRegex(progress["ownerAccountBinding"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("ownerAccountId", progress)
+        self.assertEqual(progress["phoneDeviceIds"], ["phone-1"])
+        self.assertEqual(progress["matrixDeviceIds"], ["phone-1"])
 
     def test_matrix_job_submit_disconnect_is_indeterminate_and_may_continue(self) -> None:
         from core.agent_capabilities import CapabilityExecutionError
@@ -1393,6 +1617,197 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
                 service.shutdown()
 
         self.assertEqual(local_cancel_calls, [])
+
+    def test_matrix_cancel_only_cancels_current_account_owned_local_job(self) -> None:
+        from core.job_ownership import account_job_binding
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        account_id = "account-a"
+        install_id = "install-a"
+        session_binding = "session-a"
+        owner_binding = account_job_binding(account_id, install_id)
+        other_owner_binding = account_job_binding("account-b", install_id)
+
+        class FilteringJobs:
+            def __init__(self) -> None:
+                self.cancelled: list[str] = []
+                self.jobs = [
+                    {
+                        "id": "job-current-account",
+                        "kind": "matrix.dispatch",
+                        "progress": {
+                            "campaignId": "shared-campaign",
+                            "ownerAccountId": account_id,
+                            "ownerAccountBinding": owner_binding,
+                        },
+                    },
+                    {
+                        "id": "job-other-account",
+                        "kind": "matrix.dispatch",
+                        "progress": {
+                            "campaignId": "shared-campaign",
+                            "ownerAccountId": "account-b",
+                            "ownerAccountBinding": other_owner_binding,
+                        },
+                    },
+                    {
+                        "id": "job-ownerless",
+                        "kind": "matrix.dispatch",
+                        "progress": {"campaignId": "shared-campaign"},
+                    },
+                ]
+
+            def cancel_matching(self, predicate):
+                self.cancelled = [
+                    job["id"] for job in self.jobs if predicate(dict(job))
+                ]
+                return list(self.cancelled)
+
+        class Matrix:
+            _owner_account_id = account_id
+            _owner_account_binding = owner_binding
+
+            def status(self, campaign_id=None):
+                return {
+                    "campaigns": [{
+                        "campaignId": campaign_id or "shared-campaign",
+                        "status": "cancelled",
+                    }],
+                }
+
+            def cancel(self, campaign_id):
+                return {"cancelled": True, "campaignId": campaign_id}
+
+        with tempfile.TemporaryDirectory() as root:
+            jobs = FilteringJobs()
+            context = self._context(root, jobs)
+            context.get_entitlement_mgr = lambda: SimpleNamespace(
+                current_state=lambda _feature: {
+                    "authorized": True,
+                    "accountId": account_id,
+                    "lease": {
+                        "accountId": account_id,
+                        "installId": install_id,
+                        "sessionBinding": session_binding,
+                    },
+                },
+            )
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=Matrix,
+            )
+
+            result = provider.operations()["loom.matrix.cancel"]["executor"]({
+                "campaignId": "shared-campaign",
+            })
+
+        self.assertTrue(result["localCancellationRequested"])
+        self.assertEqual(jobs.cancelled, ["job-current-account"])
+
+    def test_matrix_cancel_fails_closed_without_verified_session_identity(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        class Matrix:
+            def __init__(self) -> None:
+                self.cancelled: list[str] = []
+
+            def status(self, campaign_id=None):
+                return {
+                    "campaigns": [{
+                        "campaignId": campaign_id or "shared-campaign",
+                        "status": "running",
+                    }],
+                }
+
+            def cancel(self, campaign_id):
+                self.cancelled.append(campaign_id)
+                return {"cancelled": True, "campaignId": campaign_id}
+
+        with tempfile.TemporaryDirectory() as root:
+            matrix = Matrix()
+            jobs = SimpleNamespace(cancel_matching=lambda _predicate: [])
+            context = self._context(root, jobs)
+            context.get_entitlement_mgr = lambda: SimpleNamespace(
+                current_state=lambda _feature: {
+                    "authorized": True,
+                    "accountId": "account-a",
+                    "lease": {
+                        "accountId": "account-a",
+                        "installId": "install-a",
+                    },
+                },
+            )
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: matrix,
+            )
+
+            with self.assertRaises(CapabilityExecutionError) as raised:
+                provider.operations()["loom.matrix.cancel"]["executor"]({
+                    "campaignId": "shared-campaign",
+                })
+
+        self.assertEqual(raised.exception.code, "matrix_owner_identity_required")
+        self.assertEqual(matrix.cancelled, [])
+
+    def test_matrix_cancel_fails_closed_when_control_plane_owner_mismatches(self) -> None:
+        from core.agent_capabilities import CapabilityExecutionError
+        from core.job_ownership import account_job_binding
+        from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
+
+        account_id = "account-a"
+        install_id = "install-a"
+
+        class Matrix:
+            _owner_account_id = "account-b"
+            _owner_account_binding = account_job_binding("account-b", install_id)
+
+            def __init__(self) -> None:
+                self.cancelled: list[str] = []
+
+            def status(self, campaign_id=None):
+                return {
+                    "campaigns": [{
+                        "campaignId": campaign_id or "shared-campaign",
+                        "status": "running",
+                    }],
+                }
+
+            def cancel(self, campaign_id):
+                self.cancelled.append(campaign_id)
+                return {"cancelled": True, "campaignId": campaign_id}
+
+        with tempfile.TemporaryDirectory() as root:
+            matrix = Matrix()
+            jobs = SimpleNamespace(cancel_matching=lambda _predicate: [])
+            context = self._context(root, jobs)
+            context.get_entitlement_mgr = lambda: SimpleNamespace(
+                current_state=lambda _feature: {
+                    "authorized": True,
+                    "accountId": account_id,
+                    "lease": {
+                        "accountId": account_id,
+                        "installId": install_id,
+                        "sessionBinding": "session-a",
+                    },
+                },
+            )
+            provider = AgentBuiltinCapabilityProvider(
+                context_factory=lambda: context,
+                job_manager=jobs,
+                matrix_factory=lambda: matrix,
+            )
+
+            with self.assertRaises(CapabilityExecutionError) as raised:
+                provider.operations()["loom.matrix.cancel"]["executor"]({
+                    "campaignId": "shared-campaign",
+                })
+
+        self.assertEqual(raised.exception.code, "matrix_owner_identity_mismatch")
+        self.assertEqual(matrix.cancelled, [])
 
     def test_matrix_attachment_counts_succeeded_device_tasks_as_completed(self) -> None:
         from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
@@ -1659,6 +2074,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             ))
 
             with patch("api.routes_phone.phone_process_env", return_value={}), patch(
+                "services.agent_builtin_capabilities._authorize_agent_phone_devices",
+                return_value={},
+            ), patch(
                 "services.agent_builtin_capabilities.subprocess.run",
                 return_value=SimpleNamespace(
                     returncode=0,
@@ -1666,21 +2084,27 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
                     stderr="",
                 ),
             ) as execute:
-                result = run_phone_publish(context, {
-                    "platform": "douyin",
-                    "title": "LOOM QA",
-                    "body": "",
-                    "hashtags": "",
-                    "notes": "",
-                    "mediaPaths": [media_path],
-                    "draftOnly": True,
-                })
+                result = run_phone_publish(
+                    context,
+                    {
+                        "platform": "douyin",
+                        "title": "LOOM QA",
+                        "body": "",
+                        "hashtags": "",
+                        "notes": "",
+                        "deviceId": "phone-1",
+                        "mediaPaths": [media_path],
+                        "draftOnly": True,
+                    },
+                    cancel_file=os.path.join(root, "publish.cancel"),
+                )
 
             args = execute.call_args.args[0]
             self.assertIn("--title", args)
             self.assertNotIn("--body", args)
             self.assertNotIn("--hashtags", args)
             self.assertNotIn("--notes", args)
+            self.assertIn("--cancel-file", args)
             self.assertIn("--draft-only", args)
             self.assertEqual(result["success"], True)
 
@@ -1704,6 +2128,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             ))
 
             with patch("api.routes_phone.phone_process_env", return_value={}), patch(
+                "services.agent_builtin_capabilities._authorize_agent_phone_devices",
+                return_value={},
+            ), patch(
                 "services.agent_builtin_capabilities.subprocess.run",
                     return_value=SimpleNamespace(
                         returncode=0,
@@ -1716,6 +2143,7 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             ):
                 result = run_phone_publish(context, {
                     "platform": "douyin",
+                    "deviceId": "phone-1",
                     "mediaPaths": [media_path],
                     "draftOnly": True,
                 })
@@ -1744,6 +2172,9 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             ))
 
             with patch("api.routes_phone.phone_process_env", return_value={}), patch(
+                "services.agent_builtin_capabilities._authorize_agent_phone_devices",
+                return_value={},
+            ), patch(
                 "services.agent_builtin_capabilities.subprocess.run",
                 return_value=SimpleNamespace(
                     returncode=0,
@@ -1756,6 +2187,7 @@ class AgentBuiltinCapabilityTests(unittest.TestCase):
             ):
                 result = run_phone_publish(context, {
                     "platform": "douyin",
+                    "deviceId": "phone-1",
                     "mediaPaths": [media_path],
                     "draftOnly": True,
                 })

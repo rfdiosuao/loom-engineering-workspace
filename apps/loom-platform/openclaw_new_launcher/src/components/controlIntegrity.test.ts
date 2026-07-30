@@ -279,6 +279,23 @@ test('account login exposes account entitlement redemption without the legacy ac
   assert.match(licenseSource, /aria-label="商业矩阵授权码"/);
 });
 
+test('account identity transitions clear all in-memory Agent projections and attachment drafts', () => {
+  const licenseSource = readSource('./license/LicensePage.tsx');
+  const applyAccount = sourceBlock(
+    licenseSource,
+    'const applyAccount',
+    'const refresh',
+  );
+
+  assert.match(licenseSource, /import \{ useAgentStore \} from '\.\.\/\.\.\/stores\/agentStore'/);
+  assert.match(applyAccount, /previousIdentity !== nextIdentity/);
+  assert.match(applyAccount, /useAgentStore\.getState\(\)\.reset\(\)/);
+  assert.ok(
+    applyAccount.indexOf('useAgentStore.getState().reset()')
+      < applyAccount.indexOf('cachedAccount.current = next'),
+  );
+});
+
 test('phone matrix gate sends authorization binding through the logged-in account page', () => {
   const gateSource = readSource('./license/PhoneMatrixAccessGate.tsx');
   const paywallSource = readSource('./license/LicensePaywall.tsx');
@@ -287,6 +304,9 @@ test('phone matrix gate sends authorization binding through the logged-in accoun
   assert.match(paywallSource, /accountBindingOnly/);
   assert.match(paywallSource, /setCurrentPage\('license'\)/);
   assert.match(paywallSource, /登录模型账号并绑定授权码/);
+  assert.match(paywallSource, /未激活账号可用 0 台手机/);
+  assert.match(paywallSource, /当前账号下已连接的全部手机均可使用/);
+  assert.doesNotMatch(paywallSource, /正在核验这台电脑的矩阵使用资格/);
 });
 
 test('shared modal, confirmation, and toast controls expose accessibility contracts', () => {

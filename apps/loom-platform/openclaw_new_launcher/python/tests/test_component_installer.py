@@ -1012,7 +1012,7 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
             self.assertEqual(os.path.normcase(selected or ""), os.path.normcase(cmd_entry))
 
-    def test_windows_npm_entry_keeps_legacy_extensionless_fallback_without_sibling(self) -> None:
+    def test_windows_npm_entry_rejects_extensionless_posix_wrapper_without_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             legacy_entry = os.path.join(temp_dir, "legacy", "claude")
             os.makedirs(os.path.dirname(legacy_entry), exist_ok=True)
@@ -1040,7 +1040,7 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
             selected = installer._first_existing_external_entry(component, refresh=True)
 
-            self.assertEqual(os.path.normcase(selected or ""), os.path.normcase(legacy_entry))
+            self.assertIsNone(selected)
 
     def test_install_probes_the_same_selected_windows_npm_entry_before_ready(self) -> None:
         payload = make_tgz_payload({"package/bin/claude.js": b"console.log('claude')"})

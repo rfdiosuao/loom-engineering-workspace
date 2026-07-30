@@ -231,9 +231,24 @@ class MatrixControlPlane:
         paths: AppPaths,
         *,
         phone_authorizer: Callable[[list[str], str], Any] | None = None,
+        owner_account_id: str = "",
+        owner_account_binding: str = "",
     ):
         self.paths = paths
         self._phone_authorizer = phone_authorizer
+        self._owner_account_id = str(owner_account_id or "").strip()
+        self._owner_account_binding = str(owner_account_binding or "").strip()
+
+    def _scoped_state_path(self, stem: str, suffix: str) -> str:
+        if not self._owner_account_binding:
+            raise MatrixSafetyError(
+                "matrix_owner_required",
+                "无法确认当前模型账号，已拒绝访问未归属的矩阵状态",
+            )
+        return os.path.join(
+            self.paths.launcher_dir,
+            f"{stem}-{self._owner_account_binding[:24]}{suffix}",
+        )
 
     def _authorize_phone_devices(self, device_ids: list[str], operation: str) -> None:
         if self._phone_authorizer is None:
@@ -246,7 +261,7 @@ class MatrixControlPlane:
 
     @property
     def devices_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-devices.json")
+        return self._scoped_state_path("matrix-devices", ".json")
 
     @property
     def phone_devices_path(self) -> str:
@@ -254,43 +269,42 @@ class MatrixControlPlane:
 
     @property
     def tasks_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-tasks.json")
+        return self._scoped_state_path("matrix-tasks", ".json")
 
     @property
     def events_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-events.jsonl")
+        return self._scoped_state_path("matrix-events", ".jsonl")
 
     @property
     def event_sequence_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-event-sequence.json")
+        return self._scoped_state_path("matrix-event-sequence", ".json")
 
     @property
     def experience_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-experience.jsonl")
+        return self._scoped_state_path("matrix-experience", ".jsonl")
 
     @property
     def leads_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-leads.jsonl")
+        return self._scoped_state_path("matrix-leads", ".jsonl")
 
     @property
     def acquisition_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-acquisition.json")
+        return self._scoped_state_path("matrix-acquisition", ".json")
 
     @property
     def leases_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-device-leases.json")
+        return self._scoped_state_path("matrix-device-leases", ".json")
 
     @property
     def control_commands_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-control-commands.json")
+        return self._scoped_state_path("matrix-control-commands", ".json")
 
     @_matrix_state_guard
     def register_device(self, raw: Json) -> Json:
-        devices = self._load_registered_devices()
         device_id = _device_id(raw.get("deviceId") or raw.get("id") or raw.get("name") or "phone-1")
+        self._authorize_phone_devices([device_id], "matrix.device.claim")
+        devices = self._load_registered_devices()
         existing = next((item for item in devices if item.get("deviceId") == device_id), {})
-        if not existing:
-            self._authorize_phone_devices([device_id], "matrix.device.claim")
         raw_groups = raw.get("groups") if isinstance(raw.get("groups"), list) else None
         groups = raw_groups if raw_groups is not None else list(existing.get("groups") or [])
         group = str(
@@ -2757,6 +2771,13 @@ class MatrixControlPlane:
         for index, item in enumerate(devices, start=1):
             if not isinstance(item, dict):
                 continue
+            owner_account_id = str(item.get("ownerAccountId") or "").strip()
+            if (
+                self._owner_account_id
+                and owner_account_id
+                and owner_account_id != self._owner_account_id
+            ):
+                continue
             device_id = _device_id(item.get("id") or item.get("deviceId") or item.get("name") or f"phone-{index}")
             name = _clip(item.get("name") or item.get("id") or device_id, 80)
             last_seen = _clip(item.get("lastSeenAt") or item.get("lastCheckedAt") or "", 64)
@@ -3547,6 +3568,8 @@ def _redact_json(value: Any) -> Any:
     if isinstance(value, dict):
         safe: Json = {}
         for key, item in value.items():
+            if str(key).startswith("_"):
+                continue
             lowered = str(key).lower()
             if str(key) in SENSITIVE_KEYS or any(mark in lowered for mark in ("token", "secret", "password", "apikey", "api_key")):
                 continue

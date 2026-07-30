@@ -72,6 +72,11 @@ def _error_response(ctx: Any, error: Exception):
         return ctx.fastapi_json({"error": "agent resource not found", "code": "AGENT_NOT_FOUND"}, 404)
     if isinstance(error, AgentServiceUnavailable):
         return ctx.fastapi_json({"error": str(error), "code": "AGENT_SERVICE_UNAVAILABLE"}, 503)
+    if isinstance(error, PermissionError):
+        return ctx.fastapi_json(
+            {"error": str(error), "code": "AGENT_ENTITLEMENT_REQUIRED"},
+            403,
+        )
     if isinstance(error, ValueError):
         message = str(error)
         status = 409 if any(token in message.casefold() for token in ("conflict", "transition", "already")) else 400

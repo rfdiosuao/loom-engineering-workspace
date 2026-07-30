@@ -91,7 +91,9 @@ ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC = max(
 ENTITLEMENT_KEY_ID = os.environ.get("OPENCLAW_ENTITLEMENT_KEY_ID", "openclaw-ed25519-v1")
 TRUSTED_ENTITLEMENT_KEY_ID = "openclaw-ed25519-v1"
 TRUSTED_ENTITLEMENT_PUBLIC_KEY_B64 = "njEIf3io24DAXRYVp37p2gIT5u2KZaWoGvBPD0JlTZ4="
+ENTITLEMENT_LEASE_SCHEMA = "loom.entitlement_lease.v1"
 PHONE_SEAT_LEASE_SCHEMA = "loom.phone_seat_lease.v1"
+MAX_ENTITLEMENT_LEASE_WINDOW_SEC = 8 * 24 * 3600
 ENTITLEMENT_PRIVATE_KEY_B64 = (
     os.environ.get("OPENCLAW_ENTITLEMENT_PRIVATE_KEY_B64")
     or os.environ.get("LICENSE_PRIVATE_KEY_B64")
@@ -455,15 +457,65 @@ def _entitlement_expiry_epoch(value: Any) -> int:
         return 0
 
 
-def normalize_authorization_entitlement(payload: Any) -> dict[str, Any]:
-    data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
-    entitlement = (
-        data.get("entitlement")
-        if isinstance(data, dict) and isinstance(data.get("entitlement"), dict)
-        else data
+def _invalid_entitlement_service_response(message: str) -> BridgeUpstreamError:
+    return BridgeUpstreamError(
+        message,
+        status_code=502,
+        code="ENTITLEMENT_SERVICE_INVALID_RESPONSE",
     )
+
+
+def normalize_authorization_entitlement(
+    payload: Any,
+    *,
+    strict_service: bool = False,
+) -> dict[str, Any]:
+    data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+    if strict_service:
+        if not isinstance(data, dict) or not isinstance(data.get("entitlement"), dict):
+            raise _invalid_entitlement_service_response(
+                "授权服务没有返回有效权益。",
+            )
+        entitlement = data["entitlement"]
+    else:
+        entitlement = (
+            data.get("entitlement")
+            if isinstance(data, dict) and isinstance(data.get("entitlement"), dict)
+            else data
+        )
     if not isinstance(entitlement, dict):
+        if strict_service:
+            raise _invalid_entitlement_service_response(
+                "授权服务没有返回有效权益。",
+            )
         raise BridgeUpstreamError("授权服务没有返回有效权益。", status_code=502)
+
+    raw_limits = entitlement.get("limits") if isinstance(entitlement.get("limits"), dict) else {}
+    if strict_service:
+        raw_features = entitlement.get("features")
+        expires_value = entitlement.get("expiresAt")
+        valid = (
+            entitlement.get("source") == "authorization_code"
+            and isinstance(entitlement.get("plan"), str)
+            and bool(str(entitlement.get("plan") or "").strip())
+            and isinstance(raw_features, list)
+            and bool(raw_features)
+            and all(isinstance(feature, str) and feature.strip() for feature in raw_features)
+            and isinstance(entitlement.get("limits"), dict)
+            and type(raw_limits.get("devices")) is int
+            and int(raw_limits["devices"]) > 0
+            and type(raw_limits.get("concurrentTasks")) is int
+            and int(raw_limits["concurrentTasks"]) > 0
+            and raw_limits.get("unlimitedDevices") is True
+            and "expiresAt" in entitlement
+            and _entitlement_expiry_epoch(expires_value) > 0
+            and isinstance(entitlement.get("codeLabel"), str)
+            and bool(str(entitlement.get("codeLabel") or "").strip())
+        )
+        if not valid:
+            raise _invalid_entitlement_service_response(
+                "授权服务返回的权益字段不完整或类型无效。",
+            )
 
     plan = str(entitlement.get("plan") or "standard").strip().lower() or "standard"
     defaults = entitlement_policy_for_group(plan)
@@ -489,7 +541,6 @@ def normalize_authorization_entitlement(payload: Any) -> dict[str, Any]:
     if "matrix.diagnostics" not in features:
         features.append("matrix.diagnostics")
 
-    raw_limits = entitlement.get("limits") if isinstance(entitlement.get("limits"), dict) else {}
     default_limits = defaults["limits"]
     devices = ACTIVATED_PHONE_DEVICE_LIMIT
     concurrent_tasks = _strict_positive_int(
@@ -567,6 +618,10 @@ def _license_service_json(path: str, body: dict[str, Any]) -> dict[str, Any]:
             code=code,
             details=details,
         ) from error
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise _invalid_entitlement_service_response(
+            "授权服务响应不是有效 JSON。",
+        ) from error
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         raise BridgeUpstreamError(
             "暂时无法连接授权服务，请稍后重试。",
@@ -581,6 +636,10 @@ def _license_service_json(path: str, body: dict[str, Any]) -> dict[str, Any]:
             code=str(payload.get("code") or ""),
             details=payload.get("details") if isinstance(payload.get("details"), dict) else None,
         )
+    if payload.get("ok") is not True and payload.get("success") is not True:
+        raise _invalid_entitlement_service_response(
+            "授权服务响应缺少明确成功标记。",
+        )
     return payload
 
 
@@ -593,7 +652,7 @@ def redeem_authorization_code_with_license_server(
         "/api/service/account-entitlements/redeem",
         {"code": code, "accountId": account_id},
     )
-    return normalize_authorization_entitlement(payload)
+    return normalize_authorization_entitlement(payload, strict_service=True)
 
 
 def current_authorization_entitlement_from_license_server(
@@ -603,11 +662,7 @@ def current_authorization_entitlement_from_license_server(
         "/api/service/account-entitlements/current",
         {"accountId": account_id},
     )
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    entitlement = data.get("entitlement") if isinstance(data, dict) else None
-    if entitlement in (None, False):
-        return None
-    return normalize_authorization_entitlement(payload)
+    return normalize_authorization_entitlement(payload, strict_service=True)
 
 
 def migrate_legacy_authorization_with_license_server(
@@ -622,7 +677,7 @@ def migrate_legacy_authorization_with_license_server(
             "accountId": account_id,
         },
     )
-    return normalize_authorization_entitlement(payload)
+    return normalize_authorization_entitlement(payload, strict_service=True)
 
 
 def _authorization_refresh_lock(account_id: str) -> threading.Lock:
@@ -1782,17 +1837,23 @@ def account_entitlement_policy(
         return inactive_entitlement_policy(group)
     if not isinstance(features, list) or not isinstance(limits, dict):
         return inactive_entitlement_policy(group)
-    policy = normalize_authorization_entitlement(
-        {
-            "plan": row["plan"],
-            "features": features,
-            "limits": limits,
-            "expiresAt": expires_at,
-            "codeLabel": row["code_label"],
-        }
-    )
+    try:
+        policy = normalize_authorization_entitlement(
+            {
+                "entitlement": {
+                    "source": row["source"],
+                    "plan": row["plan"],
+                    "features": features,
+                    "limits": limits,
+                    "expiresAt": expires_at,
+                    "codeLabel": row["code_label"],
+                },
+            },
+            strict_service=True,
+        )
+    except BridgeUpstreamError:
+        return inactive_entitlement_policy(group)
     policy["group"] = str(group or "default").strip() or "default"
-    policy["source"] = str(row["source"] or "authorization_code")
     return policy
 
 
@@ -2231,10 +2292,12 @@ def verify_entitlement_lease(lease: Any) -> tuple[int, dict[str, Any]]:
             "relogin",
         )
     required = {
+        "schema",
         "accountId",
         "sessionBinding",
         "installId",
         "deviceId",
+        "hostDeviceId",
         "features",
         "limits",
         "issuedAt",
@@ -2252,6 +2315,12 @@ def verify_entitlement_lease(lease: Any) -> tuple[int, dict[str, Any]]:
             "relogin",
             {"missing": missing},
         )
+    if lease.get("schema") != ENTITLEMENT_LEASE_SCHEMA:
+        return 401, entitlement_error(
+            "lease_schema_unsupported",
+            "账号权益租约版本不受支持，请更新 LOOM。",
+            "update_loom",
+        )
     signature = str(lease.get("signature") or "")
     signed = dict(lease)
     signed.pop("signature", None)
@@ -2264,6 +2333,79 @@ def verify_entitlement_lease(lease: Any) -> tuple[int, dict[str, Any]]:
         return 401, entitlement_error(
             "lease_signature_invalid",
             "账号权益租约验签失败，请重新登录。",
+            "relogin",
+        )
+    if str(lease.get("keyId") or "") != ENTITLEMENT_KEY_ID:
+        return 401, entitlement_error(
+            "lease_key_unknown",
+            "账号权益租约使用了未知签名密钥，请更新 LOOM。",
+            "update_loom",
+        )
+    identity_fields = (
+        "accountId",
+        "sessionBinding",
+        "installId",
+        "deviceId",
+        "hostDeviceId",
+    )
+    if any(
+        not isinstance(lease.get(field), str)
+        or not str(lease.get(field) or "").strip()
+        for field in identity_fields
+    ):
+        return 401, entitlement_error(
+            "lease_malformed",
+            "账号权益租约身份字段无效，请重新登录。",
+            "relogin",
+        )
+    if str(lease["hostDeviceId"]) != str(lease["deviceId"]):
+        return 401, entitlement_error(
+            "lease_host_mismatch",
+            "账号权益租约主机身份不一致，请重新登录。",
+            "relogin",
+        )
+    features = lease.get("features")
+    limits = lease.get("limits")
+    if (
+        not isinstance(features, list)
+        or any(not isinstance(value, str) or not value.strip() for value in features)
+        or not isinstance(limits, dict)
+        or type(limits.get("devices")) is not int
+        or int(limits["devices"]) < 0
+        or type(limits.get("concurrentTasks")) is not int
+        or int(limits["concurrentTasks"]) < 0
+        or type(limits.get("unlimitedDevices")) is not bool
+    ):
+        return 401, entitlement_error(
+            "lease_malformed",
+            "账号权益租约能力或额度字段无效，请重新登录。",
+            "relogin",
+        )
+    numeric_fields = (
+        "issuedAt",
+        "expiresAt",
+        "offlineGraceUntil",
+        "entitlementVersion",
+    )
+    if any(
+        type(lease.get(field)) is not int or int(lease[field]) < 1
+        for field in numeric_fields
+    ):
+        return 401, entitlement_error(
+            "lease_malformed",
+            "账号权益租约时间或版本字段无效，请重新登录。",
+            "relogin",
+        )
+    issued_at = int(lease["issuedAt"])
+    expires_at = int(lease["expiresAt"])
+    offline_grace_until = int(lease["offlineGraceUntil"])
+    if (
+        not (issued_at < expires_at <= offline_grace_until)
+        or offline_grace_until - issued_at > MAX_ENTITLEMENT_LEASE_WINDOW_SEC
+    ):
+        return 401, entitlement_error(
+            "lease_time_window_invalid",
+            "账号权益租约时间窗口无效，请重新登录。",
             "relogin",
         )
     return 200, {"success": True, "lease": lease}
@@ -2294,6 +2436,7 @@ def _phone_seat_result(
     account_id = str(lease["accountId"])
     host_device_id = str(lease.get("hostDeviceId") or lease["deviceId"])
     limit = max(1, int((lease.get("limits") or {}).get("devices") or 1))
+    unlimited_devices = (lease.get("limits") or {}).get("unlimitedDevices") is True
     released: list[str] = []
 
     if operation == "matrix.device.release":
@@ -2355,7 +2498,7 @@ def _phone_seat_result(
     foreign_phone_ids = sorted(
         {str(row["phone_device_id"]) for row in foreign_rows}
     )
-    if foreign_phone_ids and operation != "matrix.device.reclaim":
+    if foreign_phone_ids:
         details = {
             "phoneDeviceIds": foreign_phone_ids,
             "operation": operation,
@@ -2376,20 +2519,6 @@ def _phone_seat_result(
             "repair_phone",
             details,
         )
-    reclaimed: list[str] = []
-    if foreign_phone_ids:
-        connection.execute(
-            f"""
-            update entitlement_phone_seats
-            set released_at = ?, last_seen_at = ?
-            where phone_device_id in ({placeholders})
-              and account_id != ?
-              and released_at = 0
-            """,
-            (now, now, *phone_device_ids, account_id),
-        )
-        reclaimed = foreign_phone_ids
-
     active_rows = connection.execute(
         """
         select phone_device_id
@@ -2400,7 +2529,7 @@ def _phone_seat_result(
     ).fetchall()
     active = {str(row["phone_device_id"]) for row in active_rows}
     new_phone_ids = [device_id for device_id in phone_device_ids if device_id not in active]
-    if len(active) + len(new_phone_ids) > limit:
+    if not unlimited_devices and len(active) + len(new_phone_ids) > limit:
         details = {
             "accountId": account_id,
             "limit": limit,
@@ -2468,7 +2597,6 @@ def _phone_seat_result(
         "code": "ok",
         "operation": operation,
         "claimedPhoneDeviceIds": phone_device_ids,
-        **({"reclaimedPhoneDeviceIds": reclaimed} if reclaimed else {}),
         "features": lease["features"],
         "limits": lease["limits"],
         "phoneSeatLease": phone_seat_lease,
@@ -2533,6 +2661,16 @@ def authorize_entitlement_operation(
     now = int(time.time())
     normalized_operation = str(operation or "matrix.task.start").strip()
     normalized_phone_ids = _normalized_phone_device_ids(phone_device_ids)
+    if normalized_operation == "matrix.device.reclaim":
+        return 403, entitlement_error(
+            "phone_transfer_authorization_required",
+            "不能直接接管其他账号的手机。请先登录原账号释放设备，或联系技术支持完成可审计转移。",
+            "release_from_previous_account",
+            {
+                "phoneDeviceIds": normalized_phone_ids,
+                "operation": normalized_operation,
+            },
+        )
     if normalized_operation in SAFETY_ENTITLEMENT_OPERATIONS:
         connection = _bind_connection()
         try:
@@ -2935,6 +3073,7 @@ def handle_entitlement_migrate_legacy(
     body: dict[str, Any],
     authorization: str = "",
 ) -> tuple[int, dict[str, Any]]:
+    del body
     owner = api_token_owner(authorization)
     if not owner:
         return 401, entitlement_error(
@@ -2942,96 +3081,11 @@ def handle_entitlement_migrate_legacy(
             "请先登录模型账号，再迁移旧版商业授权。",
             "login",
         )
-
-    legacy_license = body.get("legacyLicense")
-    required_fields = {
-        "schema",
-        "licenseId",
-        "installId",
-        "deviceId",
-        "expires",
-        "signature",
-    }
-    try:
-        proof_size = len(
-            json.dumps(
-                legacy_license,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
-    except (TypeError, ValueError):
-        proof_size = 0
-    if (
-        not isinstance(legacy_license, dict)
-        or legacy_license.get("schema") != "loom.license.v1"
-        or not required_fields.issubset(legacy_license)
-        or any(
-            not str(legacy_license.get(field) or "").strip()
-            for field in required_fields
-        )
-        or proof_size <= 0
-        or proof_size > 131072
-    ):
-        return 400, entitlement_error(
-            "legacy_license_proof_invalid",
-            "旧版授权证明无效，无法安全迁移。",
-            "use_authorization_code",
-        )
-
-    install_id, device_id = lease_identity_from_body(body)
-    if not install_id or not device_id:
-        return 400, entitlement_error(
-            "device_identity_required",
-            "当前安装缺少设备身份，请升级 LOOM 后重新登录。",
-            "relogin_with_device_identity",
-        )
-
-    account_id = str(owner.get("user_id") or "")
-    try:
-        entitlement = migrate_legacy_authorization_with_license_server(
-            legacy_license,
-            account_id=account_id,
-        )
-        persist_account_entitlement_grant(
-            account_id,
-            entitlement,
-            action="migrate_legacy_authorization",
-        )
-    except BridgeUpstreamError as error:
-        status = int(error.status_code or 502)
-        public_status = status if status in {400, 401, 403, 404, 409, 422, 429} else 503
-        public_code = {
-            "LEGACY_LICENSE_PROOF_INVALID": "legacy_license_proof_invalid",
-            "LEGACY_LICENSE_PROOF_NOT_FOUND": "legacy_license_proof_not_found",
-            "LICENSE_EXPIRED": "authorization_code_expired",
-            "LICENSE_DISABLED": "authorization_code_disabled",
-            "ACCOUNT_ENTITLEMENT_REVOKED": "authorization_code_revoked",
-            "ACCOUNT_ENTITLEMENT_ALREADY_REDEEMED": "authorization_code_already_bound",
-        }.get(
-            error.code,
-            "legacy_license_migration_rejected"
-            if public_status < 500
-            else "authorization_service_unavailable",
-        )
-        return public_status, entitlement_error(
-            public_code,
-            str(error),
-            "use_authorization_code" if public_status < 500 else "retry_later",
-            error.details,
-        )
-
-    status, payload = issue_entitlement_lease(
-        account_id=account_id,
-        group=str(owner.get("user_group") or "default"),
-        install_id=install_id,
-        device_id=device_id,
-        session_token=str(owner.get("key") or ""),
-        source_verified=True,
+    return 410, entitlement_error(
+        "legacy_migration_disabled",
+        "旧版静态授权不能自动绑定账号。请登录后输入原授权码完成绑定。",
+        "use_authorization_code",
     )
-    if status != 200:
-        return status, payload
-    return 200, payload
 
 
 def handle_entitlement_check(

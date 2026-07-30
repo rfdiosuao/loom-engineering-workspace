@@ -2,6 +2,7 @@ import React from 'react';
 import { AlertTriangle, ShieldCheck } from 'lucide-react';
 import { loomClient } from '../../services/loomClient';
 import { loomErrorText, normalizeLoomError } from '../../services/loomErrors';
+import { resolveRefreshedModelDraft } from './agentModelConfig';
 import type {
   AgentModelConfigStatus,
   BridgeJob,
@@ -1083,9 +1084,9 @@ export const AgentInstallerPage: React.FC = () => {
       const status = result.status;
       setModelConfigs((current) => ({ ...current, [componentId]: status }));
       setModelDrafts((current) => {
-        if (current[componentId]) return current;
-        const firstModel = status.model || status.availableModels?.[0] || '';
-        return { ...current, [componentId]: firstModel };
+        const nextDraft = resolveRefreshedModelDraft(current[componentId] || '', status);
+        if (current[componentId] === nextDraft) return current;
+        return { ...current, [componentId]: nextDraft };
       });
     } catch (err: any) {
       if (modelConfigRequestGeneration.current[componentId] !== generation) return;

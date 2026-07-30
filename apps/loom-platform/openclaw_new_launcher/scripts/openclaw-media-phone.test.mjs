@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { phoneRuntimeTestEnv } from './tests/phone-runtime-auth-fixture.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -76,7 +77,7 @@ test('upload-only media CLI imports images and videos without Agent task request
     const { stdout, stderr } = await execFileAsync(process.execPath, args, {
       env: {
         ...process.env,
-        LOOM_PHONE_RUNTIME_CONFIG_JSON: JSON.stringify(runtimeConfig),
+        ...phoneRuntimeTestEnv(runtimeConfig),
       },
     });
     const result = JSON.parse(stdout);
@@ -97,6 +98,7 @@ test('upload-only media CLI imports images and videos without Agent task request
     assert.equal(stdout.includes(phoneToken), false);
     assert.equal(stderr.includes(phoneToken), false);
   } finally {
+    server.closeAllConnections?.();
     await close(server);
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -152,7 +154,7 @@ test('partial upload failure reports safe counts and basenames without paths or 
       ], {
         env: {
           ...process.env,
-          LOOM_PHONE_RUNTIME_CONFIG_JSON: JSON.stringify(runtimeConfig),
+          ...phoneRuntimeTestEnv(runtimeConfig),
         },
       });
       assert.fail('partial upload must exit non-zero');
@@ -217,7 +219,7 @@ test('interrupted media stream keeps an actionable transfer error instead of rep
       ], {
         env: {
           ...process.env,
-          LOOM_PHONE_RUNTIME_CONFIG_JSON: JSON.stringify(runtimeConfig),
+          ...phoneRuntimeTestEnv(runtimeConfig),
         },
       });
       assert.fail('interrupted upload must exit non-zero');
@@ -236,6 +238,63 @@ test('interrupted media stream keeps an actionable transfer error instead of rep
     }]);
     assert.equal(JSON.stringify(failure).includes(tempDir), false);
   } finally {
+    await close(server);
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('cancel file aborts an in-flight media upload', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loom-media-phone-cancel-'));
+  const imagePath = path.join(tempDir, 'cancel.png');
+  const cancelFile = path.join(tempDir, 'job.cancel');
+  let requestCount = 0;
+  const server = http.createServer((request) => {
+    requestCount += 1;
+    void fs.writeFile(cancelFile, 'cancelled\n', 'utf8');
+  });
+  const port = await listen(server);
+
+  try {
+    await fs.writeFile(imagePath, Buffer.alloc(1024 * 1024, 9));
+    const runtimeConfig = {
+      selectedDeviceId: 'phone-a',
+      devices: [{
+        id: 'phone-a',
+        baseUrl: `http://127.0.0.1:${port}`,
+        token: 'phone-token',
+        launcherId: 'launcher-id',
+        launcherSecret: 'launcher-secret',
+        album: 'LOOM',
+      }],
+    };
+    let failure;
+    try {
+      await execFileAsync(process.execPath, [
+        scriptPath,
+        '--device-id',
+        'phone-a',
+        '--image',
+        imagePath,
+        '--cancel-file',
+        cancelFile,
+        '--json',
+      ], {
+        env: {
+          ...process.env,
+          ...phoneRuntimeTestEnv(runtimeConfig),
+        },
+        timeout: 5_000,
+      });
+      assert.fail('cancelled upload must exit non-zero');
+    } catch (error) {
+      failure = JSON.parse(String(error.stdout || '').trim());
+    }
+
+    assert.equal(failure.ok, false);
+    assert.equal(failure.errorCode, 'phone_request_cancelled');
+    assert.equal(requestCount, 1);
+  } finally {
+    server.closeAllConnections?.();
     await close(server);
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -282,7 +341,7 @@ test('older phone builds receive small media through the signed JSON compatibili
       '--video', videoPath,
       '--json',
     ], {
-      env: { ...process.env, LOOM_PHONE_RUNTIME_CONFIG_JSON: JSON.stringify(runtimeConfig) },
+      env: { ...process.env, ...phoneRuntimeTestEnv(runtimeConfig) },
     });
 
     assert.equal(JSON.parse(stdout).ok, true);
@@ -333,7 +392,7 @@ test('older phone builds reject large legacy JSON fallback with an upgrade instr
         '--video', videoPath,
         '--json',
       ], {
-        env: { ...process.env, LOOM_PHONE_RUNTIME_CONFIG_JSON: JSON.stringify(runtimeConfig) },
+        env: { ...process.env, ...phoneRuntimeTestEnv(runtimeConfig) },
       });
       assert.fail('large legacy fallback must fail');
     } catch (error) {

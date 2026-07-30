@@ -10,6 +10,7 @@ import {
   readLauncherPhoneStore,
   signedJsonRequest,
 } from './openclaw-phone-secure.mjs';
+import { cancellationRequested } from './lib/phone-command-core.mjs';
 
 const DEFAULT_TIMEOUT_SEC = 600;
 const DEFAULT_MAX_WAIT_SEC = DEFAULT_TIMEOUT_SEC + 15;
@@ -39,6 +40,7 @@ Options:
   --poll-ms <n>                Poll interval. Default: 1800
   --request-timeout-ms <n>     Status request timeout. Default: 30000
   --concurrency <n>            Device concurrency. Default: 1, max: 8
+  --cancel-file <path>         Internal cooperative cancellation signal used by LOOM
   --json                       Print machine-readable JSON
   -h, --help                   Show help
 `.trim();
@@ -55,6 +57,7 @@ function parseArgs(argv) {
     pollMs: DEFAULT_POLL_MS,
     requestTimeoutMs: DEFAULT_STATUS_REQUEST_TIMEOUT_MS,
     concurrency: 1,
+    cancelFile: '',
     json: false,
     help: false,
   };
@@ -102,6 +105,9 @@ function parseArgs(argv) {
         break;
       case '--concurrency':
         args.concurrency = nextInt();
+        break;
+      case '--cancel-file':
+        args.cancelFile = next();
         break;
       case '--json':
         args.json = true;
@@ -247,12 +253,57 @@ async function getTask(device, taskId) {
   return signedJsonRequest(device, 'GET', `/api/lumi/agent/tasks/${encodeURIComponent(taskId)}`, undefined, 60_000);
 }
 
+async function cancelTask(device, taskId) {
+  return signedJsonRequest(
+    device,
+    'POST',
+    `/api/lumi/agent/tasks/${encodeURIComponent(taskId)}/cancel`,
+    {},
+    60_000,
+  );
+}
+
+async function waitForCancellation(cancelFile, delayMs) {
+  const deadline = Date.now() + Math.max(0, delayMs);
+  while (Date.now() < deadline) {
+    if (await cancellationRequested(cancelFile)) return true;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
+  }
+  return cancellationRequested(cancelFile);
+}
+
+async function cancelSubmittedTask(device, taskId) {
+  try {
+    const receipt = await cancelTask(device, taskId);
+    return {
+      status: 'cancelled',
+      cancelled: true,
+      error: 'cancelled',
+      remoteCancellation: receipt,
+      executionMayContinue: false,
+    };
+  } catch (error) {
+    return {
+      status: 'cancelled',
+      cancelled: true,
+      error: 'cancelled',
+      cancellationError: error?.message || String(error),
+      executionMayContinue: true,
+    };
+  }
+}
+
 async function waitForTask(device, taskId, args) {
   const startedAt = Date.now();
   const maxWaitMs = Math.max(30, args.maxWaitSec) * 1000;
   let lastStatus = null;
   while (Date.now() - startedAt < maxWaitMs) {
-    await new Promise((resolve) => setTimeout(resolve, Math.max(500, args.pollMs)));
+    if (await cancellationRequested(args.cancelFile)) {
+      return cancelSubmittedTask(device, taskId);
+    }
+    if (await waitForCancellation(args.cancelFile, Math.max(500, args.pollMs))) {
+      return cancelSubmittedTask(device, taskId);
+    }
     const payload = await getTask(device, taskId);
     const data = payload?.data || payload;
     lastStatus = data;

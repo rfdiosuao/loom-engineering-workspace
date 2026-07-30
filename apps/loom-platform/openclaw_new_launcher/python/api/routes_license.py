@@ -36,6 +36,7 @@ def _account_license_payload(state: dict, license_manager) -> dict | None:
         return None
     lease = state.get("lease") if isinstance(state.get("lease"), dict) else {}
     limits = state.get("limits") if isinstance(state.get("limits"), dict) else {}
+    unlimited_devices = limits.get("unlimitedDevices") is True
     expires_at = _epoch_iso(state.get("expiresAt"))
     device_id = str(
         lease.get("hostDeviceId")
@@ -51,7 +52,8 @@ def _account_license_payload(state: dict, license_manager) -> dict | None:
         "features": list(state.get("features") or []),
         "installId": str(lease.get("installId") or license_manager.get_install_id()),
         "deviceId": device_id,
-        "deviceLimit": limits.get("devices"),
+        "deviceLimit": None if unlimited_devices else limits.get("devices"),
+        "unlimitedDevices": unlimited_devices,
         "signature": str(lease.get("signature") or ""),
         "status": "offline_grace" if state.get("offline") else "authorized",
         "code": "OFFLINE_GRACE" if state.get("offline") else "AUTHORIZED",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -19,9 +20,39 @@ from core.agent_capabilities import (
     PHONE_PUBLISH_INPUT_SCHEMA,
     CapabilityExecutionError,
 )
+from core.job_ownership import account_job_binding
 
 
 Json = dict[str, Any]
+
+
+def _secure_text_equal(left: object, right: object) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    return hmac.compare_digest(
+        left_text.encode("utf-8"),
+        right_text.encode("utf-8"),
+    )
+
+
+def _authorize_agent_phone_devices(
+    context: Any,
+    device_ids: list[str],
+    operation: str,
+) -> Json:
+    from api.routes_phone import _authorize_phone_entitlement
+    from core.account_entitlement import AccountEntitlementError
+
+    try:
+        return _authorize_phone_entitlement(context, device_ids, operation)
+    except AccountEntitlementError as exc:
+        raise CapabilityExecutionError(
+            exc.code,
+            str(exc),
+            recoverable=False,
+        ) from exc
 
 
 def _post_submission_error(
@@ -47,9 +78,15 @@ def _submit_background_job(
     *,
     error_code: str,
     error_message: str,
+    initial_progress: Json | None = None,
 ) -> Any:
     try:
-        return job_manager.submit_progress(kind, label, target)
+        return job_manager.submit_progress(
+            kind,
+            label,
+            target,
+            initial_progress=initial_progress,
+        )
     except Exception as exc:
         raise _post_submission_error(
             error_code,
@@ -290,7 +327,14 @@ class AgentBuiltinCapabilityProvider:
         campaign_id = str(payload.get("campaignId") or payload.get("id") or "").strip()
         if not campaign_id:
             raise ValueError("campaignId is required")
+        owner_identity = (
+            self._current_matrix_owner_identity()
+            if self.job_manager is not None
+            else None
+        )
         matrix = self.matrix_factory()
+        if owner_identity is not None:
+            self._require_matrix_control_plane_owner(matrix, owner_identity)
         before = matrix.status(campaign_id)
         if self._matrix_campaign_status(before, campaign_id) is None:
             raise CapabilityExecutionError(
@@ -336,7 +380,11 @@ class AgentBuiltinCapabilityProvider:
         if self.job_manager is not None:
             try:
                 self.job_manager.cancel_matching(
-                    lambda job: str((job.get("progress") or {}).get("campaignId") or "") == campaign_id
+                    lambda job: self._matrix_job_owned_by(
+                        job,
+                        campaign_id,
+                        owner_identity,
+                    )
                 )
                 local_cancellation_requested = True
             except Exception:
@@ -347,6 +395,156 @@ class AgentBuiltinCapabilityProvider:
             "authoritativeStatus": status,
             "localCancellationRequested": local_cancellation_requested,
         }
+
+    def _current_matrix_owner_identity(self) -> Json:
+        if not callable(self.context_factory):
+            raise self._matrix_owner_identity_error()
+        try:
+            context = self.context_factory()
+            manager_getter = getattr(context, "get_entitlement_mgr", None)
+            manager = manager_getter() if callable(manager_getter) else None
+            if manager is None:
+                account_manager_getter = getattr(
+                    context,
+                    "get_newapi_account_mgr",
+                    None,
+                )
+                account_manager = (
+                    account_manager_getter()
+                    if callable(account_manager_getter)
+                    else None
+                )
+                manager = getattr(account_manager, "account_entitlement", None)
+            current_state = getattr(manager, "current_state", None)
+            current = (
+                current_state("matrix.devices")
+                if callable(current_state)
+                else {}
+            )
+        except Exception as exc:
+            raise self._matrix_owner_identity_error() from exc
+        if not isinstance(current, dict) or current.get("authorized") is not True:
+            raise self._matrix_owner_identity_error()
+        lease = (
+            current.get("lease")
+            if isinstance(current.get("lease"), dict)
+            else {}
+        )
+        account_id = str(
+            current.get("accountId")
+            or lease.get("accountId")
+            or ""
+        ).strip()
+        lease_account_id = str(lease.get("accountId") or "").strip()
+        session_binding = str(lease.get("sessionBinding") or "").strip()
+        install_id = str(lease.get("installId") or "").strip()
+        owner_binding = account_job_binding(account_id, install_id)
+        if (
+            not account_id
+            or not lease_account_id
+            or not _secure_text_equal(account_id, lease_account_id)
+            or not session_binding
+            or not owner_binding
+        ):
+            raise self._matrix_owner_identity_error()
+        return {
+            "accountId": account_id,
+            "sessionBinding": session_binding,
+            "ownerAccountBinding": owner_binding,
+        }
+
+    @staticmethod
+    def _matrix_owner_identity_error() -> CapabilityExecutionError:
+        return CapabilityExecutionError(
+            "matrix_owner_identity_required",
+            "无法证明当前 Matrix 任务归属，已拒绝取消。请重新登录并刷新手机矩阵权益。",
+            recoverable=False,
+        )
+
+    @staticmethod
+    def _require_matrix_control_plane_owner(
+        matrix: Any,
+        owner_identity: Json,
+    ) -> None:
+        matrix_account_id = str(
+            getattr(matrix, "_owner_account_id", "") or ""
+        ).strip()
+        matrix_owner_binding = str(
+            getattr(matrix, "_owner_account_binding", "") or ""
+        ).strip()
+        if not matrix_account_id or not matrix_owner_binding:
+            raise AgentBuiltinCapabilityProvider._matrix_owner_identity_error()
+        if (
+            not _secure_text_equal(
+                matrix_account_id,
+                owner_identity.get("accountId"),
+            )
+            or not _secure_text_equal(
+                matrix_owner_binding,
+                owner_identity.get("ownerAccountBinding"),
+            )
+        ):
+            raise CapabilityExecutionError(
+                "matrix_owner_identity_mismatch",
+                "当前 Matrix 控制面不属于已验证账号，已拒绝取消。",
+                recoverable=False,
+            )
+
+    @staticmethod
+    def _matrix_job_owned_by(
+        job: Any,
+        campaign_id: str,
+        owner_identity: Json | None,
+    ) -> bool:
+        if not isinstance(job, dict) or not isinstance(owner_identity, dict):
+            return False
+        progress = (
+            job.get("progress")
+            if isinstance(job.get("progress"), dict)
+            else {}
+        )
+        if str(progress.get("campaignId") or "").strip() != campaign_id:
+            return False
+        matrix_markers = (
+            job.get("kind"),
+            job.get("type"),
+            job.get("phase"),
+            progress.get("commandId"),
+            progress.get("phase"),
+        )
+        if not any(
+            str(marker or "").strip().lower().startswith("matrix.")
+            for marker in matrix_markers
+        ):
+            return False
+        stored_account_id = str(
+            progress.get("ownerAccountId") or ""
+        ).strip()
+        if (
+            stored_account_id
+            and not _secure_text_equal(
+                stored_account_id,
+                owner_identity.get("accountId"),
+            )
+        ):
+            return False
+        stored_owner_binding = str(
+            progress.get("ownerAccountBinding") or ""
+        ).strip()
+        if stored_owner_binding:
+            return _secure_text_equal(
+                stored_owner_binding,
+                owner_identity.get("ownerAccountBinding"),
+            )
+        stored_session_binding = str(
+            progress.get("ownerSessionBinding") or ""
+        ).strip()
+        return bool(stored_account_id and stored_session_binding) and (
+            _secure_text_equal(
+                stored_session_binding,
+                owner_identity.get("sessionBinding"),
+            )
+        )
 
     def _matrix_retry(self, payload: Json) -> Json:
         self._require_matrix_access()
@@ -421,10 +619,14 @@ class AgentBuiltinCapabilityProvider:
     ) -> Json | None:
         if self.job_manager is None or not callable(self.context_factory):
             return None
-        from api.routes_matrix import _run_matrix_campaign
+        from api.routes_matrix import _matrix_job_scope, _run_matrix_campaign
+        from api.routes_phone import _phone_entitlement_job_metadata
+
+        context = self.context_factory()
+        task_scope = _matrix_job_scope(task)
 
         def run(job_id: str) -> Json:
-            return _run_matrix_campaign(self.context_factory(), matrix, task, body, job_id)
+            return _run_matrix_campaign(context, matrix, task, body, job_id)
 
         try:
             job = self.job_manager.submit_progress(
@@ -436,6 +638,11 @@ class AgentBuiltinCapabilityProvider:
                     "phase": f"{kind}.queued",
                     "commandId": kind,
                     "campaignId": task.get("campaignId"),
+                    **task_scope,
+                    **_phone_entitlement_job_metadata(
+                        context,
+                        task_scope["matrixDeviceIds"],
+                    ),
                 },
             )
         except Exception as exc:
@@ -538,6 +745,7 @@ class AgentBuiltinCapabilityProvider:
 
         from api.routes_media import (
             _configured_phone_snapshot,
+            _media_phone_job_metadata,
             _media_library,
             _transfer_generated_media_to_phones,
         )
@@ -577,6 +785,11 @@ class AgentBuiltinCapabilityProvider:
                 recoverable=False,
             )
 
+        _authorize_agent_phone_devices(
+            context,
+            requested_device_ids,
+            "agent.media.asset.transfer",
+        )
         phone_snapshot = _configured_phone_snapshot(context, requested_device_ids)
         missing_ids = phone_snapshot.get("missingDeviceIds")
         if isinstance(missing_ids, list) and missing_ids:
@@ -604,11 +817,22 @@ class AgentBuiltinCapabilityProvider:
                     "neutral",
                     phase="phone-transfer",
                 )
+            cancel_file_getter = getattr(
+                self.job_manager,
+                "cancel_file",
+                None,
+            )
+            cancel_file = (
+                str(cancel_file_getter(job_id) or "")
+                if callable(cancel_file_getter)
+                else ""
+            )
             summary = _transfer_generated_media_to_phones(
                 context,
                 asset.kind,
                 files,
                 phone_snapshot=phone_snapshot,
+                cancel_file=cancel_file,
             )
             return {**summary, "success": summary.get("status") == "succeeded"}
 
@@ -619,6 +843,10 @@ class AgentBuiltinCapabilityProvider:
             target,
             error_code="media_transfer_submission_unknown",
             error_message="素材传输任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+            initial_progress=_media_phone_job_metadata(
+                context,
+                phone_snapshot,
+            ),
         )
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
@@ -699,6 +927,7 @@ class AgentBuiltinCapabilityProvider:
             _image_generate_payload,
             _video_generation_failure,
             _local_only_phone_snapshot,
+            _media_phone_job_metadata,
             _video_generate_payload,
         )
         from services.pippit_video_api import PippitManualRequired, PippitResumeRequired
@@ -731,6 +960,12 @@ class AgentBuiltinCapabilityProvider:
             requested_device_ids = self._resolve_media_target_device_ids(
                 requested_groups,
                 all_online=all_online,
+            )
+        if target_selector_present:
+            _authorize_agent_phone_devices(
+                context,
+                requested_device_ids,
+                f"agent.media.{kind}.transfer",
             )
         body = {
             **{
@@ -778,6 +1013,16 @@ class AgentBuiltinCapabilityProvider:
 
         def target(job_id: str) -> Json:
             ensure_job_active(job_id)
+            cancel_file_getter = getattr(
+                self.job_manager,
+                "cancel_file",
+                None,
+            )
+            cancel_file = (
+                str(cancel_file_getter(job_id) or "")
+                if callable(cancel_file_getter)
+                else ""
+            )
             if kind == "image":
                 update_progress(job_id, "正在生成图片")
                 generated = _image_generate_payload(context, body)
@@ -805,6 +1050,7 @@ class AgentBuiltinCapabilityProvider:
                 kind,
                 generated,
                 phone_snapshot=phone_snapshot,
+                cancel_file=cancel_file,
             )
 
         label = "图片生成" if kind == "image" else "视频生成"
@@ -815,6 +1061,10 @@ class AgentBuiltinCapabilityProvider:
             target,
             error_code="media_job_submission_unknown",
             error_message="媒体任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+            initial_progress=_media_phone_job_metadata(
+                context,
+                phone_snapshot,
+            ),
         )
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
@@ -1013,6 +1263,19 @@ class AgentBuiltinCapabilityProvider:
                 recoverable=False,
             )
 
+        device_id = str(payload.get("deviceId") or "").strip()
+        if not device_id:
+            raise CapabilityExecutionError(
+                "phone_target_scope_required",
+                "请先明确选择执行发布任务的手机",
+                recoverable=False,
+            )
+        entitlement = _authorize_agent_phone_devices(
+            context,
+            [device_id],
+            "agent.phone.publish",
+        )
+
         media_paths = [
             os.path.abspath(str(item).strip())
             for item in payload.get("mediaPaths", [])
@@ -1035,10 +1298,47 @@ class AgentBuiltinCapabilityProvider:
         def target(job_id: str) -> Json:
             progress = getattr(self.job_manager, "progress", None)
             if callable(progress):
-                progress(job_id, "正在上传素材并执行手机发布流程", "neutral", phase="publishing")
-            return run_phone_publish(context, normalized)
+                progress(
+                    job_id,
+                    "正在上传素材并执行手机发布流程",
+                    "neutral",
+                    phase="phone.publish.running",
+                    commandId="phone.publish",
+                    deviceId=device_id,
+                )
+            cancel_file_getter = getattr(
+                self.job_manager,
+                "cancel_file",
+                None,
+            )
+            cancel_file = (
+                str(cancel_file_getter(job_id) or "")
+                if callable(cancel_file_getter)
+                else ""
+            )
+            from api.routes_phone import _account_task_slot
+
+            is_cancelled = getattr(self.job_manager, "is_cancelled", None)
+            with _account_task_slot(
+                context,
+                entitlement,
+                "agent.phone.publish",
+                cancelled=(
+                    (lambda: bool(is_cancelled(job_id)))
+                    if callable(is_cancelled)
+                    else None
+                ),
+                device_ids=[device_id],
+            ):
+                return run_phone_publish(
+                    context,
+                    normalized,
+                    cancel_file=cancel_file,
+                )
 
         label = "手机发布草稿" if normalized["draftOnly"] else "手机自动发布"
+        from api.routes_phone import _phone_entitlement_job_metadata
+
         job = _submit_background_job(
             self.job_manager,
             "publish",
@@ -1046,6 +1346,10 @@ class AgentBuiltinCapabilityProvider:
             target,
             error_code="publish_job_submission_unknown",
             error_message="手机发布任务可能已经提交，但提交回执连接中断，任务可能仍在执行",
+            initial_progress=_phone_entitlement_job_metadata(
+                context,
+                [device_id],
+            ),
         )
         job_id = str(job.get("id") or "") if isinstance(job, dict) else ""
         if not job_id:
@@ -1109,9 +1413,14 @@ class AgentBuiltinCapabilityProvider:
         )
 
 
-def run_phone_publish(context: Any, payload: Json) -> Json:
+def run_phone_publish(
+    context: Any,
+    payload: Json,
+    *,
+    cancel_file: str = "",
+) -> Json:
     from api.routes_cli import _script_path
-    from api.routes_phone import phone_process_env
+    from api.routes_phone import _sanitize_cli_output, phone_process_env
 
     script_path = _script_path(context, "openclaw-publish-phone.mjs")
     node_exe = str(getattr(context.paths, "node_exe", "") or "")
@@ -1119,6 +1428,26 @@ def run_phone_publish(context: Any, payload: Json) -> Json:
         return {"success": False, "errorCode": "publish_script_missing", "error": "手机发布执行器缺失"}
     if not os.path.isfile(node_exe):
         return {"success": False, "errorCode": "node_runtime_missing", "error": "Node.js 运行时缺失"}
+
+    device_id = str(payload.get("deviceId") or "").strip()
+    if not device_id:
+        return {
+            "success": False,
+            "errorCode": "phone_target_scope_required",
+            "error": "请先明确选择执行发布任务的手机",
+        }
+    try:
+        _authorize_agent_phone_devices(
+            context,
+            [device_id],
+            "agent.phone.publish.execute",
+        )
+    except CapabilityExecutionError as exc:
+        return {
+            "success": False,
+            "errorCode": exc.code,
+            "error": str(exc),
+        }
 
     args = [
         node_exe,
@@ -1131,8 +1460,12 @@ def run_phone_publish(context: Any, payload: Json) -> Json:
         "615",
         "--max-rounds",
         "60",
+        "--device-id",
+        device_id,
         "--json",
     ]
+    if str(cancel_file or "").strip():
+        args.extend(["--cancel-file", str(cancel_file).strip()])
     for key, option in (
         ("title", "--title"),
         ("body", "--body"),
@@ -1142,8 +1475,6 @@ def run_phone_publish(context: Any, payload: Json) -> Json:
         value = str(payload.get(key) or "").strip()
         if value:
             args.extend([option, value])
-    if str(payload.get("deviceId") or "").strip():
-        args.extend(["--device-id", str(payload["deviceId"]).strip()])
     args.append("--draft-only" if payload.get("draftOnly", True) else "--commit")
     for media_path in payload.get("mediaPaths", []):
         args.extend(["--file", str(media_path)])
@@ -1152,7 +1483,7 @@ def run_phone_publish(context: Any, payload: Json) -> Json:
         completed = subprocess.run(
             args,
             cwd=context.paths.base_path,
-            env=phone_process_env(context),
+            env=phone_process_env(context, [device_id]),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1163,8 +1494,13 @@ def run_phone_publish(context: Any, payload: Json) -> Json:
     except subprocess.TimeoutExpired:
         return {"success": False, "errorCode": "publish_timeout", "error": "手机发布任务执行超时"}
 
+    stdout = _sanitize_cli_output(
+        context,
+        completed.stdout or "",
+        kind="phone.publish",
+    )
     try:
-        result = json.loads((completed.stdout or "").strip())
+        result = json.loads(stdout.strip())
     except (TypeError, ValueError, json.JSONDecodeError):
         result = {}
     semantic_error = _publish_business_failure(result.get("answer"))

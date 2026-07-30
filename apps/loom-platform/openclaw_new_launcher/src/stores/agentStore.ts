@@ -12,8 +12,10 @@ export interface AgentAttachmentMetadata {
   name: string;
   size: number;
   type: string;
+  kind: 'text' | 'image';
   lastModified: number;
   content?: string;
+  dataUrl?: string;
   truncated?: boolean;
   contentTruncated?: boolean;
 }

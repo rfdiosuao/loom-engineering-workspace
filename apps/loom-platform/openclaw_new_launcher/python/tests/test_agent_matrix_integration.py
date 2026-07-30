@@ -5,7 +5,6 @@ import sys
 import tempfile
 import time
 import unittest
-from types import SimpleNamespace
 
 
 PYTHON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -16,9 +15,12 @@ if PYTHON_DIR not in sys.path:
 from core.paths import AppPaths
 from core.account_entitlement import AccountEntitlementError
 from core.agent_policy import AgentPolicyEngine
-from core.phone_matrix import MatrixControlPlane
 from services.agent_service import AgentService
-from tests.matrix_test_support import matrix_for_test
+from tests.matrix_test_support import (
+    MatrixTestEntitlement,
+    matrix_context_for_test,
+    matrix_for_test,
+)
 
 
 class MatrixDispatchRuntime:
@@ -61,7 +63,7 @@ class EscapingPhoneRuntime:
 
 class AgentMatrixIntegrationTests(unittest.TestCase):
     def test_default_agent_matrix_factory_enforces_account_phone_entitlement(self) -> None:
-        class LimitedEntitlement:
+        class LimitedEntitlement(MatrixTestEntitlement):
             def authorize_phone_devices(self, device_ids, operation, *, session=None):
                 if "phone-b" in device_ids:
                     raise AccountEntitlementError(
@@ -71,14 +73,12 @@ class AgentMatrixIntegrationTests(unittest.TestCase):
                     )
                 return {"authorized": True}
 
-        entitlement = LimitedEntitlement()
-        context = SimpleNamespace(
-            get_entitlement_mgr=lambda: entitlement,
-            protected_error=lambda _path: None,
-        )
         with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            entitlement = LimitedEntitlement(paths)
+            context = matrix_context_for_test(paths, entitlement=entitlement)
             service = AgentService(
-                AppPaths(root),
+                paths,
                 runtime=MatrixDispatchRuntime(),
                 context_factory=lambda: context,
             )
@@ -99,10 +99,12 @@ class AgentMatrixIntegrationTests(unittest.TestCase):
             matrix = matrix_for_test(paths)
             matrix.register_device({"deviceId": "phone-a", "online": True, "group": "recruiting"})
             matrix.register_device({"deviceId": "phone-b", "online": True, "group": "recruiting"})
+            context = matrix_context_for_test(paths)
             service = AgentService(
                 paths,
                 runtime=MatrixDispatchRuntime(),
                 policy=AgentPolicyEngine(approval_mode="strong"),
+                context_factory=lambda: context,
             )
             try:
                 session = service.create_session({"title": "Recruiting Matrix"})
@@ -173,7 +175,12 @@ class AgentMatrixIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             paths = AppPaths(root)
             matrix_for_test(paths).register_device({"deviceId": "phone-a", "online": True})
-            service = AgentService(paths, runtime=EscapingPhoneRuntime())
+            context = matrix_context_for_test(paths)
+            service = AgentService(
+                paths,
+                runtime=EscapingPhoneRuntime(),
+                context_factory=lambda: context,
+            )
             try:
                 session = service.create_session({"title": "Phone scope"})
                 response = service.send_message(session["sessionId"], {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -19,6 +21,7 @@ from core.agent_capabilities import CapabilityRegistry
 from core.agent_policy import AgentPolicyEngine
 from core.agent_runtime import RuntimeExecutionError
 from core.agent_sessions import AgentSessionRepository
+from core.job_ownership import account_job_binding
 from core.paths import AppPaths
 
 
@@ -43,6 +46,44 @@ def _managed_session(token: str = "sk-native-secret-value", model: str = "glm-ma
             "defaultModel": model,
         },
     }
+
+
+def _matrix_account_context(
+    root: str,
+    account_id: str,
+    install_id: str,
+) -> SimpleNamespace:
+    class Entitlement:
+        def current_state(self, _feature=None):
+            return {
+                "authorized": True,
+                "accountId": account_id,
+                "lease": {
+                    "accountId": account_id,
+                    "installId": install_id,
+                },
+                "limits": {"devices": 1000, "concurrentTasks": 8},
+            }
+
+        def authorize_phone_devices(
+            self,
+            _device_ids,
+            _operation,
+            *,
+            session=None,
+        ):
+            return {
+                "authorized": True,
+                "accountId": account_id,
+                "limits": {"devices": 1000, "concurrentTasks": 8},
+            }
+
+    entitlement = Entitlement()
+    return SimpleNamespace(
+        paths=AppPaths(root),
+        get_entitlement_mgr=lambda: entitlement,
+        protected_error=lambda _path: None,
+    )
 
 
 class FakeAccount:
@@ -293,6 +334,76 @@ class RecordingJobManager:
 
 
 class AgentServiceTests(unittest.TestCase):
+    def test_image_attachment_is_materialized_without_persisting_inline_base64(self) -> None:
+        from services.agent_service import AgentService
+
+        image_bytes = b"\x89PNG\r\n\x1a\nloom"
+        data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+        runtime = ScriptedRuntime([{"final": {"text": "image received"}}])
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=runtime, capabilities=_registry())
+            try:
+                session = service.create_session({"title": "Image attachment"})
+                sent = service.send_message(session["sessionId"], {
+                    "clientMessageId": "image-attachment-1",
+                    "text": "请分析图片",
+                    "attachments": [{
+                        "name": "../cover.png",
+                        "size": len(image_bytes),
+                        "type": "image/png",
+                        "kind": "image",
+                        "dataUrl": data_url,
+                    }],
+                })
+                _wait_for_status(service, sent["run"]["runId"], "completed")
+                attachment = runtime.requests[0]["attachments"][0]
+                self.assertNotIn("dataUrl", attachment)
+                self.assertEqual(attachment["name"], "cover.png")
+                self.assertEqual(attachment["kind"], "image")
+                self.assertTrue(os.path.isfile(attachment["path"]))
+                with open(attachment["path"], "rb") as handle:
+                    self.assertEqual(handle.read(), image_bytes)
+                self.assertEqual(
+                    os.path.commonpath([
+                        os.path.abspath(attachment["path"]),
+                        os.path.join(os.path.abspath(root), "data", "agent", "attachments"),
+                    ]),
+                    os.path.join(os.path.abspath(root), "data", "agent", "attachments"),
+                )
+            finally:
+                service.shutdown()
+
+            persisted = ""
+            for directory, _subdirs, files in os.walk(os.path.join(root, "data", "agent")):
+                for filename in files:
+                    if filename.endswith((".json", ".jsonl")):
+                        with open(os.path.join(directory, filename), "r", encoding="utf-8") as handle:
+                            persisted += handle.read()
+            self.assertNotIn(data_url, persisted)
+
+    def test_unsupported_attachment_is_rejected_before_run_creation(self) -> None:
+        from services.agent_service import AgentService
+
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime(), capabilities=_registry())
+            try:
+                session = service.create_session({"title": "Unsupported attachment"})
+                with self.assertRaisesRegex(ValueError, "AGENT_ATTACHMENT_TYPE_UNSUPPORTED"):
+                    service.send_message(session["sessionId"], {
+                        "clientMessageId": "unsupported-attachment-1",
+                        "text": "",
+                        "attachments": [{
+                            "name": "brief.pdf",
+                            "size": 3,
+                            "type": "application/pdf",
+                            "kind": "binary",
+                            "dataUrl": "data:application/pdf;base64,cGRm",
+                        }],
+                    })
+                self.assertEqual(service.repository.list_runs(session["sessionId"]), [])
+            finally:
+                service.shutdown()
+
     def test_session_detail_returns_newest_message_page_and_cursor_loads_older_messages(self) -> None:
         from services.agent_service import AgentService
 
@@ -2136,12 +2247,23 @@ class AgentServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             matrix = CancellableMatrix()
             jobs = RecordingJobManager()
+            jobs.jobs[0]["kind"] = "matrix.dispatch"
+            jobs.jobs[0]["progress"].update({
+                "ownerAccountBinding": account_job_binding(
+                    "account-a",
+                    "install-a",
+                ),
+                "matrixDeviceIds": ["phone-progress"],
+                "matrixDeviceTaskIds": ["task-progress"],
+            })
+            context = _matrix_account_context(root, "account-a", "install-a")
             service = AgentService(
                 AppPaths(root),
                 runtime=UnavailableRuntime(),
                 capabilities=_registry(),
                 matrix_factory=lambda: matrix,
                 job_manager=jobs,
+                context_factory=lambda: context,
             )
             try:
                 session = service.create_session({"title": "Cascade cancel"})
@@ -2165,6 +2287,139 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertNotIn("campaign-progress", service._campaign_links)
             finally:
                 service.shutdown()
+
+    def test_central_agent_matrix_job_has_owner_binding_and_device_scope(self) -> None:
+        from services.agent_service import AgentService
+
+        class CapturingJobManager:
+            def __init__(self) -> None:
+                self.initial_progress: dict = {}
+
+            def submit_progress(
+                self,
+                kind,
+                title,
+                target,
+                initial_progress=None,
+            ):
+                del title, target
+                self.initial_progress = dict(initial_progress or {})
+                return {
+                    "id": "job-agent-matrix",
+                    "kind": kind,
+                    "progress": dict(self.initial_progress),
+                }
+
+        with tempfile.TemporaryDirectory() as root:
+            jobs = CapturingJobManager()
+            context = _matrix_account_context(root, "account-a", "install-a")
+            service = object.__new__(AgentService)
+            service.job_manager = jobs
+            service.context_factory = lambda: context
+            task = {
+                "campaignId": "campaign-agent",
+                "missions": [{
+                    "deviceTasks": [
+                        {
+                            "deviceTaskId": "task-phone-b",
+                            "deviceId": "phone-b",
+                        },
+                        {
+                            "deviceTaskId": "task-phone-a",
+                            "deviceId": "phone-a",
+                        },
+                    ],
+                }],
+            }
+
+            job = service._start_matrix_job(
+                "matrix.dispatch",
+                "Agent Matrix dispatch",
+                ProgressMatrix(),
+                task,
+                {"prompt": "check"},
+            )
+
+        self.assertEqual(job["id"], "job-agent-matrix")
+        self.assertEqual(
+            jobs.initial_progress["ownerAccountBinding"],
+            account_job_binding("account-a", "install-a"),
+        )
+        self.assertNotIn("ownerAccountId", jobs.initial_progress)
+        self.assertEqual(
+            jobs.initial_progress["matrixDeviceIds"],
+            ["phone-a", "phone-b"],
+        )
+        self.assertEqual(
+            jobs.initial_progress["matrixDeviceTaskIds"],
+            ["task-phone-a", "task-phone-b"],
+        )
+        self.assertEqual(
+            jobs.initial_progress["phoneDeviceIds"],
+            ["phone-a", "phone-b"],
+        )
+
+    def test_agent_linked_matrix_cancel_preserves_other_and_unknown_owner_jobs(self) -> None:
+        from services.agent_service import AgentService
+
+        binding_a = account_job_binding("account-a", "install-a")
+        binding_b = account_job_binding("account-b", "install-a")
+        jobs = RecordingJobManager()
+        jobs.jobs = [
+            {
+                "id": "job-account-a",
+                "kind": "matrix.dispatch",
+                "status": "running",
+                "progress": {
+                    "campaignId": "campaign-progress",
+                    "ownerAccountBinding": binding_a,
+                    "matrixDeviceIds": ["phone-a"],
+                },
+            },
+            {
+                "id": "job-account-b",
+                "kind": "matrix.dispatch",
+                "status": "running",
+                "progress": {
+                    "campaignId": "campaign-progress",
+                    "ownerAccountBinding": binding_b,
+                    "matrixDeviceIds": ["phone-b"],
+                },
+            },
+            {
+                "id": "job-owner-unknown",
+                "kind": "matrix.dispatch",
+                "status": "running",
+                "progress": {
+                    "campaignId": "campaign-progress",
+                    "matrixDeviceIds": ["phone-unknown"],
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            context = _matrix_account_context(root, "account-a", "install-a")
+            matrix = CancellableMatrix()
+            service = object.__new__(AgentService)
+            service.job_manager = jobs
+            service.context_factory = lambda: context
+            service._matrix_factory = lambda: matrix
+            service._lock = threading.RLock()
+            service._campaign_links = {
+                "campaign-progress": {
+                    "sessionId": "session-a",
+                    "runId": "run-a",
+                },
+            }
+
+            incomplete = service._cancel_linked_matrix_campaigns(
+                ["campaign-progress"],
+            )
+
+        self.assertEqual(incomplete, [])
+        self.assertEqual(jobs.cancelled_job_ids, ["job-account-a"])
+        self.assertEqual(jobs.jobs[0]["status"], "cancelled")
+        self.assertEqual(jobs.jobs[1]["status"], "running")
+        self.assertEqual(jobs.jobs[2]["status"], "running")
 
     def test_cancel_run_stays_nonterminal_while_linked_campaign_is_still_running(self) -> None:
         from services.agent_service import AgentService
@@ -2440,7 +2695,7 @@ class AgentServiceTests(unittest.TestCase):
         cancelled: list[str] = []
 
         class FakeMatrix:
-            def __init__(self, _paths) -> None:
+            def __init__(self, _paths, **_kwargs) -> None:
                 pass
 
             def emergency_stop(self, *, all_tasks: bool = False):
@@ -2460,6 +2715,10 @@ class AgentServiceTests(unittest.TestCase):
                 )
                 return list(cancelled)
 
+            def list(self, limit=30):
+                del limit
+                return []
+
         jobs = FakeJobs()
         with (
             patch.object(bridge, "_shutdown_agent_service", return_value={
@@ -2467,8 +2726,17 @@ class AgentServiceTests(unittest.TestCase):
                 "executionMayContinue": False,
             }),
             patch.object(bridge, "_get_job_mgr", return_value=jobs),
+            patch.object(
+                bridge,
+                "_get_entitlement_mgr",
+                return_value=SimpleNamespace(
+                    current_state=lambda _feature: {
+                        "accountId": "account-a",
+                    },
+                ),
+            ),
             patch("core.phone_matrix.MatrixControlPlane", FakeMatrix),
-            patch("api.routes_phone.stop_all_phone_event_syncs", return_value={
+            patch("api.routes_phone.stop_phone_event_syncs_for_account", return_value={
                 "ok": True,
                 "executionMayContinue": False,
             }),
@@ -2476,6 +2744,14 @@ class AgentServiceTests(unittest.TestCase):
                 "ok": True,
                 "running": False,
             }),
+            patch(
+                "api.routes_phone.cleanup_phone_usb_for_account",
+                return_value={
+                    "cleanedDeviceIds": ["phone-a"],
+                    "failedDeviceIds": [],
+                    "executionMayContinue": False,
+                },
+            ) as cleanup_usb,
         ):
             result = bridge._account_logout_cleanup()
 
@@ -2484,6 +2760,71 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(result["cancelledJobIds"], ["job-image", "job-phone"])
         self.assertTrue(jobs.wait_for_workers)
         self.assertNotIn("job-update", cancelled)
+        self.assertEqual(result["usb"]["cleanedDeviceIds"], ["phone-a"])
+        cleanup_usb.assert_called_once()
+        self.assertEqual(cleanup_usb.call_args.args[1], "account-a")
+
+    def test_bridge_account_cleanup_reports_cancelling_jobs_and_usb_failure(self) -> None:
+        import bridge
+
+        class FakeJobs:
+            def cancel_matching(self, _predicate, *, wait_for_workers=True):
+                self.wait_for_workers = wait_for_workers
+                return ["job-still-running"]
+
+            def list(self, limit=30):
+                del limit
+                return [{
+                    "id": "job-still-running",
+                    "kind": "phone.task",
+                    "status": "cancelling",
+                }]
+
+        with (
+            patch.object(bridge, "_shutdown_agent_service", return_value={
+                "drained": True,
+                "executionMayContinue": False,
+            }),
+            patch.object(bridge, "_get_job_mgr", return_value=FakeJobs()),
+            patch.object(
+                bridge,
+                "_get_entitlement_mgr",
+                return_value=SimpleNamespace(
+                    current_state=lambda _feature: {
+                        "accountId": "account-a",
+                    },
+                ),
+            ),
+            patch(
+                "core.phone_matrix.MatrixControlPlane.emergency_stop",
+                return_value={"cancelled": True, "affectedTaskCount": 0},
+            ),
+            patch(
+                "api.routes_phone.stop_phone_event_syncs_for_account",
+                return_value={
+                    "ok": True,
+                    "executionMayContinue": False,
+                },
+            ),
+            patch(
+                "api.routes_phone.stop_phone_daemon",
+                return_value={"ok": True, "running": False},
+            ),
+            patch(
+                "api.routes_phone.cleanup_phone_usb_for_account",
+                return_value={
+                    "cleanedDeviceIds": [],
+                    "failedDeviceIds": ["phone-a"],
+                    "executionMayContinue": True,
+                },
+            ),
+        ):
+            result = bridge._account_logout_cleanup()
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["executionMayContinue"])
+        self.assertEqual(result["unfinishedJobIds"], ["job-still-running"])
+        self.assertEqual(result["usb"]["failedDeviceIds"], ["phone-a"])
 
     def test_bridge_context_exposes_account_logout_cleanup(self) -> None:
         import bridge

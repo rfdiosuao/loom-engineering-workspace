@@ -10,6 +10,7 @@ import {
   type AccountSubscriptionSnapshot,
 } from '../../services/api';
 import { accountCacheUsable, loadCachedAccount, saveCachedAccount } from '../../services/startupCache';
+import { useAgentStore } from '../../stores/agentStore';
 import { useAppStore } from '../../stores/appStore';
 import { APP_DISPLAY_NAME } from '../../version';
 
@@ -96,6 +97,15 @@ function safeSubscriptionUrl(url: string): string {
   }
 }
 
+function accountIdentity(account: AccountSnapshot | null): string {
+  return String(
+    account?.accountEntitlement?.accountId
+    || account?.memberId
+    || account?.account
+    || '',
+  ).trim();
+}
+
 export const LicensePage: React.FC = () => {
   const cachedAccount = useRef<AccountSnapshot | null>(loadCachedAccount());
   const subscriptionRequestVersion = useRef(0);
@@ -139,6 +149,11 @@ export const LicensePage: React.FC = () => {
 
   const applyAccount = useCallback((next: AccountSnapshot | null) => {
     subscriptionRequestVersion.current += 1;
+    const previousIdentity = accountIdentity(cachedAccount.current);
+    const nextIdentity = accountIdentity(next);
+    if (previousIdentity !== nextIdentity) {
+      useAgentStore.getState().reset();
+    }
     cachedAccount.current = next;
     saveCachedAccount(next);
     setAccount(next);

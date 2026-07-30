@@ -182,7 +182,7 @@ class AccountEntitlementTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(["account-owner"], [row["account_id"] for row in rows])
 
-    def test_signed_legacy_activation_can_migrate_without_plain_authorization_code(self) -> None:
+    def test_signed_legacy_activation_requires_original_authorization_code(self) -> None:
         code = self.create_code()
         legacy_license = self.server.activate_code(
             {
@@ -192,40 +192,24 @@ class AccountEntitlementTests(unittest.TestCase):
             }
         )
 
-        migrated = self.server.migrate_legacy_account_entitlement(
-            {
-                "legacyLicense": legacy_license,
-                "accountId": "account-legacy-owner",
-            },
-            request_ip="127.0.0.1",
-        )
+        with self.assertRaises(self.server.ActivationError) as disabled:
+            self.server.migrate_legacy_account_entitlement(
+                {
+                    "legacyLicense": legacy_license,
+                    "accountId": "account-legacy-owner",
+                },
+                request_ip="127.0.0.1",
+            )
 
-        self.assertEqual("matrix_pro", migrated["plan"])
-        self.assertTrue(migrated["limits"]["unlimitedDevices"])
-        self.assertNotIn(code, json.dumps(migrated, ensure_ascii=False))
+        self.assertEqual(410, disabled.exception.status)
+        self.assertEqual("LEGACY_MIGRATION_DISABLED", disabled.exception.code)
         with self.server.connect() as connection:
-            redemption = connection.execute(
-                """
-                select code_hash, account_id from account_entitlement_redemptions
-                where account_id = ?
-                """,
-                ("account-legacy-owner",),
-            ).fetchone()
-            audit_row = connection.execute(
-                """
-                select action, after_json from audit_logs
-                where action = 'account_entitlement.migrate_legacy'
-                """
-            ).fetchone()
-        self.assertEqual(self.server.code_hash(code), redemption["code_hash"])
-        self.assertEqual("account-legacy-owner", redemption["account_id"])
-        self.assertIsNotNone(audit_row)
-        self.assertNotIn(
-            legacy_license["signature"],
-            str(audit_row["after_json"]),
-        )
+            redemption_count = connection.execute(
+                "select count(*) from account_entitlement_redemptions"
+            ).fetchone()[0]
+        self.assertEqual(0, redemption_count)
 
-    def test_legacy_migration_rejects_tampering_unmatched_proof_and_cross_account_reuse(self) -> None:
+    def test_legacy_migration_rejects_every_proof_before_inspection(self) -> None:
         code = self.create_code()
         legacy_license = self.server.activate_code(
             {
@@ -242,10 +226,7 @@ class AccountEntitlementTests(unittest.TestCase):
                     "accountId": "account-attacker",
                 }
             )
-        self.assertEqual(
-            "LEGACY_LICENSE_PROOF_INVALID",
-            invalid_signature.exception.code,
-        )
+        self.assertEqual("LEGACY_MIGRATION_DISABLED", invalid_signature.exception.code)
 
         unmatched_payload = dict(legacy_license)
         unmatched_payload.pop("signature")
@@ -258,28 +239,7 @@ class AccountEntitlementTests(unittest.TestCase):
                     "accountId": "account-attacker",
                 }
             )
-        self.assertEqual(
-            "LEGACY_LICENSE_PROOF_NOT_FOUND",
-            not_found.exception.code,
-        )
-
-        self.server.migrate_legacy_account_entitlement(
-            {
-                "legacyLicense": legacy_license,
-                "accountId": "account-owner",
-            }
-        )
-        with self.assertRaises(self.server.ActivationError) as conflict:
-            self.server.migrate_legacy_account_entitlement(
-                {
-                    "legacyLicense": legacy_license,
-                    "accountId": "account-other",
-                }
-            )
-        self.assertEqual(
-            "ACCOUNT_ENTITLEMENT_ALREADY_REDEEMED",
-            conflict.exception.code,
-        )
+        self.assertEqual("LEGACY_MIGRATION_DISABLED", not_found.exception.code)
 
     def test_concurrent_cross_account_redeem_has_exactly_one_winner(self) -> None:
         code = self.create_code()
@@ -600,7 +560,7 @@ class AccountEntitlementTests(unittest.TestCase):
         self.assertNotIn(code, serialized)
         self.assertNotIn("gateway-secret-token", serialized)
 
-    def test_legacy_migration_http_route_requires_service_auth(self) -> None:
+    def test_legacy_migration_http_route_requires_auth_then_rejects_migration(self) -> None:
         code = self.create_code()
         legacy_license = self.server.activate_code(
             {
@@ -623,10 +583,11 @@ class AccountEntitlementTests(unittest.TestCase):
         migrated = self.request_json(
             request,
             path=MIGRATE_SERVICE_PATH,
+            expected_status=410,
         )
 
         self.assertEqual("SERVICE_AUTH_REQUIRED", unauthorized["code"])
-        self.assertEqual("matrix_pro", migrated["entitlement"]["plan"])
+        self.assertEqual("LEGACY_MIGRATION_DISABLED", migrated["code"])
         self.assertNotIn(legacy_license["signature"], json.dumps(migrated))
 
     def test_http_route_fails_closed_when_service_token_is_not_configured(self) -> None:

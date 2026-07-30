@@ -1,28 +1,47 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
-import logging
 import secrets
 import sqlite3
 import time
 from collections.abc import Callable
 from typing import Any
 
-from .. import db
+from .. import db, security
 from ..config import Settings
 from ..errors import ActivationError
 from ..serialization import clamp_int, normalize_string
 from ..timeutils import now_ms, utc_now
+from . import relay_storage
+from .relay_authorization import (
+    CurrentEntitlementFn,
+    PUBLISH_RELAY_ENTITLEMENT_KEY_ID,
+    PUBLISH_RELAY_ENTITLEMENT_SCHEMA,
+    PUBLISH_RELAY_MAX_CLOCK_SKEW_SECONDS,
+    PUBLISH_RELAY_PHONE_SEAT_SCHEMA,
+    PUBLISH_RELAY_PRODUCER_AUTH_SCHEMA,
+    PUBLISH_RELAY_PRODUCER_FEATURES,
+    _producer_account_id,
+    _producer_auth_unavailable,
+    _producer_entitlement_error,
+    publish_relay_producer_request_token,
+    publish_relay_producer_scope_from_headers,
+    publish_relay_validate_current_authorization,
+    publish_relay_validate_producer_authorization,
+)
 
-
-LOGGER = logging.getLogger("openclaw-license")
 PUBLISH_RELAY_BACKOFF_MS = 2_000
 PUBLISH_RELAY_MAX_BACKOFF_MS = 5 * 60_000
 PUBLISH_RELAY_CLAIM_BUSY_TIMEOUT_MS = 100
 PUBLISH_RELAY_CLAIM_CONNECT_TIMEOUT_SECONDS = 0.1
 PUBLISH_RELAY_CLAIM_MAX_ATTEMPTS = 3
 PUBLISH_RELAY_CLAIM_RETRY_DELAY_MS = 50
+PUBLISH_RELAY_COMMIT_TOKEN_TTL_MS = 15_000
+PUBLISH_RELAY_COMMIT_INDETERMINATE_ERROR = (
+    "Formal publish commit outcome is indeterminate; automatic retry is blocked"
+)
 
 ConnectFn = Callable[[], sqlite3.Connection]
 ClaimFn = Callable[[str, str, int], dict[str, Any] | None]
@@ -99,46 +118,18 @@ def publish_relay_token_valid(headers: Any, *, settings: Settings | None = None)
     return bool(provided) and secrets.compare_digest(provided, token)
 
 
-def publish_relay_record_from_row(row: sqlite3.Row, include_packet: bool = False) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "id": row["packet_id"],
-        "channelId": row["channel_id"],
-        "status": row["status"],
-        "attempts": row["attempts"],
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-        "leasedBy": row["leased_by"],
-        "leaseId": row["lease_id"],
-        "leaseUntil": row["lease_until_ms"] or None,
-        "nextAvailableAt": row["next_available_at_ms"] or None,
-        "completedAt": row["completed_at"] or None,
-        "lastError": row["last_error"] or "",
-    }
-    if include_packet:
-        try:
-            payload["packet"] = json.loads(row["packet_json"] or "{}")
-        except json.JSONDecodeError as error:
-            LOGGER.warning("Invalid publish relay packet JSON for %s: %s", row["packet_id"], error)
-            payload["packet"] = {}
-    if row["result_json"]:
-        try:
-            payload["result"] = json.loads(row["result_json"] or "{}")
-        except json.JSONDecodeError as error:
-            LOGGER.warning("Invalid publish relay result JSON for %s: %s", row["packet_id"], error)
-            payload["result"] = row["result_json"]
-    return payload
-
-
-def publish_relay_fetch(conn: sqlite3.Connection, packet_id: str) -> sqlite3.Row | None:
-    return conn.execute(
-        "select * from publish_relay_packets where packet_id = ?",
-        (packet_id,),
-    ).fetchone()
+publish_relay_ensure_state_columns = relay_storage.ensure_state_columns
+_packet_json = relay_storage.packet_json
+_formal_publish_packet = relay_storage.is_formal_publish_packet
+_strict_commit_policy = relay_storage.has_strict_commit_policy
+publish_relay_record_from_row = relay_storage.record_from_row
+publish_relay_fetch = relay_storage.fetch
 
 
 def publish_relay_enqueue(
     packet: dict[str, Any],
     *,
+    account_id: str = "",
     settings: Settings | None = None,
     defaults: dict[str, Any] | None = None,
     connect_fn: ConnectFn | None = None,
@@ -153,19 +144,44 @@ def publish_relay_enqueue(
     if schema not in {"openclaw.publish.packet.v1", "openclaw.phone.screenshot.v1"}:
         raise ActivationError("Unsupported packet schema", 400)
 
+    normalized_account_id = normalize_string(account_id)
+    if normalized_account_id:
+        normalized_account_id = _producer_account_id(normalized_account_id)
+        if schema == "openclaw.publish.packet.v1":
+            if not isinstance(packet.get("draftOnly"), bool):
+                raise ActivationError(
+                    "Publish packet must declare draftOnly",
+                    400,
+                    "RELAY_PACKET_MODE_REQUIRED",
+                )
+            if not _strict_commit_policy(packet):
+                raise ActivationError(
+                    "Publish packet commit policy is incomplete",
+                    400,
+                    "RELAY_COMMIT_POLICY_REQUIRED",
+                )
+
     packet_id = packet_id_fn()
     timestamp = utc_now()
     with (connect_fn or (lambda: _connect(settings, defaults)))() as conn:
+        publish_relay_ensure_state_columns(conn)
         conn.execute(
             """
             insert into publish_relay_packets (
-                packet_id, channel_id, packet_json, status, attempts,
+                packet_id, account_id, channel_id, packet_json, status, attempts,
                 created_at, updated_at, leased_by, lease_id, lease_until_ms,
                 next_available_at_ms, completed_at, result_json, last_error
             )
-            values (?, ?, ?, 'pending', 0, ?, ?, '', '', 0, 0, '', '', '')
+            values (?, ?, ?, ?, 'pending', 0, ?, ?, '', '', 0, 0, '', '', '')
             """,
-            (packet_id, channel_id, json.dumps(packet, ensure_ascii=False), timestamp, timestamp),
+            (
+                packet_id,
+                normalized_account_id,
+                channel_id,
+                json.dumps(packet, ensure_ascii=False),
+                timestamp,
+                timestamp,
+            ),
         )
         conn.commit()
         row = publish_relay_fetch(conn, packet_id)
@@ -182,6 +198,7 @@ def publish_relay_claim(
     defaults: dict[str, Any] | None = None,
     connect_fn: ConnectFn | None = None,
     lease_id_fn: LeaseIdFn = publish_relay_lease_id,
+    current_entitlement_fn: CurrentEntitlementFn | None = None,
 ) -> dict[str, Any] | None:
     active_settings = _settings(settings)
     channel_id = normalize_string(channel_id)
@@ -199,10 +216,11 @@ def publish_relay_claim(
         try:
             current_ms = now_ms()
             with connect() as conn:
+                publish_relay_ensure_state_columns(conn)
                 conn.execute(f"pragma busy_timeout = {PUBLISH_RELAY_CLAIM_BUSY_TIMEOUT_MS}")
                 rows = conn.execute(
                     """
-                    select packet_id, attempts from publish_relay_packets
+                    select * from publish_relay_packets
                     where channel_id = ? and status not in ('done', 'failed')
                         and (status != 'leased' or lease_until_ms <= ?)
                         and next_available_at_ms <= ?
@@ -211,6 +229,62 @@ def publish_relay_claim(
                     (channel_id, current_ms, current_ms),
                 ).fetchall()
                 for row in rows:
+                    if normalize_string(row["commit_state"]) == "authorized":
+                        timestamp = utc_now()
+                        conn.execute(
+                            """
+                            update publish_relay_packets
+                            set status = 'failed', updated_at = ?, completed_at = ?,
+                                outcome_indeterminate = 1,
+                                commit_state = 'indeterminate', last_error = ?
+                            where packet_id = ? and status not in ('done', 'failed')
+                                and commit_state = 'authorized'
+                                and lease_until_ms <= ?
+                            """,
+                            (
+                                timestamp,
+                                timestamp,
+                                PUBLISH_RELAY_COMMIT_INDETERMINATE_ERROR,
+                                row["packet_id"],
+                                current_ms,
+                            ),
+                        )
+                        continue
+
+                    if normalize_string(row["account_id"]):
+                        if current_entitlement_fn is None:
+                            raise _producer_auth_unavailable()
+                        try:
+                            packet = _packet_json(row)
+                            context = publish_relay_validate_current_authorization(
+                                packet.get("authorization"),
+                                current_entitlement_fn=current_entitlement_fn,
+                                settings=active_settings,
+                            )
+                            if context["accountId"] != normalize_string(row["account_id"]):
+                                raise _producer_entitlement_error()
+                            if (
+                                context["selectedDeviceInstanceId"]
+                                != client_id
+                            ):
+                                continue
+                        except ActivationError as error:
+                            if error.status >= 500:
+                                raise
+                            timestamp = utc_now()
+                            conn.execute(
+                                """
+                                update publish_relay_packets
+                                set status = 'failed', updated_at = ?, completed_at = ?,
+                                    commit_state = 'denied',
+                                    last_error = 'Relay authorization is no longer active'
+                                where packet_id = ? and status not in ('done', 'failed')
+                                    and (status != 'leased' or lease_until_ms <= ?)
+                                """,
+                                (timestamp, timestamp, row["packet_id"], current_ms),
+                            )
+                            continue
+
                     if int(row["attempts"] or 0) >= active_settings.publish_relay_max_attempts:
                         timestamp = utc_now()
                         conn.execute(
@@ -278,6 +352,123 @@ def publish_relay_claim(
     raise AssertionError("unreachable")
 
 
+def publish_relay_authorize_commit(
+    body: dict[str, Any],
+    *,
+    current_entitlement_fn: CurrentEntitlementFn,
+    settings: Settings | None = None,
+    defaults: dict[str, Any] | None = None,
+    connect_fn: ConnectFn | None = None,
+    token_fn: Callable[[], str] = lambda: secrets.token_urlsafe(32),
+) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ActivationError("Invalid JSON body", 400, "RELAY_COMMIT_INVALID")
+    packet_id = normalize_string(body.get("packetId") or body.get("id"))
+    lease_id = normalize_string(body.get("leaseId") or body.get("lease_id"))
+    client_id = normalize_string(body.get("clientId") or body.get("client_id"))
+    if not packet_id or not lease_id or not client_id:
+        raise ActivationError(
+            "Commit authorization requires packetId, leaseId and clientId",
+            400,
+            "RELAY_COMMIT_INVALID",
+        )
+
+    active_settings = _settings(settings)
+    with (connect_fn or (lambda: _connect(active_settings, defaults)))() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        publish_relay_ensure_state_columns(conn)
+        row = publish_relay_fetch(conn, packet_id)
+        current_ms = now_ms()
+        if (
+            row is None
+            or normalize_string(row["status"]) != "leased"
+            or normalize_string(row["lease_id"]) != lease_id
+            or normalize_string(row["leased_by"]) != client_id
+            or int(row["lease_until_ms"] or 0) <= current_ms
+        ):
+            raise ActivationError(
+                "Relay lease is no longer current",
+                409,
+                "RELAY_COMMIT_LEASE_STALE",
+            )
+        if normalize_string(row["commit_state"]):
+            raise ActivationError(
+                "Publish commit was already authorized or denied",
+                409,
+                "RELAY_COMMIT_ALREADY_DECIDED",
+            )
+
+        packet = _packet_json(row)
+        if not _formal_publish_packet(packet) or not _strict_commit_policy(packet):
+            raise ActivationError(
+                "Packet is not eligible for formal publish commit",
+                409,
+                "RELAY_COMMIT_NOT_ALLOWED",
+            )
+        context = publish_relay_validate_current_authorization(
+            packet.get("authorization"),
+            current_entitlement_fn=current_entitlement_fn,
+            settings=active_settings,
+        )
+        if context["accountId"] != normalize_string(row["account_id"]):
+            raise _producer_entitlement_error()
+        if context["selectedDeviceInstanceId"] != client_id:
+            raise ActivationError(
+                "Relay lease does not belong to the selected phone",
+                409,
+                "RELAY_COMMIT_DEVICE_MISMATCH",
+            )
+
+        token = normalize_string(token_fn())
+        if len(token) < 32:
+            raise ActivationError(
+                "Commit authorization unavailable",
+                503,
+                "RELAY_COMMIT_UNAVAILABLE",
+            )
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        timestamp = utc_now()
+        expires_at_ms = current_ms + PUBLISH_RELAY_COMMIT_TOKEN_TTL_MS
+        changed = conn.execute(
+            """
+            update publish_relay_packets
+            set commit_token_hash = ?, commit_authorized_at = ?,
+                commit_expires_at_ms = ?, commit_lease_id = ?,
+                commit_client_id = ?, commit_state = 'authorized',
+                updated_at = ?
+            where packet_id = ? and status = 'leased'
+                and lease_id = ? and leased_by = ? and lease_until_ms > ?
+                and commit_state = ''
+            """,
+            (
+                token_hash,
+                timestamp,
+                expires_at_ms,
+                lease_id,
+                client_id,
+                timestamp,
+                packet_id,
+                lease_id,
+                client_id,
+                current_ms,
+            ),
+        )
+        if changed.rowcount != 1:
+            raise ActivationError(
+                "Relay lease is no longer current",
+                409,
+                "RELAY_COMMIT_LEASE_STALE",
+            )
+        conn.commit()
+        return {
+            "packetId": packet_id,
+            "leaseId": lease_id,
+            "clientId": client_id,
+            "commitToken": token,
+            "expiresAt": expires_at_ms,
+        }
+
+
 def publish_relay_wait_for_packet(
     channel_id: str,
     client_id: str,
@@ -328,6 +519,7 @@ def publish_relay_complete(
         raise ActivationError("Missing clientId", 400)
 
     with (connect_fn or (lambda: _connect(active_settings, defaults)))() as conn:
+        publish_relay_ensure_state_columns(conn)
         row = publish_relay_fetch(conn, packet_id)
         if row is None:
             raise ActivationError(f"Packet not found: {packet_id}", 404)
@@ -337,13 +529,37 @@ def publish_relay_complete(
         error = "" if success else normalize_string(body.get("error") or body.get("message"))
         current_ms = now_ms()
         timestamp = utc_now()
+        packet = _packet_json(row)
+        formal_publish = _formal_publish_packet(packet) and bool(
+            normalize_string(row["account_id"])
+        )
+        commit_token = normalize_string(body.get("commitToken") or body.get("commit_token"))
+        stored_commit_hash = normalize_string(row["commit_token_hash"])
+        commit_matches = bool(commit_token and stored_commit_hash) and secrets.compare_digest(
+            hashlib.sha256(commit_token.encode("utf-8")).hexdigest(),
+            stored_commit_hash,
+        )
+        if success and formal_publish and (
+            normalize_string(row["commit_state"]) != "authorized"
+            or normalize_string(row["commit_lease_id"]) != lease_id
+            or normalize_string(row["commit_client_id"]) != client_id
+            or not commit_matches
+        ):
+            raise ActivationError(
+                "Formal publish completion requires its one-time commit token",
+                409,
+                "RELAY_COMMIT_TOKEN_REQUIRED",
+            )
         if success:
             changed = conn.execute(
                 """
                 update publish_relay_packets
                 set status = 'done', updated_at = ?, completed_at = ?,
                     lease_id = '', leased_by = '', lease_until_ms = 0,
-                    next_available_at_ms = 0, result_json = ?, last_error = ''
+                    next_available_at_ms = 0, result_json = ?, last_error = '',
+                    commit_token_hash = '',
+                    commit_state = case when commit_state = 'authorized'
+                        then 'consumed' else commit_state end
                 where packet_id = ? and status = 'leased'
                     and lease_id = ? and leased_by = ?
                 """,
@@ -351,13 +567,25 @@ def publish_relay_complete(
             )
         else:
             attempts = int(row["attempts"] or 0)
-            retryable = attempts < active_settings.publish_relay_max_attempts
+            commit_authorized = normalize_string(row["commit_state"]) == "authorized"
+            retryable = (
+                attempts < active_settings.publish_relay_max_attempts
+                and not commit_authorized
+            )
+            terminal_error = (
+                PUBLISH_RELAY_COMMIT_INDETERMINATE_ERROR
+                if commit_authorized
+                else error
+            )
             changed = conn.execute(
                 """
                 update publish_relay_packets
                 set status = ?, updated_at = ?, completed_at = ?,
                     lease_id = '', leased_by = '', lease_until_ms = 0,
-                    next_available_at_ms = ?, result_json = ?, last_error = ?
+                    next_available_at_ms = ?, result_json = ?, last_error = ?,
+                    outcome_indeterminate = ?,
+                    commit_state = case when commit_state = 'authorized'
+                        then 'indeterminate' else commit_state end
                 where packet_id = ? and status = 'leased'
                     and lease_id = ? and leased_by = ?
                 """,
@@ -367,7 +595,8 @@ def publish_relay_complete(
                     "" if retryable else timestamp,
                     current_ms + backoff_fn(attempts) if retryable else 0,
                     result_json,
-                    error,
+                    terminal_error,
+                    1 if commit_authorized else 0,
                     packet_id,
                     lease_id,
                     client_id,
@@ -385,6 +614,9 @@ def publish_relay_status(
     packet_id: str,
     include_packet: bool = True,
     *,
+    account_id: str = "",
+    entitlement_version: int | None = None,
+    runtime_config_digest: str = "",
     settings: Settings | None = None,
     defaults: dict[str, Any] | None = None,
     connect_fn: ConnectFn | None = None,
@@ -392,11 +624,55 @@ def publish_relay_status(
     packet_id = normalize_string(packet_id)
     if not packet_id:
         raise ActivationError("Missing packetId", 400)
+    normalized_account_id = normalize_string(account_id)
+    if normalized_account_id:
+        normalized_account_id = _producer_account_id(normalized_account_id)
     with (connect_fn or (lambda: _connect(settings, defaults)))() as conn:
-        row = publish_relay_fetch(conn, packet_id)
+        if normalized_account_id:
+            publish_relay_ensure_state_columns(conn)
+        row = publish_relay_fetch(
+            conn,
+            packet_id,
+            account_id=normalized_account_id,
+        )
         if row is None:
-            raise ActivationError(f"Packet not found: {packet_id}", 404)
-        return publish_relay_record_from_row(row, include_packet=include_packet)
+            raise ActivationError(
+                "Relay packet not found",
+                404,
+                "RELAY_PACKET_NOT_FOUND",
+            )
+        record = publish_relay_record_from_row(row, include_packet=include_packet)
+        if normalized_account_id:
+            packet = record.get("packet")
+            authorization = (
+                packet.get("authorization") if isinstance(packet, dict) else None
+            )
+            expected_digest = normalize_string(runtime_config_digest).lower()
+            actual_digest = (
+                normalize_string(authorization.get("runtimeConfigDigest")).lower()
+                if isinstance(authorization, dict)
+                else ""
+            )
+            actual_version = (
+                authorization.get("entitlementVersion")
+                if isinstance(authorization, dict)
+                else None
+            )
+            metadata_matches = (
+                isinstance(actual_version, int)
+                and not isinstance(actual_version, bool)
+                and actual_version == entitlement_version
+                and bool(expected_digest)
+                and bool(actual_digest)
+                and secrets.compare_digest(actual_digest, expected_digest)
+            )
+            if not metadata_matches:
+                raise ActivationError(
+                    "Relay packet not found",
+                    404,
+                    "RELAY_PACKET_NOT_FOUND",
+                )
+        return record
 
 
 def publish_relay_stats(

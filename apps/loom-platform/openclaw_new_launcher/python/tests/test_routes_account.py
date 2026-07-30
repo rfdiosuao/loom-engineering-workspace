@@ -5,6 +5,8 @@ import sys
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
 
@@ -22,6 +24,372 @@ from fastapi.testclient import TestClient
 
 
 class AccountRouteResponseTests(unittest.TestCase):
+    def test_account_transition_gate_covers_login_and_releases_after_failure(
+        self,
+    ) -> None:
+        app = FastAPI()
+        events: list[str] = []
+        transition = {"active": False, "token": 0}
+
+        class Manager:
+            def public_session(self):
+                return {"loggedIn": False}
+
+            def login(self, *_args, **_kwargs):
+                if not transition["active"]:
+                    raise AssertionError("account transition gate is not active")
+                events.append("login")
+                raise NewApiAccountError("upstream unavailable")
+
+        def begin_transition() -> int:
+            transition["token"] += 1
+            transition["active"] = True
+            events.append("begin")
+            return transition["token"]
+
+        def end_transition(token: object) -> bool:
+            events.append("end")
+            if token != transition["token"]:
+                return False
+            transition["active"] = False
+            return True
+
+        ctx = _ctx(Manager())
+        ctx.begin_account_transition = begin_transition
+        ctx.end_account_transition = end_transition
+        register_account_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(events, ["begin", "login", "end"])
+        self.assertFalse(transition["active"])
+
+    def test_account_transition_fails_closed_when_current_identity_cannot_be_read(
+        self,
+    ) -> None:
+        app = FastAPI()
+        login_called = threading.Event()
+        logs: list[str] = []
+
+        class Manager:
+            def public_session(self):
+                raise RuntimeError("identity store unreadable apiKey=do-not-leak")
+
+            def login(self, *_args, **_kwargs):
+                login_called.set()
+                return {"source": "newapi_account"}
+
+        ctx = _ctx(Manager())
+        ctx.append_log = logs.append
+        register_account_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(login_called.is_set())
+        self.assertEqual(
+            response.json()["cleanup"]["code"],
+            "account_runtime_identity_unavailable",
+        )
+        self.assertTrue(response.json()["cleanup"]["executionMayContinue"])
+        self.assertNotIn("do-not-leak", repr(response.json()))
+        self.assertNotIn("do-not-leak", "".join(logs))
+
+    def test_account_login_captures_immutable_previous_runtime_identity(self) -> None:
+        app = FastAPI()
+        captured = []
+
+        class Manager:
+            def __init__(self) -> None:
+                self.account_id = "account-old"
+
+            def public_session(self):
+                return {
+                    "loggedIn": True,
+                    "account": "old@example.invalid",
+                    "accountEntitlement": {"accountId": self.account_id},
+                }
+
+            def login(self, *_args, **_kwargs):
+                self.account_id = "account-new"
+                return {"source": "newapi_account"}
+
+            def sync_targets(self, _session):
+                return []
+
+        manager = Manager()
+
+        def cleanup(identity) -> dict:
+            captured.append(identity)
+            return {
+                "ok": True,
+                "executionMayContinue": False,
+            }
+
+        register_account_routes(
+            app,
+            _ctx(manager, account_logout_cleanup=cleanup),
+        )
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].account_id, "account-old")
+        self.assertRegex(captured[0].owner_binding, r"^[0-9a-f]{64}$")
+        self.assertTrue(captured[0].resolved)
+        with self.assertRaises(FrozenInstanceError):
+            captured[0].account_id = "account-tampered"
+
+    def test_account_transition_blocks_when_identity_is_unresolved_and_execution_may_continue(
+        self,
+    ) -> None:
+        app = FastAPI()
+        login_called = threading.Event()
+        captured = []
+
+        class Manager:
+            def public_session(self):
+                return {
+                    "loggedIn": True,
+                    "account": "old@example.invalid",
+                }
+
+            def login(self, *_args, **_kwargs):
+                login_called.set()
+                return {"source": "newapi_account"}
+
+        def cleanup(identity) -> dict:
+            captured.append(identity)
+            return {
+                "ok": False,
+                "code": "account_runtime_identity_unresolved",
+                "executionMayContinue": True,
+            }
+
+        register_account_routes(
+            app,
+            _ctx(Manager(), account_logout_cleanup=cleanup),
+        )
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(len(captured), 1)
+        self.assertFalse(captured[0].resolved)
+        self.assertFalse(login_called.is_set())
+
+    def test_account_transition_confirms_terminal_state_before_replacing_credentials(
+        self,
+    ) -> None:
+        app = FastAPI()
+        login_called = threading.Event()
+
+        class Manager:
+            def public_session(self):
+                return {
+                    "loggedIn": True,
+                    "accountEntitlement": {"accountId": "account-old"},
+                }
+
+            def login(self, *_args, **_kwargs):
+                login_called.set()
+                return {"source": "newapi_account"}
+
+        def cleanup(_identity) -> dict:
+            return {
+                "ok": True,
+                "executionMayContinue": False,
+                "unfinishedJobIds": ["job-old"],
+            }
+
+        register_account_routes(
+            app,
+            _ctx(Manager(), account_logout_cleanup=cleanup),
+        )
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(login_called.is_set())
+        self.assertTrue(response.json()["cleanup"]["executionMayContinue"])
+
+    def test_concurrent_account_transitions_are_serialized_and_capture_each_previous_identity(
+        self,
+    ) -> None:
+        app = FastAPI()
+        state_lock = threading.Lock()
+        first_cleanup_started = threading.Event()
+        release_first_cleanup = threading.Event()
+        cleanup_identities = []
+        login_order: list[str] = []
+        active_cleanups = 0
+        maximum_active_cleanups = 0
+
+        class Manager:
+            def __init__(self) -> None:
+                self.account_id = "account-old"
+
+            def public_session(self):
+                with state_lock:
+                    account_id = self.account_id
+                return {
+                    "loggedIn": True,
+                    "account": f"{account_id}@example.invalid",
+                    "accountEntitlement": {"accountId": account_id},
+                }
+
+            def login_with_email_code(self, email, _code, *, base_url=""):
+                del base_url
+                account_id = "account-a" if email.startswith("a@") else "account-b"
+                with state_lock:
+                    self.account_id = account_id
+                    login_order.append(account_id)
+                return {"source": "newapi_account"}
+
+        manager = Manager()
+
+        def cleanup(identity) -> dict:
+            nonlocal active_cleanups, maximum_active_cleanups
+            with state_lock:
+                active_cleanups += 1
+                maximum_active_cleanups = max(
+                    maximum_active_cleanups,
+                    active_cleanups,
+                )
+                cleanup_identities.append(identity)
+                cleanup_number = len(cleanup_identities)
+            try:
+                if cleanup_number == 1:
+                    first_cleanup_started.set()
+                    release_first_cleanup.wait(2)
+                return {
+                    "ok": True,
+                    "executionMayContinue": False,
+                }
+            finally:
+                with state_lock:
+                    active_cleanups -= 1
+
+        register_account_routes(
+            app,
+            _ctx(manager, account_logout_cleanup=cleanup),
+        )
+        with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(
+                client.post,
+                "/api/account/email-code/login",
+                json={"email": "a@example.invalid", "code": "111111"},
+            )
+            self.assertTrue(first_cleanup_started.wait(1))
+            second = pool.submit(
+                client.post,
+                "/api/account/email-code/login",
+                json={"email": "b@example.invalid", "code": "222222"},
+            )
+            time.sleep(0.1)
+            with state_lock:
+                self.assertEqual(login_order, [])
+                self.assertEqual(len(cleanup_identities), 1)
+            release_first_cleanup.set()
+            first_response = first.result(timeout=3)
+            second_response = second.result(timeout=3)
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(login_order, ["account-a", "account-b"])
+        self.assertEqual(
+            [identity.account_id for identity in cleanup_identities],
+            ["account-old", "account-a"],
+        )
+        self.assertEqual(maximum_active_cleanups, 1)
+
+    def test_account_login_drains_existing_runtime_before_replacing_session(self) -> None:
+        app = FastAPI()
+        calls: list[str] = []
+
+        class Manager:
+            def public_session(self):
+                return {
+                    "loggedIn": True,
+                    "account": "old@example.invalid",
+                }
+
+            def login(self, *_args, **_kwargs):
+                calls.append("login")
+                return {"source": "newapi_account"}
+
+            def sync_targets(self, _session):
+                return []
+
+        def cleanup(_identity) -> dict:
+            calls.append("cleanup")
+            return {
+                "ok": True,
+                "executionMayContinue": False,
+            }
+
+        register_account_routes(
+            app,
+            _ctx(Manager(), account_logout_cleanup=cleanup),
+        )
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls[:2], ["cleanup", "login"])
+
+    def test_account_login_does_not_replace_session_while_old_runtime_continues(self) -> None:
+        app = FastAPI()
+        login_called = threading.Event()
+
+        class Manager:
+            def public_session(self):
+                return {
+                    "loggedIn": True,
+                    "account": "old@example.invalid",
+                }
+
+            def login(self, *_args, **_kwargs):
+                login_called.set()
+                return {"source": "newapi_account"}
+
+        def cleanup(_identity) -> dict:
+            return {
+                "ok": False,
+                "executionMayContinue": True,
+                "unfinishedJobIds": ["job-old"],
+            }
+
+        register_account_routes(
+            app,
+            _ctx(Manager(), account_logout_cleanup=cleanup),
+        )
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(login_called.is_set())
+        self.assertTrue(response.json()["cleanup"]["executionMayContinue"])
+        self.assertIn("旧账号", response.json()["error"])
+
     def test_password_login_returns_before_background_runtime_sync(self) -> None:
         app = FastAPI()
         sync_started = threading.Event()
@@ -188,6 +556,44 @@ class AccountRouteResponseTests(unittest.TestCase):
         self.assertEqual(
             [item["target"] for item in response.json()["syncResults"]],
             ["openclaw", "phone"],
+        )
+
+    def test_account_sync_stops_runtime_when_entitlement_is_inactive(self) -> None:
+        app = FastAPI()
+        cleanup_calls: list[str] = []
+        manager = SimpleNamespace(
+            refresh_current=lambda: {"lastSyncResults": []},
+            public_session=lambda: {
+                "loggedIn": True,
+                "account": "user@example.invalid",
+                "accountEntitlement": {
+                    "source": "authorization_required",
+                    "plan": "inactive",
+                    "limits": {"devices": 0, "concurrentTasks": 0},
+                },
+            },
+        )
+
+        def cleanup(_identity) -> dict:
+            cleanup_calls.append("cleanup")
+            return {
+                "ok": True,
+                "performed": True,
+                "executionMayContinue": False,
+                "cancelledJobIds": ["job-publish"],
+            }
+
+        register_account_routes(
+            app,
+            _ctx(manager, account_logout_cleanup=cleanup),
+        )
+        response = TestClient(app).post("/api/account/sync")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(cleanup_calls, ["cleanup"])
+        self.assertEqual(
+            response.json()["cleanup"]["cancelledJobIds"],
+            ["job-publish"],
         )
 
     def test_email_code_send_route_uses_bridge_manager_and_hides_sensitive_fields(self) -> None:
@@ -470,8 +876,9 @@ class AccountRouteResponseTests(unittest.TestCase):
     def test_logout_route_clears_public_account_state(self) -> None:
         app = FastAPI()
         calls: list[str] = []
+        state = {"loggedIn": True}
 
-        def cleanup() -> dict:
+        def cleanup(_identity) -> dict:
             calls.append("cleanup")
             return {
                 "ok": True,
@@ -481,12 +888,14 @@ class AccountRouteResponseTests(unittest.TestCase):
 
         def logout() -> bool:
             calls.append("logout")
+            state["loggedIn"] = False
             return True
 
         manager = SimpleNamespace(
             logout=logout,
             public_session=lambda: {
-                "loggedIn": False,
+                "loggedIn": state["loggedIn"],
+                "accountEntitlement": {"accountId": "account-old"},
                 "models": {"text": [], "image": [], "video": []},
             },
         )
@@ -503,18 +912,19 @@ class AccountRouteResponseTests(unittest.TestCase):
         self.assertTrue(payload["cleanup"]["ok"])
         self.assertFalse(payload["cleanup"]["executionMayContinue"])
 
-    def test_logout_route_still_removes_credentials_when_cleanup_is_incomplete(self) -> None:
+    def test_logout_route_keeps_credentials_when_cleanup_is_incomplete(self) -> None:
         app = FastAPI()
         logs: list[str] = []
+        logout_calls: list[str] = []
         manager = SimpleNamespace(
-            logout=lambda: True,
+            logout=lambda: logout_calls.append("logout") or True,
             public_session=lambda: {
-                "loggedIn": False,
+                "loggedIn": True,
                 "models": {"text": [], "image": [], "video": []},
             },
         )
 
-        def cleanup() -> dict:
+        def cleanup(_identity) -> dict:
             raise RuntimeError("daemon stop failed apiKey=do-not-leak")
 
         ctx = _ctx(manager, account_logout_cleanup=cleanup)
@@ -524,9 +934,11 @@ class AccountRouteResponseTests(unittest.TestCase):
 
         response = client.post("/api/account/logout")
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 409)
         payload = response.json()
-        self.assertTrue(payload["loggedOut"])
+        self.assertFalse(payload["loggedOut"])
+        self.assertTrue(payload["account"]["loggedIn"])
+        self.assertEqual(logout_calls, [])
         self.assertFalse(payload["cleanup"]["ok"])
         self.assertTrue(payload["cleanup"]["executionMayContinue"])
         self.assertNotIn("do-not-leak", repr(payload))
@@ -553,6 +965,7 @@ def _ctx(manager, *, account_logout_cleanup=None):
         get_newapi_account_mgr=lambda: manager,
         append_log=lambda _text: None,
         account_logout_cleanup=account_logout_cleanup,
+        paths=SimpleNamespace(base_path="test-install"),
     )
 
 

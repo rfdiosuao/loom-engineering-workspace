@@ -267,14 +267,42 @@ class CreativeMediaUiContractTests(unittest.TestCase):
 
 
 class CreativeMediaBackendContractTests(unittest.TestCase):
-    def test_image_gateway_524_is_reported_as_retryable_upstream_timeout(self) -> None:
+    def test_image_gateway_524_is_reported_as_indeterminate_without_direct_retry(self) -> None:
         from api.routes_media import _image_generation_failure
+        from services.image_api import ImageApiError
 
-        failure = _image_generation_failure(RuntimeError("HTTP 524"))
+        failure = _image_generation_failure(ImageApiError(
+            "HTTP 524",
+            status_code=524,
+            phase="submit",
+            outcome_indeterminate=True,
+        ))
 
         self.assertEqual(failure["errorCode"], "image_provider_gateway_timeout")
-        self.assertTrue(failure["retryable"])
+        self.assertFalse(failure["retryable"])
+        self.assertTrue(failure["outcomeIndeterminate"])
+        self.assertFalse(failure["regenerationAllowed"])
         self.assertIn("素材库", failure["error"])
+
+    def test_video_poll_failure_preserves_remote_task_and_blocks_resubmission(self) -> None:
+        from api.routes_media import _video_generation_failure
+        from services.video_api import VideoApiError
+
+        failure = _video_generation_failure(VideoApiError(
+            "HTTP 503: busy",
+            status_code=503,
+            phase="poll",
+            task_id="task-remote-1",
+            request_key="request-1",
+            outcome_indeterminate=True,
+        ))
+
+        self.assertEqual(failure["errorCode"], "video_task_outcome_uncertain")
+        self.assertEqual(failure["taskId"], "task-remote-1")
+        self.assertEqual(failure["requestKey"], "request-1")
+        self.assertTrue(failure["outcomeIndeterminate"])
+        self.assertFalse(failure["retryable"])
+        self.assertFalse(failure["regenerationAllowed"])
 
     def test_empty_image_config_exposes_gpt_image_2_as_the_real_default(self) -> None:
         routes_media = importlib.import_module("api.routes_media")

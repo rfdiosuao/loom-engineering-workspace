@@ -222,6 +222,7 @@ _RELAY_FUNCTION_NAMES = (
     "publish_relay_enqueue",
     "publish_relay_claim",
     "publish_relay_wait_for_packet",
+    "publish_relay_authorize_commit",
     "publish_relay_complete",
     "publish_relay_status",
     "publish_relay_stats",
@@ -324,6 +325,7 @@ class FacadeBindings:
     migrate_legacy_account_entitlement: Callable[..., Any]
     publish_relay_enqueue: Callable[..., Any]
     publish_relay_claim: Callable[..., Any]
+    publish_relay_authorize_commit: Callable[..., Any]
     publish_relay_complete: Callable[..., Any]
     publish_relay_status: Callable[..., Any]
     serve: Callable[..., Any]
@@ -442,6 +444,7 @@ def bind_facade(target: ModuleType) -> FacadeBindings:
         migrate_legacy_account_entitlement=namespace["migrate_legacy_account_entitlement"],
         publish_relay_enqueue=namespace["publish_relay_enqueue"],
         publish_relay_claim=namespace["publish_relay_claim"],
+        publish_relay_authorize_commit=namespace["publish_relay_authorize_commit"],
         publish_relay_complete=namespace["publish_relay_complete"],
         publish_relay_status=namespace["publish_relay_status"],
         serve=cli.serve,

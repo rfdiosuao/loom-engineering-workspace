@@ -131,13 +131,21 @@ object AgentApiController {
      * - read_only: 严格只读模式，禁止 Agent 执行点击/输入/滑动/打开应用等动作（默认 false）
      * - tool_policy: observe_only / safe_action / full_access（默认 full_access；read_only=true 时强制 observe_only）
      */
-    fun handleExecuteTask(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
-        return handleExecuteTaskInternal(session, preclaimedTaskSlot = false)
+    fun handleExecuteTask(
+        session: NanoHTTPD.IHTTPSession,
+        beforeToolDispatch: (String, Map<String, Any>) -> String? = { _, _ -> null },
+    ): NanoHTTPD.Response {
+        return handleExecuteTaskInternal(
+            session,
+            preclaimedTaskSlot = false,
+            beforeToolDispatch = beforeToolDispatch,
+        )
     }
 
     private fun handleExecuteTaskInternal(
         session: NanoHTTPD.IHTTPSession,
-        preclaimedTaskSlot: Boolean
+        preclaimedTaskSlot: Boolean,
+        beforeToolDispatch: (String, Map<String, Any>) -> String? = { _, _ -> null },
     ): NanoHTTPD.Response {
         val authError = checkAuth(session)
         if (authError != null) {
@@ -584,10 +592,16 @@ object AgentApiController {
                 toolPolicy = toolPolicy,
                 maxRounds = taskMaxRounds,
                 allowReplayFailedStep = false,
-                oldPostconditionAbsent = { false }
+                oldPostconditionAbsent = { false },
+                beforeToolDispatch = beforeToolDispatch,
             )
         } else {
-            AgentRunOptions(readOnly = effectiveReadOnly, toolPolicy = toolPolicy, maxRounds = taskMaxRounds)
+            AgentRunOptions(
+                readOnly = effectiveReadOnly,
+                toolPolicy = toolPolicy,
+                maxRounds = taskMaxRounds,
+                beforeToolDispatch = beforeToolDispatch,
+            )
         })
 
         // 等待任务完成；Lumi 可按任务传入 timeout_sec，避免复杂任务被短超时窗口截断。

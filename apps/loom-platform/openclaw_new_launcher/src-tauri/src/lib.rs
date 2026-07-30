@@ -175,7 +175,14 @@ fn kill_process_tree(pid: u32) {
         let mut command = Command::new("taskkill");
         command.args(["/F", "/T", "/PID", &pid.to_string()]);
         command.creation_flags(CREATE_NO_WINDOW);
-        let _ = command.output();
+        // Never wait for taskkill here. During an update this function runs on
+        // the old process' exit path; a blocked taskkill must not prevent the
+        // detached installer from observing that its parent has exited.
+        let _ = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
 
     #[cfg(not(windows))]
@@ -183,6 +190,17 @@ fn kill_process_tree(pid: u32) {
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output();
+    }
+}
+
+fn update_test_mode_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var("LOOM_UPDATE_TEST_MODE").ok().as_deref() == Some("1")
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
     }
 }
 
@@ -202,7 +220,7 @@ async fn post_bridge_shutdown(path: &str) {
 
     let url = format!("http://127.0.0.1:{}/{}", port, path.trim_start_matches('/'));
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(4))
         .build()
     {
         Ok(client) => client,
@@ -217,9 +235,17 @@ async fn post_bridge_shutdown(path: &str) {
 }
 
 async fn shutdown_backend() {
-    post_bridge_shutdown("/api/agent/shutdown").await;
-    post_bridge_shutdown("/api/process/stop").await;
-    post_bridge_shutdown("/api/desktop-agent/stop").await;
+    let agent_shutdown =
+        tauri::async_runtime::spawn(post_bridge_shutdown("/api/agent/shutdown"));
+    let process_shutdown =
+        tauri::async_runtime::spawn(post_bridge_shutdown("/api/process/stop"));
+    let desktop_shutdown =
+        tauri::async_runtime::spawn(post_bridge_shutdown("/api/desktop-agent/stop"));
+    let _ = (
+        agent_shutdown.await,
+        process_shutdown.await,
+        desktop_shutdown.await,
+    );
     terminate_bridge_process_tree();
 }
 
@@ -1298,7 +1324,9 @@ async fn prepare_update_install(
         command.arg("-Version").arg(&target_version);
         command.arg("-BrandId").arg(BRAND_ID);
         command.arg("-BrandDisplayName").arg(BRAND_DISPLAY_NAME);
-        let test_mode = std::env::var("LOOM_UPDATE_TEST_MODE").ok().as_deref() == Some("1");
+        // Test mode is a debug-build contract only. A machine-level environment
+        // variable must never disable shutdown in a production updater.
+        let test_mode = update_test_mode_enabled();
         if test_mode {
             command.arg("-TestMode");
         }
@@ -1343,12 +1371,18 @@ async fn prepare_update_install(
             handoff_guard.reset_on_drop = false;
             std::mem::forget(system_mutex);
 
-            // Exit only after the Bridge has drained Agent work and released
-            // packaged runtimes, so the detached installer can replace them.
+            // Drain the Bridge first, while an independent deadline guarantees
+            // the detached installer gets enough of its parent-wait window.
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 shutdown_backend().await;
                 app_handle.exit(0);
+            });
+            let forced_exit_app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(6));
+                terminate_bridge_process_tree();
+                forced_exit_app.exit(0);
             });
         }
         Ok(recovery_root.to_string_lossy().to_string())

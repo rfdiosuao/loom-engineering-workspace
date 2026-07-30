@@ -1182,7 +1182,6 @@ class ComponentInstaller:
             cached_entry = self._cached_existing_external_entry(component)
             if cached_entry is not None or cache_key in _EXTERNAL_ENTRY_CACHE:
                 return cached_entry
-        deferred_extensionless: list[str] = []
         for candidate in self._external_entry_candidates(component):
             if not os.path.isfile(candidate):
                 continue
@@ -1192,14 +1191,13 @@ class ComponentInstaller:
                     if os.path.isfile(sibling):
                         _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), sibling)
                         return sibling
-                deferred_extensionless.append(candidate)
+                # npm also creates a POSIX shell shim without an extension.
+                # Windows cannot launch that file and may display the legacy
+                # "unsupported 16-bit application" dialog. Never treat it as a
+                # fallback when no Windows sibling exists.
                 continue
             _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), candidate)
             return candidate
-        if deferred_extensionless:
-            entry_path = deferred_extensionless[0]
-            _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), entry_path)
-            return entry_path
         _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), None)
         return None
 

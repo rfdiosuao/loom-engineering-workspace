@@ -13,7 +13,8 @@ export interface License {
   features: string[];
   installId: string;
   deviceId?: string;
-  deviceLimit?: number;
+  deviceLimit?: number | null;
+  unlimitedDevices?: boolean;
   signature: string;
   status?: string;
   code?: string;

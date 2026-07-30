@@ -4,11 +4,18 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  hasLauncherPhoneRuntimeConfig,
   readLauncherPhoneConfigByDevice,
+  readLauncherPhoneStore,
+  resolveLauncherPhoneConnection,
   signedJsonRequest,
   uploadImageBuffer,
   uploadVideoBuffer,
 } from './openclaw-phone-secure.mjs';
+import {
+  cancelAndConfirmPhoneTask,
+  cancellationRequested,
+} from './lib/phone-command-core.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,7 +63,6 @@ LOOM platform publish CLI
 Usage:
   npm run phone:publish -- --platform xiaohongshu --title "..." --body "..." --image ./a.png --video ./b.mp4
   npm run phone:publish -- --transport reverse --platform douyin --packet-out .\\publish-packet.json
-  npm run phone:publish -- --transport reverse --platform douyin --relay-url https://relay.example.com/api/lumi/publish/packet --relay-token ... --channel-id publish-channel-01 --wait-relay
 
 Options:
   --platform <x|xiaohongshu|douyin|wechat|custom>  Default: xiaohongshu
@@ -66,16 +72,14 @@ Options:
   --hashtags <tag1,tag2>                          Comma, space or newline separated hashtags
   --notes <text>                                  Extra operator notes for the Agent prompt
   --album <name>                                  Default phone album. Default: LOOM Publish
-  --relay-url <url>                               Optional reverse relay / phone publish endpoint
-  --relay-token <token>                           Optional reverse relay auth token. Env: OPENCLAW_PUBLISH_RELAY_TOKEN
-  --channel-id <id>                               Optional reverse publish channel
+  --relay-url <url>                               Reserved; reverse relay endpoint must come from signed LOOM runtime
+  --relay-token <token>                           Reserved; reverse relay token must come from signed LOOM runtime
+  --channel-id <id>                               Reserved; reverse channel must come from signed LOOM runtime
   --channel <id>                                  Alias for --channel-id
   --wait-relay                                    Wait for relay packet status done/failed in reverse mode
   --relay-wait-sec <n>                            Relay wait window. Default: ${DEFAULT_RELAY_WAIT_SEC}
   --relay-poll-ms <n>                             Relay status poll interval. Default: ${DEFAULT_RELAY_POLL_MS}
   --device-id <id>                                Optional launcher device id
-  --phone-url <url>                               Optional phone Agent base URL
-  --phone-token <token>                           Optional phone Agent token
   --image <path>                                  Repeatable image file path
   --video <path>                                  Repeatable video file path
   --file <path>                                   Repeatable generic media file path
@@ -84,6 +88,7 @@ Options:
   --max-wait-sec <n>                              CLI wait window for direct mode. Default: 615
   --max-rounds <n>                                APKClaw Agent round budget. Default: ${DEFAULT_MAX_ROUNDS}
   --poll-ms <n>                                   Poll interval. Default: 1800
+  --cancel-file <path>                            Internal cooperative cancellation signal used by LOOM
   --draft-only                                    Save a draft and never tap final publish. Default.
   --commit                                        Allow the final publish tap after external approval.
   --json                                          Print machine-readable JSON
@@ -100,6 +105,7 @@ function parseArgs(argv) {
     hashtags: '',
     notes: '',
     album: DEFAULT_ALBUM,
+    albumProvided: false,
     deviceId: '',
     phoneUrl: '',
     phoneToken: '',
@@ -117,6 +123,7 @@ function parseArgs(argv) {
     maxWaitSec: DEFAULT_MAX_WAIT_SEC,
     maxRounds: DEFAULT_MAX_ROUNDS,
     pollMs: DEFAULT_POLL_MS,
+    cancelFile: '',
     draftOnly: true,
     json: false,
     help: false,
@@ -161,6 +168,7 @@ function parseArgs(argv) {
         break;
       case '--album':
         args.album = next();
+        args.albumProvided = true;
         break;
       case '--device-id':
         args.deviceId = next();
@@ -213,6 +221,9 @@ function parseArgs(argv) {
         break;
       case '--poll-ms':
         args.pollMs = nextInt();
+        break;
+      case '--cancel-file':
+        args.cancelFile = next();
         break;
       case '--draft-only':
         args.draftOnly = true;
@@ -308,18 +319,159 @@ async function readRuntimeContext() {
 }
 
 async function resolveConfig(args) {
-  const runtime = await readRuntimeContext();
+  const bridgeRuntime = hasLauncherPhoneRuntimeConfig();
+  const runtime = bridgeRuntime ? {} : await readRuntimeContext();
   const launcherPhone = await readLauncherPhoneConfigByDevice(args.deviceId);
+  const reverseRuntime = args.transport === 'reverse'
+    ? resolveTrustedReverseRuntime(args, await readLauncherPhoneStore())
+    : null;
   return {
     ...args,
-    phoneUrl: firstNonEmpty(args.phoneUrl, process.env.OPENCLAW_PHONE_BASE_URL, process.env.APKCLAW_BASE_URL, runtime?.phone?.baseUrl, launcherPhone.phoneUrl),
-    phoneToken: firstNonEmpty(args.phoneToken, process.env.OPENCLAW_PHONE_TOKEN, process.env.APKCLAW_TOKEN, launcherPhone.phoneToken),
-    deviceId: args.deviceId || launcherPhone.id || runtime?.phone?.defaultDeviceId || '',
-    album: firstNonEmpty(args.album, launcherPhone.album, DEFAULT_ALBUM),
-    relayUrl: args.relayUrl.trim(),
-    relayToken: firstNonEmpty(args.relayToken, process.env.OPENCLAW_PUBLISH_RELAY_TOKEN),
-    channelId: args.channelId.trim(),
+    ...resolveLauncherPhoneConnection(args, launcherPhone, runtime, { includeStandalonePairing: false }),
+    album: bridgeRuntime
+      ? firstNonEmpty(args.albumProvided ? args.album : '', launcherPhone.album, DEFAULT_ALBUM)
+      : firstNonEmpty(args.album, launcherPhone.album, DEFAULT_ALBUM),
+    relayUrl: reverseRuntime?.relayUrl || '',
+    relayToken: '',
+    channelId: reverseRuntime?.channelId || '',
+    reverseAuthorization: reverseRuntime?.authorization || null,
   };
+}
+
+function resolveTrustedReverseRuntime(args, verifiedRuntime) {
+  if (!verifiedRuntime?.entitlementLease || !verifiedRuntime?.accountId) {
+    throw new Error(
+      'reverse_runtime_entitlement_required: reverse transport requires a service-signed LOOM account entitlement.',
+    );
+  }
+  if (verifiedRuntime.entitlementLease?.limits?.unlimitedDevices !== true) {
+    throw new Error(
+      'reverse_runtime_unlimited_devices_required: the current signed entitlement does not grant activated unlimited-device access.',
+    );
+  }
+  if (
+    String(args.relayUrl || '').trim()
+    || String(args.relayToken || '').trim()
+    || String(args.channelId || '').trim()
+  ) {
+    throw new Error(
+      'reverse_runtime_override_forbidden: relay URL, token, and channel must come from the verified LOOM runtime.',
+    );
+  }
+  const envelope = parseLauncherRuntimeEnvelope();
+  const reversePublish = envelope.reversePublish;
+  if (
+    reversePublish !== undefined
+    && (
+      !reversePublish
+      || typeof reversePublish !== 'object'
+      || Array.isArray(reversePublish)
+    )
+  ) {
+    throw new Error(
+      'reverse_runtime_config_malformed: signed LOOM runtime reversePublish configuration is invalid.',
+    );
+  }
+  const relayUrl = trustedRuntimeString(reversePublish?.relayUrl, 'relayUrl');
+  const channelId = trustedRuntimeString(reversePublish?.channelId, 'channelId');
+  if (relayUrl) {
+    let parsedRelayUrl;
+    try {
+      parsedRelayUrl = new URL(relayUrl);
+    } catch {
+      throw new Error('reverse_runtime_config_malformed: trusted relayUrl is not a valid URL.');
+    }
+    if (!['http:', 'https:'].includes(parsedRelayUrl.protocol)) {
+      throw new Error(
+        'reverse_runtime_config_malformed: trusted relayUrl must use HTTP or HTTPS.',
+      );
+    }
+    if (!channelId) {
+      throw new Error(
+        'reverse_runtime_config_incomplete: trusted relayUrl requires a runtime channelId.',
+      );
+    }
+  } else if (channelId) {
+    throw new Error(
+      'reverse_runtime_config_incomplete: trusted channelId requires a runtime relayUrl.',
+    );
+  }
+
+  return {
+    relayUrl,
+    relayToken: '',
+    channelId,
+    authorization: reverseAuthorizationFromRuntime(verifiedRuntime),
+  };
+}
+
+function parseLauncherRuntimeEnvelope() {
+  try {
+    const parsed = JSON.parse(String(process.env.LOOM_PHONE_RUNTIME_CONFIG_JSON || ''));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid');
+    return parsed;
+  } catch {
+    throw new Error(
+      'reverse_runtime_config_malformed: verified LOOM runtime envelope is unavailable.',
+    );
+  }
+}
+
+function trustedRuntimeString(value, field) {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') {
+    throw new Error(`reverse_runtime_config_malformed: trusted ${field} must be a string.`);
+  }
+  return value.trim();
+}
+
+function reverseAuthorizationFromRuntime(runtime) {
+  const entitlementLease = runtime.entitlementLease;
+  const selectedDeviceId = trustedRuntimeString(runtime.selectedDeviceId, 'selectedDeviceId');
+  const selectedDevice = Array.isArray(runtime.devices)
+    ? runtime.devices.find((device) => device?.id === selectedDeviceId)
+    : null;
+  const selectedDeviceInstanceId = trustedRuntimeString(
+    selectedDevice?.deviceInstanceId,
+    'selected deviceInstanceId',
+  );
+  if (!selectedDeviceId || !selectedDevice || !selectedDeviceInstanceId) {
+    throw new Error(
+      'reverse_runtime_device_identity_missing: selected phone installation identity is unavailable.',
+    );
+  }
+  return {
+    schema: 'loom.phone.publish.authorization.v1',
+    accountId: runtime.accountId,
+    entitlementVersion: entitlementLease.entitlementVersion,
+    runtimeConfigDigest: runtime.configDigest,
+    selectedDeviceId,
+    selectedDeviceInstanceId,
+    authorizedDeviceIds: Array.isArray(runtime.devices)
+      ? runtime.devices.map((device) => device.id)
+      : [],
+    entitlementLease,
+    phoneSeatLease: runtime.phoneSeatLease || null,
+  };
+}
+
+async function revalidateReverseAuthorization(expected) {
+  const currentRuntime = await readLauncherPhoneStore();
+  const current = reverseAuthorizationFromRuntime(currentRuntime);
+  if (
+    currentRuntime.entitlementLease?.limits?.unlimitedDevices !== true
+    || current.accountId !== expected?.accountId
+    || current.entitlementVersion !== expected?.entitlementVersion
+    || current.runtimeConfigDigest !== expected?.runtimeConfigDigest
+    || current.selectedDeviceId !== expected?.selectedDeviceId
+    || current.selectedDeviceInstanceId !== expected?.selectedDeviceInstanceId
+    || current.entitlementLease?.signature !== expected?.entitlementLease?.signature
+  ) {
+    throw new Error(
+      'reverse_runtime_authorization_changed: account entitlement changed or was revoked before relay execution.',
+    );
+  }
+  return current;
 }
 
 async function readMediaEntries(args) {
@@ -375,7 +527,7 @@ function buildPrompt(config, uploadedMediaRefs = []) {
     '- 发布前检查预览、可见性、@、定位、草稿状态和平台提示。',
     config.draftOnly
       ? '- 只保存草稿：绝对不要点击最终发布或提交按钮；退出编辑页时选择保存草稿，并再次进入草稿箱确认该草稿存在。'
-      : '- 已获得本次操作的单次确认；内容正确且平台提示正常时，允许点击最终发布按钮。',
+      : '- 已获得本次操作的单次确认；点击最终发布按钮前必须再次确认任务未收到取消请求。只要收到取消请求或无法确认授权仍然有效，绝对不要点击最终发布按钮，停留在编辑页或保存为草稿。',
     '- 完成后返回当前页面、是否提交成功、草稿状态和失败原因。',
   ].filter(Boolean).join('\n');
 }
@@ -393,9 +545,16 @@ function buildReversePacket(config, mediaRefs = []) {
     hashtags: splitHashtags(config.hashtags),
     notes: config.notes.trim(),
     transport: config.transport,
+    draftOnly: config.draftOnly,
     relayUrl: config.relayUrl.trim(),
     channelId: config.channelId.trim(),
     album: config.album || DEFAULT_ALBUM,
+    authorization: config.reverseAuthorization,
+    executionPolicy: {
+      requireSignedEntitlementAtDequeue: true,
+      requireSignedEntitlementBeforeCommit: true,
+      denyCommitOnRevocation: true,
+    },
     media: mediaRefs.map((item) => ({
       kind: item.kind,
       name: item.name,
@@ -440,7 +599,19 @@ async function waitForTask(config, taskId) {
   const maxWaitMs = Math.max(30, config.maxWaitSec) * 1000;
   let lastStatus = null;
   while (Date.now() - startedAt < maxWaitMs) {
+    if (await cancellationRequested(config.cancelFile)) {
+      return cancelAndConfirmPhoneTask(config, taskId, {
+        pollMs: config.pollMs,
+        commitSensitive: !config.draftOnly,
+      });
+    }
     await new Promise((resolve) => setTimeout(resolve, Math.max(500, config.pollMs)));
+    if (await cancellationRequested(config.cancelFile)) {
+      return cancelAndConfirmPhoneTask(config, taskId, {
+        pollMs: config.pollMs,
+        commitSensitive: !config.draftOnly,
+      });
+    }
     const payload = await getTask(config, taskId);
     const data = payload?.data || payload;
     lastStatus = data;
@@ -460,13 +631,26 @@ async function writePacketIfRequested(packet, targetPath) {
   await fs.writeFile(targetPath, `${JSON.stringify(packet, null, 2)}\n`, 'utf8');
 }
 
-function relayAuthHeaders(relayToken, headers = {}) {
-  if (!relayToken) return headers;
-  return {
+function relayAuthHeaders(_relayToken, authorization, headers = {}) {
+  const nextHeaders = {
     ...headers,
-    Authorization: `Bearer ${relayToken}`,
-    'X-OpenClaw-Relay-Token': relayToken,
   };
+  const producerToken = String(
+    process.env.LOOM_PHONE_RELAY_PRODUCER_TOKEN || '',
+  ).trim();
+  if (producerToken) {
+    nextHeaders.Authorization = `Bearer ${producerToken}`;
+  }
+  if (authorization?.accountId) {
+    nextHeaders['X-LOOM-Account-ID'] = String(authorization.accountId);
+  }
+  if (authorization?.entitlementVersion) {
+    nextHeaders['X-LOOM-Entitlement-Version'] = String(authorization.entitlementVersion);
+  }
+  if (authorization?.runtimeConfigDigest) {
+    nextHeaders['X-LOOM-Runtime-Config-Digest'] = String(authorization.runtimeConfigDigest);
+  }
+  return nextHeaders;
 }
 
 async function readJsonResponse(response) {
@@ -479,12 +663,12 @@ async function readJsonResponse(response) {
   }
 }
 
-async function postPacketToRelay(relayUrl, packet, relayToken) {
+async function postPacketToRelay(relayUrl, packet, relayToken, authorization) {
   if (!relayUrl) return { response: null, body: null };
   const headers = { 'Content-Type': 'application/json' };
   const response = await fetch(relayUrl, {
     method: 'POST',
-    headers: relayAuthHeaders(relayToken, headers),
+    headers: relayAuthHeaders(relayToken, authorization, headers),
     body: JSON.stringify(packet),
   });
   const body = await readJsonResponse(response);
@@ -513,9 +697,9 @@ function relayStatusUrl(relayUrl, relayPayload) {
   return url.toString();
 }
 
-async function getRelayStatus(statusUrl, relayToken) {
+async function getRelayStatus(statusUrl, relayToken, authorization) {
   const response = await fetch(statusUrl, {
-    headers: relayAuthHeaders(relayToken, { Accept: 'application/json' }),
+    headers: relayAuthHeaders(relayToken, authorization, { Accept: 'application/json' }),
   });
   const body = await readJsonResponse(response);
   if (!response.ok) {
@@ -525,13 +709,21 @@ async function getRelayStatus(statusUrl, relayToken) {
   return body;
 }
 
-async function waitForRelayCompletion(relayUrl, relayPayload, relayToken, waitSec, pollMs) {
+async function waitForRelayCompletion(
+  relayUrl,
+  relayPayload,
+  relayToken,
+  authorization,
+  waitSec,
+  pollMs,
+) {
   const statusUrl = relayStatusUrl(relayUrl, relayPayload);
   const deadline = Date.now() + waitSec * 1000;
   let lastRecord = null;
 
   while (Date.now() <= deadline) {
-    const payload = await getRelayStatus(statusUrl, relayToken);
+    await revalidateReverseAuthorization(authorization);
+    const payload = await getRelayStatus(statusUrl, relayToken, authorization);
     const record = relayRecordData(payload);
     lastRecord = record;
     if (record?.status === 'done') {
@@ -554,9 +746,15 @@ async function main() {
   }
 
   const resolved = await resolveConfig(args);
+  if (!resolved.draftOnly && resolved.transport !== 'reverse') {
+    throw new Error(
+      'formal_publish_trusted_relay_required: 正式发布必须使用 LOOM 签名反向中继，直连模式仅允许保存草稿。',
+    );
+  }
   const mediaEntries = await readMediaEntries(resolved);
 
   if (resolved.transport === 'reverse') {
+    await revalidateReverseAuthorization(resolved.reverseAuthorization);
     const packet = buildReversePacket(resolved, mediaEntries.map((item) => ({
       kind: item.kind,
       name: item.name,
@@ -568,12 +766,19 @@ async function main() {
     let relayResult = null;
     let relayCompletion = null;
     if (resolved.relayUrl) {
-      relayResult = await postPacketToRelay(resolved.relayUrl, packet, resolved.relayToken);
+      await revalidateReverseAuthorization(resolved.reverseAuthorization);
+      relayResult = await postPacketToRelay(
+        resolved.relayUrl,
+        packet,
+        resolved.relayToken,
+        resolved.reverseAuthorization,
+      );
       if (resolved.waitRelay) {
         relayCompletion = await waitForRelayCompletion(
           resolved.relayUrl,
           relayResult.body,
           resolved.relayToken,
+          resolved.reverseAuthorization,
           resolved.relayWaitSec,
           resolved.relayPollMs,
         );
@@ -609,17 +814,21 @@ async function main() {
   }
 
   if (!resolved.phoneUrl || !resolved.phoneToken) {
-    throw new Error('Missing phone URL or token. Configure the launcher Phone Control page first, or use --phone-url / --phone-token.');
+    throw new Error('Missing phone URL or token. Complete pairing in the LOOM Phone Connection page first.');
   }
 
   const uploadedMediaRefs = [];
   for (const entry of mediaEntries) {
+    if (await cancellationRequested(resolved.cancelFile)) {
+      throw new Error('publish_cancelled');
+    }
     const fileConfig = {
       phoneUrl: resolved.phoneUrl,
       phoneToken: resolved.phoneToken,
       album: resolved.album || DEFAULT_ALBUM,
-      lumiLauncherId: '',
-      lumiLauncherSecret: '',
+      lumiLauncherId: resolved.lumiLauncherId,
+      lumiLauncherSecret: resolved.lumiLauncherSecret,
+      source: resolved.source,
     };
     const upload = entry.kind === 'video'
       ? await uploadVideoBuffer(fileConfig, entry.bytes, entry.name, entry.mime)
@@ -636,6 +845,9 @@ async function main() {
     });
   }
 
+  if (await cancellationRequested(resolved.cancelFile)) {
+    throw new Error('publish_cancelled');
+  }
   const prompt = buildPrompt(resolved, uploadedMediaRefs);
   const { taskId } = await submitTask(resolved, prompt);
   const result = await waitForTask(resolved, taskId);
@@ -644,16 +856,26 @@ async function main() {
   const taskError = task?.result?.error || task?.error || '';
   const semanticError = publishBusinessFailure(answer);
   const error = taskError || semanticError;
+  const status = semanticError ? 'error' : (task.status || 'unknown');
   const output = {
-    success: task.status === 'success' && !error,
+    success: status === 'success' && !error && task.executionMayContinue !== true,
     taskId,
-    status: semanticError ? 'error' : (task.status || 'unknown'),
+    status,
     platform: resolved.platform,
     transport: resolved.transport,
     draftOnly: resolved.draftOnly,
     answer,
     error,
-    errorCode: semanticError ? 'phone_publish_semantic_failure' : '',
+    errorCode: semanticError
+      ? 'phone_publish_semantic_failure'
+      : (task?.result?.errorCode || task?.errorCode || ''),
+    cancelled: task.cancelled === true || status === 'cancelled',
+    executionMayContinue: task.executionMayContinue === true,
+    outcomeIndeterminate: task.outcomeIndeterminate === true,
+    operationMayHaveCompleted: task.operationMayHaveCompleted === true,
+    commitMayHaveOccurred: task.commitMayHaveOccurred === true,
+    cancellationError: task.cancellationError || '',
+    remoteStatus: task.remoteStatus || '',
     uploadedMediaRefs,
   };
   if (resolved.json) {

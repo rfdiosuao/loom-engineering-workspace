@@ -7,10 +7,9 @@ from collections.abc import Callable
 from datetime import date
 from typing import Any
 
-from .. import audit, signing
+from .. import audit
 from ..config import Settings
 from ..errors import ActivationError
-from ..serialization import canonical
 from ..timeutils import utc_now
 
 
@@ -347,90 +346,12 @@ def migrate_legacy_account_entitlement(
     settings: Settings | None = None,
     utc_now_fn: Callable[[], str] = utc_now,
 ) -> dict[str, Any]:
-    if not isinstance(body, dict):
-        raise ActivationError(
-            "Invalid JSON body",
-            400,
-            "ACCOUNT_REDEEM_INVALID_REQUEST",
-        )
-    account_id = normalize_account_id(body.get("accountId"))
-    legacy_license = body.get("legacyLicense")
-    if not isinstance(legacy_license, dict):
-        raise ActivationError(
-            "Missing legacy license proof",
-            400,
-            "LEGACY_LICENSE_PROOF_INVALID",
-        )
-    try:
-        proof_bytes = canonical(legacy_license)
-    except (TypeError, ValueError) as error:
-        raise ActivationError(
-            "Legacy license proof is invalid",
-            400,
-            "LEGACY_LICENSE_PROOF_INVALID",
-        ) from error
-    if len(proof_bytes) > 131_072:
-        raise ActivationError(
-            "Legacy license proof is too large",
-            413,
-            "LEGACY_LICENSE_PROOF_INVALID",
-        )
-    required = ("licenseId", "installId", "deviceId", "expires", "signature")
-    if (
-        str(legacy_license.get("schema") or "") != "loom.license.v1"
-        or any(not str(legacy_license.get(field) or "").strip() for field in required)
-        or not signing.verify_license(
-            legacy_license,
-            private_key_file=(settings or Settings.from_env()).private_key_file,
-        )
-    ):
-        raise ActivationError(
-            "Legacy license proof signature is invalid",
-            403,
-            "LEGACY_LICENSE_PROOF_INVALID",
-        )
-
-    install_id = str(legacy_license["installId"]).strip()
-    device_id = str(legacy_license["deviceId"]).strip()
-    with connect_fn() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        rows = connection.execute(
-            """
-            select a.code_hash, a.license_json,
-                   c.code_hash as current_code_hash, c.code_label, c.edition,
-                   c.features_json, c.expires, c.max_activations, c.disabled,
-                   c.plan, c.quotas_json
-            from activations a
-            join codes c on c.code_hash = a.code_hash
-            where a.install_id = ? and a.device_id = ?
-            """,
-            (install_id, device_id),
-        ).fetchall()
-        code_row = None
-        for row in rows:
-            try:
-                stored_license = json.loads(str(row["license_json"] or "{}"))
-            except json.JSONDecodeError:
-                continue
-            if isinstance(stored_license, dict) and canonical(stored_license) == proof_bytes:
-                code_row = row
-                break
-        if code_row is None:
-            raise ActivationError(
-                "Legacy license proof does not match an activation record",
-                404,
-                "LEGACY_LICENSE_PROOF_NOT_FOUND",
-            )
-        _validate_code_status(code_row)
-        return _redeem_code_row(
-            connection,
-            code_row=code_row,
-            code_hash=str(code_row["code_hash"]),
-            account_id=account_id,
-            request_ip=request_ip,
-            utc_now_fn=utc_now_fn,
-            audit_action="account_entitlement.migrate_legacy",
-        )
+    del body, connect_fn, request_ip, settings, utc_now_fn
+    raise ActivationError(
+        "Legacy migration is disabled; bind the original authorization code",
+        410,
+        "LEGACY_MIGRATION_DISABLED",
+    )
 
 
 def current_account_entitlement(
