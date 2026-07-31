@@ -88,6 +88,7 @@
     <!-- Settings -->
     <string name="settings_title">Settings</string>
     <string name="settings_group_channel">Channels</string>
+    <string name="settings_group_connection">Connect to LOOM</string>
     <string name="settings_group_model">Model</string>
     <string name="settings_group_display">Display</string>
     <string name="settings_group_publish">Publish</string>
@@ -153,8 +154,9 @@
     <string name="menu_discord">Discord</string>
     <string name="menu_telegram">Telegram</string>
     <string name="menu_wechat">WeChat</string>
-    <string name="menu_lan_config">LAN Config</string>
+    <string name="menu_lan_config">Connection &amp; LAN</string>
     <string name="menu_pc_pairing">Pair with LOOM</string>
+    <string name="menu_connection_diagnostics">Connection diagnostics</string>
     <string name="menu_publish_relay">Publish Relay</string>
     <string name="menu_floating_circle_size">Floating Ball Size</string>
     <string name="menu_floating_click_enabled">Clickable and draggable overlay</string>
@@ -164,12 +166,19 @@
     <string name="floating_size_medium">Medium</string>
     <string name="floating_size_large">Large</string>
     <string name="floating_size_saved">Floating ball size: %s</string>
-    <string name="lan_config_stopped">Off</string>
+    <string name="lan_config_stopped">Service off</string>
     <string name="lan_config_starting">Starting…</string>
     <string name="lan_config_stopping">Stopping…</string>
     <string name="lan_config_error">Service error. Try again.</string>
-    <string name="lan_config_usb_ready">On (USB only)</string>
+    <string name="lan_config_switching">Switching…</string>
+    <string name="lan_config_usb_ready">USB available</string>
+    <string name="lan_config_lan_ready">LAN available: %1$s</string>
+    <string name="lan_config_hotspot_ready">Hotspot available: %1$s</string>
     <string name="lan_config_no_wifi">Please connect to Wi-Fi or enable phone hotspot</string>
+    <string name="connection_diagnostics_title">Connection diagnostics</string>
+    <string name="connection_diagnostics_action">View</string>
+    <string name="connection_diagnostics_no_lan">No LAN candidate; USB forwarding remains independently available</string>
+    <string name="connection_diagnostics_summary">Pairing: %1$s\nService: %2$s\nNetwork mode: %3$s\nCandidates:\n%4$s</string>
 
     <!-- LOOM pairing -->
     <string name="pc_pairing_title">Pair with LOOM</string>

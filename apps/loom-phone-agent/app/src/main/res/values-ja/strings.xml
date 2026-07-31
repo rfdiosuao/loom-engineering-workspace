@@ -72,6 +72,7 @@
     <!-- 設定 -->
     <string name="settings_title">設定</string>
     <string name="settings_group_channel">チャネル</string>
+    <string name="settings_group_connection">LOOM に接続</string>
     <string name="settings_group_model">モデル</string>
     <string name="settings_group_display">表示</string>
 
@@ -136,19 +137,27 @@
     <string name="menu_discord">Discord</string>
     <string name="menu_telegram">Telegram</string>
     <string name="menu_wechat">WeChat</string>
-    <string name="menu_lan_config">LAN設定</string>
+    <string name="menu_lan_config">接続方法と LAN</string>
+    <string name="menu_connection_diagnostics">接続診断</string>
     <string name="menu_floating_circle_size">フローティングボールサイズ</string>
     <string name="menu_floating_click_enabled">フローティングウィンドウのクリックと移動</string>
     <string name="floating_size_small">小</string>
     <string name="floating_size_medium">中</string>
     <string name="floating_size_large">大</string>
     <string name="floating_size_saved">フローティングボールサイズ: %s</string>
-    <string name="lan_config_stopped">オフ</string>
+    <string name="lan_config_stopped">サービス停止</string>
     <string name="lan_config_starting">起動中…</string>
     <string name="lan_config_stopping">停止中…</string>
     <string name="lan_config_error">サービスエラー。再試行してください。</string>
-    <string name="lan_config_usb_ready">オン（USB のみ）</string>
+    <string name="lan_config_switching">切り替え中…</string>
+    <string name="lan_config_usb_ready">USB 利用可能</string>
+    <string name="lan_config_lan_ready">LAN 利用可能: %1$s</string>
+    <string name="lan_config_hotspot_ready">ホットスポット利用可能: %1$s</string>
     <string name="lan_config_no_wifi">Wi-Fiに接続するか、スマートフォンのテザリングを有効にしてください</string>
+    <string name="connection_diagnostics_title">接続診断</string>
+    <string name="connection_diagnostics_action">表示</string>
+    <string name="connection_diagnostics_no_lan">LAN 候補なし。USB 転送は単独で利用できます</string>
+    <string name="connection_diagnostics_summary">ペアリング: %1$s\nサービス: %2$s\nネットワークモード: %3$s\n候補:\n%4$s</string>
 
     <!-- プロトコル -->
     <string name="protocol_agree_title">個人情報保護について</string>

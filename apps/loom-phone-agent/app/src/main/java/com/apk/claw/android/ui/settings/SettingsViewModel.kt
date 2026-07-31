@@ -11,6 +11,7 @@ import com.apk.claw.android.floating.FloatingCircleManager
 import com.apk.claw.android.server.ConfigServerManager
 import com.apk.claw.android.server.ConfigServerLifecyclePhase
 import com.apk.claw.android.server.ConfigServerState
+import com.apk.claw.android.server.PhoneNetworkMode
 import com.apk.claw.android.server.TokenValidator
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
@@ -67,7 +68,7 @@ class SettingsViewModel : ViewModel() {
             MenuAction.WECHAT.name to SettingValue.Text(ClawApplication.instance.getString(if (wechatBotToken) R.string.common_bound else R.string.common_unbound)),
             MenuAction.PC_PAIRING.name to SettingValue.Text(ClawApplication.instance.getString(if (phonePaired) R.string.pc_pairing_status_paired else R.string.pc_pairing_status_unpaired)),
             MenuAction.LAN_CONFIG.name to SettingValue.Text(getLanConfigTrailingText()),
-            MenuAction.PUBLISH_RELAY.name to SettingValue.Text(getPublishRelayTrailingText()),
+            MenuAction.CONNECTION_DIAGNOSTICS.name to SettingValue.Text(ClawApplication.instance.getString(R.string.connection_diagnostics_action)),
             MenuAction.FLOATING_CLICK.name to SettingValue.Switch(FloatingCircleManager.isFloatingClickEnabled()),
             MenuAction.FLOATING_SIZE.name to SettingValue.Text(FloatingCircleManager.getFloatingSizeLabel(ClawApplication.instance))
         )
@@ -226,24 +227,32 @@ class SettingsViewModel : ViewModel() {
     private fun getLanConfigTrailingText(state: ConfigServerState = ConfigServerManager.state.value): String {
         return when (state.phase) {
             ConfigServerLifecyclePhase.STOPPED -> ClawApplication.instance.getString(R.string.lan_config_stopped)
-            ConfigServerLifecyclePhase.STARTING -> ClawApplication.instance.getString(R.string.lan_config_starting)
-            ConfigServerLifecyclePhase.STOPPING -> ClawApplication.instance.getString(R.string.lan_config_stopping)
+            ConfigServerLifecyclePhase.STARTING -> ClawApplication.instance.getString(R.string.lan_config_switching)
+            ConfigServerLifecyclePhase.STOPPING -> ClawApplication.instance.getString(R.string.lan_config_switching)
             ConfigServerLifecyclePhase.ERROR -> ClawApplication.instance.getString(R.string.lan_config_error)
-            ConfigServerLifecyclePhase.READY -> ConfigServerManager.getAddress()
-                ?: ClawApplication.instance.getString(R.string.lan_config_usb_ready)
+            ConfigServerLifecyclePhase.READY -> {
+                val address = ConfigServerManager.getAddress()
+                when {
+                    address.isNullOrBlank() -> ClawApplication.instance.getString(R.string.lan_config_usb_ready)
+                    ConfigServerManager.getNetworkMode(ClawApplication.instance) == PhoneNetworkMode.HOTSPOT_HOST ->
+                        ClawApplication.instance.getString(R.string.lan_config_hotspot_ready, address)
+                    else -> ClawApplication.instance.getString(R.string.lan_config_lan_ready, address)
+                }
+            }
         }
     }
 
-    private fun getPublishRelayTrailingText(): String {
-        val configured = KVUtils.getPublishRelayBaseUrl().isNotBlank() && KVUtils.getPublishRelayChannelId().isNotBlank()
-        if (!configured) return ClawApplication.instance.getString(R.string.common_unconfigured)
-        return ClawApplication.instance.getString(
-            if (KVUtils.isPublishRelayEnabled()) {
-                R.string.publish_relay_status_on
-            } else {
-                R.string.publish_relay_status_off
-            }
+    fun connectionDiagnostics(): String {
+        val app = ClawApplication.instance
+        val pairing = app.getString(
+            if (TokenValidator.isTokenConfigured()) R.string.pc_pairing_status_paired else R.string.pc_pairing_status_unpaired
         )
+        val state = getLanConfigTrailingText()
+        val mode = ConfigServerManager.getNetworkMode(app).wireName
+        val candidates = ConfigServerManager.getNetworkCandidates(app)
+            .joinToString(separator = "\n") { "${it.mode.wireName}  ${it.address}" }
+            .ifBlank { app.getString(R.string.connection_diagnostics_no_lan) }
+        return app.getString(R.string.connection_diagnostics_summary, pairing, state, mode, candidates)
     }
 
     fun isDingtalkBound(): Boolean {
@@ -361,8 +370,8 @@ class SettingsViewModel : ViewModel() {
         DINGDING, FEISHU, QQ, DISCORD, TELEGRAM, WECHAT,
         PC_PAIRING,
         LAN_CONFIG,
+        CONNECTION_DIAGNOSTICS,
         LLM_CONFIG,
-        PUBLISH_RELAY,
         FLOATING_CLICK,
         FLOATING_SIZE
     }

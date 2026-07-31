@@ -41,11 +41,6 @@ class SettingsActivity : BaseActivity() {
         viewModel.refresh()
     }
 
-    // 注册发布中转配置页返回后刷新
-    private val publishRelayConfigLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
-        viewModel.refresh()
-    }
-
     // 注册通道配置结果回调
     private val channelConfigLauncher = ChannelConfigActivity.registerLauncher(this) { result ->
         result?.let {
@@ -80,6 +75,31 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun initMenuGroups() {
+        val connectionGroup = findViewById<MenuGroup>(R.id.connectionGroup)
+        connectionGroup.setTitle(getString(R.string.settings_group_connection))
+
+        menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name] = connectionGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_pc_pairing,
+            title = getString(R.string.menu_pc_pairing),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.PC_PAIRING) },
+            showDivider = true
+        )
+        menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name] = connectionGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_lan_config,
+            title = getString(R.string.menu_lan_config),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.LAN_CONFIG) },
+            showDivider = true
+        )
+        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+        menuItems[SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS.name] = connectionGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_settings,
+            title = getString(R.string.menu_connection_diagnostics),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS) },
+            showDivider = false
+        )
+        menuItems[SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+
         // 通道
         val channelGroup = findViewById<MenuGroup>(R.id.channelGroup)
         channelGroup.setTitle(getString(R.string.settings_group_channel))
@@ -120,22 +140,6 @@ class SettingsActivity : BaseActivity() {
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.WECHAT) },
             showDivider = true
         )
-        menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name] = channelGroup.addMenuItem(
-            leadingIcon = R.drawable.ic_pc_pairing,
-            title = getString(R.string.menu_pc_pairing),
-            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.PC_PAIRING) },
-            showDivider = true
-        )
-        menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
-        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name] = channelGroup.addMenuItem(
-            leadingIcon = R.drawable.ic_lan_config,
-            title = getString(R.string.menu_lan_config),
-            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.LAN_CONFIG) },
-            showDivider = false
-        )
-        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
-
-
         val modelGroup = findViewById<MenuGroup>(R.id.modelGroup)
         modelGroup.setTitle(getString(R.string.settings_group_model))
 
@@ -146,17 +150,6 @@ class SettingsActivity : BaseActivity() {
             showDivider = false
         )
         menuItems[SettingsViewModel.MenuAction.LLM_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
-
-        val publishGroup = findViewById<MenuGroup>(R.id.publishGroup)
-        publishGroup.setTitle(getString(R.string.settings_group_publish))
-
-        menuItems[SettingsViewModel.MenuAction.PUBLISH_RELAY.name] = publishGroup.addMenuItem(
-            leadingIcon = R.drawable.ic_lan_config,
-            title = getString(R.string.menu_publish_relay),
-            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.PUBLISH_RELAY) },
-            showDivider = false
-        )
-        menuItems[SettingsViewModel.MenuAction.PUBLISH_RELAY.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
 
         val displayGroup = findViewById<MenuGroup>(R.id.displayGroup)
         displayGroup.setTitle(getString(R.string.settings_group_display))
@@ -278,14 +271,18 @@ class SettingsActivity : BaseActivity() {
                             SettingsViewModel.MenuAction.LAN_CONFIG -> {
                                 viewModel.toggleConfigServer(this@SettingsActivity)
                             }
+                            SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS -> {
+                                AlertDialog.show(
+                                    this@SettingsActivity,
+                                    getString(R.string.connection_diagnostics_title),
+                                    viewModel.connectionDiagnostics()
+                                )
+                            }
                             SettingsViewModel.MenuAction.PC_PAIRING -> {
                                 pcPairingLauncher.launch(Intent(this@SettingsActivity, PcPairingActivity::class.java))
                             }
                             SettingsViewModel.MenuAction.LLM_CONFIG -> {
                                 llmConfigLauncher.launch(Intent(this@SettingsActivity, LlmConfigActivity::class.java))
-                            }
-                            SettingsViewModel.MenuAction.PUBLISH_RELAY -> {
-                                publishRelayConfigLauncher.launch(Intent(this@SettingsActivity, PublishRelayConfigActivity::class.java))
                             }
                             SettingsViewModel.MenuAction.FLOATING_CLICK -> Unit
                             SettingsViewModel.MenuAction.FLOATING_SIZE -> {

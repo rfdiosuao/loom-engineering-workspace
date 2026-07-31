@@ -88,6 +88,7 @@
     <!-- 设置 -->
     <string name="settings_title">设置</string>
     <string name="settings_group_channel">通道</string>
+    <string name="settings_group_connection">连接 LOOM</string>
     <string name="settings_group_model">模型</string>
     <string name="settings_group_display">显示</string>
     <string name="settings_group_publish">发布</string>
@@ -153,8 +154,9 @@
     <string name="menu_discord">Discord</string>
     <string name="menu_telegram">Telegram</string>
     <string name="menu_wechat">微信</string>
-    <string name="menu_lan_config">局域网配置</string>
+    <string name="menu_lan_config">连接方式与局域网</string>
     <string name="menu_pc_pairing">与 LOOM 配对</string>
+    <string name="menu_connection_diagnostics">连接诊断</string>
     <string name="menu_publish_relay">发布中转</string>
     <string name="menu_floating_circle_size">悬浮球大小</string>
     <string name="menu_floating_click_enabled">悬浮窗可点击和拖动</string>
@@ -164,12 +166,19 @@
     <string name="floating_size_medium">中</string>
     <string name="floating_size_large">大</string>
     <string name="floating_size_saved">悬浮球大小：%s</string>
-    <string name="lan_config_stopped">已关闭</string>
+    <string name="lan_config_stopped">服务已关闭</string>
     <string name="lan_config_starting">正在启动…</string>
     <string name="lan_config_stopping">正在关闭…</string>
     <string name="lan_config_error">服务异常，请重试</string>
-    <string name="lan_config_usb_ready">已开启（仅 USB）</string>
+    <string name="lan_config_switching">正在切换…</string>
+    <string name="lan_config_usb_ready">USB 可用</string>
+    <string name="lan_config_lan_ready">局域网可用：%1$s</string>
+    <string name="lan_config_hotspot_ready">热点可用：%1$s</string>
     <string name="lan_config_no_wifi">请连接 WiFi 或开启手机热点</string>
+    <string name="connection_diagnostics_title">连接诊断</string>
+    <string name="connection_diagnostics_action">查看</string>
+    <string name="connection_diagnostics_no_lan">没有局域网候选地址；USB 转发仍可独立使用</string>
+    <string name="connection_diagnostics_summary">配对：%1$s\n服务：%2$s\n网络模式：%3$s\n候选地址：\n%4$s</string>
 
     <!-- LOOM 配对 -->
     <string name="pc_pairing_title">与 LOOM 配对</string>
