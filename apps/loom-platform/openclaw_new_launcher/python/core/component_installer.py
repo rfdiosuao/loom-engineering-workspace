@@ -80,6 +80,10 @@ KNOWN_COMPONENT_COMMANDS: dict[str, tuple[str, ...]] = {
     "opencode": ("opencode",),
     "openclaw-companion": ("openclaw",),
     "hermes": ("hermes",),
+    "grok-build": ("grok",),
+    "pi": ("pi",),
+    "goose": ("goose",),
+    "gemini-cli": ("gemini",),
 }
 
 KNOWN_NPM_PACKAGE_COMMANDS: dict[str, tuple[str, ...]] = {
@@ -88,6 +92,8 @@ KNOWN_NPM_PACKAGE_COMMANDS: dict[str, tuple[str, ...]] = {
     "opencode-ai": ("opencode",),
     "opencode-windows-x64": ("opencode",),
     "openclaw": ("openclaw",),
+    "@earendil-works/pi-coding-agent": ("pi",),
+    "@google/gemini-cli": ("gemini",),
 }
 
 RETRY_DELAYS_SECONDS = (0.0, 0.8, 1.6)
@@ -101,6 +107,7 @@ DOWNLOAD_PROGRESS_PERCENT_STEP = 5
 DOWNLOAD_PROGRESS_INTERVAL_SECONDS = 2.0
 _EXTERNAL_ENTRY_CACHE: dict[tuple[object, ...], tuple[float, str | None]] = {}
 _GUIDANCE_WRITE_LOCK = threading.Lock()
+_EXTERNAL_COMMAND_INSTALL_LOCK = threading.Lock()
 LOOM_GUIDANCE_START = "<!-- LOOM:BEGIN DEFAULT-LANGUAGE -->"
 LOOM_GUIDANCE_END = "<!-- LOOM:END DEFAULT-LANGUAGE -->"
 LOOM_DEFAULT_LANGUAGE_GUIDANCE = """# LOOM 默认交互语言
@@ -132,11 +139,21 @@ NON_TEXT_MODEL_MARKERS = (
     "pika",
     "luma",
 )
-MODEL_ENV_SCRUB_COMPONENTS = {"codex-desktop", "codex-cli", "claude-code", "opencode", "openclaw-companion"}
+MODEL_ENV_SCRUB_COMPONENTS = {
+    "codex-desktop",
+    "codex-cli",
+    "claude-code",
+    "opencode",
+    "openclaw-companion",
+    "pi",
+    "grok-build",
+}
 AGENT_MODEL_ENV_KEYS = (
     "LOOM_CODEX_API_KEY",
     "LOOM_CLAUDE_API_KEY",
     "LOOM_OPENCODE_API_KEY",
+    "LOOM_PI_API_KEY",
+    "LOOM_GROK_API_KEY",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_API_BASE",
@@ -249,6 +266,8 @@ class ComponentInstaller:
             return self._simulate_install(component, job_id=job_id, on_progress=on_progress)
         if is_official_codex_component(component):
             return self._install_official_codex(component, job_id=job_id, on_progress=on_progress)
+        if component.archive_type == "external":
+            return self._install_external_command(component, job_id=job_id, on_progress=on_progress)
         self._mark(component, "downloading", job_id=job_id, on_progress=on_progress, message=f"下载 {component.name}")
         try:
             package_path = self._download_to_cache(component, on_progress=on_progress)
@@ -432,6 +451,98 @@ class ComponentInstaller:
             version=component.version,
             job_id=job_id,
             previous_version=previous.version if previous else None,
+        )
+        self._configure_component_experience(component.component_id, on_progress=on_progress)
+        if on_progress:
+            on_progress(f"{component.name} 已就绪", "ok")
+        return state
+
+    def _install_external_command(
+        self,
+        component: ReleaseComponent,
+        *,
+        job_id: str | None,
+        on_progress: ProgressCallback | None,
+    ) -> ComponentState:
+        if not component.install_command:
+            raise ComponentInstallError(
+                f"{component.name} 当前仅支持安全探测；请从官方入口安装后重新检测",
+                phase="installing",
+                error_code="official_manual_install_required",
+            )
+        install_path = self._safe_install_path(component.install_path)
+        os.makedirs(install_path, exist_ok=True)
+        backup_path = os.path.join(self.staging_dir, f"{component.component_id}.npm-prefix-backup")
+        private_prefix = self._npm_private_prefix()
+        with _EXTERNAL_COMMAND_INSTALL_LOCK:
+            self._remove_path(backup_path)
+            prefix_existed = os.path.isdir(private_prefix)
+            if prefix_existed:
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                shutil.copytree(private_prefix, backup_path)
+            self._mark(
+                component,
+                "configuring",
+                job_id=job_id,
+                on_progress=on_progress,
+                message=f"隔离安装 {component.name}",
+            )
+            try:
+                self._run_install_command(component, install_path, on_progress=on_progress)
+                self._invalidate_external_entry_cache(component)
+                self._assert_external_install_available(component, force_refresh=True)
+                entry_path = self._resolve_component_entry(component, install_path, force_external_probe=True)
+                installed_version = self._detect_installed_version(component, install_path, entry_path=entry_path)
+                if not installed_version:
+                    raise ComponentInstallError("安装入口无法执行 --version，已撤销本次安装")
+            except Exception as exc:
+                self._remove_path(private_prefix)
+                if prefix_existed and os.path.isdir(backup_path):
+                    os.makedirs(os.path.dirname(private_prefix), exist_ok=True)
+                    self._replace_path(backup_path, private_prefix)
+                else:
+                    self._remove_path(backup_path)
+                self._invalidate_external_entry_cache(component)
+                message = str(exc) or "隔离安装失败"
+                self.state_store.mark(
+                    component.component_id,
+                    "config_failed",
+                    version=component.version,
+                    job_id=job_id,
+                    error_code="external_install_rolled_back",
+                    error_message=message,
+                )
+                if on_progress:
+                    on_progress(f"安装失败，已恢复安装前状态：{message}", "danger")
+                raise ComponentInstallError(
+                    f"install command failed for {component.component_id}: {message}",
+                    phase="configuring",
+                    error_code="external_install_rolled_back",
+                    retryable=True,
+                    preserved_user_data=True,
+                ) from exc
+            self._remove_path(backup_path)
+
+        state = self.state_store.mark(
+            component.component_id,
+            "ready",
+            version=installed_version,
+            job_id=job_id,
+            detection=_detection_evidence(
+                component,
+                available=True,
+                healthy=True,
+                source="managed_npm",
+                reason=f"{component.name} 已安装到麓鸣私有 npm 前缀，入口与版本探测通过",
+                next_action="可以启动；配置第三方模型前仍需完成协议兼容性探测",
+                items=_ready_detection_items(
+                    component,
+                    entry_path=entry_path,
+                    architecture_entry=entry_path,
+                    entry_arch="script",
+                    installed_version=installed_version,
+                ),
+            ),
         )
         self._configure_component_experience(component.component_id, on_progress=on_progress)
         if on_progress:
@@ -954,6 +1065,10 @@ class ComponentInstaller:
             "opencode",
             "openclaw-companion",
             "hermes",
+            "grok-build",
+            "pi",
+            "goose",
+            "gemini-cli",
         }
 
     def _simulate_install(
@@ -1007,6 +1122,8 @@ class ComponentInstaller:
         job_id: str | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> ComponentState:
+        if component.archive_type == "external":
+            return self._uninstall_external_command(component, job_id=job_id, on_progress=on_progress)
         existing_state = self.state_store.load().get(component.component_id)
         version = (existing_state.version if existing_state else None) or component.version
         self._mark(component, "uninstalling", job_id=job_id, on_progress=on_progress, message=f"卸载 {component.name}")
@@ -1039,6 +1156,75 @@ class ComponentInstaller:
         if on_progress:
             on_progress(f"{component.name} 已卸载", "ok")
         return state
+
+    def _uninstall_external_command(
+        self,
+        component: ReleaseComponent,
+        *,
+        job_id: str | None,
+        on_progress: ProgressCallback | None,
+    ) -> ComponentState:
+        if not component.uninstall_command:
+            raise ComponentInstallError(
+                f"{component.name} 不是由麓鸣安装，请使用官方卸载方式",
+                phase="uninstalling",
+                error_code="official_manual_uninstall_required",
+            )
+        existing_state = self.state_store.load().get(component.component_id)
+        version = (existing_state.version if existing_state else None) or component.version
+        private_prefix = self._npm_private_prefix()
+        backup_path = os.path.join(self.staging_dir, f"{component.component_id}.npm-prefix-uninstall-backup")
+        self._mark(component, "uninstalling", job_id=job_id, on_progress=on_progress, message=f"卸载 {component.name}")
+        with _EXTERNAL_COMMAND_INSTALL_LOCK:
+            self._remove_path(backup_path)
+            prefix_existed = os.path.isdir(private_prefix)
+            if prefix_existed:
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                shutil.copytree(private_prefix, backup_path)
+            try:
+                self._run_uninstall_command(component)
+                self._invalidate_external_entry_cache(component)
+                if self._private_npm_entry_exists(component):
+                    raise ComponentInstallError("卸载命令结束后麓鸣私有入口仍然存在")
+                self._remove_path(self._safe_install_path(component.install_path))
+            except Exception as exc:
+                self._remove_path(private_prefix)
+                if prefix_existed and os.path.isdir(backup_path):
+                    os.makedirs(os.path.dirname(private_prefix), exist_ok=True)
+                    self._replace_path(backup_path, private_prefix)
+                else:
+                    self._remove_path(backup_path)
+                self._invalidate_external_entry_cache(component)
+                message = str(exc) or "隔离卸载失败"
+                self.state_store.mark(
+                    component.component_id,
+                    "uninstall_failed",
+                    version=version,
+                    job_id=job_id,
+                    error_code="external_uninstall_rolled_back",
+                    error_message=message,
+                )
+                raise ComponentInstallError(
+                    f"uninstall failed for {component.component_id}: {message}",
+                    phase="uninstalling",
+                    error_code="external_uninstall_rolled_back",
+                    retryable=True,
+                ) from exc
+            self._remove_path(backup_path)
+        state = self.state_store.mark(component.component_id, "not_installed", version=component.version, job_id=job_id)
+        if on_progress:
+            on_progress(f"{component.name} 已卸载", "ok")
+        return state
+
+    def _private_npm_entry_exists(self, component: ReleaseComponent) -> bool:
+        prefix = self._npm_private_prefix()
+        for command_name in self._external_command_names(component):
+            stem = os.path.splitext(os.path.basename(command_name))[0]
+            for directory in (prefix, os.path.join(prefix, "bin")):
+                for filename in self._command_file_names(stem):
+                    if os.path.isfile(os.path.join(directory, filename)):
+                        return True
+        return False
 
     def _verified_cache_path(self, component: ReleaseComponent) -> str:
         safe_version = re.sub(r"[^0-9A-Za-z._-]+", "_", component.version)
@@ -2750,6 +2936,19 @@ def build_agent_launcher_environment(base_path: str | None, component_id: str | 
             env["ANTHROPIC_BASE_URL"] = base_url
         if model:
             env["ANTHROPIC_MODEL"] = model
+    elif component_id == "pi":
+        agent_dir = os.path.join(root, "data", ".pi", "agent")
+        env["PI_CODING_AGENT_DIR"] = agent_dir
+        wire = _agent_wire_from_root(root)
+        api_key = _wire_api_key(wire)
+        if api_key:
+            env["LOOM_PI_API_KEY"] = api_key
+    elif component_id == "grok-build":
+        env["GROK_HOME"] = os.path.join(root, "data", ".grok")
+        wire = _agent_wire_from_root(root)
+        api_key = _wire_api_key(wire)
+        if api_key:
+            env["LOOM_GROK_API_KEY"] = api_key
     return env
 
 

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "goose",
+  "name": "Goose",
+  "description": "Agentic AI Foundation 的本地智能体；当前列入兼容性评估，采用官方安装入口和只读探测。",
+  "officialUrl": "https://block.github.io/goose/",
+  "sourceUrl": "https://github.com/block/goose",
+  "installMode": "official_manual",
+  "providerConfigMode": "probe_required",
+  "installCommand": [],
+  "uninstallCommand": [],
+  "commandNames": ["goose"],
+  "compatibility": "Windows CLI 与自定义 Provider 需要完成端到端工具调用验收后再开放自动配置",
+  "sandbox": false,
+  "priority": "P2"
+}

@@ -7,6 +7,7 @@ import threading
 from fastapi import Request
 from starlette.concurrency import run_in_threadpool
 
+from core.agent_catalog import AgentCatalog
 from core.component_catalog import ComponentCatalog, default_component_state_path, default_manifest_path, load_installable_manifest
 from core.component_installer import ComponentInstallError, ComponentInstaller
 from core.component_state import ComponentState, ComponentStateStore
@@ -22,6 +23,7 @@ from core.wire_config import WireConfigError
 
 
 RUNNING_JOB_STATUSES = {"queued", "running"}
+DECLARATIVE_AGENT_CATALOG = AgentCatalog()
 
 SIMULATION_COMPONENTS: dict[str, ReleaseComponent] = {
     "codex-desktop": ReleaseComponent(
@@ -143,6 +145,9 @@ def _resolve_component_for_action(
     *,
     allow_fallback: bool,
 ) -> tuple[ReleaseComponent | None, str | None]:
+    definition = DECLARATIVE_AGENT_CATALOG.by_id(component_id)
+    if definition is not None:
+        return definition.to_release_component(), None
     try:
         manifest, _manifest_warning = load_installable_manifest(manifest_path)
         source_id = CODEX_DESKTOP_COMPONENT_ID if component_id in {
@@ -466,7 +471,7 @@ def register_component_routes(app, ctx) -> None:
                 wire_service.sync_agent_model_config,
                 component_id,
                 model=model,
-                validate_remote=component_id == "codex-desktop",
+                validate_remote=component_id in {"codex-desktop", "pi", "grok-build"},
             )
         except WireConfigError as exc:
             error_payload = _model_config_error_payload(exc)
@@ -596,6 +601,18 @@ def register_component_routes(app, ctx) -> None:
             )
             if component is None:
                 return ctx.fastapi_json({"error": manifest_error or f"Unknown component: {component_id}"}, _component_error_status(manifest_error))
+
+            definition = DECLARATIVE_AGENT_CATALOG.by_id(component_id)
+            if not simulate and definition is not None and definition.install_locked:
+                return ctx.fastapi_json(
+                    {
+                        "error": f"{definition.name} 当前仅支持安全探测；请通过官方入口完成安装后重新检测。",
+                        "code": "official_manual_install_required",
+                        "officialUrl": definition.official_url,
+                        "catalog": _component_catalog(ctx).status(),
+                    },
+                    409,
+                )
 
             if not simulate:
                 state_store.mark(component.component_id, "resolving_manifest", version=component.version)

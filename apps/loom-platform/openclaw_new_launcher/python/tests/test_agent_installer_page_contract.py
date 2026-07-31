@@ -176,8 +176,8 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         self.assertIn("data-agent-model-apply", source)
         self.assertNotIn("if (!oneClickLocked) onApply();", source)
         self.assertIn("选择模型不会修改本机", source)
-        self.assertIn("只有点击“写入配置”后才会更新 Codex / Claude Code", source)
-        self.assertIn("Codex / Claude Code 模型", source)
+        self.assertIn("只有点击“写入配置”后才会更新当前智能体", source)
+        self.assertIn("`${component.name} 模型`", source)
 
     def test_model_config_visibly_protects_existing_agent_sessions(self) -> None:
         with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
@@ -252,7 +252,7 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn("new Set(['codex-desktop', 'claude-code', 'opencode', 'openclaw-companion'])", source)
+        self.assertIn("new Set(['codex-desktop', 'claude-code', 'opencode', 'openclaw-companion', 'pi', 'grok-build'])", source)
         self.assertIn("data-agent-open-web-button", source)
         self.assertIn("openWeb(selected)", source)
         self.assertIn("isOpenClawComponent(selected)", source)

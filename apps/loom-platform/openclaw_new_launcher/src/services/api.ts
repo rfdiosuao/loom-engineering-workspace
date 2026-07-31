@@ -1002,6 +1002,13 @@ export interface ComponentSummary {
   errorCode?: string | null;
   errorMessage?: string | null;
   detection?: ComponentDetectionEvidence | null;
+  installLocked?: boolean;
+  installMode?: 'managed_npm' | 'official_manual' | 'detect_only' | string;
+  providerConfigMode?: 'verified_schema' | 'probe_required' | 'official_only' | 'unsupported' | string;
+  compatibility?: string;
+  sandbox?: boolean;
+  priority?: string;
+  sourceUrl?: string;
 }
 
 export interface ComponentSnapshot {

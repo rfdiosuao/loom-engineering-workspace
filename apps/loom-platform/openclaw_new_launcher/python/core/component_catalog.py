@@ -8,6 +8,8 @@ from typing import Any
 
 from collections.abc import Iterable
 
+from core.agent_catalog import AgentCatalog, merge_agent_components
+from core.agent_definition import AgentDefinition
 from core.component_state import ComponentState, ComponentStateStore
 from core.official_codex import CODEX_CLI_COMPONENT_ID, CODEX_DESKTOP_COMPONENT_ID, expand_openai_components
 from core.release_manifest import (
@@ -29,10 +31,12 @@ class ComponentCatalog:
         manifest_path: str,
         state_store: ComponentStateStore,
         fallback_components: Iterable[ReleaseComponent] = (),
+        agent_definitions: Iterable[AgentDefinition] | None = None,
     ):
         self.manifest_path = manifest_path
         self.state_store = state_store
         self.fallback_components = tuple(fallback_components)
+        self.agent_definitions = tuple(agent_definitions) if agent_definitions is not None else AgentCatalog().definitions()
 
     def status(self, *, state_overrides: Iterable[ComponentState] = ()) -> dict[str, Any]:
         overrides = {state.component_id: state for state in state_overrides}
@@ -41,24 +45,35 @@ class ComponentCatalog:
         except Exception:
             states = self.state_store.load()
             states.update(overrides)
+            components = merge_agent_components(self.fallback_components, self.agent_definitions)
             return {
                 "manifest": None,
                 "components": [
-                    _component_payload(component, _state_for_component(component, states))
-                    for component in self.fallback_components
+                    _component_payload(
+                        component,
+                        _state_for_component(component, states),
+                        definition=_definition_by_id(self.agent_definitions, component.component_id),
+                        install_locked=_definition_install_locked(self.agent_definitions, component.component_id, fallback=True),
+                    )
+                    for component in components
                 ],
-                "warning": "正式组件清单未就绪。当前仅支持本机检测；安装前请确认发布通道可访问。",
+                "warning": "正式组件清单未就绪。签名包组件仅支持本机查看；内置声明式 CLI 仍可按各自安全状态探测或安装。",
                 "manifestErrorCode": "manifest_unavailable",
                 "installLocked": True,
             }
 
-        components = expand_openai_components(manifest.components)
+        components = merge_agent_components(expand_openai_components(manifest.components), self.agent_definitions)
         states = self.state_store.load()
         states.update(overrides)
         return {
             "manifest": _manifest_payload(manifest),
             "components": [
-                _component_payload(component, _state_for_component(component, states))
+                _component_payload(
+                    component,
+                    _state_for_component(component, states),
+                    definition=_definition_by_id(self.agent_definitions, component.component_id),
+                    install_locked=_definition_install_locked(self.agent_definitions, component.component_id, fallback=False),
+                )
                 for component in components
             ],
             "warning": manifest_warning,
@@ -176,7 +191,13 @@ def _state_for_component(component: ReleaseComponent, states: dict[str, Componen
     return state or _default_state(component)
 
 
-def _component_payload(component: ReleaseComponent, state) -> dict[str, Any]:
+def _component_payload(
+    component: ReleaseComponent,
+    state,
+    *,
+    definition: AgentDefinition | None = None,
+    install_locked: bool = False,
+) -> dict[str, Any]:
     payload = {
         "id": component.component_id,
         "name": component.name,
@@ -202,5 +223,22 @@ def _component_payload(component: ReleaseComponent, state) -> dict[str, Any]:
         "errorCode": state.error_code,
         "errorMessage": state.error_message,
         "detection": state.detection,
+        "installLocked": bool(install_locked),
     }
+    if definition is not None:
+        payload.update(definition.payload())
     return payload
+
+
+def _definition_by_id(definitions: Iterable[AgentDefinition], component_id: str) -> AgentDefinition | None:
+    return next((item for item in definitions if item.component_id == component_id), None)
+
+
+def _definition_install_locked(
+    definitions: Iterable[AgentDefinition],
+    component_id: str,
+    *,
+    fallback: bool,
+) -> bool:
+    definition = _definition_by_id(definitions, component_id)
+    return definition.install_locked if definition is not None else bool(fallback)

@@ -428,6 +428,101 @@ class WireServiceTests(unittest.TestCase):
             providers = openclaw_config["models"]["providers"]
             self.assertTrue(any(provider.get("baseUrl") == "https://api.heang.top/v1" for provider in providers.values()))
 
+    def test_pi_model_config_uses_env_reference_and_records_live_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            service.sync_from_session(session_snapshot(), targets=())
+            validation = {
+                "baseUrl": "https://api.heang.top/v1",
+                "selectedModel": "gpt-4o",
+                "protocols": ["chat_completions"],
+                "textGeneration": True,
+                "toolCall": True,
+            }
+
+            status = service.sync_agent_model_config(
+                "pi",
+                model="gpt-4o",
+                validate_remote=True,
+                remote_validation=validation,
+            )
+
+            self.assertTrue(status["configured"])
+            self.assertTrue(status["remoteVerified"])
+            config = read_json(service._agent_config_path("pi"), {})
+            provider = config["providers"]["loom"]
+            self.assertEqual(provider["baseUrl"], "https://api.heang.top/v1")
+            self.assertEqual(provider["api"], "openai-completions")
+            self.assertEqual(provider["apiKey"], "$LOOM_PI_API_KEY")
+            self.assertEqual(provider["models"][0]["id"], "gpt-4o")
+            with open(service._agent_config_path("pi"), "r", encoding="utf-8") as handle:
+                self.assertNotIn(session_snapshot()["memberToken"], handle.read())
+
+    def test_grok_model_config_uses_verified_official_schema_without_storing_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            service.sync_from_session(session_snapshot(), targets=())
+            validation = {
+                "baseUrl": "https://api.heang.top/v1",
+                "selectedModel": "gpt-4o",
+                "protocols": ["chat_completions"],
+                "textGeneration": True,
+                "toolCall": True,
+            }
+
+            status = service.sync_agent_model_config(
+                "grok-build",
+                model="gpt-4o",
+                validate_remote=True,
+                remote_validation=validation,
+            )
+
+            self.assertTrue(status["configured"])
+            config_path = service._agent_config_path("grok-build")
+            with open(config_path, "rb") as handle:
+                config = tomllib.load(handle)
+            self.assertEqual(config["models"]["default"], "loom")
+            self.assertEqual(config["model"]["loom"]["model"], "gpt-4o")
+            self.assertEqual(config["model"]["loom"]["env_key"], "LOOM_GROK_API_KEY")
+            with open(config_path, "r", encoding="utf-8") as handle:
+                self.assertNotIn(session_snapshot()["memberToken"], handle.read())
+
+    def test_pi_model_config_failure_restores_existing_file_and_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            service.sync_from_session(session_snapshot(), targets=())
+            config_path = service._agent_config_path("pi")
+            metadata_path = service._agent_config_metadata_path("pi")
+            for path, text in (
+                (config_path, '{"customer":true}\n'),
+                (metadata_path, '{"marker":"before"}\n'),
+            ):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+
+            with mock.patch("core.wire_config._validate_external_agent_config", side_effect=OSError("disk readback failed")):
+                with self.assertRaises(WireConfigError):
+                    service.sync_agent_model_config(
+                        "pi",
+                        model="gpt-4o",
+                        validate_remote=True,
+                        remote_validation={
+                            "baseUrl": "https://api.heang.top/v1",
+                            "selectedModel": "gpt-4o",
+                            "protocols": ["chat_completions"],
+                            "textGeneration": True,
+                        },
+                    )
+
+            with open(config_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), '{"customer":true}\n')
+            with open(metadata_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), '{"marker":"before"}\n')
+
     def test_agent_model_config_write_failure_restores_previous_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)

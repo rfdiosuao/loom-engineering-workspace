@@ -26,6 +26,10 @@ const PINNED_COMPONENT_IDS = [
   'opencode',
   'openclaw-companion',
   'hermes',
+  'grok-build',
+  'pi',
+  'goose',
+  'gemini-cli',
 ];
 
 const FALLBACK_COMPONENTS: Record<string, { name: string; description: string; category: string }> = {
@@ -36,6 +40,10 @@ const FALLBACK_COMPONENTS: Record<string, { name: string; description: string; c
   opencode: { name: 'opencode', description: '终端优先的 AI 编程工具', category: 'agent' },
   'openclaw-companion': { name: 'OpenClaw', description: '多智能体编程工作台', category: 'agent' },
   hermes: { name: 'Hermes', description: 'Hermes 智能体运行时', category: 'agent' },
+  'grok-build': { name: 'Grok Build', description: 'xAI 官方终端编程智能体；支持探测并引导官方安装', category: 'agent' },
+  pi: { name: 'Pi', description: '轻量终端编程智能体；使用麓鸣私有 npm 前缀隔离安装', category: 'agent' },
+  goose: { name: 'Goose', description: 'Agentic AI Foundation 本地智能体；当前为兼容性评估通道', category: 'agent' },
+  'gemini-cli': { name: 'Gemini CLI', description: 'Google 官方 Gemini 命令行智能体', category: 'agent' },
 };
 
 const PREREQ_IDS = ['python_runtime', 'node', 'npm', 'git', 'git_bash', 'uv', 'webview2', 'data_dir'];
@@ -47,8 +55,12 @@ const COMPONENT_REQUIRED_PREREQ_IDS: Record<string, Set<string>> = {
   opencode: new Set(['python_runtime', 'node', 'npm', 'data_dir']),
   'openclaw-companion': new Set(['python_runtime', 'node', 'npm', 'data_dir']),
   hermes: new Set(['python_runtime', 'data_dir']),
+  'grok-build': new Set(['data_dir']),
+  pi: new Set(['node', 'npm', 'data_dir']),
+  goose: new Set(['data_dir']),
+  'gemini-cli': new Set(['node', 'npm', 'data_dir']),
 };
-const MODEL_CONFIG_COMPONENT_IDS = new Set(['codex-desktop', 'claude-code', 'opencode', 'openclaw-companion']);
+const MODEL_CONFIG_COMPONENT_IDS = new Set(['codex-desktop', 'claude-code', 'opencode', 'openclaw-companion', 'pi', 'grok-build']);
 const OPENCLAW_WEB_URL = 'http://127.0.0.1:18790';
 
 type CustomProviderOption = {
@@ -456,6 +468,16 @@ function manifestInstallLocked(snapshot: ComponentSnapshot | null): boolean {
   return Boolean(snapshot.installLocked || snapshot.manifestErrorCode === 'manifest_unavailable' || !snapshot.manifest);
 }
 
+function componentControlLocked(snapshot: ComponentSnapshot | null, component?: ComponentSummary): boolean {
+  if (typeof component?.installLocked === 'boolean') return false;
+  return manifestInstallLocked(snapshot);
+}
+
+function componentInstallLocked(snapshot: ComponentSnapshot | null, component?: ComponentSummary): boolean {
+  if (typeof component?.installLocked === 'boolean') return component.installLocked;
+  return manifestInstallLocked(snapshot);
+}
+
 const InfoTile: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div className="border-t border-border/70 pt-3">
     <div className="text-[11px] font-bold text-text-subtle">{label}</div>
@@ -727,7 +749,7 @@ const AgentModelConfigPanel: React.FC<{
   const detail = status?.message || '读取模型配置状态';
   const oneClickLocked = locked || !canUseWire || !isManagedAccount || availableModels.length === 0;
   const customModelPlaceholder = '输入当前账号可用文本模型';
-  const modelConfigTitle = isOpenClawComponent(component) ? 'OpenClaw 模型' : 'Codex / Claude Code 模型';
+  const modelConfigTitle = isOpenClawComponent(component) ? 'OpenClaw 模型' : `${component.name} 模型`;
   const customProviderOption = providerOptionById(customProviderId);
   const customProviderName = customProviderId === 'custom' ? customProvider.trim() : customProviderOption.label;
   const canApplyCustom = Boolean(customProviderName && customBaseUrl.trim() && customApiKey.trim() && draftModel.trim());
@@ -842,7 +864,7 @@ const AgentModelConfigPanel: React.FC<{
             ? '自定义会先保存本机第三方 Provider；已安装智能体会继续写入配置。'
             : oneClickLocked
               ? '一键配置需登录后解锁，并同步托管模型。'
-              : '选择模型不会修改本机；只有点击“写入配置”后才会更新 Codex / Claude Code。'}
+              : '选择模型不会修改本机；只有点击“写入配置”后才会更新当前智能体。'}
         </div>
       </div>
 
@@ -1205,7 +1227,8 @@ export const AgentInstallerPage: React.FC = () => {
   const selectedModelConfig = selected ? modelConfigs[selected.id] : undefined;
   const selectedModelDraft = selected ? (modelDrafts[selected.id] || selectedModelConfig?.model || selectedModelConfig?.availableModels?.[0] || '') : '';
   const readyCount = components.filter((item) => item.status === 'ready' || item.status === 'started').length;
-  const installActionsLocked = manifestInstallLocked(snapshot);
+  const installActionsLocked = componentControlLocked(snapshot, selected);
+  const selectedInstallLocked = componentInstallLocked(snapshot, selected);
   const selectedLogEntries = React.useMemo(() => {
     const selectedComponentId = selected?.id || '';
     const localEntries = installLog.filter((entry) => !selectedComponentId || !entry.componentId || entry.componentId === selectedComponentId);
@@ -1274,10 +1297,17 @@ export const AgentInstallerPage: React.FC = () => {
     component: ComponentSummary,
     options: { autoStart?: boolean; confirmAction?: boolean } = {},
   ) => {
-    if (installActionsLocked) {
+    if (componentControlLocked(snapshot, component)) {
       const message = '安装清单未就绪，安装和启动暂不可用。请刷新后重试。';
       pushLog(message, 'warning', component.id);
       showToast(message, 'error');
+      return;
+    }
+    if (componentInstallLocked(snapshot, component)) {
+      const message = `${component.name} 的官方安装器尚无可固定校验值，麓鸣不会静默执行远程脚本；请从已核验的官方入口安装后点击“重新检测”。`;
+      pushLog(message, 'warning', component.id);
+      showToast(message, 'info');
+      await openWeb(component);
       return;
     }
     const autoStart = options.autoStart ?? false;
@@ -1403,7 +1433,7 @@ export const AgentInstallerPage: React.FC = () => {
   };
 
   const detect = async (component: ComponentSummary) => {
-    if (installActionsLocked) {
+    if (componentControlLocked(snapshot, component)) {
       const message = '安装清单未就绪，暂不能检测。请先刷新清单。';
       pushLog(message, 'warning', component.id);
       showToast(message, 'error');
@@ -1431,7 +1461,7 @@ export const AgentInstallerPage: React.FC = () => {
   };
 
   const start = async (component: ComponentSummary) => {
-    if (installActionsLocked) {
+    if (componentControlLocked(snapshot, component)) {
       const message = '安装清单未就绪，启动暂不可用。请先刷新清单。';
       pushLog(message, 'warning', component.id);
       showToast(message, 'error');
@@ -1844,7 +1874,7 @@ export const AgentInstallerPage: React.FC = () => {
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <div className="text-[10px] font-bold tracking-[0.24em] text-text-subtle">可安装智能体</div>
-                <h2 className="mt-1 text-2xl font-black text-text">Codex Desktop / ChatGPT Desktop / Codex CLI / Claude Code / opencode / OpenClaw / Hermes</h2>
+                <h2 className="mt-1 text-2xl font-black text-text">Codex / ChatGPT / Claude / Grok Build / Pi / Goose / Gemini CLI 等</h2>
               </div>
               {error ? <span className="text-sm font-bold text-status-danger">{error}</span> : null}
             </div>
@@ -1909,6 +1939,18 @@ export const AgentInstallerPage: React.FC = () => {
                       <InfoTile label="类型" value={selected.type} />
                     </div>
 
+                    {selected.compatibility ? (
+                      <div data-agent-compatibility className="rounded-[12px] border border-border/70 bg-surface-alt/35 px-4 py-3 text-xs leading-5 text-text-muted">
+                        <div className="font-black text-text">兼容性与隔离边界</div>
+                        <div className="mt-1">{selected.compatibility}</div>
+                        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 font-bold text-text-subtle">
+                          <span>安装：{selected.installMode === 'managed_npm' ? '麓鸣私有 npm 前缀' : '官方安装 / 麓鸣只读探测'}</span>
+                          <span>沙箱：{selected.sandbox ? '工具官方提供' : '未声明系统级沙箱'}</span>
+                          <span>模型中转：{selected.providerConfigMode === 'verified_schema' ? 'Schema 已核实，写入前仍需活体探测' : '暂不自动写入'}</span>
+                        </div>
+                      </div>
+                    ) : null}
+
                     {selected.detection ? (
                       <section
                         data-agent-detection-evidence
@@ -1937,6 +1979,10 @@ export const AgentInstallerPage: React.FC = () => {
                     {installActionsLocked ? (
                       <div className="rounded-[16px] border border-status-warning/30 bg-status-warning/10 p-4 text-sm font-bold text-status-warning">
                         安装清单未就绪，暂时不能安装或启动。请刷新后重试。
+                      </div>
+                    ) : selectedInstallLocked && needsInstallAfterDetect(selected) ? (
+                      <div className="rounded-[16px] border border-status-warning/30 bg-status-warning/10 p-4 text-sm font-bold text-status-warning">
+                        麓鸣可安全探测该智能体，但不会执行没有固定哈希的远程安装脚本。请打开官方安装入口，完成后返回重新检测。
                       </div>
                     ) : selected.errorMessage ? (
                       <div className="rounded-[16px] border border-status-danger/30 bg-status-danger/10 p-4 text-sm text-status-danger">
@@ -1973,10 +2019,18 @@ export const AgentInstallerPage: React.FC = () => {
                       <Button
                         variant={installActionsLocked ? 'quiet' : 'primary'}
                         className="min-w-[132px]"
-                        onClick={() => void (primaryAgentAction(selected) === 'start' ? start(selected) : install(selected))}
+                        onClick={() => void (
+                          selectedInstallLocked && needsInstallAfterDetect(selected)
+                            ? openWeb(selected)
+                            : primaryAgentAction(selected) === 'start' ? start(selected) : install(selected)
+                        )}
                         disabled={controlsLocked || installActionsLocked || isWorking(selected.status)}
                       >
-                        {installActionsLocked ? '清单未就绪' : primaryAgentButtonLabel(selected, busyId, busyAction)}
+                        {installActionsLocked
+                          ? '清单未就绪'
+                          : selectedInstallLocked && needsInstallAfterDetect(selected)
+                            ? '打开官方安装'
+                            : primaryAgentButtonLabel(selected, busyId, busyAction)}
                       </Button>
                       <Button
                         variant="quiet"
@@ -1995,7 +2049,7 @@ export const AgentInstallerPage: React.FC = () => {
                           打开网页
                         </Button>
                       ) : null}
-                      {['ready', 'started'].includes(selected.status) ? (
+                      {['ready', 'started'].includes(selected.status) && !selectedInstallLocked ? (
                         <Button
                           variant="quiet"
                           onClick={() => install(selected)}
@@ -2004,7 +2058,7 @@ export const AgentInstallerPage: React.FC = () => {
                           {busyId === selected.id && busyAction === 'prepare' ? '安装中...' : '重新安装'}
                         </Button>
                       ) : null}
-                      {isFailedStatus(selected.status) ? (
+                      {isFailedStatus(selected.status) && !selectedInstallLocked ? (
                         <Button
                           data-agent-retry-button
                           variant="danger"
@@ -2060,7 +2114,7 @@ export const AgentInstallerPage: React.FC = () => {
                           </div>
                         </div>
                         <div className="flex flex-wrap gap-3">
-                          {!isOfficialCodexComponent(selected) ? (
+                          {!isOfficialCodexComponent(selected) && selected.installMode !== 'official_manual' ? (
                             <Button
                               variant="quiet"
                               onClick={() => uninstall(selected)}

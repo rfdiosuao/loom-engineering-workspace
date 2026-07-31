@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "pi",
+  "name": "Pi",
+  "description": "轻量终端编程智能体；由麓鸣隔离安装到私有 npm 前缀，不宣称具备系统沙箱。",
+  "officialUrl": "https://pi.dev/docs/latest",
+  "sourceUrl": "https://github.com/earendil-works/pi",
+  "installMode": "managed_npm",
+  "providerConfigMode": "verified_schema",
+  "installCommand": ["npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"],
+  "uninstallCommand": ["npm", "uninstall", "-g", "@earendil-works/pi-coding-agent"],
+  "commandNames": ["pi"],
+  "compatibility": "官方支持 OpenAI Chat Completions/Responses 自定义 Provider；写入前仍需真实探测中转站",
+  "sandbox": false,
+  "priority": "P1"
+}

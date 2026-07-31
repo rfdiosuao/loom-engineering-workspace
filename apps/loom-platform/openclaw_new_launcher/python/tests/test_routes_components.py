@@ -199,6 +199,26 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             self.assertIsNotNone(error)
             self.assertIn("release-manifest.json", error or "")
 
+    def test_declarative_agent_resolution_does_not_depend_on_binary_release_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pi, pi_error = _resolve_component_for_action(
+                os.path.join(temp_dir, "release-manifest.json"),
+                "pi",
+                allow_fallback=False,
+            )
+            grok, grok_error = _resolve_component_for_action(
+                os.path.join(temp_dir, "release-manifest.json"),
+                "grok-build",
+                allow_fallback=False,
+            )
+
+            self.assertIsNone(pi_error)
+            self.assertEqual(pi.archive_type, "external")
+            self.assertEqual(pi.install_command[-1], "@earendil-works/pi-coding-agent")
+            self.assertIsNone(grok_error)
+            self.assertEqual(grok.external_paths, ("grok",))
+            self.assertEqual(grok.install_command, ())
+
     def test_model_config_apply_ensures_managed_launcher_token_before_writing(self) -> None:
         calls: list[str] = []
 

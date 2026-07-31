@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "gemini-cli",
+  "name": "Gemini CLI",
+  "description": "Google 官方 Gemini 命令行智能体；由麓鸣隔离安装到私有 npm 前缀。",
+  "officialUrl": "https://google-gemini.github.io/gemini-cli/",
+  "sourceUrl": "https://github.com/google-gemini/gemini-cli",
+  "installMode": "managed_npm",
+  "providerConfigMode": "official_only",
+  "installCommand": ["npm", "install", "-g", "@google/gemini-cli"],
+  "uninstallCommand": ["npm", "uninstall", "-g", "@google/gemini-cli"],
+  "commandNames": ["gemini"],
+  "compatibility": "自动安装与官方认证可用；未验证麓鸣 OpenAI 兼容中转，暂不提供一键写入",
+  "sandbox": true,
+  "priority": "P2"
+}

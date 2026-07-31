@@ -20,6 +20,7 @@ if PYTHON_DIR not in sys.path:
 
 from core.component_installer import ComponentInstallError, ComponentInstaller
 from core import component_installer as component_installer_module
+from core.agent_catalog import AgentCatalog
 from core.component_state import ComponentStateStore
 from core.paths import AppPaths
 from core.release_manifest import ComponentHealthCheck, ReleaseComponent
@@ -197,6 +198,121 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
                     "Codex 流程预检已完成",
                 ],
             )
+
+    def test_managed_npm_agent_installs_in_private_prefix_and_verifies_version(self) -> None:
+        component = AgentCatalog().by_id("pi").to_release_component()
+        commands: list[list[str]] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+
+            def runner(command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                commands.append(list(command))
+                if "install" in command:
+                    os.makedirs(private_prefix, exist_ok=True)
+                    with open(os.path.join(private_prefix, "pi.cmd"), "w", encoding="utf-8") as handle:
+                        handle.write("@echo off\r\n")
+                    return FakeCompletedProcess()
+                if "--version" in command:
+                    return FakeCompletedProcess(stdout="pi 0.80.0\n")
+                return FakeCompletedProcess()
+
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(base_path=temp_dir, state_store=store, installer_runner=runner)
+
+            state = installer.install(component, job_id="job_pi")
+
+            self.assertEqual(state.status, "ready")
+            self.assertEqual(state.version, "0.80.0")
+            install_command = next(command for command in commands if "install" in command)
+            self.assertIn("--prefix", install_command)
+            self.assertIn(private_prefix, install_command)
+            self.assertIn("--ignore-scripts", install_command)
+            self.assertTrue(os.path.isfile(os.path.join(private_prefix, "pi.cmd")))
+
+    def test_managed_npm_agent_failure_restores_private_prefix(self) -> None:
+        component = AgentCatalog().by_id("pi").to_release_component()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+            os.makedirs(private_prefix, exist_ok=True)
+            marker = os.path.join(private_prefix, "existing-agent.txt")
+            with open(marker, "w", encoding="utf-8") as handle:
+                handle.write("preserve")
+
+            def runner(_command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                with open(os.path.join(private_prefix, "partial.txt"), "w", encoding="utf-8") as handle:
+                    handle.write("partial")
+                return FakeCompletedProcess(returncode=1, stderr="registry unavailable")
+
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                installer_runner=runner,
+                retry_sleep=lambda _delay: None,
+            )
+
+            with self.assertRaisesRegex(ComponentInstallError, "install command failed") as raised:
+                installer.install(component, job_id="job_pi_fail")
+
+            self.assertEqual(raised.exception.error_code, "external_install_rolled_back")
+            with open(marker, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "preserve")
+            self.assertFalse(os.path.exists(os.path.join(private_prefix, "partial.txt")))
+            self.assertEqual(store.load()["pi"].error_code, "external_install_rolled_back")
+
+    def test_manual_official_agent_cannot_execute_unverified_remote_installer(self) -> None:
+        component = AgentCatalog().by_id("grok-build").to_release_component()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda *_args: self.fail("manual definition must not run a command"),
+            )
+
+            with self.assertRaises(ComponentInstallError) as raised:
+                installer.install(component)
+
+            self.assertEqual(raised.exception.error_code, "official_manual_install_required")
+
+    def test_manual_official_agent_cannot_fake_managed_uninstall(self) -> None:
+        component = AgentCatalog().by_id("grok-build").to_release_component()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda *_args: self.fail("manual definition must not run an uninstall command"),
+            )
+
+            with self.assertRaises(ComponentInstallError) as raised:
+                installer.uninstall(component)
+
+            self.assertEqual(raised.exception.error_code, "official_manual_uninstall_required")
+
+    def test_managed_npm_uninstall_failure_restores_private_prefix(self) -> None:
+        component = AgentCatalog().by_id("pi").to_release_component()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+            os.makedirs(private_prefix, exist_ok=True)
+            shim = os.path.join(private_prefix, "pi.cmd")
+            with open(shim, "w", encoding="utf-8") as handle:
+                handle.write("@echo off\r\n")
+
+            def runner(_command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                os.remove(shim)
+                return FakeCompletedProcess(returncode=1, stderr="uninstall interrupted")
+
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            store.mark("pi", "ready", version="0.80.0")
+            installer = ComponentInstaller(base_path=temp_dir, state_store=store, installer_runner=runner)
+
+            with self.assertRaises(ComponentInstallError) as raised:
+                installer.uninstall(component)
+
+            self.assertEqual(raised.exception.error_code, "external_uninstall_rolled_back")
+            self.assertTrue(os.path.isfile(shim))
+            self.assertEqual(store.load()["pi"].status, "uninstall_failed")
 
     def test_download_failure_records_failed_state_and_retry_can_install(self) -> None:
         payload = b"codex retry payload"
@@ -3339,6 +3455,28 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             self.assertEqual(env["ANTHROPIC_API_KEY"], secret)
             self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://api.heang.top")
             self.assertEqual(env["ANTHROPIC_MODEL"], "qwen3.7-plus")
+
+    def test_pi_and_grok_launchers_inject_protected_wire_key_only_at_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            secret = "sk-runtime-only-test-token"
+            WireService(AppPaths(temp_dir)).sync_custom_provider(
+                provider="麓鸣中转站",
+                base_url="https://api.heang.top/v1",
+                api_key=secret,
+                text_model="gpt-4o",
+                targets=(),
+            )
+            build_env = getattr(component_installer_module, "build_agent_launcher_environment", lambda *_args, **_kwargs: {})
+
+            pi_env = build_env(temp_dir, "pi")
+            grok_env = build_env(temp_dir, "grok-build")
+
+            self.assertEqual(pi_env["LOOM_PI_API_KEY"], secret)
+            self.assertEqual(pi_env["PI_CODING_AGENT_DIR"], os.path.join(temp_dir, "data", ".pi", "agent"))
+            self.assertEqual(grok_env["LOOM_GROK_API_KEY"], secret)
+            self.assertEqual(grok_env["GROK_HOME"], os.path.join(temp_dir, "data", ".grok"))
+            self.assertNotIn("OPENAI_API_KEY", pi_env)
+            self.assertNotIn("XAI_API_KEY", grok_env)
 
     def test_codex_launcher_environment_preserves_existing_codex_home_and_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

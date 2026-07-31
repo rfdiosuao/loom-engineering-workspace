@@ -123,6 +123,10 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
                     "opencode",
                     "openclaw-companion",
                     "hermes",
+                    "gemini-cli",
+                    "goose",
+                    "grok-build",
+                    "pi",
                 ],
             )
             codex = next(component for component in status["components"] if component["id"] == "codex-desktop")
@@ -135,7 +139,15 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
             self.assertEqual(chatgpt["type"], "msstore")
             self.assertNotEqual(codex_cli["type"], "msstore")
             self.assertEqual(codex["installCommand"], [])
+            self.assertTrue(codex["installLocked"])
             self.assertEqual(codex["urls"], ["https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"])
+            pi = next(component for component in status["components"] if component["id"] == "pi")
+            grok = next(component for component in status["components"] if component["id"] == "grok-build")
+            self.assertFalse(pi["installLocked"])
+            self.assertEqual(pi["installMode"], "managed_npm")
+            self.assertFalse(pi["sandbox"])
+            self.assertTrue(grok["installLocked"])
+            self.assertEqual(grok["installMode"], "official_manual")
             self.assertTrue(all(component["status"] == "not_installed" for component in status["components"]))
             self.assertFalse(os.path.exists(state_path))
 
