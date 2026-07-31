@@ -165,6 +165,10 @@
     <string name="floating_size_large">大</string>
     <string name="floating_size_saved">悬浮球大小：%s</string>
     <string name="lan_config_stopped">已关闭</string>
+    <string name="lan_config_starting">正在启动…</string>
+    <string name="lan_config_stopping">正在关闭…</string>
+    <string name="lan_config_error">服务异常，请重试</string>
+    <string name="lan_config_usb_ready">已开启（仅 USB）</string>
     <string name="lan_config_no_wifi">请连接 WiFi 或开启手机热点</string>
 
     <!-- LOOM 配对 -->

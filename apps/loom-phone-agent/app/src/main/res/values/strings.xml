@@ -165,6 +165,10 @@
     <string name="floating_size_large">Large</string>
     <string name="floating_size_saved">Floating ball size: %s</string>
     <string name="lan_config_stopped">Off</string>
+    <string name="lan_config_starting">Starting…</string>
+    <string name="lan_config_stopping">Stopping…</string>
+    <string name="lan_config_error">Service error. Try again.</string>
+    <string name="lan_config_usb_ready">On (USB only)</string>
     <string name="lan_config_no_wifi">Please connect to Wi-Fi or enable phone hotspot</string>
 
     <!-- LOOM pairing -->

@@ -9,6 +9,8 @@ import com.apk.claw.android.R
 import com.apk.claw.android.channel.ChannelManager
 import com.apk.claw.android.floating.FloatingCircleManager
 import com.apk.claw.android.server.ConfigServerManager
+import com.apk.claw.android.server.ConfigServerLifecyclePhase
+import com.apk.claw.android.server.ConfigServerState
 import com.apk.claw.android.server.TokenValidator
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
@@ -17,8 +19,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
 /**
  * SettingsActivity 的 ViewModel
@@ -35,6 +39,11 @@ class SettingsViewModel : ViewModel() {
 
     init {
         refresh()
+        viewModelScope.launch {
+            ConfigServerManager.state.collect { state ->
+                updateTrailingText(MenuAction.LAN_CONFIG.name, getLanConfigTrailingText(state))
+            }
+        }
     }
 
     fun refresh() {
@@ -181,29 +190,47 @@ class SettingsViewModel : ViewModel() {
     /**
      * 切换局域网配置服务开关
      */
-    fun toggleConfigServer(context: Context): String {
-        return if (ConfigServerManager.isRunning()) {
-            ConfigServerManager.disable()
-            val text = getLanConfigTrailingText()
-            updateTrailingText(MenuAction.LAN_CONFIG.name, text)
-            text
-        } else {
-            val started = ConfigServerManager.enable(context)
-            if (started) {
-                val text = getLanConfigTrailingText()
-                updateTrailingText(MenuAction.LAN_CONFIG.name, text)
-                text
-            } else {
-                ClawApplication.instance.getString(R.string.lan_config_no_wifi)
+    fun toggleConfigServer(context: Context) {
+        when (ConfigServerManager.state.value.phase) {
+            ConfigServerLifecyclePhase.STARTING,
+            ConfigServerLifecyclePhase.STOPPING -> return
+            ConfigServerLifecyclePhase.READY -> {
+                updateTrailingText(
+                    MenuAction.LAN_CONFIG.name,
+                    ClawApplication.instance.getString(R.string.lan_config_stopping)
+                )
+                viewModelScope.launch {
+                    withContext(Dispatchers.IO) {
+                        ConfigServerManager.disable()
+                    }
+                }
+            }
+            ConfigServerLifecyclePhase.STOPPED,
+            ConfigServerLifecyclePhase.ERROR -> {
+                updateTrailingText(
+                    MenuAction.LAN_CONFIG.name,
+                    ClawApplication.instance.getString(R.string.lan_config_starting)
+                )
+                viewModelScope.launch {
+                    val started = withContext(Dispatchers.IO) {
+                        ConfigServerManager.enable(context)
+                    }
+                    if (!started) {
+                        Toast.makeText(context, R.string.lan_config_no_wifi, Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
     }
 
-    private fun getLanConfigTrailingText(): String {
-        return if (ConfigServerManager.isRunning()) {
-            ConfigServerManager.getAddress() ?: ClawApplication.instance.getString(R.string.lan_config_stopped)
-        } else {
-            ClawApplication.instance.getString(R.string.lan_config_stopped)
+    private fun getLanConfigTrailingText(state: ConfigServerState = ConfigServerManager.state.value): String {
+        return when (state.phase) {
+            ConfigServerLifecyclePhase.STOPPED -> ClawApplication.instance.getString(R.string.lan_config_stopped)
+            ConfigServerLifecyclePhase.STARTING -> ClawApplication.instance.getString(R.string.lan_config_starting)
+            ConfigServerLifecyclePhase.STOPPING -> ClawApplication.instance.getString(R.string.lan_config_stopping)
+            ConfigServerLifecyclePhase.ERROR -> ClawApplication.instance.getString(R.string.lan_config_error)
+            ConfigServerLifecyclePhase.READY -> ConfigServerManager.getAddress()
+                ?: ClawApplication.instance.getString(R.string.lan_config_usb_ready)
         }
     }
 

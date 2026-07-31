@@ -16,17 +16,33 @@ import kotlinx.coroutines.flow.asSharedFlow
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
+import java.util.concurrent.atomic.AtomicReference
 
 /** Android adapter for the serialized ConfigServer lifecycle coordinator. */
 object ConfigServerManager {
 
     private const val TAG = "ConfigServerManager"
     private const val MAX_PORT_RETRY = 10
+    private const val STOP_TIMEOUT_MS = 750L
+
+    private data class ManagedServer(
+        val generation: Long,
+        val value: ConfigServer
+    )
+
+    private data class ManagedNetworkCallback(
+        val generation: Long,
+        val value: ConnectivityManager.NetworkCallback
+    )
 
     @Volatile
-    private var server: ConfigServer? = null
+    private var server: ManagedServer? = null
 
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val serverLock = Any()
+    private var retiredServerGeneration = 0L
+    private val callbackLock = Any()
+    private var retiredCallbackGeneration = 0L
+    private var networkCallback: ManagedNetworkCallback? = null
     private var appContext: Context? = null
 
     private val _configChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -44,14 +60,16 @@ object ConfigServerManager {
             KVUtils.setConfigServerEnabled(enabled)
         }
 
-        override fun currentListeningPort(): Int? = server
+        override fun currentListeningPort(generation: Long?): Int? = server
+            ?.takeIf { generation == null || it.generation == generation }
+            ?.value
             ?.takeIf { it.isAlive }
             ?.listeningPort
             ?.takeIf { it > 0 }
 
-        override fun startServer(): Int? {
+        override fun startServer(generation: Long): Int? {
             val context = appContext ?: return null
-            currentListeningPort()?.let { return it }
+            currentListeningPort(generation)?.let { return it }
 
             for (port in ConfigServer.PORT until ConfigServer.PORT + MAX_PORT_RETRY) {
                 var candidate: ConfigServer? = null
@@ -60,17 +78,28 @@ object ConfigServerManager {
                     candidate.start()
                     val listeningPort = candidate.listeningPort
                     if (candidate.isAlive && listeningPort > 0) {
-                        server = candidate
+                        var displaced: ManagedServer? = null
+                        val installed = synchronized(serverLock) {
+                            val active = server
+                            if (generation <= retiredServerGeneration || (active != null && active.generation > generation)) {
+                                false
+                            } else {
+                                displaced = active
+                                server = ManagedServer(generation, candidate)
+                                true
+                            }
+                        }
+                        if (!installed) {
+                            boundedStop(candidate)
+                            return null
+                        }
+                        displaced?.value?.takeIf { it !== candidate }?.let(::stopDetached)
                         XLog.i(TAG, "config_server.bound event=start port=$listeningPort")
                         return listeningPort
                     }
-                    candidate.stop()
+                    boundedStop(candidate)
                 } catch (error: Exception) {
-                    try {
-                        candidate?.stop()
-                    } catch (_: Exception) {
-                        // Best effort only; the next bounded port attempt is still safe.
-                    }
+                    candidate?.let(::boundedStop)
                     XLog.e(TAG, "config_server.start_failed port=$port error=${error.javaClass.simpleName}")
                 }
             }
@@ -78,18 +107,15 @@ object ConfigServerManager {
             return null
         }
 
-        override fun stopServer() {
-            val activeServer = server
-            server = null
-            try {
-                activeServer?.stop()
-            } catch (error: Exception) {
-                XLog.e(TAG, "config_server.stop_failed error=${error.javaClass.simpleName}")
+        override fun stopServer(upToGeneration: Long): ConfigServerStopOutcome {
+            val activeServer = synchronized(serverLock) {
+                retiredServerGeneration = maxOf(retiredServerGeneration, upToGeneration)
+                server?.takeIf { it.generation <= upToGeneration }?.also { server = null }
             }
+            return activeServer?.value?.let(::boundedStop) ?: ConfigServerStopOutcome.STOPPED
         }
 
         override fun registerNetworkCallback(generation: Long) {
-            unregisterNetworkCallback()
             val context = appContext ?: return
             val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
             val callback = object : ConnectivityManager.NetworkCallback() {
@@ -108,23 +134,42 @@ object ConfigServerManager {
             }
             try {
                 connectivityManager.registerNetworkCallback(NetworkRequest.Builder().build(), callback)
-                networkCallback = callback
+                var displaced: ManagedNetworkCallback? = null
+                val installed = synchronized(callbackLock) {
+                    val active = networkCallback
+                    if (generation <= retiredCallbackGeneration || (active != null && active.generation > generation)) {
+                        false
+                    } else {
+                        displaced = active
+                        networkCallback = ManagedNetworkCallback(generation, callback)
+                        true
+                    }
+                }
+                if (!installed) {
+                    unregisterCallback(connectivityManager, callback)
+                    return
+                }
+                displaced?.value?.takeIf { it !== callback }?.let {
+                    unregisterCallback(connectivityManager, it)
+                }
                 XLog.i(TAG, "config_server.callback event=registered generation=$generation")
             } catch (error: Exception) {
                 XLog.e(TAG, "config_server.callback_register_failed error=${error.javaClass.simpleName}")
             }
         }
 
-        override fun unregisterNetworkCallback() {
-            val callback = networkCallback ?: return
-            try {
-                val connectivityManager = appContext
-                    ?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                connectivityManager?.unregisterNetworkCallback(callback)
-            } catch (error: Exception) {
-                XLog.e(TAG, "config_server.callback_unregister_failed error=${error.javaClass.simpleName}")
+        override fun unregisterNetworkCallback(upToGeneration: Long) {
+            val callback = synchronized(callbackLock) {
+                retiredCallbackGeneration = maxOf(retiredCallbackGeneration, upToGeneration)
+                networkCallback
+                    ?.takeIf { it.generation <= upToGeneration }
+                    ?.also { networkCallback = null }
             }
-            networkCallback = null
+            val connectivityManager = appContext
+                ?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            if (callback != null && connectivityManager != null) {
+                unregisterCallback(connectivityManager, callback.value)
+            }
         }
 
         override fun onAddressChanged() {
@@ -137,12 +182,67 @@ object ConfigServerManager {
             current: ConfigServerState,
             reason: String
         ) {
+            if (current.generation < _state.value.generation) return
             _state.value = current
             XLog.i(
                 TAG,
                 "config_server.transition event=$reason previous=${previous.phase} new=${current.phase} generation=${current.generation}"
             )
             _configChanged.tryEmit(Unit)
+        }
+    }
+
+    private fun stopDetached(value: ConfigServer) {
+        Thread(
+            { boundedStop(value) },
+            "lumi-config-server-displaced-stop"
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun boundedStop(value: ConfigServer): ConfigServerStopOutcome {
+        val failure = AtomicReference<Throwable?>(null)
+        val worker = Thread(
+            {
+                try {
+                    value.stop()
+                } catch (error: Throwable) {
+                    failure.set(error)
+                }
+            },
+            "lumi-config-server-nanohttpd-stop"
+        ).apply { isDaemon = true }
+        worker.start()
+        return try {
+            worker.join(STOP_TIMEOUT_MS)
+            when {
+                worker.isAlive -> {
+                    XLog.e(TAG, "config_server.stop_timeout timeout_ms=$STOP_TIMEOUT_MS")
+                    ConfigServerStopOutcome.TIMED_OUT
+                }
+                failure.get() != null -> {
+                    XLog.e(TAG, "config_server.stop_failed error=${failure.get()!!.javaClass.simpleName}")
+                    ConfigServerStopOutcome.FAILED
+                }
+                else -> ConfigServerStopOutcome.STOPPED
+            }
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            XLog.e(TAG, "config_server.stop_interrupted")
+            ConfigServerStopOutcome.FAILED
+        }
+    }
+
+    private fun unregisterCallback(
+        connectivityManager: ConnectivityManager,
+        callback: ConnectivityManager.NetworkCallback
+    ) {
+        try {
+            connectivityManager.unregisterNetworkCallback(callback)
+        } catch (error: Exception) {
+            XLog.e(TAG, "config_server.callback_unregister_failed error=${error.javaClass.simpleName}")
         }
     }
 
@@ -177,7 +277,7 @@ object ConfigServerManager {
     }
 
     fun isRunning(): Boolean = lifecycle.state.phase == ConfigServerLifecyclePhase.READY &&
-        server?.isAlive == true
+        server?.value?.isAlive == true
 
     fun getPort(): Int? = if (isRunning()) lifecycle.state.port else null
 

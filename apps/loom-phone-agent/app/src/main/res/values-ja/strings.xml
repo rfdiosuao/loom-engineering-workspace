@@ -144,6 +144,10 @@
     <string name="floating_size_large">大</string>
     <string name="floating_size_saved">フローティングボールサイズ: %s</string>
     <string name="lan_config_stopped">オフ</string>
+    <string name="lan_config_starting">起動中…</string>
+    <string name="lan_config_stopping">停止中…</string>
+    <string name="lan_config_error">サービスエラー。再試行してください。</string>
+    <string name="lan_config_usb_ready">オン（USB のみ）</string>
     <string name="lan_config_no_wifi">Wi-Fiに接続するか、スマートフォンのテザリングを有効にしてください</string>
 
     <!-- プロトコル -->

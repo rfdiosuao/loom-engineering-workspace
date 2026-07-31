@@ -276,10 +276,7 @@ class SettingsActivity : BaseActivity() {
                                 }
                             }
                             SettingsViewModel.MenuAction.LAN_CONFIG -> {
-                                val result = viewModel.toggleConfigServer(this@SettingsActivity)
-                                if (result == getString(R.string.lan_config_no_wifi)) {
-                                    Toast.makeText(this@SettingsActivity, R.string.lan_config_no_wifi, Toast.LENGTH_SHORT).show()
-                                }
+                                viewModel.toggleConfigServer(this@SettingsActivity)
                             }
                             SettingsViewModel.MenuAction.PC_PAIRING -> {
                                 pcPairingLauncher.launch(Intent(this@SettingsActivity, PcPairingActivity::class.java))

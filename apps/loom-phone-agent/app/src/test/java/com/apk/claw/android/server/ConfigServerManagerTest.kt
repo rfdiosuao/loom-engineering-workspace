@@ -1,6 +1,9 @@
 package com.apk.claw.android.server
 
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -24,13 +27,12 @@ class ConfigServerManagerTest {
     @Test
     fun healthy_network_callback_does_not_describe_or_perform_a_restart() {
         val source = File("src/main/java/com/apk/claw/android/server/ConfigServerManager.kt").readText()
-        val available = source.substringAfter("override fun onAvailable(network: Network)")
-            .substringBefore("        }\n\n        cm.registerNetworkCallback")
 
         assertFalse(
             "A network address change must preserve a healthy loopback server",
-            available.contains("restarting ConfigServer")
+            source.contains("restarting ConfigServer")
         )
+        assertTrue(source.contains("lifecycle.onNetworkAvailable(generation)"))
     }
 
     @Test
@@ -42,6 +44,7 @@ class ConfigServerManagerTest {
 
         coordinator.userDisable()
 
+        awaitPhase(coordinator, ConfigServerLifecyclePhase.STOPPED)
         assertEquals(ConfigServerLifecyclePhase.STOPPED, coordinator.state.phase)
         assertTrue(effects.events.indexOf("persist:false") < effects.events.indexOf("unregister"))
         assertTrue(effects.events.indexOf("persist:false") < effects.events.indexOf("stop"))
@@ -54,6 +57,7 @@ class ConfigServerManagerTest {
         coordinator.userEnable()
         val staleGeneration = effects.callbackGeneration!!
         coordinator.userDisable()
+        awaitPhase(coordinator, ConfigServerLifecyclePhase.STOPPED)
         val startsBeforeStaleCallback = effects.startCalls
 
         coordinator.onNetworkAvailable(staleGeneration)
@@ -84,6 +88,7 @@ class ConfigServerManagerTest {
         coordinator.runtimeStop()
         coordinator.runtimeStop()
 
+        awaitPhase(coordinator, ConfigServerLifecyclePhase.STOPPED)
         assertEquals(1, effects.stopCalls)
         assertEquals(ConfigServerLifecyclePhase.STOPPED, coordinator.state.phase)
     }
@@ -97,6 +102,7 @@ class ConfigServerManagerTest {
 
         coordinator.userDisable()
 
+        awaitPhase(coordinator, ConfigServerLifecyclePhase.STOPPED)
         assertEquals(
             listOf(ConfigServerLifecyclePhase.STOPPING, ConfigServerLifecyclePhase.STOPPED),
             effects.publishedPhases
@@ -111,6 +117,7 @@ class ConfigServerManagerTest {
 
         coordinator.runtimeStop()
 
+        awaitPhase(coordinator, ConfigServerLifecyclePhase.STOPPED)
         assertTrue(effects.enabled)
         assertEquals(ConfigServerLifecyclePhase.STOPPED, coordinator.state.phase)
     }
@@ -166,6 +173,7 @@ class ConfigServerManagerTest {
         repeat(50) {
             coordinator.userEnable()
             coordinator.userDisable()
+            awaitPhase(coordinator, ConfigServerLifecyclePhase.STOPPED)
         }
 
         assertFalse(effects.enabled)
@@ -173,6 +181,52 @@ class ConfigServerManagerTest {
         assertEquals(ConfigServerLifecyclePhase.STOPPED, coordinator.state.phase)
         assertEquals(50, effects.startCalls)
         assertEquals(50, effects.stopCalls)
+    }
+
+    @Test
+    fun blocked_stop_does_not_hold_the_lifecycle_monitor_or_overwrite_a_new_generation() {
+        val effects = BlockingStopEffects()
+        val coordinator = ConfigServerLifecycleCoordinator(effects)
+        coordinator.userEnable()
+        val disableReturned = CountDownLatch(1)
+        val enableReturned = CountDownLatch(1)
+
+        val disabling = thread {
+            coordinator.userDisable()
+            disableReturned.countDown()
+        }
+        assertTrue(effects.stopEntered.await(1, TimeUnit.SECONDS))
+        val enabling = thread {
+            coordinator.userEnable()
+            enableReturned.countDown()
+        }
+
+        assertTrue("Disable must not wait for a blocking server stop", disableReturned.await(250, TimeUnit.MILLISECONDS))
+        assertTrue("Enable must be able to replace a stopping generation", enableReturned.await(250, TimeUnit.MILLISECONDS))
+
+        effects.releaseStop.countDown()
+        disabling.join(1000)
+        enabling.join(1000)
+        assertEquals(ConfigServerLifecyclePhase.READY, coordinator.state.phase)
+        assertTrue(coordinator.state.generation > 1)
+    }
+
+    @Test
+    fun adapter_stop_contract_is_bounded_and_reports_timeout_instead_of_false_stopped() {
+        val source = File("src/main/java/com/apk/claw/android/server/ConfigServerManager.kt").readText()
+
+        assertTrue(source.contains("STOP_TIMEOUT_MS = 750L"))
+        assertTrue(source.contains("worker.join(STOP_TIMEOUT_MS)"))
+        assertTrue(source.contains("ConfigServerStopOutcome.TIMED_OUT"))
+    }
+
+    @Test
+    fun settings_toggle_uses_io_and_immediately_exposes_transitional_state() {
+        val source = File("src/main/java/com/apk/claw/android/ui/settings/SettingsViewModel.kt").readText()
+
+        assertTrue(source.contains("withContext(Dispatchers.IO)"))
+        assertTrue(source.contains("ConfigServerLifecyclePhase.STOPPING"))
+        assertTrue(source.contains("ConfigServerLifecyclePhase.STARTING"))
     }
 
     private class FakeEffects(
@@ -186,6 +240,7 @@ class ConfigServerManagerTest {
         var registerCalls = 0
         var addressUpdates = 0
         var callbackGeneration: Long? = null
+        var serverGeneration: Long? = null
         val publishedPhases = mutableListOf<ConfigServerLifecyclePhase>()
 
         override fun isDesiredEnabled(): Boolean = enabled
@@ -195,19 +250,25 @@ class ConfigServerManagerTest {
             events += "persist:$enabled"
         }
 
-        override fun currentListeningPort(): Int? = if (alive) nextStartPort else null
+        override fun currentListeningPort(generation: Long?): Int? =
+            if (alive && (generation == null || generation == serverGeneration)) nextStartPort else null
 
-        override fun startServer(): Int? {
+        override fun startServer(generation: Long): Int? {
             startCalls += 1
             events += "start"
             alive = nextStartPort != null
+            serverGeneration = generation.takeIf { alive }
             return nextStartPort
         }
 
-        override fun stopServer() {
+        override fun stopServer(upToGeneration: Long): ConfigServerStopOutcome {
             stopCalls += 1
             events += "stop"
-            alive = false
+            if ((serverGeneration ?: Long.MAX_VALUE) <= upToGeneration) {
+                alive = false
+                serverGeneration = null
+            }
+            return ConfigServerStopOutcome.STOPPED
         }
 
         override fun registerNetworkCallback(generation: Long) {
@@ -216,8 +277,8 @@ class ConfigServerManagerTest {
             events += "register:$generation"
         }
 
-        override fun unregisterNetworkCallback() {
-            callbackGeneration = null
+        override fun unregisterNetworkCallback(upToGeneration: Long) {
+            if ((callbackGeneration ?: Long.MAX_VALUE) <= upToGeneration) callbackGeneration = null
             events += "unregister"
         }
 
@@ -233,5 +294,62 @@ class ConfigServerManagerTest {
             events += "state:${previous.phase}->${current.phase}:$reason"
             publishedPhases += current.phase
         }
+    }
+
+    private class BlockingStopEffects : ConfigServerLifecycleEffects {
+        val stopEntered = CountDownLatch(1)
+        val releaseStop = CountDownLatch(1)
+        private var enabled = false
+        private var alive = false
+        private var serverGeneration: Long? = null
+
+        override fun isDesiredEnabled(): Boolean = enabled
+
+        override fun persistEnabled(enabled: Boolean) {
+            this.enabled = enabled
+        }
+
+        override fun currentListeningPort(generation: Long?): Int? =
+            if (alive && (generation == null || generation == serverGeneration)) 9527 else null
+
+        override fun startServer(generation: Long): Int? {
+            alive = true
+            serverGeneration = generation
+            return 9527
+        }
+
+        override fun stopServer(upToGeneration: Long): ConfigServerStopOutcome {
+            stopEntered.countDown()
+            releaseStop.await(1, TimeUnit.SECONDS)
+            if ((serverGeneration ?: Long.MAX_VALUE) <= upToGeneration) {
+                alive = false
+                serverGeneration = null
+            }
+            return ConfigServerStopOutcome.STOPPED
+        }
+
+        override fun registerNetworkCallback(generation: Long) = Unit
+
+        override fun unregisterNetworkCallback(upToGeneration: Long) = Unit
+
+        override fun onAddressChanged() = Unit
+
+        override fun onStateChanged(
+            previous: ConfigServerState,
+            current: ConfigServerState,
+            reason: String
+        ) = Unit
+    }
+
+    private fun awaitPhase(
+        coordinator: ConfigServerLifecycleCoordinator,
+        expected: ConfigServerLifecyclePhase,
+        timeoutMs: Long = 1000
+    ) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (coordinator.state.phase != expected && System.nanoTime() < deadline) {
+            Thread.yield()
+        }
+        assertEquals(expected, coordinator.state.phase)
     }
 }
