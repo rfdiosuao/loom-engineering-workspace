@@ -183,15 +183,13 @@ class SettingsViewModel : ViewModel() {
      */
     fun toggleConfigServer(context: Context): String {
         return if (ConfigServerManager.isRunning()) {
-            ConfigServerManager.stop()
-            KVUtils.setConfigServerEnabled(false)
+            ConfigServerManager.disable()
             val text = getLanConfigTrailingText()
             updateTrailingText(MenuAction.LAN_CONFIG.name, text)
             text
         } else {
-            val started = ConfigServerManager.start(context)
+            val started = ConfigServerManager.enable(context)
             if (started) {
-                KVUtils.setConfigServerEnabled(true)
                 val text = getLanConfigTrailingText()
                 updateTrailingText(MenuAction.LAN_CONFIG.name, text)
                 text

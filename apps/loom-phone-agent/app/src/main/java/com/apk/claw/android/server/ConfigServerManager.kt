@@ -9,15 +9,15 @@ import android.net.wifi.WifiManager
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
 
-/**
- * ConfigServer 生命周期管理单例
- */
+/** Android adapter for the serialized ConfigServer lifecycle coordinator. */
 object ConfigServerManager {
 
     private const val TAG = "ConfigServerManager"
@@ -29,130 +29,216 @@ object ConfigServerManager {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var appContext: Context? = null
 
-    /** H5 页面保存配置后发出通知，Settings 页面可观察此 Flow 来刷新 UI */
     private val _configChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val configChanged: SharedFlow<Unit> = _configChanged.asSharedFlow()
+
+    private val _state = MutableStateFlow(ConfigServerState())
+    val state: StateFlow<ConfigServerState> = _state
+
+    private lateinit var lifecycle: ConfigServerLifecycleCoordinator
+
+    private val lifecycleEffects = object : ConfigServerLifecycleEffects {
+        override fun isDesiredEnabled(): Boolean = KVUtils.isConfigServerEnabled()
+
+        override fun persistEnabled(enabled: Boolean) {
+            KVUtils.setConfigServerEnabled(enabled)
+        }
+
+        override fun currentListeningPort(): Int? = server
+            ?.takeIf { it.isAlive }
+            ?.listeningPort
+            ?.takeIf { it > 0 }
+
+        override fun startServer(): Int? {
+            val context = appContext ?: return null
+            currentListeningPort()?.let { return it }
+
+            for (port in ConfigServer.PORT until ConfigServer.PORT + MAX_PORT_RETRY) {
+                var candidate: ConfigServer? = null
+                try {
+                    candidate = ConfigServer(context, port)
+                    candidate.start()
+                    val listeningPort = candidate.listeningPort
+                    if (candidate.isAlive && listeningPort > 0) {
+                        server = candidate
+                        XLog.i(TAG, "config_server.bound event=start port=$listeningPort")
+                        return listeningPort
+                    }
+                    candidate.stop()
+                } catch (error: Exception) {
+                    try {
+                        candidate?.stop()
+                    } catch (_: Exception) {
+                        // Best effort only; the next bounded port attempt is still safe.
+                    }
+                    XLog.e(TAG, "config_server.start_failed port=$port error=${error.javaClass.simpleName}")
+                }
+            }
+            XLog.e(TAG, "config_server.start_failed reason=no_available_port")
+            return null
+        }
+
+        override fun stopServer() {
+            val activeServer = server
+            server = null
+            try {
+                activeServer?.stop()
+            } catch (error: Exception) {
+                XLog.e(TAG, "config_server.stop_failed error=${error.javaClass.simpleName}")
+            }
+        }
+
+        override fun registerNetworkCallback(generation: Long) {
+            unregisterNetworkCallback()
+            val context = appContext ?: return
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onLost(network: Network) {
+                    XLog.i(
+                        TAG,
+                        "config_server.callback event=lost generation=$generation keeping ConfigServer available for USB loopback"
+                    )
+                    lifecycle.onNetworkLost(generation)
+                }
+
+                override fun onAvailable(network: Network) {
+                    XLog.i(TAG, "config_server.callback event=available generation=$generation")
+                    lifecycle.onNetworkAvailable(generation)
+                }
+            }
+            try {
+                connectivityManager.registerNetworkCallback(NetworkRequest.Builder().build(), callback)
+                networkCallback = callback
+                XLog.i(TAG, "config_server.callback event=registered generation=$generation")
+            } catch (error: Exception) {
+                XLog.e(TAG, "config_server.callback_register_failed error=${error.javaClass.simpleName}")
+            }
+        }
+
+        override fun unregisterNetworkCallback() {
+            val callback = networkCallback ?: return
+            try {
+                val connectivityManager = appContext
+                    ?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                connectivityManager?.unregisterNetworkCallback(callback)
+            } catch (error: Exception) {
+                XLog.e(TAG, "config_server.callback_unregister_failed error=${error.javaClass.simpleName}")
+            }
+            networkCallback = null
+        }
+
+        override fun onAddressChanged() {
+            XLog.i(TAG, "config_server.address_changed generation=${lifecycle.state.generation}")
+            _configChanged.tryEmit(Unit)
+        }
+
+        override fun onStateChanged(
+            previous: ConfigServerState,
+            current: ConfigServerState,
+            reason: String
+        ) {
+            _state.value = current
+            XLog.i(
+                TAG,
+                "config_server.transition event=$reason previous=${previous.phase} new=${current.phase} generation=${current.generation}"
+            )
+            _configChanged.tryEmit(Unit)
+        }
+    }
+
+    init {
+        lifecycle = ConfigServerLifecycleCoordinator(lifecycleEffects)
+    }
 
     fun notifyConfigChanged() {
         _configChanged.tryEmit(Unit)
     }
 
-    /**
-     * 启动配置服务。即使没有局域网地址也保持 loopback 可用，供 ADB USB 转发访问。
-     */
+    /** Runtime start preserves the existing API and does not alter the persisted preference. */
     fun start(context: Context): Boolean {
-        val ctx = context.applicationContext
-        appContext = ctx
-
-        if (isRunning()) return true
-
-        for (port in ConfigServer.PORT until ConfigServer.PORT + MAX_PORT_RETRY) {
-            try {
-                val s = ConfigServer(ctx, port)
-                s.start()
-                server = s
-                XLog.i(TAG, "ConfigServer started on port $port")
-                registerNetworkCallback(ctx)
-                return true
-            } catch (e: Exception) {
-                XLog.e(TAG, "Port $port unavailable: ${e.message}")
-            }
-        }
-        XLog.e(TAG, "Failed to start ConfigServer: all ports ${ConfigServer.PORT}-${ConfigServer.PORT + MAX_PORT_RETRY - 1} unavailable")
-        return false
+        appContext = context.applicationContext
+        return lifecycle.runtimeStart()
     }
 
+    /** User intent: persist enabled before the service can be started. */
+    fun enable(context: Context): Boolean {
+        appContext = context.applicationContext
+        return lifecycle.userEnable()
+    }
+
+    /** Runtime teardown does not change the user's persisted preference. */
     fun stop() {
-        unregisterNetworkCallback()
-        try {
-            server?.stop()
-        } catch (e: Exception) {
-            XLog.e(TAG, "Error stopping ConfigServer: ${e.message}")
-        }
-        server = null
-        XLog.i(TAG, "ConfigServer stopped")
+        lifecycle.runtimeStop()
     }
 
-    fun isRunning(): Boolean = server?.isAlive == true
+    /** User intent: persist disabled before callback unregistration or server stop. */
+    fun disable() {
+        lifecycle.userDisable()
+    }
 
-    fun getPort(): Int? = server?.takeIf { it.isAlive }?.listeningPort
+    fun isRunning(): Boolean = lifecycle.state.phase == ConfigServerLifecyclePhase.READY &&
+        server?.isAlive == true
 
-    /**
-     * 获取局域网访问地址，如 192.168.1.100:9527
-     * 端口从实际运行的 server 实例读取
-     */
+    fun getPort(): Int? = if (isRunning()) lifecycle.state.port else null
+
     fun getAddress(): String? {
         val ip = getLanIpAddress(appContext ?: return null) ?: return null
         val port = getPort() ?: return null
         return "$ip:$port"
     }
 
-    /**
-     * App 启动时调用：如果上次是开启状态则自动启动
-     */
     fun autoStartIfNeeded(context: Context) {
+        appContext = context.applicationContext
         if (ConfigServerAutoStartPolicy.shouldAutoStart(KVUtils.isConfigServerEnabled(), KVUtils.hasLlmConfig())) {
-            start(context)
+            lifecycle.startIfDesired()
         }
     }
 
-    /**
-     * 判断当前是否有 WiFi 连接
-     */
     fun isWifiConnected(context: Context): Boolean {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(network) ?: return false
-        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
 
     fun hasLanAddress(context: Context): Boolean = getLanIpAddress(context) != null
 
-    fun getLanIpAddress(context: Context): String? {
-        return getWifiIpAddress(context) ?: getInterfaceIpAddress()
-    }
+    fun getLanIpAddress(context: Context): String? = getWifiIpAddress(context) ?: getInterfaceIpAddress()
 
-    /**
-     * 通过 WifiManager 获取 WiFi IP 地址（优先），回退到 NetworkInterface
-     */
     private fun getWifiIpAddress(context: Context): String? {
-        try {
+        return try {
             val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            val wifiInfo = wifiManager?.connectionInfo
-            val ipInt = wifiInfo?.ipAddress ?: 0
-            if (ipInt != 0) {
-                val ip = String.format(
-                    "%d.%d.%d.%d",
-                    ipInt and 0xff,
-                    ipInt shr 8 and 0xff,
-                    ipInt shr 16 and 0xff,
-                    ipInt shr 24 and 0xff
-                )
-                if (ip != "0.0.0.0") return ip
-            }
-        } catch (e: Exception) {
-            XLog.e(TAG, "WifiManager IP failed: ${e.message}")
+            val ipInt = wifiManager?.connectionInfo?.ipAddress ?: 0
+            if (ipInt == 0) return null
+            String.format(
+                "%d.%d.%d.%d",
+                ipInt and 0xff,
+                ipInt shr 8 and 0xff,
+                ipInt shr 16 and 0xff,
+                ipInt shr 24 and 0xff
+            ).takeUnless { it == "0.0.0.0" }
+        } catch (error: Exception) {
+            XLog.e(TAG, "config_server.wifi_ip_failed error=${error.javaClass.simpleName}")
+            null
         }
-        // 回退方案
-        return null
     }
 
     private fun getInterfaceIpAddress(): String? {
         return try {
             NetworkInterface.getNetworkInterfaces()?.toList()
                 ?.filter { it.isUp && !it.isLoopback && !it.isVirtual }
-                ?.filterNot { isCellularOnlyInterface(it.name) }
+                ?.filterNot { PhoneNetworkMode.isCellularOnly(it.name) }
                 ?.flatMap { networkInterface ->
                     networkInterface.inetAddresses.toList()
                         .filterIsInstance<Inet4Address>()
-                        .filter { isUsableLanAddress(it) }
+                        .filter(::isUsableLanAddress)
                         .map { address -> networkInterface.name to address.hostAddress }
                 }
-                ?.sortedWith(compareBy<Pair<String, String>>({ interfacePriority(it.first) }, { it.first }))
+                ?.sortedWith(compareBy<Pair<String, String>>({ PhoneNetworkMode.interfacePriority(it.first) }, { it.first }))
                 ?.firstOrNull()
                 ?.second
-        } catch (e: Exception) {
-            XLog.e(TAG, "NetworkInterface IP failed: ${e.message}")
+        } catch (error: Exception) {
+            XLog.e(TAG, "config_server.interface_ip_failed error=${error.javaClass.simpleName}")
             null
         }
     }
@@ -162,74 +248,5 @@ object ConfigServerManager {
             !address.isAnyLocalAddress &&
             !address.isLinkLocalAddress &&
             address.isSiteLocalAddress
-    }
-
-    private fun isCellularOnlyInterface(name: String): Boolean {
-        val lower = name.lowercase()
-        return lower.startsWith("rmnet") ||
-            lower.startsWith("ccmni") ||
-            lower.startsWith("pdp") ||
-            lower.startsWith("wwan")
-    }
-
-    private fun interfacePriority(name: String): Int {
-        val lower = name.lowercase()
-        return when {
-            lower.startsWith("wlan") -> 0
-            lower.startsWith("ap") || lower.startsWith("swlan") || lower.contains("softap") -> 1
-            lower.startsWith("eth") -> 2
-            lower.startsWith("rndis") || lower.startsWith("usb") -> 3
-            else -> 9
-        }
-    }
-
-    /**
-     * 注册网络变化监听。网络变化只刷新地址状态，不中断 ADB USB loopback 通道。
-     */
-    private fun registerNetworkCallback(context: Context) {
-        unregisterNetworkCallback()
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val request = NetworkRequest.Builder().build()
-
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onLost(network: Network) {
-                XLog.i(TAG, "Network lost; keeping ConfigServer available for USB loopback")
-                _configChanged.tryEmit(Unit)
-            }
-
-            override fun onAvailable(network: Network) {
-                XLog.i(TAG, "Network available, restarting ConfigServer")
-                // WiFi 重连后 IP 可能变化，重新启动
-                if (KVUtils.isConfigServerEnabled() && !isRunning()) {
-                    val ctx = appContext ?: return
-                    for (port in ConfigServer.PORT until ConfigServer.PORT + MAX_PORT_RETRY) {
-                        try {
-                            val s = ConfigServer(ctx, port)
-                            s.start()
-                            server = s
-                            XLog.i(TAG, "ConfigServer restarted on port $port")
-                            break
-                        } catch (e: Exception) {
-                            XLog.e(TAG, "Port $port unavailable on restart: ${e.message}")
-                        }
-                    }
-                    _configChanged.tryEmit(Unit)
-                }
-            }
-        }
-
-        cm.registerNetworkCallback(request, callback)
-        networkCallback = callback
-    }
-
-    private fun unregisterNetworkCallback() {
-        val cb = networkCallback ?: return
-        try {
-            val cm = appContext?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            cm?.unregisterNetworkCallback(cb)
-        } catch (e: Exception) {
-            XLog.e(TAG, "Failed to unregister network callback: ${e.message}")
-        }
-        networkCallback = null
     }
 }
