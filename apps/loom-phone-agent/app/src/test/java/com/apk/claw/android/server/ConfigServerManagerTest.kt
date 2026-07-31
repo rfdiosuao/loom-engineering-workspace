@@ -33,6 +33,8 @@ class ConfigServerManagerTest {
             source.contains("restarting ConfigServer")
         )
         assertTrue(source.contains("lifecycle.onNetworkAvailable(generation)"))
+        assertTrue(source.contains("override fun onLinkPropertiesChanged"))
+        assertTrue(source.contains("ADDRESS_STABILITY_DELAY_MS"))
     }
 
     @Test

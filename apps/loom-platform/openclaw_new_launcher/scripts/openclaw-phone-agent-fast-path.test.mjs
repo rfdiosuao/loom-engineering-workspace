@@ -213,6 +213,56 @@ test('fleet CLI without bridge runtime cannot fall back to legacy launcher crede
   }
 });
 
+test('fleet status preserves phone network candidates for desktop transport selection', async () => {
+  const server = http.createServer(async (request, response) => {
+    await readBody(request);
+    return sendJson(response, {
+      success: true,
+      data: readyStatus({
+        configServerRunning: true,
+        configServerPort: 9527,
+        networkMode: 'hotspot-host',
+        usbLoopbackAvailable: true,
+        networkCandidates: [{
+          interface: 'ap0',
+          address: '192.168.43.1',
+          mode: 'hotspot-host',
+          baseUrl: 'http://192.168.43.1:9527',
+        }],
+      }),
+    });
+  });
+  await listen(server);
+  try {
+    const port = server.address().port;
+    const result = await runPhoneScript('openclaw-phone-fleet.mjs', ['status', '--json'], {
+      ...phoneRuntimeTestEnv({
+        selectedDeviceId: 'phone-hotspot',
+        devices: [{
+          id: 'phone-hotspot',
+          name: 'Hotspot Phone',
+          baseUrl: `http://127.0.0.1:${port}`,
+          token: 'phone-token',
+        }],
+      }),
+    });
+
+    assert.equal(result.code, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    const status = payload.results[0].status;
+    assert.equal(status.networkMode, 'hotspot-host');
+    assert.equal(status.usbLoopbackAvailable, true);
+    assert.deepEqual(status.networkCandidates, [{
+      interface: 'ap0',
+      address: '192.168.43.1',
+      mode: 'hotspot-host',
+      baseUrl: 'http://192.168.43.1:9527',
+    }]);
+  } finally {
+    await close(server);
+  }
+});
+
 test('runtime context cannot probe a phone from direct URL and token arguments', async () => {
   const directRequests = [];
   const directServer = http.createServer(async (request, response) => {

@@ -1,6 +1,7 @@
 package com.apk.claw.android.server
 
 import com.google.gson.JsonNull
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 
 object ConfigServerStatusBuilder {
@@ -9,7 +10,8 @@ object ConfigServerStatusBuilder {
         running: Boolean,
         address: String?,
         actualPort: Int?,
-        defaultPort: Int
+        defaultPort: Int,
+        candidates: List<PhoneNetworkCandidate> = emptyList()
     ) {
         target.addProperty("configServerRunning", running)
         if (address != null) {
@@ -23,5 +25,19 @@ object ConfigServerStatusBuilder {
             target.add("configServerPort", JsonNull.INSTANCE)
         }
         target.addProperty("serverPort", actualPort ?: defaultPort)
+        target.addProperty("networkMode", candidates.firstOrNull()?.mode?.wireName ?: PhoneNetworkMode.NONE.wireName)
+        target.addProperty("usbLoopbackAvailable", running)
+        target.add("networkCandidates", JsonArray().apply {
+            if (running && actualPort != null) {
+                candidates.forEach { candidate ->
+                    add(JsonObject().apply {
+                        addProperty("interface", candidate.interfaceName)
+                        addProperty("address", candidate.address)
+                        addProperty("mode", candidate.mode.wireName)
+                        addProperty("baseUrl", "http://${candidate.address}:$actualPort")
+                    })
+                }
+            }
+        })
     }
 }

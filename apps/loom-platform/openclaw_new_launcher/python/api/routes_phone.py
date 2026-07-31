@@ -39,6 +39,7 @@ from core.job_ownership import (
     current_account_job_identity,
     public_job_snapshot,
 )
+from core.phone_connection import select_phone_connection
 from core.secret_store import DPAPI_PROVIDER, SECRET_MARKER, protect_secret, unprotect_secret
 
 
@@ -396,6 +397,12 @@ def _public_device(device: dict) -> dict:
     lan_base_url = str(device.get("lanBaseUrl") or "").strip().rstrip("/")
     if lan_base_url:
         public["lanBaseUrl"] = lan_base_url
+    active_transport = str(device.get("activeTransport") or "").strip().lower()
+    if active_transport:
+        public["activeTransport"] = active_transport
+    network_mode = str(device.get("lastNetworkMode") or "").strip().lower()
+    if network_mode:
+        public["networkMode"] = network_mode
     return public
 
 
@@ -409,6 +416,130 @@ def _public_store(store: dict) -> dict:
         "devices": [_public_device(item) for item in devices],
         "configured": any(str(item.get("baseUrl") or "").strip() and _is_securely_paired_device(item) for item in devices),
     }
+
+
+def _safe_phone_network_candidates(status: dict) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    try:
+        port = int(status.get("configServerPort") or status.get("serverPort") or _DEFAULT_PHONE_PORT)
+    except (TypeError, ValueError):
+        port = _DEFAULT_PHONE_PORT
+    for item in status.get("networkCandidates", []) if isinstance(status.get("networkCandidates"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        raw_url = item.get("baseUrl") or (
+            f"http://{item.get('address')}:{port}" if item.get("address") else ""
+        )
+        try:
+            base_url = _normalize_url(raw_url)
+        except ValueError:
+            continue
+        if not base_url or base_url in seen:
+            continue
+        seen.add(base_url)
+        candidates.append({
+            "baseUrl": base_url,
+            "mode": _clip(item.get("mode"), 32).lower(),
+            "interface": _clip(item.get("interface"), 80),
+        })
+    return candidates
+
+
+def _remember_phone_connection_candidates(ctx, stdout: str, requested_device_id: str = "") -> bool:
+    payload = _phone_stdout_payload(stdout)
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    if not results:
+        return False
+    store = _load_store(ctx)
+    devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
+    changed = False
+    next_devices: list[dict] = []
+    for device in devices:
+        device_id = _normalize_device_id(device.get("id"), "")
+        match = next((
+            item for item in results
+            if isinstance(item, dict)
+            and _normalize_device_id(
+                (item.get("device") or {}).get("id") if isinstance(item.get("device"), dict) else "",
+                "",
+            ) == device_id
+        ), None)
+        if match is None and requested_device_id and device_id == _normalize_device_id(requested_device_id, "") and len(results) == 1:
+            match = results[0] if isinstance(results[0], dict) else None
+        status = match.get("status") if isinstance(match, dict) and isinstance(match.get("status"), dict) else None
+        if not status:
+            next_devices.append(device)
+            continue
+        candidates = _safe_phone_network_candidates(status)
+        candidate_urls = [item["baseUrl"] for item in candidates]
+        next_device = {
+            **device,
+            "networkCandidates": candidates,
+            "lanBaseUrls": candidate_urls,
+            "lastNetworkMode": _clip(status.get("networkMode"), 32).lower(),
+            "configServerRunning": status.get("configServerRunning") is True,
+            "networkCandidatesObservedAt": int(time.time() * 1000),
+        }
+        if candidate_urls:
+            next_device["lanBaseUrl"] = candidate_urls[0]
+        if next_device != device:
+            changed = True
+        next_devices.append(next_device)
+    if changed:
+        _write_phone_store(ctx, {**store, "devices": next_devices})
+    return changed
+
+
+def _refresh_phone_transport(ctx, device_id: str, probe=None) -> dict | None:
+    store = _load_store(ctx)
+    devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
+    safe_id = _normalize_device_id(device_id, "")
+    device = next((item for item in devices if _normalize_device_id(item.get("id"), "") == safe_id), None)
+    if not device or not isinstance(device.get("networkCandidates"), list):
+        return None
+
+    def signed_probe(base_url: str) -> dict:
+        parsed = urlparse(base_url)
+        return _probe_phone_tunnel(
+            base_url,
+            str(device.get("token") or ""),
+            1,
+            str(device.get("deviceInstanceId") or ""),
+            int(parsed.port or _DEFAULT_PHONE_PORT),
+        )
+
+    observed_at = int(device.get("networkCandidatesObservedAt") or 0)
+    recent_service_state = (
+        device.get("configServerRunning")
+        if int(time.time() * 1000) - observed_at <= 5_000
+        else None
+    )
+    selection = select_phone_connection(
+        device,
+        status={
+            "configServerRunning": recent_service_state,
+            "networkCandidates": device.get("networkCandidates"),
+        },
+        probe=probe or signed_probe,
+    )
+    if not selection.get("ok"):
+        return selection
+    selected_url = _normalize_url(selection.get("baseUrl"))
+    if selected_url == _normalize_url(device.get("baseUrl")) and selection.get("activeTransport") == device.get("activeTransport"):
+        return selection
+    next_device = {
+        **device,
+        "baseUrl": selected_url,
+        "activeTransport": _clip(selection.get("activeTransport"), 32).lower(),
+    }
+    if selection.get("activeTransport") != "usb-loopback":
+        next_device["lanBaseUrl"] = selected_url
+    _write_phone_store(ctx, {
+        **store,
+        "devices": [next_device if item is device else item for item in devices],
+    })
+    return selection
 
 
 def _public_adb_connection(result: dict) -> dict:
@@ -5133,6 +5264,22 @@ def _submit_phone_job(
             if not inline_job_id:
                 _record_phone_task_evidence(ctx, kind, evidence_body, result, started_at)
 
+        for allowed_device_id in allowed_device_ids or []:
+            connection = _refresh_phone_transport(ctx, allowed_device_id)
+            if connection is not None and not connection.get("ok"):
+                result = _phone_failure_result(
+                    kind,
+                    code=str(connection.get("errorCode") or "phone_port_unreachable"),
+                    reason=str(connection.get("message") or "手机连接端口不可达。"),
+                    stdout="",
+                    stderr="",
+                    execution=execution,
+                    started_at=started_at,
+                )
+                result["connection"] = connection
+                record_evidence(result)
+                return result
+
         def run_agent_fallback(previous_result: dict) -> dict:
             if (
                 _phone_execution_is_uncertain(previous_result)
@@ -5415,6 +5562,8 @@ def _submit_phone_job(
             result_payload["metrics"] = metrics
             _phone_promote_metrics_fields(result_payload, metrics)
         result = _with_phone_execution(result_payload, execution)
+        if kind == "phone.status":
+            _remember_phone_connection_candidates(ctx, stdout, device_id)
         if kind == "phone.screenshot":
             _remember_phone_screenshot_result(ctx, evidence_body, result)
         record_evidence(result)

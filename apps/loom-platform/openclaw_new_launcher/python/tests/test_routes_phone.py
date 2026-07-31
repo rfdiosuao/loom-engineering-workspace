@@ -31,7 +31,7 @@ if PYTHON_DIR not in sys.path:
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from tests.matrix_test_support import matrix_for_test
+from tests.matrix_test_support import matrix_context_for_test, matrix_for_test
 
 from api.routes_jobs import register_job_routes
 from api.routes_phone import (
@@ -53,6 +53,8 @@ from api.routes_phone import (
     _phone_payload_failure,
     _phone_runtime_config_json,
     _phone_status_request_timeout_ms,
+    _refresh_phone_transport,
+    _remember_phone_connection_candidates,
     _normalize_url,
     _probe_phone_tunnel,
     _public_store,
@@ -1404,7 +1406,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(base_path=temp_dir)
-            matrix = matrix_for_test(paths, owner_account_id="")
+            matrix = matrix_for_test(paths)
             matrix.register_device(
                 {
                     "deviceId": "phone-1",
@@ -1413,7 +1415,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     "currentTaskId": "stale-task",
                 }
             )
-            ctx = SimpleNamespace(paths=paths)
+            ctx = matrix_context_for_test(paths)
 
             _sync_phone_matrix_presence(
                 ctx,
@@ -1795,10 +1797,10 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(base_path=temp_dir)
-            matrix = matrix_for_test(paths, owner_account_id="")
+            matrix = matrix_for_test(paths)
             matrix.register_device({"deviceId": "phone-1", "online": True})
 
-            _mark_phone_event_stream_offline(SimpleNamespace(paths=paths), "phone-1")
+            _mark_phone_event_stream_offline(matrix_context_for_test(paths), "phone-1")
             device = matrix.status()["devices"][0]
 
         self.assertFalse(device["online"])
@@ -5187,6 +5189,79 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
         self.assertTrue(snapshot["devices"][0]["paired"])
         self.assertNotIn("token", snapshot["devices"][0])
         self.assertNotIn("launcherSecret", snapshot["devices"][0])
+
+    def test_phone_status_remembers_all_lan_candidates_without_rotating_pairing_identity(self) -> None:
+        store = {
+            "selectedDeviceId": "phone-a",
+            "devices": [_secure_phone_device(
+                "phone-a",
+                base_url="http://127.0.0.1:19631",
+                connectionMode="usb",
+                adbLocalPort=19631,
+            )],
+        }
+        stdout = json.dumps({
+            "ok": True,
+            "results": [{
+                "ok": True,
+                "device": {"id": "phone-a"},
+                "status": {
+                    "configServerRunning": True,
+                    "configServerPort": 9527,
+                    "networkMode": "hotspot-host",
+                    "networkCandidates": [{
+                        "interface": "ap0",
+                        "address": "192.168.43.1",
+                        "mode": "hotspot-host",
+                        "baseUrl": "http://192.168.43.1:9527",
+                    }],
+                },
+            }],
+        })
+
+        with (
+            patch("api.routes_phone._load_store", return_value=store),
+            patch("api.routes_phone._write_phone_store") as write_store,
+        ):
+            changed = _remember_phone_connection_candidates(SimpleNamespace(), stdout, "phone-a")
+
+        self.assertTrue(changed)
+        saved = write_store.call_args.args[1]["devices"][0]
+        self.assertEqual(store["devices"][0]["token"], saved["token"])
+        self.assertEqual(store["devices"][0]["launcherSecret"], saved["launcherSecret"])
+        self.assertEqual("hotspot-host", saved["lastNetworkMode"])
+        self.assertEqual(["http://192.168.43.1:9527"], saved["lanBaseUrls"])
+
+    def test_transport_refresh_keeps_usb_preferred_without_changing_pairing_identity(self) -> None:
+        device = _secure_phone_device(
+            "phone-a",
+            base_url="http://127.0.0.1:19631",
+            connectionMode="usb",
+            adbLocalPort=19631,
+            networkCandidates=[{
+                "baseUrl": "http://192.168.43.1:9527",
+                "mode": "hotspot-host",
+                "interface": "ap0",
+            }],
+            networkCandidatesObservedAt=0,
+        )
+        store = {"selectedDeviceId": "phone-a", "devices": [device]}
+
+        with (
+            patch("api.routes_phone._load_store", return_value=store),
+            patch("api.routes_phone._write_phone_store") as write_store,
+        ):
+            result = _refresh_phone_transport(
+                SimpleNamespace(),
+                "phone-a",
+                probe=lambda url: {"ok": True, "baseUrl": url, "deviceInstanceId": device["deviceInstanceId"]},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("usb-loopback", result["activeTransport"])
+        saved = write_store.call_args.args[1]["devices"][0]
+        self.assertEqual("http://127.0.0.1:19631", saved["baseUrl"])
+        self.assertEqual(device["launcherSecret"], saved["launcherSecret"])
 
     def test_phone_status_route_submits_phone_service_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

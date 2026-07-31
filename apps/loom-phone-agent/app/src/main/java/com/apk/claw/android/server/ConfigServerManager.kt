@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.LinkProperties
 import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import com.apk.claw.android.utils.KVUtils
@@ -14,8 +15,10 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import java.net.Inet4Address
-import java.net.InetAddress
 import java.net.NetworkInterface
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /** Android adapter for the serialized ConfigServer lifecycle coordinator. */
@@ -24,6 +27,7 @@ object ConfigServerManager {
     private const val TAG = "ConfigServerManager"
     private const val MAX_PORT_RETRY = 10
     private const val STOP_TIMEOUT_MS = 750L
+    private const val ADDRESS_STABILITY_DELAY_MS = 350L
 
     private data class ManagedServer(
         val generation: Long,
@@ -44,6 +48,11 @@ object ConfigServerManager {
     private var retiredCallbackGeneration = 0L
     private var networkCallback: ManagedNetworkCallback? = null
     private var appContext: Context? = null
+    private val addressRefreshLock = Any()
+    private var pendingAddressRefresh: ScheduledFuture<*>? = null
+    private val addressRefreshExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "lumi-config-address-refresh").apply { isDaemon = true }
+    }
 
     private val _configChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val configChanged: SharedFlow<Unit> = _configChanged.asSharedFlow()
@@ -131,6 +140,11 @@ object ConfigServerManager {
                     XLog.i(TAG, "config_server.callback event=available generation=$generation")
                     lifecycle.onNetworkAvailable(generation)
                 }
+
+                override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                    XLog.i(TAG, "config_server.callback event=link_properties generation=$generation")
+                    lifecycle.onNetworkAvailable(generation)
+                }
             }
             try {
                 connectivityManager.registerNetworkCallback(NetworkRequest.Builder().build(), callback)
@@ -173,8 +187,20 @@ object ConfigServerManager {
         }
 
         override fun onAddressChanged() {
-            XLog.i(TAG, "config_server.address_changed generation=${lifecycle.state.generation}")
-            _configChanged.tryEmit(Unit)
+            val generation = lifecycle.state.generation
+            synchronized(addressRefreshLock) {
+                pendingAddressRefresh?.cancel(false)
+                pendingAddressRefresh = addressRefreshExecutor.schedule(
+                    {
+                        if (lifecycle.state.generation == generation && isRunning()) {
+                            XLog.i(TAG, "config_server.address_stable generation=$generation")
+                            _configChanged.tryEmit(Unit)
+                        }
+                    },
+                    ADDRESS_STABILITY_DELAY_MS,
+                    TimeUnit.MILLISECONDS
+                )
+            }
         }
 
         override fun onStateChanged(
@@ -183,6 +209,12 @@ object ConfigServerManager {
             reason: String
         ) {
             if (current.generation < _state.value.generation) return
+            if (current.phase == ConfigServerLifecyclePhase.STOPPING || current.phase == ConfigServerLifecyclePhase.STOPPED) {
+                synchronized(addressRefreshLock) {
+                    pendingAddressRefresh?.cancel(false)
+                    pendingAddressRefresh = null
+                }
+            }
             _state.value = current
             XLog.i(
                 TAG,
@@ -303,7 +335,19 @@ object ConfigServerManager {
 
     fun hasLanAddress(context: Context): Boolean = getLanIpAddress(context) != null
 
-    fun getLanIpAddress(context: Context): String? = getWifiIpAddress(context) ?: getInterfaceIpAddress()
+    fun getLanIpAddress(context: Context): String? = getNetworkCandidates(context).firstOrNull()?.address
+
+    fun getNetworkMode(context: Context): PhoneNetworkMode =
+        getNetworkCandidates(context).firstOrNull()?.mode ?: PhoneNetworkMode.NONE
+
+    fun getNetworkCandidates(context: Context): List<PhoneNetworkCandidate> {
+        val interfaceAddresses = getInterfaceAddresses().toMutableList()
+        val legacyWifiIp = getWifiIpAddress(context)
+        if (!legacyWifiIp.isNullOrBlank() && interfaceAddresses.none { it.address == legacyWifiIp }) {
+            interfaceAddresses += PhoneInterfaceAddress("wlan0", legacyWifiIp)
+        }
+        return PhoneNetworkMode.reachableCandidates(interfaceAddresses)
+    }
 
     private fun getWifiIpAddress(context: Context): String? {
         return try {
@@ -323,30 +367,28 @@ object ConfigServerManager {
         }
     }
 
-    private fun getInterfaceIpAddress(): String? {
+    private fun getInterfaceAddresses(): List<PhoneInterfaceAddress> {
         return try {
             NetworkInterface.getNetworkInterfaces()?.toList()
                 ?.filter { it.isUp && !it.isLoopback && !it.isVirtual }
-                ?.filterNot { PhoneNetworkMode.isCellularOnly(it.name) }
                 ?.flatMap { networkInterface ->
                     networkInterface.inetAddresses.toList()
                         .filterIsInstance<Inet4Address>()
-                        .filter(::isUsableLanAddress)
-                        .map { address -> networkInterface.name to address.hostAddress }
+                        .map { address ->
+                            PhoneInterfaceAddress(
+                                interfaceName = networkInterface.name,
+                                address = address.hostAddress.orEmpty(),
+                                siteLocal = address.isSiteLocalAddress,
+                                loopback = address.isLoopbackAddress,
+                                linkLocal = address.isLinkLocalAddress,
+                                anyLocal = address.isAnyLocalAddress
+                            )
+                        }
                 }
-                ?.sortedWith(compareBy<Pair<String, String>>({ PhoneNetworkMode.interfacePriority(it.first) }, { it.first }))
-                ?.firstOrNull()
-                ?.second
+                .orEmpty()
         } catch (error: Exception) {
             XLog.e(TAG, "config_server.interface_ip_failed error=${error.javaClass.simpleName}")
-            null
+            emptyList()
         }
-    }
-
-    private fun isUsableLanAddress(address: InetAddress): Boolean {
-        return !address.isLoopbackAddress &&
-            !address.isAnyLocalAddress &&
-            !address.isLinkLocalAddress &&
-            address.isSiteLocalAddress
     }
 }

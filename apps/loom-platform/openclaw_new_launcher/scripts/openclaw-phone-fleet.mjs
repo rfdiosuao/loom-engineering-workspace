@@ -238,6 +238,18 @@ async function probeStatus(device, timeoutMs = DEFAULT_STATUS_REQUEST_TIMEOUT_MS
     accessibilityRunning: Boolean(data?.accessibilityRunning),
     screenOn: data?.screenOn ?? null,
     deviceLocked: data?.deviceLocked ?? null,
+    configServerRunning: data?.configServerRunning === true,
+    configServerPort: data?.configServerPort ?? null,
+    networkMode: data?.networkMode || 'none',
+    usbLoopbackAvailable: data?.usbLoopbackAvailable === true,
+    networkCandidates: Array.isArray(data?.networkCandidates)
+      ? data.networkCandidates.map((candidate) => ({
+        interface: String(candidate?.interface || '').slice(0, 80),
+        address: String(candidate?.address || '').slice(0, 120),
+        mode: String(candidate?.mode || '').slice(0, 32),
+        baseUrl: String(candidate?.baseUrl || '').slice(0, 512),
+      }))
+      : [],
   };
 }
 

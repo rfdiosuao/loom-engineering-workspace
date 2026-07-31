@@ -1048,7 +1048,8 @@ object AgentApiController {
                 running = ConfigServerManager.isRunning(),
                 address = ConfigServerManager.getAddress(),
                 actualPort = ConfigServerManager.getPort(),
-                defaultPort = ConfigServer.PORT
+                defaultPort = ConfigServer.PORT,
+                candidates = ConfigServerManager.getNetworkCandidates(ClawApplication.instance)
             )
             // 手机当前时间,供启动器计算"手机↔电脑时钟偏差",用手机时钟签名 Lumi 请求,
             // 客户手机时间不准也不会导致签名 403。
