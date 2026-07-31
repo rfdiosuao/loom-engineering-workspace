@@ -927,6 +927,50 @@ class AgentSessionRepository:
                 "created": False,
             }
 
+    def referenced_attachment_paths(self, session_id: str, paths: list[str]) -> set[str]:
+        """Return candidate paths referenced by durable message/run transactions."""
+        candidates = {
+            os.path.normcase(os.path.abspath(path)): os.path.abspath(path)
+            for path in paths
+            if isinstance(path, str) and path.strip()
+        }
+        if not candidates:
+            return set()
+        found: set[str] = set()
+
+        def inspect(value: Any) -> None:
+            if isinstance(value, dict):
+                raw_path = value.get("path")
+                if isinstance(raw_path, str) and raw_path.strip():
+                    try:
+                        normalized = os.path.normcase(os.path.abspath(raw_path))
+                    except (OSError, ValueError):
+                        normalized = ""
+                    if normalized in candidates:
+                        found.add(candidates[normalized])
+                for nested in value.values():
+                    inspect(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    inspect(nested)
+
+        with self._locked():
+            self._require_session_unlocked(session_id)
+            inspect(_read_jsonl(self._messages_path(session_id)))
+            for directory_name in ("runs", "transactions"):
+                directory = os.path.join(self._session_dir(session_id), directory_name)
+                try:
+                    filenames = os.listdir(directory)
+                except FileNotFoundError:
+                    continue
+                for filename in filenames:
+                    if not filename.endswith(".json"):
+                        continue
+                    record = _read_json(os.path.join(directory, filename))
+                    if record is not None:
+                        inspect(record)
+        return found
+
     def append_event(self, session_id: str, event: JsonObject) -> JsonObject:
         with self._locked():
             session = self._require_session_unlocked(session_id)

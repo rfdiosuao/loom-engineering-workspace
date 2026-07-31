@@ -404,6 +404,188 @@ class AgentServiceTests(unittest.TestCase):
             finally:
                 service.shutdown()
 
+    def test_attachment_validation_failure_removes_files_created_earlier_in_request(self) -> None:
+        from services.agent_service import AgentService
+
+        image_bytes = b"\x89PNG\r\n\x1a\nloom"
+        data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime(), capabilities=_registry())
+            try:
+                session = service.create_session({"title": "Attachment validation rollback"})
+                with self.assertRaisesRegex(ValueError, "AGENT_ATTACHMENT_TYPE_UNSUPPORTED"):
+                    service.send_message(session["sessionId"], {
+                        "clientMessageId": "attachment-validation-rollback-1",
+                        "text": "",
+                        "attachments": [
+                            {
+                                "name": "valid.png",
+                                "size": len(image_bytes),
+                                "type": "image/png",
+                                "kind": "image",
+                                "dataUrl": data_url,
+                            },
+                            {
+                                "name": "unsupported.pdf",
+                                "size": 3,
+                                "type": "application/pdf",
+                                "kind": "binary",
+                                "dataUrl": "data:application/pdf;base64,cGRm",
+                            },
+                        ],
+                    })
+                attachment_root = os.path.join(root, "data", "agent", "attachments")
+                remaining = [
+                    os.path.join(directory, filename)
+                    for directory, _subdirs, files in os.walk(attachment_root)
+                    for filename in files
+                ]
+                self.assertEqual(remaining, [])
+            finally:
+                service.shutdown()
+
+    def test_message_persistence_failure_removes_unreferenced_attachment(self) -> None:
+        from services.agent_service import AgentService
+
+        image_bytes = b"\x89PNG\r\n\x1a\nloom"
+        data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime(), capabilities=_registry())
+            try:
+                session = service.create_session({"title": "Attachment persistence rollback"})
+                with patch.object(
+                    service.repository,
+                    "create_message_run",
+                    side_effect=OSError("simulated persistence failure"),
+                ):
+                    with self.assertRaisesRegex(OSError, "simulated persistence failure"):
+                        service.send_message(session["sessionId"], {
+                            "clientMessageId": "attachment-persistence-rollback-1",
+                            "text": "persist this",
+                            "attachments": [{
+                                "name": "persist.png",
+                                "size": len(image_bytes),
+                                "type": "image/png",
+                                "kind": "image",
+                                "dataUrl": data_url,
+                            }],
+                        })
+                attachment_root = os.path.join(root, "data", "agent", "attachments")
+                remaining = [
+                    os.path.join(directory, filename)
+                    for directory, _subdirs, files in os.walk(attachment_root)
+                    for filename in files
+                ]
+                self.assertEqual(remaining, [])
+            finally:
+                service.shutdown()
+
+    def test_post_commit_failure_keeps_durably_referenced_attachment(self) -> None:
+        from services.agent_service import AgentService
+
+        image_bytes = b"\x89PNG\r\n\x1a\nloom"
+        data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime(), capabilities=_registry())
+            try:
+                session = service.create_session({"title": "Attachment committed before response failure"})
+                original_create = service.repository.create_message_run
+
+                def persist_then_fail(*args, **kwargs):
+                    original_create(*args, **kwargs)
+                    raise OSError("response failed after durable commit")
+
+                with patch.object(service.repository, "create_message_run", side_effect=persist_then_fail):
+                    with self.assertRaisesRegex(OSError, "response failed after durable commit"):
+                        service.send_message(session["sessionId"], {
+                            "clientMessageId": "attachment-post-commit-1",
+                            "text": "persist this first",
+                            "attachments": [{
+                                "name": "committed.png",
+                                "size": len(image_bytes),
+                                "type": "image/png",
+                                "kind": "image",
+                                "dataUrl": data_url,
+                            }],
+                        })
+
+                existing = service.repository.find_message_run(
+                    session["sessionId"],
+                    "attachment-post-commit-1",
+                )
+                self.assertIsNotNone(existing)
+                attachment_root = os.path.join(
+                    root,
+                    "data",
+                    "agent",
+                    "attachments",
+                    session["sessionId"],
+                )
+                remaining = [
+                    os.path.join(directory, filename)
+                    for directory, _subdirs, files in os.walk(attachment_root)
+                    for filename in files
+                ]
+                self.assertEqual(len(remaining), 1)
+                with open(remaining[0], "rb") as handle:
+                    self.assertEqual(handle.read(), image_bytes)
+            finally:
+                service.shutdown()
+
+    def test_pending_message_transaction_keeps_attachment_until_recovery(self) -> None:
+        from services.agent_service import AgentService
+
+        image_bytes = b"\x89PNG\r\n\x1a\nloom"
+        data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(AppPaths(root), runtime=UnavailableRuntime(), capabilities=_registry())
+            try:
+                session = service.create_session({"title": "Attachment transaction recovery"})
+                body = {
+                    "clientMessageId": "attachment-transaction-recovery-1",
+                    "text": "recover this",
+                    "attachments": [{
+                        "name": "recover.png",
+                        "size": len(image_bytes),
+                        "type": "image/png",
+                        "kind": "image",
+                        "dataUrl": data_url,
+                    }],
+                }
+                with patch.object(
+                    service.repository,
+                    "_commit_message_transaction_unlocked",
+                    side_effect=OSError("commit interrupted after transaction write"),
+                ):
+                    with self.assertRaisesRegex(OSError, "commit interrupted"):
+                        service.send_message(session["sessionId"], body)
+
+                attachment_root = os.path.join(
+                    root,
+                    "data",
+                    "agent",
+                    "attachments",
+                    session["sessionId"],
+                )
+                before_recovery = [
+                    os.path.join(directory, filename)
+                    for directory, _subdirs, files in os.walk(attachment_root)
+                    for filename in files
+                ]
+                self.assertEqual(len(before_recovery), 1)
+
+                recovered = service.send_message(session["sessionId"], body)
+                persisted_path = recovered["run"]["request"]["attachments"][0]["path"]
+                self.assertTrue(os.path.isfile(persisted_path))
+                after_recovery = [
+                    os.path.join(directory, filename)
+                    for directory, _subdirs, files in os.walk(attachment_root)
+                    for filename in files
+                ]
+                self.assertEqual(after_recovery, [persisted_path])
+            finally:
+                service.shutdown()
+
     def test_session_detail_returns_newest_message_page_and_cursor_loads_older_messages(self) -> None:
         from services.agent_service import AgentService
 

@@ -431,7 +431,19 @@ class AgentService:
                     break
         if requested_mode == "manual" and scope_resolution.status != "resolved":
             raise ValueError(f"AGENT_SCOPE_INVALID: {scope_resolution.summary}")
-        attachments = self._normalize_user_attachments(session_id, raw_attachments)
+        materialized_attachments: list[Json] = []
+        try:
+            attachments = self._normalize_user_attachments(
+                session_id,
+                raw_attachments,
+                materialized=materialized_attachments,
+            )
+        except Exception:
+            self._cleanup_unreferenced_user_attachments(
+                session_id,
+                materialized_attachments,
+            )
+            raise
         session_artifacts = self._session_artifacts(session_id)
         now = _utc_now()
         message_id = f"message_{uuid.uuid4().hex}"
@@ -501,14 +513,26 @@ class AgentService:
         with self._lock:
             if self._closed:
                 raise RuntimeError("agent service is closed")
-            result = self.repository.create_message_run(
-                session_id,
-                client_message_id,
-                message,
-                run,
-                reject_active_run=True,
-                history_limit=40,
-            )
+            try:
+                result = self.repository.create_message_run(
+                    session_id,
+                    client_message_id,
+                    message,
+                    run,
+                    reject_active_run=True,
+                    history_limit=40,
+                )
+            except Exception:
+                self._cleanup_unreferenced_user_attachments(
+                    session_id,
+                    materialized_attachments,
+                )
+                raise
+            if not result.get("created"):
+                self._cleanup_unreferenced_user_attachments(
+                    session_id,
+                    materialized_attachments,
+                )
             if result.get("created"):
                 persisted_request = result["run"].get("request")
                 if not isinstance(persisted_request, Mapping):
@@ -523,7 +547,13 @@ class AgentService:
                 self._submit_run(session_id, str(result["run"]["runId"]), persisted_request)
         return {"message": result["message"], "run": result["run"]}
 
-    def _normalize_user_attachments(self, session_id: str, values: list[Any]) -> list[Json]:
+    def _normalize_user_attachments(
+        self,
+        session_id: str,
+        values: list[Any],
+        *,
+        materialized: list[Json] | None = None,
+    ) -> list[Json]:
         if len(values) > _MAX_USER_ATTACHMENTS:
             raise ValueError(
                 f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: at most {_MAX_USER_ATTACHMENTS} attachments are allowed"
@@ -557,14 +587,17 @@ class AgentService:
                     raise ValueError(
                         "AGENT_ATTACHMENT_LIMIT_EXCEEDED: attachment total exceeds 16 MB"
                     )
-                normalized.append(self._materialize_user_image_attachment(
+                attachment = self._materialize_user_image_attachment(
                     session_id,
                     name=name,
                     mime=supplied_type,
                     size=size,
                     last_modified=value.get("lastModified"),
                     data_url=encoded,
-                ))
+                )
+                normalized.append(attachment)
+                if materialized is not None:
+                    materialized.append(attachment)
                 continue
 
             is_text = (
@@ -605,6 +638,52 @@ class AgentService:
                 f"AGENT_ATTACHMENT_TYPE_UNSUPPORTED: {name} is not a supported image or text attachment"
             )
         return normalized
+
+    def _cleanup_unreferenced_user_attachments(
+        self,
+        session_id: str,
+        attachments: list[Json],
+    ) -> None:
+        attachment_root = os.path.abspath(os.path.join(
+            self.paths.data_dir,
+            "agent",
+            "attachments",
+            session_id,
+        ))
+        candidates: list[str] = []
+        for item in attachments:
+            raw_path = str(item.get("path") or "").strip() if isinstance(item, Mapping) else ""
+            if not raw_path:
+                continue
+            path = os.path.abspath(raw_path)
+            try:
+                inside_root = os.path.commonpath([path, attachment_root]) == attachment_root
+            except ValueError:
+                inside_root = False
+            if inside_root and path not in candidates:
+                candidates.append(path)
+        if not candidates:
+            return
+        try:
+            referenced = self.repository.referenced_attachment_paths(session_id, candidates)
+        except Exception:
+            # If durable-state inspection fails, retain files so repository
+            # recovery cannot resurrect a message with a missing attachment.
+            return
+        referenced_keys = {os.path.normcase(os.path.abspath(path)) for path in referenced}
+        for path in candidates:
+            if os.path.normcase(path) in referenced_keys:
+                continue
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+        try:
+            os.rmdir(attachment_root)
+        except OSError:
+            pass
 
     def _materialize_user_image_attachment(
         self,
