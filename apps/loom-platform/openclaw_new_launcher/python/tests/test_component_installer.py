@@ -2821,6 +2821,154 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
         self.assertEqual(command, ["explorer.exe", r"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App"])
 
+    def test_codex_desktop_appx_probe_never_queries_chatgpt_package_identity(self) -> None:
+        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda command, _cwd, _timeout: calls.append(command) or FakeCompletedProcess(),
+            )
+
+            installer._codex_desktop_appx_locations()
+
+        command_text = " ".join(calls[0])
+        self.assertIn("OpenAI.Codex", command_text)
+        self.assertNotIn("OpenAI.ChatGPT", command_text)
+
+    def test_chatgpt_store_package_cannot_satisfy_codex_desktop_detection(self) -> None:
+        component = ReleaseComponent(
+            component_id="codex-desktop",
+            name="Codex Desktop",
+            version="Microsoft Store",
+            platform="windows",
+            arch="x64",
+            archive_type="msstore",
+            size=0,
+            sha256="a" * 64,
+            urls=(),
+            install_path="agents/codex-desktop",
+            entry=None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            chatgpt_location = os.path.join(
+                temp_dir,
+                "WindowsApps",
+                "OpenAI.ChatGPT_26.707.3748.0_x64__2p2nqsd0c76g0",
+            )
+            chatgpt_entry = os.path.join(chatgpt_location, "app", "ChatGPT.exe")
+            os.makedirs(os.path.dirname(chatgpt_entry), exist_ok=True)
+            with open(chatgpt_entry, "wb") as handle:
+                handle.write(b"chatgpt only")
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(stdout=chatgpt_location),
+            )
+
+            state = installer.detect(component, job_id="chatgpt-is-not-codex", force_external_probe=True)
+
+        self.assertEqual(state.status, "not_installed")
+
+    def test_store_package_residue_without_entry_is_reported_as_damaged(self) -> None:
+        component = ReleaseComponent(
+            component_id="codex-desktop",
+            name="Codex Desktop",
+            version="Microsoft Store",
+            platform="windows",
+            arch="x64",
+            archive_type="msstore",
+            size=0,
+            sha256="a" * 64,
+            urls=(),
+            install_path="agents/codex-desktop",
+            entry=None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_location = os.path.join(
+                temp_dir,
+                "WindowsApps",
+                "OpenAI.Codex_26.707.3748.0_x64__2p2nqsd0c76g0",
+            )
+            os.makedirs(package_location)
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(stdout=package_location),
+            )
+
+            with self.assertRaises(ComponentInstallError):
+                installer.detect(component, job_id="damaged-store-package", force_external_probe=True)
+
+            failed = store.load()[component.component_id]
+            self.assertEqual(failed.status, "health_failed")
+            self.assertEqual(failed.error_code, "desktop_entry_missing")
+
+    def test_codex_cli_rejects_executable_bundled_inside_codex_desktop(self) -> None:
+        component = ReleaseComponent(
+            component_id="codex-cli",
+            name="Codex CLI",
+            version="0.142.3",
+            platform="windows",
+            arch="x64",
+            archive_type="tgz",
+            size=1,
+            sha256="a" * 64,
+            urls=(),
+            install_path="agents/codex-cli",
+            entry=None,
+            external_paths=(r"%LOCALAPPDATA%\Microsoft\WindowsApps\OpenAI.Codex_26.707.3748.0_x64__2p2nqsd0c76g0\app\resources\codex.exe",),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            desktop_resource = os.path.join(
+                temp_dir,
+                "Microsoft",
+                "WindowsApps",
+                "OpenAI.Codex_26.707.3748.0_x64__2p2nqsd0c76g0",
+                "app",
+                "resources",
+                "codex.exe",
+            )
+            os.makedirs(os.path.dirname(desktop_resource), exist_ok=True)
+            with open(desktop_resource, "wb") as handle:
+                handle.write(b"desktop bundled cli")
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(stdout="codex-cli 0.142.3"),
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOCALAPPDATA": temp_dir,
+                    "APPDATA": temp_dir,
+                    "USERPROFILE": temp_dir,
+                    "ProgramFiles": temp_dir,
+                    "ProgramFiles(x86)": temp_dir,
+                    "PATH": temp_dir,
+                },
+                clear=False,
+            ):
+                state = installer.detect(component, job_id="desktop-resource-is-not-cli")
+
+        self.assertEqual(state.status, "not_installed")
+
+    def test_legacy_16_bit_pe_entry_is_identified_before_launch(self) -> None:
+        detector = getattr(component_installer_module, "detect_pe_architecture", None)
+        self.assertIsNotNone(detector)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            entry = os.path.join(temp_dir, "codex.exe")
+            payload = bytearray(256)
+            payload[0:2] = b"MZ"
+            payload[0x3C:0x40] = (128).to_bytes(4, "little")
+            payload[128:130] = b"NE"
+            with open(entry, "wb") as handle:
+                handle.write(payload)
+
+            self.assertEqual(detector(entry), "legacy_16bit")
+
     def test_codex_install_uses_official_chatgpt_store_product_instead_of_npm_cli(self) -> None:
         payload = b"legacy codex installer placeholder"
         component = ReleaseComponent(
@@ -2906,6 +3054,7 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             installer = ComponentInstaller(
                 base_path=temp_dir,
                 state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(stdout=""),
             )
             installer._official_codex_entry = lambda refresh=False: None  # type: ignore[attr-defined,method-assign]
 

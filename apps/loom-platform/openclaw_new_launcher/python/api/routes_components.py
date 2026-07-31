@@ -11,7 +11,12 @@ from core.component_catalog import ComponentCatalog, default_component_state_pat
 from core.component_installer import ComponentInstallError, ComponentInstaller
 from core.component_state import ComponentState, ComponentStateStore
 from core.newapi_account_manager import ACCOUNT_SOURCE, NewApiAccountError
-from core.official_codex import official_codex_component
+from core.official_codex import (
+    CHATGPT_DESKTOP_COMPONENT_ID,
+    CODEX_CLI_COMPONENT_ID,
+    CODEX_DESKTOP_COMPONENT_ID,
+    virtual_openai_component,
+)
 from core.release_manifest import ReleaseComponent, default_release_manifest_public_key, load_release_manifest_file
 from core.wire_config import WireConfigError
 
@@ -21,18 +26,53 @@ RUNNING_JOB_STATUSES = {"queued", "running"}
 SIMULATION_COMPONENTS: dict[str, ReleaseComponent] = {
     "codex-desktop": ReleaseComponent(
         component_id="codex-desktop",
-        name="ChatGPT Codex 原版",
+        name="Codex Desktop",
+        version="Microsoft Store",
+        platform="windows",
+        arch="x64",
+        archive_type="msstore",
+        size=0,
+        sha256="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        urls=("https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi",),
+        install_path="agents/codex-desktop",
+        entry=None,
+        category="agent",
+        official_url="https://openai.com/codex/",
+        description="OpenAI 官方 Codex 桌面应用，由 Microsoft Store 安装和更新",
+    ),
+    "chatgpt-desktop": ReleaseComponent(
+        component_id="chatgpt-desktop",
+        name="ChatGPT Desktop",
         version="Microsoft Store",
         platform="windows",
         arch="x64",
         archive_type="msstore",
         size=1,
         sha256="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        urls=(),
-        install_path="agents/codex-desktop",
+        urls=("https://get.microsoft.com/installer/download/9NT1R1C2HH7J?cid=website_cta_psi",),
+        install_path="agents/chatgpt-desktop",
         entry=None,
         category="agent",
-        description="OpenAI 官方 ChatGPT 桌面应用，内含 Codex，由 Microsoft Store 安装和更新",
+        official_url="https://openai.com/chatgpt/desktop/",
+        description="OpenAI 官方 ChatGPT 桌面应用，由 Microsoft Store 安装和更新",
+    ),
+    "codex-cli": ReleaseComponent(
+        component_id="codex-cli",
+        name="Codex CLI",
+        version="待正式清单",
+        platform="windows",
+        arch="x64",
+        archive_type="tgz",
+        size=1,
+        sha256="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        urls=(),
+        install_path="agents/codex-cli",
+        entry="package/bin/codex.js",
+        category="agent",
+        official_url="https://developers.openai.com/codex/cli/",
+        description="OpenAI 官方 Codex 命令行智能体；与桌面应用独立检测和安装",
+        install_command=("npm", "install", "-g", "@openai/codex"),
+        uninstall_command=("npm", "uninstall", "-g", "@openai/codex"),
     ),
     "claude-code": ReleaseComponent(
         component_id="claude-code",
@@ -105,16 +145,22 @@ def _resolve_component_for_action(
 ) -> tuple[ReleaseComponent | None, str | None]:
     try:
         manifest, _manifest_warning = load_installable_manifest(manifest_path)
-        component = manifest.component_by_id(component_id)
+        source_id = CODEX_DESKTOP_COMPONENT_ID if component_id in {
+            CODEX_DESKTOP_COMPONENT_ID,
+            CHATGPT_DESKTOP_COMPONENT_ID,
+            CODEX_CLI_COMPONENT_ID,
+        } else component_id
+        component = manifest.component_by_id(source_id)
         if component is None:
             return None, f"Unknown component: {component_id}"
-        component = official_codex_component(component)
+        component = virtual_openai_component(component, component_id)
+        if component is None:
+            return None, f"Unknown component: {component_id}"
         return component, None
     except Exception as manifest_error:
         if allow_fallback:
             component = SIMULATION_COMPONENTS.get(component_id)
             if component is not None:
-                component = official_codex_component(component)
                 return component, f"正式组件清单未就绪：release-manifest.json：{manifest_error}"
         return None, f"正式安装需要 release-manifest.json：{manifest_error}"
 

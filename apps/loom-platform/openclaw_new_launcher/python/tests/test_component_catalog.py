@@ -96,7 +96,7 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
 
             self.assertEqual(default_manifest_path(debug_dir), parent_manifest)
 
-    def test_missing_manifest_exposes_five_simulation_targets_without_state_write(self) -> None:
+    def test_missing_manifest_exposes_split_openai_products_without_state_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = os.path.join(temp_dir, "components-state.json")
             catalog = ComponentCatalog(
@@ -115,11 +115,25 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
             self.assertNotIn("All manifest sources", status["warning"])
             self.assertEqual(
                 [component["id"] for component in status["components"]],
-                ["codex-desktop", "claude-code", "opencode", "openclaw-companion", "hermes"],
+                [
+                    "codex-desktop",
+                    "chatgpt-desktop",
+                    "codex-cli",
+                    "claude-code",
+                    "opencode",
+                    "openclaw-companion",
+                    "hermes",
+                ],
             )
             codex = next(component for component in status["components"] if component["id"] == "codex-desktop")
-            self.assertEqual(codex["name"], "ChatGPT Codex 原版")
+            chatgpt = next(component for component in status["components"] if component["id"] == "chatgpt-desktop")
+            codex_cli = next(component for component in status["components"] if component["id"] == "codex-cli")
+            self.assertEqual(codex["name"], "Codex Desktop")
+            self.assertEqual(chatgpt["name"], "ChatGPT Desktop")
+            self.assertEqual(codex_cli["name"], "Codex CLI")
             self.assertEqual(codex["type"], "msstore")
+            self.assertEqual(chatgpt["type"], "msstore")
+            self.assertNotEqual(codex_cli["type"], "msstore")
             self.assertEqual(codex["installCommand"], [])
             self.assertEqual(codex["urls"], ["https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"])
             self.assertTrue(all(component["status"] == "not_installed" for component in status["components"]))

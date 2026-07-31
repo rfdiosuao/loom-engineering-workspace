@@ -98,7 +98,7 @@ class ComponentRouteResolutionTests(unittest.TestCase):
 
             self.assertIsNotNone(component)
             self.assertEqual(component.component_id, "codex-desktop")
-            self.assertEqual(component.name, "ChatGPT Codex 原版")
+            self.assertEqual(component.name, "Codex Desktop")
             self.assertEqual(component.archive_type, "msstore")
             self.assertEqual(component.install_command, ())
             self.assertIsNotNone(error)

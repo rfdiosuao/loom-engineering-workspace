@@ -20,6 +20,8 @@ import { useAppStore } from '../../stores/appStore';
 
 const PINNED_COMPONENT_IDS = [
   'codex-desktop',
+  'chatgpt-desktop',
+  'codex-cli',
   'claude-code',
   'opencode',
   'openclaw-companion',
@@ -27,7 +29,9 @@ const PINNED_COMPONENT_IDS = [
 ];
 
 const FALLBACK_COMPONENTS: Record<string, { name: string; description: string; category: string }> = {
-  'codex-desktop': { name: 'ChatGPT Codex 原版', description: 'OpenAI 官方 ChatGPT 桌面应用，内含 Codex，由 Microsoft Store 安装和更新', category: 'agent' },
+  'codex-desktop': { name: 'Codex Desktop', description: 'OpenAI 官方 Codex 桌面应用，由 Microsoft Store 安装和更新', category: 'agent' },
+  'chatgpt-desktop': { name: 'ChatGPT Desktop', description: 'OpenAI 官方 ChatGPT 桌面应用，由 Microsoft Store 安装和更新', category: 'agent' },
+  'codex-cli': { name: 'Codex CLI', description: 'OpenAI 官方 Codex 命令行智能体；与桌面应用独立检测和安装', category: 'agent' },
   'claude-code': { name: 'Claude Code', description: 'Anthropic 命令行编程智能体', category: 'agent' },
   opencode: { name: 'opencode', description: '终端优先的 AI 编程工具', category: 'agent' },
   'openclaw-companion': { name: 'OpenClaw', description: '多智能体编程工作台', category: 'agent' },
@@ -37,6 +41,8 @@ const FALLBACK_COMPONENTS: Record<string, { name: string; description: string; c
 const PREREQ_IDS = ['python_runtime', 'node', 'npm', 'git', 'git_bash', 'uv', 'webview2', 'data_dir'];
 const COMPONENT_REQUIRED_PREREQ_IDS: Record<string, Set<string>> = {
   'codex-desktop': new Set(),
+  'chatgpt-desktop': new Set(),
+  'codex-cli': new Set(['python_runtime', 'node', 'npm', 'data_dir']),
   'claude-code': new Set(['python_runtime', 'node', 'npm', 'data_dir']),
   opencode: new Set(['python_runtime', 'node', 'npm', 'data_dir']),
   'openclaw-companion': new Set(['python_runtime', 'node', 'npm', 'data_dir']),
@@ -266,7 +272,7 @@ function isOpenClawComponent(component?: ComponentSummary): boolean {
 }
 
 function isOfficialCodexComponent(component?: ComponentSummary): boolean {
-  return component?.id === 'codex-desktop';
+  return component?.id === 'codex-desktop' || component?.id === 'chatgpt-desktop';
 }
 
 function componentWebUrl(component?: ComponentSummary): string {
@@ -1822,7 +1828,7 @@ export const AgentInstallerPage: React.FC = () => {
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <div className="text-[10px] font-bold tracking-[0.24em] text-text-subtle">可安装智能体</div>
-                <h2 className="mt-1 text-2xl font-black text-text">Codex / Claude Code / opencode / OpenClaw / Hermes</h2>
+                <h2 className="mt-1 text-2xl font-black text-text">Codex Desktop / ChatGPT Desktop / Codex CLI / Claude Code / opencode / OpenClaw / Hermes</h2>
               </div>
               {error ? <span className="text-sm font-bold text-status-danger">{error}</span> : null}
             </div>
@@ -1887,6 +1893,31 @@ export const AgentInstallerPage: React.FC = () => {
                       <InfoTile label="类型" value={selected.type} />
                     </div>
 
+                    {selected.detection ? (
+                      <section
+                        data-agent-detection-evidence
+                        className={`rounded-[16px] border p-4 ${selected.detection.healthy
+                          ? 'border-status-success/25 bg-status-success/5'
+                          : 'border-status-warning/30 bg-status-warning/5'}`}
+                      >
+                        <div className="text-sm font-black text-text">为什么认为可用</div>
+                        <p className="mt-2 text-sm leading-6 text-text-muted">{selected.detection.reason}</p>
+                        {selected.detection.items?.length ? (
+                          <div className="mt-3 space-y-2">
+                            {selected.detection.items.map((item, index) => (
+                              <div key={`${item.kind}-${index}`} className="grid gap-1 text-xs sm:grid-cols-[110px_minmax(0,1fr)_70px]">
+                                <span className="font-bold text-text-subtle">{item.label}</span>
+                                <span className="break-all font-mono text-text-muted">{item.value}</span>
+                                <span className="font-bold text-text-subtle">{item.status}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="mt-4 text-xs font-black text-text">下一步</div>
+                        <p className="mt-1 text-xs leading-5 text-text-muted">{selected.detection.nextAction}</p>
+                      </section>
+                    ) : null}
+
                     {installActionsLocked ? (
                       <div className="rounded-[16px] border border-status-warning/30 bg-status-warning/10 p-4 text-sm font-bold text-status-warning">
                         安装清单未就绪，暂时不能安装或启动。请刷新后重试。
@@ -1917,7 +1948,7 @@ export const AgentInstallerPage: React.FC = () => {
                     ) : selected.status === 'manual_install_required' ? (
                       <div className="rounded-[16px] border border-border/70 bg-surface-alt/50 p-4 text-sm text-text-muted">
                         {isOfficialCodexComponent(selected)
-                          ? '等待 Microsoft Store 完成安装。安装结束后点击“重新检测”，再启动原版 ChatGPT Codex。'
+                          ? `等待 Microsoft Store 完成安装。安装结束后点击“重新检测”，再启动 ${selected.name}。`
                           : '已发现本机安装器。建议点击“安装”接管流程，完成后再启动。'}
                       </div>
                     ) : null}

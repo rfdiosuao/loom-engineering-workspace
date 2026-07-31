@@ -959,6 +959,24 @@ export async function waitForJob<T = unknown>(
 }
 
 // === Components / Agent installer ===
+export interface ComponentDetectionItem {
+  kind: string;
+  label: string;
+  value: string;
+  status: string;
+}
+
+export interface ComponentDetectionEvidence {
+  identity: string;
+  identityLabel?: string;
+  source?: string;
+  available: boolean;
+  healthy: boolean;
+  reason: string;
+  nextAction: string;
+  items: ComponentDetectionItem[];
+}
+
 export interface ComponentSummary {
   id: string;
   name: string;
@@ -983,6 +1001,7 @@ export interface ComponentSummary {
   updatedAt?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
+  detection?: ComponentDetectionEvidence | null;
 }
 
 export interface ComponentSnapshot {

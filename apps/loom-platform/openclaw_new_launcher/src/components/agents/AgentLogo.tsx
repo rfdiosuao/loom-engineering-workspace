@@ -7,6 +7,8 @@ import opencodeLogo from '../../assets/agents/opencode.svg';
 
 const AGENT_LOGOS: Record<string, string> = {
   'codex-desktop': codexLogo,
+  'chatgpt-desktop': codexLogo,
+  'codex-cli': codexLogo,
   'claude-code': claudeLogo,
   opencode: opencodeLogo,
   'openclaw-companion': openclawLogo,
@@ -15,6 +17,8 @@ const AGENT_LOGOS: Record<string, string> = {
 
 const AGENT_LABELS: Record<string, string> = {
   'codex-desktop': 'Codex',
+  'chatgpt-desktop': 'ChatGPT',
+  'codex-cli': 'Codex CLI',
   'claude-code': 'Claude Code',
   opencode: 'opencode',
   'openclaw-companion': 'OpenClaw',

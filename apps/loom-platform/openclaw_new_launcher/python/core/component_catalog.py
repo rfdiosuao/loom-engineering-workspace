@@ -9,7 +9,7 @@ from typing import Any
 from collections.abc import Iterable
 
 from core.component_state import ComponentState, ComponentStateStore
-from core.official_codex import CODEX_STORE_INSTALLER_URL
+from core.official_codex import CODEX_CLI_COMPONENT_ID, CODEX_DESKTOP_COMPONENT_ID, expand_openai_components
 from core.release_manifest import (
     ReleaseComponent,
     ReleaseManifest,
@@ -44,7 +44,7 @@ class ComponentCatalog:
             return {
                 "manifest": None,
                 "components": [
-                    _component_payload(component, states.get(component.component_id) or _default_state(component))
+                    _component_payload(component, _state_for_component(component, states))
                     for component in self.fallback_components
                 ],
                 "warning": "正式组件清单未就绪。当前仅支持本机检测；安装前请确认发布通道可访问。",
@@ -52,11 +52,15 @@ class ComponentCatalog:
                 "installLocked": True,
             }
 
-        states = {state.component_id: state for state in self.state_store.snapshot_for_manifest(manifest)}
+        components = expand_openai_components(manifest.components)
+        states = self.state_store.load()
         states.update(overrides)
         return {
             "manifest": _manifest_payload(manifest),
-            "components": [_component_payload(component, states[component.component_id]) for component in manifest.components],
+            "components": [
+                _component_payload(component, _state_for_component(component, states))
+                for component in components
+            ],
             "warning": manifest_warning,
             "manifestErrorCode": None,
             "installLocked": False,
@@ -144,6 +148,34 @@ def _default_state(component: ReleaseComponent) -> ComponentState:
     )
 
 
+def _state_for_component(component: ReleaseComponent, states: dict[str, ComponentState]) -> ComponentState:
+    state = states.get(component.component_id)
+    legacy = states.get(CODEX_DESKTOP_COMPONENT_ID)
+    legacy_version = str(legacy.version or "") if legacy else ""
+    legacy_is_cli = bool(re.search(r"(?:win32|x86_64-pc-windows|codex-cli)", legacy_version, re.IGNORECASE))
+    if component.component_id == CODEX_DESKTOP_COMPONENT_ID and state is not None and legacy_is_cli:
+        return ComponentState(
+            component_id=CODEX_DESKTOP_COMPONENT_ID,
+            status="not_installed",
+            version=component.version,
+            error_code="legacy_codex_cli_state",
+            error_message="检测到旧版 Codex CLI 状态；桌面应用需要单独检测",
+        )
+    if component.component_id == CODEX_CLI_COMPONENT_ID and state is None and legacy is not None and legacy_is_cli:
+        return ComponentState(
+            component_id=CODEX_CLI_COMPONENT_ID,
+            status=legacy.status,
+            version=legacy.version,
+            previous_version=legacy.previous_version,
+            job_id=legacy.job_id,
+            error_code="legacy_codex_cli_state",
+            error_message="已从旧版混合 Codex 状态迁移；请重新检测 Codex CLI",
+            detection=legacy.detection,
+            updated_at=legacy.updated_at,
+        )
+    return state or _default_state(component)
+
+
 def _component_payload(component: ReleaseComponent, state) -> dict[str, Any]:
     payload = {
         "id": component.component_id,
@@ -169,28 +201,6 @@ def _component_payload(component: ReleaseComponent, state) -> dict[str, Any]:
         "updatedAt": state.updated_at,
         "errorCode": state.error_code,
         "errorMessage": state.error_message,
+        "detection": state.detection,
     }
-    if component.component_id == "codex-desktop":
-        payload.update(
-            {
-                "name": "ChatGPT Codex 原版",
-                "version": "Microsoft Store",
-                "type": "msstore",
-                "size": 0,
-                "entry": None,
-                "installCommand": [],
-                "uninstallCommand": [],
-                "officialUrl": "https://openai.com/codex/",
-                "description": "OpenAI 官方 ChatGPT 桌面应用，内含 Codex，由 Microsoft Store 安装和更新",
-                "urls": [CODEX_STORE_INSTALLER_URL],
-            }
-        )
-        legacy_version = str(state.version or "")
-        if re.search(r"(?:win32|x86_64-pc-windows)", legacy_version, re.IGNORECASE):
-            payload.update({
-                "installedVersion": None,
-                "status": "not_installed",
-                "errorCode": "legacy_codex_cli_state",
-                "errorMessage": "检测到旧版 Codex CLI 状态，请重新检测 OpenAI 官方应用",
-            })
     return payload

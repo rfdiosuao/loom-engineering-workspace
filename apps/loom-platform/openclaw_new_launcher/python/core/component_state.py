@@ -56,6 +56,7 @@ class ComponentState:
     job_id: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    detection: dict[str, Any] | None = None
     updated_at: str | None = None
 
     @classmethod
@@ -74,6 +75,7 @@ class ComponentState:
             job_id=_optional_str(data.get("jobId")),
             error_code=_optional_str(data.get("errorCode")),
             error_message=_optional_str(data.get("errorMessage")),
+            detection=_optional_mapping(data.get("detection")),
             updated_at=_optional_str(data.get("updatedAt")),
         )
 
@@ -86,6 +88,7 @@ class ComponentState:
             "jobId": self.job_id,
             "errorCode": self.error_code,
             "errorMessage": self.error_message,
+            "detection": self.detection,
             "updatedAt": self.updated_at,
         }
         return {key: value for key, value in payload.items() if value is not None}
@@ -123,6 +126,7 @@ class ComponentStateStore:
         job_id: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        detection: Mapping[str, Any] | None = None,
     ) -> ComponentState:
         if not component_id or not component_id.strip():
             raise ComponentStateError("component_id must be a non-empty string")
@@ -140,6 +144,7 @@ class ComponentStateStore:
                 job_id=job_id if job_id is not None else (existing.job_id if existing else None),
                 error_code=error_code,
                 error_message=error_message,
+                detection=(dict(detection) if detection is not None else (existing.detection if existing else None)),
                 updated_at=_utc_now(),
             )
             states[component_id] = state
@@ -215,6 +220,14 @@ def _optional_str(value: Any) -> str | None:
     if not isinstance(value, str):
         raise ComponentStateError("optional state field must be a string")
     return value
+
+
+def _optional_mapping(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ComponentStateError("detection must be an object")
+    return dict(value)
 
 
 def _utc_now() -> str:
