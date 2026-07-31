@@ -35,6 +35,8 @@ $registryBackupComplete = $false
 $newProcess = $null
 $updateMutex = $null
 $updateMutexOwned = $false
+$parentExitConfirmed = $false
+$installerStarted = $false
 
 function Write-UpdateLog([string]$Message) {
     try {
@@ -731,6 +733,7 @@ try {
         }
         Start-Sleep -Milliseconds 200
     }
+    $parentExitConfirmed = $true
 
     Stop-OwnedInstallProcesses -Root $InstallRoot
 
@@ -757,6 +760,7 @@ try {
     Write-UpdateLog "data and application backup complete; starting installer"
 
     $installDirectoryArgument = '"/D={0}"' -f $InstallRoot
+    $installerStarted = $true
     $setupProcess = Start-Process `
         -FilePath $Installer `
         -ArgumentList @("/S", $installDirectoryArgument) `
@@ -852,6 +856,17 @@ catch {
         $rollbackState = "restored"
     }
     Write-UpdateLog "rollback state=$rollbackState oldVersionLaunchable=$oldVersionLaunchable"
+    $preInstallFailureLeftOldVersionIntact = (
+        -not $installerStarted -and
+        -not $dataBackupComplete -and
+        -not $applicationBackupComplete -and
+        -not $registryBackupComplete
+    )
+    $restartEligible = (
+        $parentExitConfirmed -and
+        $oldVersionLaunchable -and
+        ($rollbackState -eq "restored" -or $preInstallFailureLeftOldVersionIntact)
+    )
 
     $failureMarker = [pscustomobject]@{
         version = $Version
@@ -863,6 +878,7 @@ catch {
         rollbackState = $rollbackState
         rollbackError = $rollbackError
         oldVersionLaunchable = [bool]$oldVersionLaunchable
+        restartEligible = [bool]$restartEligible
         recoveryActions = @(
             "Restart the previous LOOM version if it was restored.",
             "Keep the recovery directory until the update issue is resolved."
@@ -884,7 +900,7 @@ catch {
         Clear-UpdateRecoveryRunOnce
         Release-UpdateHandoffMutex
     }
-    if (-not $TestMode -and $rollbackState -eq "restored" -and $oldVersionLaunchable) {
+    if (-not $TestMode -and $restartEligible) {
         try {
             Start-Process -FilePath $AppExe -WorkingDirectory $InstallRoot | Out-Null
         } catch {

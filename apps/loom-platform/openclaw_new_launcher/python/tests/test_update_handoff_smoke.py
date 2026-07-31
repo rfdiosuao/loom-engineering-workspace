@@ -29,6 +29,7 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
         inject_direct_stop_failure: bool = False,
         health_fail: bool = False,
         health_late_fail: bool = False,
+        fail_data_backup: bool = False,
         expect_ready_marker: bool = False,
     ) -> tuple[str, str, str]:
         temp_dir = tempfile.mkdtemp(prefix="loom-update-中文-")
@@ -43,6 +44,10 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
         os.makedirs(os.path.dirname(marker_path), exist_ok=True)
         os.makedirs(previous_success, exist_ok=True)
         os.makedirs(other_install_success, exist_ok=True)
+        if fail_data_backup:
+            os.makedirs(recovery_root, exist_ok=True)
+            with open(os.path.join(recovery_root, "data"), "wb") as handle:
+                handle.write(b"block-backup-directory")
         with open(os.path.join(previous_success, "update-success.json"), "w", encoding="utf-8") as handle:
             json.dump({"state": "healthy", "installRoot": install_root}, handle)
         with open(os.path.join(other_install_success, "update-success.json"), "w", encoding="utf-8") as handle:
@@ -234,7 +239,7 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
                 check=False,
                 env=environment,
             )
-            expected = 1 if fail or health_fail or health_late_fail else 0
+            expected = 1 if fail or health_fail or health_late_fail or fail_data_backup else 0
             diagnostic = completed.stderr or completed.stdout
             handoff_log = os.path.join(recovery_root, "update-handoff.log")
             if completed.returncode != expected and os.path.isfile(handoff_log):
@@ -280,7 +285,11 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
             text=True,
             check=True,
         )
-        expected_registry_version = "2.1.89" if fail or health_fail or health_late_fail else "9.9.9"
+        expected_registry_version = (
+            "2.1.89"
+            if fail or health_fail or health_late_fail or fail_data_backup
+            else "9.9.9"
+        )
         self.assertIn(expected_registry_version, registry_result.stdout)
         return marker_path, recovery_root, install_root
 
@@ -375,6 +384,21 @@ class UpdateHandoffSmokeTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(install_root, "new-only.txt")))
         self.assertFalse(os.path.exists(os.path.join(install_root, "installed-version.txt")))
         self.assertTrue(os.path.isfile(os.path.join(recovery_root, "update-handoff.log")))
+
+    def test_backup_failure_marks_intact_old_version_for_restart(self) -> None:
+        marker_path, _, install_root = self._run_handoff(
+            fail=False,
+            fail_data_backup=True,
+        )
+
+        failure_marker = os.path.join(os.path.dirname(marker_path), "update-failed.json")
+        with open(failure_marker, "r", encoding="utf-8-sig") as handle:
+            marker = json.load(handle)
+        self.assertEqual(marker["rollbackState"], "not_available")
+        self.assertTrue(marker["oldVersionLaunchable"])
+        self.assertTrue(marker["restartEligible"])
+        with open(os.path.join(install_root, "LOOM.exe"), "rb") as handle:
+            self.assertEqual(handle.read(), b"old")
 
     def test_new_version_health_failure_restores_old_application(self) -> None:
         marker_path, recovery_root, install_root = self._run_handoff(fail=False, health_fail=True)
