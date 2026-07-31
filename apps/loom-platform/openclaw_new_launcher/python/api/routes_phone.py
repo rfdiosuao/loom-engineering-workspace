@@ -492,6 +492,10 @@ def _remember_phone_connection_candidates(ctx, stdout: str, requested_device_id:
 
 
 def _refresh_phone_transport(ctx, device_id: str, probe=None) -> dict | None:
+    if not callable(getattr(ctx, "read_json", None)) or not callable(
+        getattr(ctx, "write_json", None)
+    ):
+        return None
     store = _load_store(ctx)
     devices = [item for item in store.get("devices", []) if isinstance(item, dict)]
     safe_id = _normalize_device_id(device_id, "")
