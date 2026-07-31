@@ -67,6 +67,44 @@ class ImageApiTests(unittest.TestCase):
         self.assertEqual(images, [image, image, image])
         self.assertEqual(opener.call_count, 4)
 
+    def test_partial_bulk_result_never_fans_out_new_paid_requests(self) -> None:
+        from services.image_api import ImageApiClient
+
+        image = b"\x89PNG\r\n\x1a\ncontent"
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = (
+            b'{"data":[{"b64_json":"' + base64.b64encode(image) + b'"}]}'
+        )
+        with mock.patch("urllib.request.urlopen", return_value=response) as opener:
+            images = ImageApiClient().generate_many(
+                "https://gateway.example/v1",
+                "test-key",
+                "poster",
+                "1024x1024",
+                count=3,
+            )
+
+        self.assertEqual(images, [image])
+        self.assertEqual(opener.call_count, 1)
+
+    def test_malformed_http_200_submission_is_indeterminate(self) -> None:
+        from services.image_api import ImageApiClient, ImageApiError
+
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"data":['
+        with mock.patch("urllib.request.urlopen", return_value=response) as opener:
+            with self.assertRaises(ImageApiError) as raised:
+                ImageApiClient().generate_many(
+                    "https://gateway.example/v1",
+                    "test-key",
+                    "poster",
+                    "1024x1024",
+                )
+
+        self.assertEqual(opener.call_count, 1)
+        self.assertEqual(raised.exception.phase, "submit")
+        self.assertTrue(raised.exception.outcome_indeterminate)
+
     def test_model_validation_error_does_not_fan_out_or_lose_status(self) -> None:
         from services.image_api import ImageApiClient, ImageApiError
 

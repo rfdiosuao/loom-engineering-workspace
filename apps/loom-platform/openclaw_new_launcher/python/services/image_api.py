@@ -109,12 +109,26 @@ class ImageApiClient:
             if api_key:
                 request.add_header("Authorization", f"Bearer {api_key}")
             with urllib.request.urlopen(request, timeout=self.REQUEST_TIMEOUT_SEC) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                try:
+                    data = json.loads(response.read().decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ImageApiError(
+                        "图片服务返回了损坏的 HTTP 200 JSON 回执",
+                        phase="submit",
+                        outcome_indeterminate=True,
+                    ) from error
+            if not isinstance(data, dict):
+                raise ImageApiError(
+                    "图片服务返回了无效的 HTTP 200 JSON 回执",
+                    phase="submit",
+                    outcome_indeterminate=True,
+                )
             images = self._extract_images_bytes(data, base_url)
             if len(images) >= count:
                 return images[:count]
-            while len(images) < count and not edit_image_path:
-                images.append(self.generate(base_url, api_key, prompt, size, model=model))
+            # A partial batch response is still a paid provider result. Never
+            # fan it out into fresh single-image submissions behind the user's
+            # back; callers surface the smaller result as a partial success.
             return images
         except urllib.error.HTTPError as error:
             detail = _http_error_message(error)
@@ -204,7 +218,10 @@ class ImageApiClient:
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(image_url, timeout=self.REQUEST_TIMEOUT_SEC) as response:
-                    return _validated_image_bytes(response.read())
+                    try:
+                        return _validated_image_bytes(response.read())
+                    except ImageApiError as error:
+                        raise ImageApiError(str(error), phase="download") from error
             except urllib.error.HTTPError as error:
                 if attempt < 2 and (
                     error.code in {408, 429, 500, 502, 503, 504}

@@ -32,6 +32,15 @@ class _JsonResponse:
         return json.dumps(self._payload).encode("utf-8")
 
 
+class _RawResponse(_JsonResponse):
+    def __init__(self, payload: bytes) -> None:
+        self._raw_payload = payload
+        self.headers = {"Content-Type": "application/json"}
+
+    def read(self) -> bytes:
+        return self._raw_payload
+
+
 class AgnesVideoClientTests(unittest.TestCase):
     def test_agnes_provider_uses_videos_endpoint_and_video_id_polling(self) -> None:
         client = DashScopeVideoClient()
@@ -225,6 +234,32 @@ class AgnesVideoClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 503)
         self.assertEqual(raised.exception.phase, "submit")
         self.assertEqual(raised.exception.request_key, "request-uncertain")
+        self.assertTrue(raised.exception.outcome_indeterminate)
+
+    def test_malformed_http_200_submission_is_indeterminate(self) -> None:
+        client = DashScopeVideoClient()
+
+        with mock.patch(
+            "services.video_api.urllib.request.urlopen",
+            return_value=_RawResponse(b'{"task_id":'),
+        ) as urlopen:
+            with self.assertRaises(VideoApiError) as raised:
+                client.generate(
+                    "test-key",
+                    "LOOM demo",
+                    "t2v",
+                    "720P",
+                    5,
+                    "9:16",
+                    provider_id="agnes",
+                    api_base="https://api.example.com/v1",
+                    model="agnes-video-v2.0",
+                    request_key="request-malformed-200",
+                )
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(raised.exception.phase, "submit")
+        self.assertEqual(raised.exception.request_key, "request-malformed-200")
         self.assertTrue(raised.exception.outcome_indeterminate)
 
     def test_video_download_retries_without_resubmitting_generation(self) -> None:

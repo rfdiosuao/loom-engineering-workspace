@@ -677,12 +677,13 @@ class DashScopeVideoClient:
                     continue
                 raise VideoApiError(str(error), phase="download") from error
         if not data:
-            raise VideoApiError("视频下载结果为空")
+            raise VideoApiError("视频下载结果为空", phase="download")
         if not self._looks_like_video(data, content_type):
             preview = data[:160].decode("utf-8", errors="replace").replace("\n", " ")
             raise VideoApiError(
                 f"视频下载结果不是可播放的 MP4：content-type={content_type or 'unknown'}, "
-                f"size={len(data)}, preview={preview[:100]}"
+                f"size={len(data)}, preview={preview[:100]}",
+                phase="download",
             )
         return data
 
@@ -699,6 +700,13 @@ class DashScopeVideoClient:
             try:
                 with urllib.request.urlopen(request, timeout=timeout) as response:
                     return json.loads(response.read().decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise VideoApiError(
+                    "视频服务返回了损坏的 HTTP 200 JSON 回执",
+                    phase=phase,
+                    task_id=task_id,
+                    outcome_indeterminate=phase in {"submit", "poll"},
+                ) from error
             except urllib.error.HTTPError as error:
                 if attempt < retries and self._retryable_status(error.code):
                     time.sleep(0.5 * (attempt + 1))

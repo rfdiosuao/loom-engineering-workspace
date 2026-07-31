@@ -1210,7 +1210,26 @@ def _image_generate_payload(ctx, body: dict) -> dict:
                 "source": _text(body.get("source")) or "ui",
                 "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             })
-        return {"images": images_b64, "files": files, "count": len(images_b64), "ratio": ratio, "size": _text(size)}
+        partial = len(results) < count
+        payload = {
+            "images": images_b64,
+            "files": files,
+            "count": len(images_b64),
+            "requestedCount": count,
+            "partial": partial,
+            "ratio": ratio,
+            "size": _text(size),
+        }
+        if partial:
+            payload.update({
+                "success": False,
+                "status": "partial_failure",
+                "errorCode": "image_batch_partial",
+                "message": f"服务商仅返回 {len(results)}/{count} 张图片，麓鸣未自动补发付费请求。",
+                "retryable": False,
+                "regenerationAllowed": False,
+            })
+        return payload
     finally:
         if temp_file and os.path.exists(temp_file):
             try:
@@ -1360,7 +1379,11 @@ def _image_generation_failure(error: Exception) -> dict:
     status_code = getattr(error, "status_code", None)
     phase = str(getattr(error, "phase", "") or "")
     outcome_indeterminate = bool(getattr(error, "outcome_indeterminate", False))
-    if status_code == 404 or "invalid url" in lowered or "http 404" in lowered or "not found" in lowered:
+    if phase == "download":
+        code = "image_download_failed"
+        message = "图片已由服务商生成，但下载失败。麓鸣已停止重新生成以避免重复计费，请稍后从原任务或素材记录恢复。"
+        retryable = False
+    elif status_code == 404 or "invalid url" in lowered or "http 404" in lowered or "not found" in lowered:
         code = "image_provider_endpoint_mismatch"
         message = "图片 Provider、Base URL 与模型接口不匹配，请检查后重试。"
         retryable = False
@@ -1457,7 +1480,11 @@ def _video_generation_failure(error: Exception) -> dict:
     task_id = str(getattr(error, "task_id", "") or "")
     request_key = str(getattr(error, "request_key", "") or "")
     outcome_indeterminate = bool(getattr(error, "outcome_indeterminate", False))
-    if outcome_indeterminate:
+    if phase == "download":
+        code = "video_download_failed"
+        message = "视频已由服务商生成，但下载失败。麓鸣已停止重新生成以避免重复计费，请从原任务继续下载。"
+        retryable = False
+    elif outcome_indeterminate:
         code = "video_submission_uncertain" if phase == "submit" else "video_task_outcome_uncertain"
         message = (
             "视频提交结果无法确认，可能仍在服务端生成。为避免重复计费，LOOM 已停止自动重提。"
