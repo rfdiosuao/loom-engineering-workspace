@@ -594,13 +594,26 @@ def register_account_routes(app, ctx) -> None:
             return ctx.fastapi_json({"error": "请输入商业授权码。"}, 400)
         try:
             manager = ctx.get_newapi_account_mgr()
-            session = await asyncio.to_thread(manager.redeem_entitlement_code, code)
-            return ctx.fastapi_json(
-                _account_response(
-                    account=manager.public_session(),
-                    session=session,
+            async with _account_transition_scope(ctx, account_transition_lock):
+                current, _identity, identity_read_error = await _read_account_transition_identity(
+                    ctx,
+                    manager,
                 )
-            )
+                if identity_read_error is not None:
+                    return ctx.fastapi_json(
+                        {"error": identity_read_error.get("message"), "cleanup": identity_read_error},
+                        409,
+                    )
+                if current.get("loggedIn") is not True:
+                    return ctx.fastapi_json({"error": "请先登录模型账号。"}, 401)
+                session = await asyncio.to_thread(manager.redeem_entitlement_code, code)
+                account = await asyncio.to_thread(manager.public_session)
+                return ctx.fastapi_json(
+                    _account_response(
+                        account=account,
+                        session=session,
+                    )
+                )
         except NewApiAccountError as exc:
             status_code = exc.status_code if exc.status_code in {400, 401, 403, 409, 429, 502, 503} else 400
             return ctx.fastapi_json(

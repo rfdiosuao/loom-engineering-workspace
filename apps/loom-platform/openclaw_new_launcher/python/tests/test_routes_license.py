@@ -118,6 +118,8 @@ class LicenseRoutePublicSafetyTests(unittest.TestCase):
 
     def test_activate_route_redeems_against_logged_in_account_not_legacy_machine(self) -> None:
         calls: list[str] = []
+        transition_events: list[str] = []
+        transition = {"active": False, "token": 0}
         context = _context()
         context.get_license_mgr().activate = lambda _code: (_ for _ in ()).throw(
             AssertionError("legacy machine activation must not run for logged-in account")
@@ -131,8 +133,27 @@ class LicenseRoutePublicSafetyTests(unittest.TestCase):
                     "limits": {"devices": 5, "concurrentTasks": 3},
                 },
             },
-            redeem_entitlement_code=lambda code: calls.append(code) or {},
+            redeem_entitlement_code=lambda code: (
+                (_ for _ in ()).throw(AssertionError("license redeem escaped account transition"))
+                if not transition["active"]
+                else calls.append(code) or {}
+            ),
         )
+        def begin_transition() -> int:
+            transition["token"] += 1
+            transition["active"] = True
+            transition_events.append("begin")
+            return transition["token"]
+
+        def end_transition(token: object) -> bool:
+            transition_events.append("end")
+            if token != transition["token"]:
+                return False
+            transition["active"] = False
+            return True
+
+        context.begin_account_transition = begin_transition
+        context.end_account_transition = end_transition
         context.get_newapi_account_mgr = lambda: account_manager
         context.get_entitlement_mgr = lambda: SimpleNamespace(
             current_state=lambda _feature=None: {
@@ -163,8 +184,39 @@ class LicenseRoutePublicSafetyTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(calls, ["LM-PRO-UNUSED"])
+        self.assertEqual(transition_events, ["begin", "end"])
         self.assertEqual(response.json()["license"]["deviceLimit"], 5)
         self.assertNotIn("LM-PRO-UNUSED", repr(response.json()))
+
+    def test_activate_route_rejects_redeem_during_another_account_transition(self) -> None:
+        context = _context()
+        context.get_license_mgr().activate = lambda _code: (_ for _ in ()).throw(
+            AssertionError("legacy machine activation must not run during account transition")
+        )
+        account_manager = SimpleNamespace(
+            public_session=lambda: {
+                "loggedIn": True,
+                "account": "user@example.invalid",
+            },
+            redeem_entitlement_code=lambda _code: (_ for _ in ()).throw(
+                AssertionError("authorization code must not be redeemed during account transition")
+            ),
+        )
+        context.begin_account_transition = lambda: (_ for _ in ()).throw(
+            ValueError("account transition already in progress")
+        )
+        context.end_account_transition = lambda _token: (_ for _ in ()).throw(
+            AssertionError("unstarted transition must not be ended")
+        )
+        context.get_newapi_account_mgr = lambda: account_manager
+        app = FastAPI()
+        register_license_routes(app, context)
+        client = TestClient(app)
+
+        response = client.post("/api/license/activate", json={"code": "LM-RACE"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("账号正在切换", response.json()["error"])
 
 
 def _context() -> SimpleNamespace:

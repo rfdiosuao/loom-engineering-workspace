@@ -24,6 +24,51 @@ from fastapi.testclient import TestClient
 
 
 class AccountRouteResponseTests(unittest.TestCase):
+    def test_entitlement_redeem_runs_inside_account_transition_gate(self) -> None:
+        app = FastAPI()
+        events: list[str] = []
+        transition = {"active": False, "token": 0}
+
+        class Manager:
+            def public_session(self):
+                return {
+                    "loggedIn": True,
+                    "accountEntitlement": {"accountId": "account-current"},
+                }
+
+            def redeem_entitlement_code(self, _code):
+                if not transition["active"]:
+                    raise AssertionError("redeem escaped account transition")
+                events.append("redeem")
+                return {"source": "newapi_account"}
+
+        def begin_transition() -> int:
+            transition["token"] += 1
+            transition["active"] = True
+            events.append("begin")
+            return transition["token"]
+
+        def end_transition(token: object) -> bool:
+            events.append("end")
+            if token != transition["token"]:
+                return False
+            transition["active"] = False
+            return True
+
+        ctx = _ctx(Manager())
+        ctx.begin_account_transition = begin_transition
+        ctx.end_account_transition = end_transition
+        register_account_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/account/entitlement/redeem",
+            json={"code": "LM-PRO-CURRENT"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(events, ["begin", "redeem", "end"])
+        self.assertFalse(transition["active"])
+
     def test_account_transition_gate_covers_login_and_releases_after_failure(
         self,
     ) -> None:

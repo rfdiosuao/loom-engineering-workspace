@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import http.cookiejar
 import copy
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -945,6 +947,33 @@ def _allows_legacy_fallback(url: str, method: str) -> bool:
     return path in LEGACY_FALLBACK_POST_PATHS
 
 
+def _account_session_identity(session: Any) -> str:
+    if not isinstance(session, dict) or session.get("source") != ACCOUNT_SOURCE:
+        return ""
+    entitlement = session.get("accountEntitlement") if isinstance(session.get("accountEntitlement"), dict) else {}
+    newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
+    account_id = _pick_text(
+        entitlement.get("accountId"),
+        session.get("memberId"),
+        newapi.get("userId"),
+        newapi.get("account"),
+        session.get("memberName"),
+    )
+    if account_id.startswith("newapi:"):
+        account_id = account_id.partition(":")[2]
+    if not account_id:
+        member_token = _pick_text(
+            session.get("memberToken"),
+            newapi.get("apiToken"),
+        )
+        if member_token:
+            account_id = "token-sha256:" + hashlib.sha256(
+                member_token.encode("utf-8")
+            ).hexdigest()
+    base_url = str(newapi.get("baseUrl") or "").strip().rstrip("/").lower()
+    return f"{ACCOUNT_SOURCE}\0{base_url}\0{account_id}" if account_id else ""
+
+
 class NewApiAccountManager:
     def __init__(self, paths: AppPaths, append_log=None):
         self.paths = paths
@@ -955,6 +984,7 @@ class NewApiAccountManager:
         )
         self.append_log = append_log or (lambda _text: None)
         self._auth_capabilities_cache: tuple[float, str, dict[str, Any]] | None = None
+        self._session_transaction_lock = threading.RLock()
 
     @property
     def session_path(self) -> str:
@@ -2159,30 +2189,42 @@ class NewApiAccountManager:
         del session
         return False
 
-    def _persist_authenticated_session(self, session: dict[str, Any], *, sync_runtime: bool) -> dict[str, Any]:
-        session["managedGatewayMigrationVersion"] = MANAGED_GATEWAY_MIGRATION_VERSION
-        entitlement_lease = session.pop("_entitlementLease", None)
-        entitlement_snapshot = session.pop("_accountEntitlement", None)
-        if isinstance(entitlement_lease, dict):
-            self._apply_entitlement_lease(session, entitlement_lease)
-        elif isinstance(entitlement_snapshot, dict):
-            session["accountEntitlement"] = {
-                "source": str(
-                    entitlement_snapshot.get("source")
-                    or "authorization_required"
-                ),
-                "plan": str(entitlement_snapshot.get("plan") or "inactive"),
-                "features": [],
-                "limits": {
-                    "devices": 0,
-                    "concurrentTasks": 0,
-                    "unlimitedDevices": False,
-                },
-            }
-        self._write_session(session)
-        if sync_runtime:
-            self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
-        return session
+    def _persist_authenticated_session(
+        self,
+        session: dict[str, Any],
+        *,
+        sync_runtime: bool,
+        expected_identity: str | None = None,
+    ) -> dict[str, Any]:
+        with self._session_transaction_lock:
+            if expected_identity is not None:
+                self._assert_current_session_identity(expected_identity)
+            session["managedGatewayMigrationVersion"] = MANAGED_GATEWAY_MIGRATION_VERSION
+            entitlement_lease = session.pop("_entitlementLease", None)
+            entitlement_snapshot = session.pop("_accountEntitlement", None)
+            if isinstance(entitlement_lease, dict):
+                self._apply_entitlement_lease(session, entitlement_lease)
+            elif isinstance(entitlement_snapshot, dict):
+                session["accountEntitlement"] = {
+                    "source": str(
+                        entitlement_snapshot.get("source")
+                        or "authorization_required"
+                    ),
+                    "plan": str(entitlement_snapshot.get("plan") or "inactive"),
+                    "features": [],
+                    "limits": {
+                        "devices": 0,
+                        "concurrentTasks": 0,
+                        "unlimitedDevices": False,
+                    },
+                }
+            self._write_session(session)
+            if sync_runtime:
+                self.sync_targets(
+                    session,
+                    targets=DEFAULT_RUNTIME_SYNC_TARGETS,
+                )
+            return session
 
     def bind_ticket(self, ticket: str, *, base_url: str = "") -> dict[str, Any]:
         ticket = ticket.strip()
@@ -2231,6 +2273,7 @@ class NewApiAccountManager:
         session = self.current()
         if not session or session.get("source") != ACCOUNT_SOURCE:
             raise NewApiAccountError("not_logged_in")
+        expected_identity = _account_session_identity(session)
         current_token = _pick_text(session.get("memberToken"))
         if not current_token:
             raise NewApiAccountError("managed_session_missing_api_token")
@@ -2329,7 +2372,11 @@ class NewApiAccountManager:
         })
         session["newApi"] = newapi
         session["updatedAt"] = _iso(now)
-        return self._persist_authenticated_session(session, sync_runtime=sync_runtime)
+        return self._persist_authenticated_session(
+            session,
+            sync_runtime=sync_runtime,
+            expected_identity=expected_identity,
+        )
 
     def redeem_entitlement_code(self, code: str) -> dict[str, Any]:
         normalized_code = str(code or "").strip()
@@ -2341,6 +2388,7 @@ class NewApiAccountManager:
         session = self.current()
         if not session:
             raise NewApiAccountError("尚未登录模型账号", status_code=401)
+        expected_identity = _account_session_identity(session)
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
         base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
         api_token = _pick_text(session.get("memberToken"))
@@ -2367,7 +2415,11 @@ class NewApiAccountManager:
             )
         session["_entitlementLease"] = dict(lease)
         session["updatedAt"] = _iso(_utc_now())
-        return self._persist_authenticated_session(session, sync_runtime=False)
+        return self._persist_authenticated_session(
+            session,
+            sync_runtime=False,
+            expected_identity=expected_identity,
+        )
 
     def migrate_legacy_entitlement(self) -> dict[str, Any]:
         session = self.current()
@@ -2382,6 +2434,7 @@ class NewApiAccountManager:
         session = self.current()
         if not session:
             raise NewApiAccountError("尚未登录模型账号")
+        expected_identity = _account_session_identity(session)
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
         base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
         api_token = _pick_text(session.get("memberToken"))
@@ -2542,13 +2595,22 @@ class NewApiAccountManager:
         })
         session["newApi"] = newapi
         session["updatedAt"] = _iso(now)
-        return self._persist_authenticated_session(session, sync_runtime=True)
+        return self._persist_authenticated_session(
+            session,
+            sync_runtime=True,
+            expected_identity=expected_identity,
+        )
 
     def _write_session(self, session: dict[str, Any]) -> None:
-        os.makedirs(os.path.dirname(self.session_path), exist_ok=True)
-        write_json(self.session_path, self._protected_session(session))
+        with self._session_transaction_lock:
+            os.makedirs(os.path.dirname(self.session_path), exist_ok=True)
+            write_json(self.session_path, self._protected_session(session))
 
     def current(self) -> dict[str, Any] | None:
+        with self._session_transaction_lock:
+            return self._current_session_locked()
+
+    def _current_session_locked(self) -> dict[str, Any] | None:
         session = read_json(self.session_path, None)
         if isinstance(session, dict) and session.get("source") == ACCOUNT_SOURCE:
             current = self._unprotected_session(session)
@@ -2566,6 +2628,21 @@ class NewApiAccountManager:
                 self._write_session(current)
             return current
         return None
+
+    def _assert_current_session_identity(self, expected_identity: str) -> None:
+        stored = read_json(self.session_path, None)
+        current = (
+            self._unprotected_session(stored)
+            if isinstance(stored, dict) and stored.get("source") == ACCOUNT_SOURCE
+            else None
+        )
+        actual_identity = _account_session_identity(current)
+        if not expected_identity or actual_identity != expected_identity:
+            raise NewApiAccountError(
+                "账号已切换，旧账号操作结果已丢弃，请在当前账号重试。",
+                status_code=409,
+                code="account_session_changed",
+            )
 
     def _protected_session(self, session: dict[str, Any]) -> dict[str, Any]:
         return self._transform_session_secrets(session, protect_secret)
@@ -2700,6 +2777,7 @@ class NewApiAccountManager:
         session = self.current()
         if not session:
             raise NewApiAccountError("尚未登录模型账号")
+        expected_identity = _account_session_identity(session)
         classes = self._session_model_classes(session)
         text_model = text_model.strip()
         phone_model = phone_model.strip()
@@ -2730,8 +2808,11 @@ class NewApiAccountManager:
         gateway.pop("videoModel", None)
         session["gateway"] = gateway
         session["updatedAt"] = _iso(_utc_now())
-        self._write_session(session)
-        self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
+        self._persist_authenticated_session(
+            session,
+            sync_runtime=True,
+            expected_identity=expected_identity,
+        )
         return self.public_session()
 
     @staticmethod
@@ -2830,28 +2911,49 @@ class NewApiAccountManager:
         })
         write_json(path, current)
 
-    def sync_targets(self, session: dict[str, Any] | None = None, *, targets: tuple[str, ...] = DEFAULT_RUNTIME_SYNC_TARGETS) -> list[dict[str, Any]]:
+    def sync_targets(
+        self,
+        session: dict[str, Any] | None = None,
+        *,
+        targets: tuple[str, ...] = DEFAULT_RUNTIME_SYNC_TARGETS,
+        expected_identity: str | None = None,
+    ) -> list[dict[str, Any]]:
         session = session or self.current()
         if not session:
             raise NewApiAccountError("not_logged_in")
-        result = WireService(self.paths, self.append_log).sync_from_session(session, targets=targets)
-        results = result["syncResults"] if isinstance(result.get("syncResults"), list) else []
-        session["lastSyncResults"] = results
-        if isinstance(session, dict) and session.get("source") == ACCOUNT_SOURCE:
-            self._write_session(session)
-        return results
+        identity = (
+            expected_identity
+            if expected_identity is not None
+            else _account_session_identity(session)
+        )
+        guard_account_session = (
+            isinstance(session, dict)
+            and session.get("source") == ACCOUNT_SOURCE
+        )
+        with self._session_transaction_lock:
+            if guard_account_session:
+                self._assert_current_session_identity(identity)
+            result = WireService(self.paths, self.append_log).sync_from_session(session, targets=targets)
+            if guard_account_session:
+                self._assert_current_session_identity(identity)
+            results = result["syncResults"] if isinstance(result.get("syncResults"), list) else []
+            session["lastSyncResults"] = results
+            if isinstance(session, dict) and session.get("source") == ACCOUNT_SOURCE:
+                self._write_session(session)
+            return results
 
     def logout(self) -> bool:
-        session = self.current()
-        if not session:
-            return False
-        try:
-            os.remove(self.session_path)
-        except FileNotFoundError:
-            pass
-        self.account_entitlement.clear_active()
-        self._clear_synced_configs()
-        return True
+        with self._session_transaction_lock:
+            session = self.current()
+            if not session:
+                return False
+            try:
+                os.remove(self.session_path)
+            except FileNotFoundError:
+                pass
+            self.account_entitlement.clear_active()
+            self._clear_synced_configs()
+            return True
 
     def _clear_synced_configs(self) -> None:
         profiles = read_json(self.paths.auth_profiles, {"models": {"providers": {}}})

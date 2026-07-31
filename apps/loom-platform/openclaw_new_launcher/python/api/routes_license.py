@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import Request
 
+from api.routes_account import _account_transition_scope
 from api.safe_payload import public_safe_payload
 from core.license_manager import LicenseError
 from core.newapi_account_manager import NewApiAccountError
@@ -63,6 +64,8 @@ def _account_license_payload(state: dict, license_manager) -> dict | None:
 
 
 def register_license_routes(app, ctx) -> None:
+    account_transition_lock = asyncio.Lock()
+
     @app.api_route("/api/license/current", methods=["GET", "POST"])
     async def license_current(request: Request):
         if error := ctx.auth_error(request):
@@ -146,29 +149,43 @@ def register_license_routes(app, ctx) -> None:
         public_account = account_manager.public_session() if account_manager is not None else {}
         if isinstance(public_account, dict) and public_account.get("loggedIn"):
             try:
-                await asyncio.to_thread(account_manager.redeem_entitlement_code, str(code))
-                entitlement_getter = getattr(ctx, "get_entitlement_mgr", None)
-                entitlement_state = (
-                    entitlement_getter().current_state("matrix.devices")
-                    if callable(entitlement_getter)
-                    else {}
-                )
-                license_data = _account_license_payload(
-                    entitlement_state,
-                    ctx.get_license_mgr(),
-                )
-                if not isinstance(license_data, dict):
-                    return ctx.fastapi_json(
-                        {"error": "账号授权已提交，但未返回可信权益租约，请刷新账号后重试。"},
-                        502,
+                async with _account_transition_scope(ctx, account_transition_lock):
+                    current_account = await asyncio.to_thread(account_manager.public_session)
+                    if not isinstance(current_account, dict) or current_account.get("loggedIn") is not True:
+                        return ctx.fastapi_json(
+                            {"error": "账号状态已变化，未执行授权兑换，请重新登录后重试。"},
+                            409,
+                        )
+                    await asyncio.to_thread(account_manager.redeem_entitlement_code, str(code))
+                    entitlement_getter = getattr(ctx, "get_entitlement_mgr", None)
+                    entitlement_state = (
+                        entitlement_getter().current_state("matrix.devices")
+                        if callable(entitlement_getter)
+                        else {}
                     )
-                return ctx.fastapi_json(public_safe_payload({
-                    "license": license_data,
-                    "account": account_manager.public_session(),
-                    "status": "authorized",
-                    "code": "AUTHORIZED",
-                    "source": "account_entitlement",
-                }))
+                    license_data = _account_license_payload(
+                        entitlement_state,
+                        ctx.get_license_mgr(),
+                    )
+                    if not isinstance(license_data, dict):
+                        return ctx.fastapi_json(
+                            {"error": "账号授权已提交，但未返回可信权益租约，请刷新账号后重试。"},
+                            502,
+                        )
+                    return ctx.fastapi_json(public_safe_payload({
+                        "license": license_data,
+                        "account": await asyncio.to_thread(account_manager.public_session),
+                        "status": "authorized",
+                        "code": "AUTHORIZED",
+                        "source": "account_entitlement",
+                    }))
+            except ValueError as exc:
+                if "account transition" not in str(exc).lower():
+                    raise
+                return ctx.fastapi_json(
+                    {"error": "账号正在切换，未执行授权兑换，请稍后重试。"},
+                    409,
+                )
             except NewApiAccountError as exc:
                 status_code = exc.status_code if exc.status_code in {400, 401, 403, 409, 429, 502, 503} else 400
                 return ctx.fastapi_json({"error": str(exc)}, status_code)

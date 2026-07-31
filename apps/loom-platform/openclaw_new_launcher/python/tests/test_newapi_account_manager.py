@@ -4,9 +4,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +36,122 @@ from core.storage import read_json
 
 
 class NewApiAccountManagerTests(unittest.TestCase):
+    def test_background_sync_rejects_account_session_without_stable_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = NewApiAccountManager(AppPaths(temp_dir))
+            unresolved_session = {
+                "source": ACCOUNT_SOURCE,
+                "newApi": {"baseUrl": DEFAULT_BASE_URL},
+            }
+            manager._write_session(unresolved_session)
+
+            with self.assertRaises(NewApiAccountError) as raised:
+                manager.sync_targets(unresolved_session)
+
+            self.assertEqual(raised.exception.code, "account_session_changed")
+
+    def test_late_background_sync_cannot_restore_replaced_account_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = NewApiAccountManager(AppPaths(temp_dir))
+            old_session = {
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:old",
+                "memberToken": "sk-old-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "old"},
+            }
+            new_session = {
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:new",
+                "memberToken": "sk-new-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "new"},
+            }
+            manager._write_session(old_session)
+            sync_started = threading.Event()
+            release_sync = threading.Event()
+
+            class BlockingWireService:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def sync_from_session(self, _session, *, targets):
+                    del targets
+                    sync_started.set()
+                    release_sync.wait(2)
+                    return {"syncResults": [{"target": "wire", "ok": True}]}
+
+            with patch.object(account_module, "WireService", BlockingWireService):
+                old_sync = threading.Thread(target=manager.sync_targets, args=(old_session,))
+                old_sync.start()
+                self.assertTrue(sync_started.wait(1))
+                new_write_completed = threading.Event()
+
+                def write_new_session() -> None:
+                    manager._persist_authenticated_session(new_session, sync_runtime=False)
+                    new_write_completed.set()
+
+                new_write = threading.Thread(target=write_new_session)
+                new_write.start()
+                new_write_completed.wait(0.1)
+                release_sync.set()
+                old_sync.join(2)
+                new_write.join(2)
+
+            self.assertEqual(manager.current()["memberId"], "newapi:new")
+
+    def test_late_entitlement_redemption_cannot_persist_into_replaced_account(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            request_started = threading.Event()
+            release_request = threading.Event()
+
+            class BlockingRedeemManager(EntitlementRedeemFakeManager):
+                def _request_json(self, *args, **kwargs):
+                    request_started.set()
+                    release_request.wait(2)
+                    return super()._request_json(*args, **kwargs)
+
+            manager = BlockingRedeemManager(paths)
+            old_session = {
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:old",
+                "memberToken": "sk-old-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "old"},
+            }
+            new_session = {
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:new",
+                "memberToken": "sk-new-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "new"},
+            }
+            manager._write_session(old_session)
+            manager.account_entitlement.accept_lease = Mock(return_value={
+                "features": ["matrix.devices"],
+                "limits": {"devices": 5},
+                "plan": "pro",
+                "expiresAt": 1_900_000_000,
+                "offlineGraceUntil": 1_900_259_200,
+                "entitlementVersion": 7,
+            })
+            errors: list[Exception] = []
+
+            def redeem() -> None:
+                try:
+                    manager.redeem_entitlement_code("LM-PRO-OLD")
+                except Exception as exc:
+                    errors.append(exc)
+
+            redemption = threading.Thread(target=redeem)
+            redemption.start()
+            self.assertTrue(request_started.wait(1))
+            manager._persist_authenticated_session(new_session, sync_runtime=False)
+            release_request.set()
+            redemption.join(2)
+
+            self.assertEqual(manager.current()["memberId"], "newapi:new")
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], NewApiAccountError)
+            self.assertEqual(getattr(errors[0], "code", ""), "account_session_changed")
+
     def test_redeem_entitlement_code_requires_login_and_never_persists_code(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)
@@ -1469,6 +1586,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
                     "model": "agnes-2.0-flash",
                 },
             }
+            manager._write_session(session)
 
             results = manager.sync_targets(session)
 
@@ -1654,7 +1772,12 @@ class NewApiAccountManagerTests(unittest.TestCase):
 
             try:
                 account_module.WireService = FakeWireService
-                results = manager.sync_targets({"source": ACCOUNT_SOURCE}, targets=("image",))
+                session = {
+                    "source": ACCOUNT_SOURCE,
+                    "memberId": "newapi:redaction-test",
+                }
+                manager._write_session(session)
+                results = manager.sync_targets(session, targets=("image",))
             finally:
                 account_module.WireService = original_wire_service
             dumped = repr(results) + repr(logs)
