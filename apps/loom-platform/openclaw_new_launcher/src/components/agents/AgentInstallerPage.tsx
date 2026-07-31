@@ -1625,6 +1625,7 @@ export const AgentInstallerPage: React.FC = () => {
     if (!beginModelConfigOperation(component.id)) return;
     setModelConfigFailurePrompt(null);
     try {
+      let selectedModel = model;
       let message = '第三方模型配置已保存';
       if (canWriteAgentModelConfig(component, modelConfigs[component.id])) {
         const result = await loomClient.components.applyCustomModelConfig({
@@ -1632,22 +1633,37 @@ export const AgentInstallerPage: React.FC = () => {
           provider,
           baseUrl,
           apiKey,
-          model,
+          model: selectedModel,
         });
+        const probe = result.status.providerCompatibility;
         if (
           component.id === 'codex-desktop'
           && (!result.status.configured || !result.status.remoteVerified || result.status.transactionState !== 'committed')
         ) {
           throw new Error('第三方模型未完成真实连通性验证，麓鸣没有将其设为可用');
         }
+        if (!probe?.reachable || !probe.protocols.length) {
+          throw new Error('Provider 未完成实时兼容性探测，原配置没有设为可用');
+        }
+        selectedModel = result.status.model || probe.selectedModel || model;
         finishModelConfigChange(component, result.status, '自定义渠道');
-        message = `${component.name} 第三方模型已保存并写入`;
+        message = `${component.name} 第三方模型已探测并写入（${probe.protocols.join(' / ')}，工具调用${probe.toolCall ? '可用' : '未验证'}，流式${probe.streaming ? '可用' : '未验证'}）`;
       } else {
-        await loomClient.wire.custom({ provider, baseUrl, apiKey, textModel: model, targets: [] });
-        message = '第三方模型已保存；安装智能体后可写入配置';
+        const { probe } = await loomClient.components.probeProviderCompatibility({
+          provider,
+          baseUrl,
+          apiKey,
+          preferredModel: model,
+        });
+        if (!probe.reachable || !probe.protocols.length) {
+          throw new Error('Provider 未通过最小文本请求，原配置没有修改');
+        }
+        selectedModel = probe.selectedModel || model;
+        await loomClient.wire.custom({ provider, baseUrl, apiKey, textModel: selectedModel, targets: [] });
+        message = `第三方模型已完成实时探测并保存；安装智能体后可写入配置（${probe.protocols.join(' / ')}）`;
         showToast(message, 'success');
       }
-      setModelDrafts((current) => ({ ...current, [component.id]: model }));
+      setModelDrafts((current) => ({ ...current, [component.id]: selectedModel }));
       pushLog(message, 'ok', component.id);
     } catch (err: any) {
       const message = openModelConfigFailure(component, err, '第三方模型配置失败');

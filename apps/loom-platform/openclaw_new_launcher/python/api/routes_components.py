@@ -280,6 +280,27 @@ def _model_config_error_text(error: Exception) -> str:
     return _model_config_error_payload(error)["error"]
 
 
+def _provider_probe_error_payload(error: WireConfigError) -> tuple[dict, int]:
+    detail = error.to_dict()
+    code = str(detail.get("code") or "provider_probe_failed")
+    status_code = detail.get("statusCode")
+    if type(status_code) is not int or not 400 <= status_code <= 599:
+        status_code = 503 if detail.get("retryable") is True else 400
+    if code in {"authentication_failed", "provider_auth_failed"}:
+        action = "review_api_key"
+    elif code in {"protocol_endpoint_not_found", "selected_model_not_listed"}:
+        action = "review_provider_settings"
+    else:
+        action = "retry_provider_probe"
+    return ({
+        "error": str(detail.get("messageZh") or "Provider 兼容性探测失败，请检查配置后重试。"),
+        "code": code,
+        "action": action,
+        "retryable": detail.get("retryable") is True,
+        "statusCode": detail.get("statusCode"),
+    }, status_code)
+
+
 def _log_model_config_failure(ctx, component_id: str, error: Exception) -> None:
     append_log = getattr(ctx, "append_log", None)
     if callable(append_log):
@@ -306,6 +327,36 @@ def register_component_routes(app, ctx) -> None:
             return ctx.fastapi_json({"error": "componentId is required"}, 400)
         status = _model_config_status(ctx, component_id)
         return ctx.fastapi_json({"status": status})
+
+    @app.post("/api/components/model-config/probe-provider")
+    async def components_model_config_probe_provider(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        provider = str(body.get("provider") or "").strip()
+        base_url = str(body.get("baseUrl") or "").strip()
+        api_key = str(body.get("apiKey") or "").strip()
+        preferred_model = str(
+            body.get("preferredModel") or body.get("model") or ""
+        ).strip()
+        if not base_url or not api_key:
+            return ctx.fastapi_json({
+                "error": "请填写 Provider Base URL 和 API Key。",
+                "code": "provider_probe_input_required",
+                "action": "review_provider_settings",
+            }, 400)
+        try:
+            probe = await run_in_threadpool(
+                ctx.get_wire_svc().probe_provider_compatibility,
+                provider=provider,
+                base_url=base_url,
+                api_key=api_key,
+                preferred_model=preferred_model,
+            )
+        except WireConfigError as exc:
+            payload, status_code = _provider_probe_error_payload(exc)
+            return ctx.fastapi_json(payload, status_code)
+        return ctx.fastapi_json({"probe": probe})
 
     @app.post("/api/components/model-config/apply")
     async def components_model_config_apply(request: Request):

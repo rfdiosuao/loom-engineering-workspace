@@ -1053,6 +1053,7 @@ export interface AgentModelConfigStatus {
     toolCallsVerified?: boolean;
     verifiedAt?: string;
   };
+  providerCompatibility?: ProviderCompatibilityProbe;
   officialAuthUnchanged?: boolean;
   sessionPreservation?: {
     supported: boolean;
@@ -1070,6 +1071,22 @@ export interface AgentModelConfigStatus {
   };
   updatedAt?: string;
   componentStatus?: string;
+}
+
+export interface ProviderCompatibilityProbe {
+  reachable: boolean;
+  protocols: Array<'responses' | 'chat_completions' | string>;
+  toolCall: boolean;
+  toolCallProtocols?: string[];
+  streaming: boolean;
+  streamingProtocols?: string[];
+  selectedModel: string;
+  availableModelCount?: number;
+  latencyMs?: number;
+  source: 'live-probe' | string;
+  fallbackUsed: boolean;
+  baseUrl?: string;
+  probedAt?: string;
 }
 
 function sanitizeComponentSnapshot(snapshot: ComponentSnapshot): ComponentSnapshot {
@@ -1105,6 +1122,8 @@ export const componentApi = {
     api('/api/components/model-config/apply', 'POST', { ...params, confirmed: true }),
   applyCustomModelConfig: (params: { componentId: string; provider: string; baseUrl: string; apiKey: string; model: string }): Promise<{ status: AgentModelConfigStatus }> =>
     api('/api/components/model-config/apply-custom', 'POST', { ...params, confirmed: true }),
+  probeProviderCompatibility: (params: { provider: string; baseUrl: string; apiKey: string; preferredModel?: string }): Promise<{ probe: ProviderCompatibilityProbe }> =>
+    api('/api/components/model-config/probe-provider', 'POST', params),
   rollbackModelConfig: (componentId: string): Promise<{ status: AgentModelConfigStatus }> =>
     api('/api/components/model-config/rollback', 'POST', { componentId, confirmed: true }),
   disableModelConfig: (componentId: string): Promise<{ status: AgentModelConfigStatus }> =>

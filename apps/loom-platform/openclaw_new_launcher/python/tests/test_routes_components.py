@@ -77,6 +77,89 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertEqual(payload["action"], "review_api_key")
         self.assertIn("API Key", payload["error"])
 
+    def test_provider_probe_route_returns_live_capabilities_without_echoing_key(self) -> None:
+        calls: list[dict] = []
+        secret = "route-provider-secret-not-real"
+
+        class FakeWireService:
+            def probe_provider_compatibility(self, **kwargs):
+                calls.append(kwargs)
+                return {
+                    "reachable": True,
+                    "protocols": ["responses"],
+                    "toolCall": True,
+                    "streaming": True,
+                    "selectedModel": "live-model",
+                    "source": "live-probe",
+                    "fallbackUsed": True,
+                }
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_wire_svc=lambda: FakeWireService(),
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/components/model-config/probe-provider",
+            json={
+                "provider": "Example",
+                "baseUrl": "https://api.example.invalid/v1",
+                "apiKey": secret,
+                "preferredModel": "stale-model",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["probe"]["selectedModel"], "live-model")
+        self.assertEqual(calls[0]["api_key"], secret)
+        self.assertNotIn(secret, repr(response.json()))
+
+    def test_provider_probe_route_returns_sanitized_actionable_error(self) -> None:
+        class FakeWireService:
+            def probe_provider_compatibility(self, **_kwargs):
+                raise WireConfigError(
+                    "http_524: raw upstream body",
+                    detail={
+                        "code": "upstream_response_timeout",
+                        "messageZh": "上游模型服务响应超时，请稍后重试或切换服务节点。",
+                        "retryable": True,
+                        "statusCode": 524,
+                    },
+                )
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_wire_svc=lambda: FakeWireService(),
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/components/model-config/probe-provider",
+            json={
+                "provider": "Example",
+                "baseUrl": "https://api.example.invalid/v1",
+                "apiKey": "route-provider-secret-not-real",
+            },
+        )
+
+        self.assertEqual(response.status_code, 524)
+        self.assertEqual(response.json()["code"], "upstream_response_timeout")
+        self.assertEqual(response.json()["action"], "retry_provider_probe")
+        self.assertNotIn("raw upstream body", repr(response.json()))
+
     def test_session_preservation_failure_has_actionable_chinese_message(self) -> None:
         message = _model_config_error_text(
             WireConfigError(

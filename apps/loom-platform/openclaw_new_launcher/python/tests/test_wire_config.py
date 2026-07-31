@@ -1203,8 +1203,9 @@ class WireServiceTests(unittest.TestCase):
             service.sync_from_session(session_snapshot(), targets=())
             previous_wire = service.current_public()
 
-            with mock.patch(
-                "core.wire_config._probe_codex_provider",
+            with mock.patch.object(
+                service,
+                "probe_provider_compatibility",
                 side_effect=WireConfigError("remote_responses_probe_failed: http_401"),
             ):
                 with self.assertRaisesRegex(WireConfigError, "remote_responses_probe_failed"):
@@ -1217,6 +1218,55 @@ class WireServiceTests(unittest.TestCase):
                     )
 
             self.assertEqual(service.current_public(), previous_wire)
+
+    def test_custom_agent_apply_uses_live_probe_model_before_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = WireService(AppPaths(temp_dir))
+            applied: list[dict] = []
+            compatibility = {
+                "reachable": True,
+                "protocols": ["chat_completions"],
+                "toolCall": True,
+                "streaming": True,
+                "selectedModel": "live-text-model",
+                "source": "live-probe",
+                "fallbackUsed": True,
+                "baseUrl": "https://custom.example.invalid/v1",
+            }
+
+            def sync_agent(component_id, **kwargs):
+                applied.append({"componentId": component_id, **kwargs})
+                return {
+                    "componentId": component_id,
+                    "configured": True,
+                    "status": "configured",
+                    "model": kwargs["model"],
+                }
+
+            with (
+                mock.patch.object(
+                    service,
+                    "probe_provider_compatibility",
+                    return_value=compatibility,
+                ),
+                mock.patch.object(
+                    service,
+                    "sync_agent_model_config",
+                    side_effect=sync_agent,
+                ),
+            ):
+                result = service.sync_custom_agent_model_config(
+                    "claude-code",
+                    provider="Custom",
+                    base_url="https://custom.example.invalid/v1",
+                    api_key="sk-custom-not-real",
+                    model="stale-ui-model",
+                )
+
+            self.assertEqual(service.current_public()["models"]["text"], "live-text-model")
+            self.assertEqual(applied[0]["model"], "live-text-model")
+            self.assertEqual(result["providerCompatibility"], compatibility)
+            self.assertNotIn("sk-custom-not-real", repr(result))
 
     def test_disable_codex_model_config_without_snapshot_preserves_unrelated_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1583,6 +1633,73 @@ class WireServiceTests(unittest.TestCase):
                 secret,
                 method="GET",
             )
+
+    def test_provider_compatibility_probe_uses_live_catalog_and_records_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            secret = "provider-probe-secret-not-real"
+            requests: list[tuple[str, bool]] = []
+
+            def request(url, api_key, *, method, payload=None):
+                self.assertEqual(api_key, secret)
+                has_tools = bool(isinstance(payload, dict) and payload.get("tools"))
+                requests.append((url, has_tools))
+                if url.endswith("/models"):
+                    return {"data": [{"id": "live-text-model"}]}
+                if url.endswith("/responses"):
+                    if has_tools:
+                        return {
+                            "id": "resp-tool",
+                            "status": "completed",
+                            "output": [{
+                                "type": "function_call",
+                                "name": "loom_capability_probe",
+                                "call_id": "call-live",
+                                "arguments": '{"probe":"provider-tools"}',
+                            }],
+                        }
+                    return {
+                        "id": "resp-text",
+                        "status": "completed",
+                        "output_text": "LOOM_OK",
+                    }
+                if url.endswith("/chat/completions"):
+                    if has_tools:
+                        return {
+                            "choices": [{"message": {"tool_calls": [{
+                                "type": "function",
+                                "function": {
+                                    "name": "loom_capability_probe",
+                                    "arguments": '{"probe":"provider-tools"}',
+                                },
+                            }]}}],
+                        }
+                    return {"choices": [{"message": {"content": "LOOM_OK"}}]}
+                raise AssertionError(url)
+
+            with (
+                mock.patch.object(wire_config_module, "_provider_json_request", side_effect=request),
+                mock.patch.object(wire_config_module, "_provider_stream_request", return_value=True),
+            ):
+                result = service.probe_provider_compatibility(
+                    provider="Example",
+                    base_url="https://api.example.invalid/v1",
+                    api_key=secret,
+                    preferred_model="stale-ui-model",
+                )
+
+            self.assertTrue(result["reachable"])
+            self.assertEqual(result["selectedModel"], "live-text-model")
+            self.assertEqual(result["protocols"], ["responses", "chat_completions"])
+            self.assertTrue(result["toolCall"])
+            self.assertTrue(result["streaming"])
+            self.assertEqual(result["source"], "live-probe")
+            self.assertTrue(result["fallbackUsed"])
+            self.assertTrue(result["modelDescriptor"]["available"])
+            self.assertNotIn(secret, repr(result))
+            self.assertFalse(os.path.exists(paths.wire_current))
+            self.assertEqual(requests[0], ("https://api.example.invalid/v1/models", False))
 
     def test_verify_candidate_rejects_model_missing_from_remote_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -13,6 +13,7 @@ export type {
   PhoneDeviceSummary,
   PhoneTaskMode,
   PhoneTaskProfile,
+  ProviderCompatibilityProbe,
   WireSnapshot,
 } from './api';
 
