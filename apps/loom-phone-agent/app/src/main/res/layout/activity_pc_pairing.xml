@@ -35,6 +35,30 @@
                 android:textColor="@color/colorTextSecondary"
                 android:textSize="14pt" />
 
+            <RadioGroup
+                android:id="@+id/pairingTransportSelector"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12pt"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/rbPairingUsb"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:text="@string/pc_pairing_transport_usb"
+                    android:textColor="@color/colorTextPrimary" />
+
+                <RadioButton
+                    android:id="@+id/rbPairingLan"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="16pt"
+                    android:text="@string/pc_pairing_transport_lan"
+                    android:textColor="@color/colorTextPrimary" />
+            </RadioGroup>
+
             <androidx.cardview.widget.CardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -85,6 +109,16 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8pt"
                         android:textColor="@color/colorTextTertiary"
+                        android:textSize="12pt" />
+
+                    <TextView
+                        android:id="@+id/tvPairingEndpoint"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8pt"
+                        android:fontFamily="monospace"
+                        android:textColor="@color/colorTextSecondary"
+                        android:textIsSelectable="true"
                         android:textSize="12pt" />
 
                     <ImageView

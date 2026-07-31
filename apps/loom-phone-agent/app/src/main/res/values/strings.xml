@@ -171,6 +171,8 @@
     <string name="pc_pairing_title">Pair with LOOM</string>
     <string name="pc_pairing_tip_usb">For USB pairing, enter the 6-digit code in LOOM or copy the full pairing payload. Long-lived credentials are never shown.</string>
     <string name="pc_pairing_tip_lan">For LAN pairing, scan or paste the full pairing payload in LOOM. The 6-digit code is USB-only, and long-lived credentials are never shown.</string>
+    <string name="pc_pairing_transport_usb">USB</string>
+    <string name="pc_pairing_transport_lan">LAN</string>
     <string name="pc_pairing_code">USB only: 6-digit pairing code</string>
     <string name="pc_pairing_expiry">Expires in %1$d seconds</string>
     <string name="pc_pairing_refresh">Refresh pairing payload</string>

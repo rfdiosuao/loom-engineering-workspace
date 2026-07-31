@@ -11,12 +11,14 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.widget.ImageView
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import com.apk.claw.android.R
 import com.apk.claw.android.base.BaseActivity
 import com.apk.claw.android.server.ConfigServerManager
 import com.apk.claw.android.server.PcPairingReadinessPolicy
+import com.apk.claw.android.server.PairingTransportMode
 import com.apk.claw.android.server.PhonePairingBootstrap
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.widget.CommonToolbar
@@ -32,10 +34,12 @@ import com.google.zxing.qrcode.QRCodeWriter
 class PcPairingActivity : BaseActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var session: PhonePairingBootstrap.SessionView? = null
+    private var transportMode = PairingTransportMode.USB
 
     private lateinit var codeView: TextView
     private lateinit var codeSection: View
     private lateinit var expiryView: TextView
+    private lateinit var endpointView: TextView
     private lateinit var tipView: TextView
     private lateinit var statusView: TextView
     private lateinit var payloadView: TextView
@@ -66,12 +70,24 @@ class PcPairingActivity : BaseActivity() {
         codeSection = findViewById(R.id.pairingCodeSection)
         codeView = findViewById(R.id.tvPairingCode)
         expiryView = findViewById(R.id.tvPairingExpiry)
+        endpointView = findViewById(R.id.tvPairingEndpoint)
         statusView = findViewById(R.id.tvPairingStatus)
         payloadView = findViewById(R.id.tvPairingPayload)
         qrView = findViewById(R.id.ivPairingQr)
 
         findViewById<KButton>(R.id.btnCopy).setOnClickListener { copyPayload() }
         findViewById<KButton>(R.id.btnGenerate).setOnClickListener { createPairingSession() }
+        findViewById<RadioGroup>(R.id.pairingTransportSelector)
+            .setOnCheckedChangeListener { _, checkedId ->
+                val selectedMode = when (checkedId) {
+                    R.id.rbPairingUsb -> PairingTransportMode.USB
+                    else -> PairingTransportMode.LAN
+                }
+                if (selectedMode != transportMode) {
+                    transportMode = selectedMode
+                    createPairingSession()
+                }
+            }
         createPairingSession()
     }
 
@@ -92,7 +108,8 @@ class PcPairingActivity : BaseActivity() {
         val readiness = PcPairingReadinessPolicy.evaluate(
             lanIp = ConfigServerManager.getLanIpAddress(this),
             serverRunning = ConfigServerManager.isRunning(),
-            serverPort = ConfigServerManager.getPort()
+            serverPort = ConfigServerManager.getPort(),
+            transportMode = transportMode
         )
         if (!readiness.ready) {
             showUnavailable(readiness.message)
@@ -108,6 +125,7 @@ class PcPairingActivity : BaseActivity() {
         val usesUsbCode = next.transportHint == "usb"
         codeSection.visibility = if (usesUsbCode) View.VISIBLE else View.GONE
         codeView.text = if (usesUsbCode) next.code else ""
+        endpointView.text = readiness.baseUrl
         tipView.setText(
             if (usesUsbCode) R.string.pc_pairing_tip_usb else R.string.pc_pairing_tip_lan
         )
@@ -137,6 +155,7 @@ class PcPairingActivity : BaseActivity() {
         codeSection.visibility = View.GONE
         codeView.text = "------"
         expiryView.text = ""
+        endpointView.text = ""
         payloadView.text = ""
         qrView.setImageDrawable(null)
         statusView.text = message
