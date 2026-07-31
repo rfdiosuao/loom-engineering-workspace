@@ -203,6 +203,31 @@ class PhonePairingBootstrapTest {
     }
 
     @Test
+    fun revoked_lan_session_is_rejected_while_a_replacement_usb_session_can_claim() {
+        val revoked = createLanSession()
+        PhonePairingBootstrap.revokeSession(revoked.sessionId)
+
+        val revokedClaim = PhonePairingBootstrap.claim(
+            lanClaim(revoked, "nonce-revoked-0000000"),
+            remoteAddress = "192.168.1.30"
+        )
+        val replacement = PhonePairingBootstrap.createSession(
+            baseUrl = "http://127.0.0.1:19527",
+            deviceInstanceId = "lumi-phone-a",
+            deviceName = "Pixel",
+            transportHint = "usb"
+        )
+        val replacementClaim = PhonePairingBootstrap.claim(
+            usbClaim(replacement),
+            remoteAddress = "127.0.0.1"
+        )
+
+        assertFalse(revokedClaim.success)
+        assertEquals("phone_pairing_code_invalid", revokedClaim.errorCode)
+        assertTrue(replacementClaim.success)
+    }
+
+    @Test
     fun expired_session_and_device_mismatch_do_not_promote_credentials() {
         val expired = createLanSession(ttlMs = 300_000L)
         now += 300_001L

@@ -14,6 +14,8 @@ import android.widget.ImageView
 import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
+import androidx.annotation.VisibleForTesting
+import com.apk.claw.android.BuildConfig
 import com.apk.claw.android.R
 import com.apk.claw.android.base.BaseActivity
 import com.apk.claw.android.server.ConfigServerManager
@@ -26,6 +28,7 @@ import com.apk.claw.android.widget.KButton
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Creates a phone-owned, short-lived pairing code without exposing the
@@ -39,18 +42,30 @@ class PcPairingActivity : BaseActivity() {
     )
 
     companion object {
-        @Volatile
-        private var pairingRuntimeForTests: PairingRuntime? = null
+        private fun interface PairingRuntimeProvider {
+            fun snapshot(): PairingRuntime
+        }
 
+        private val pairingRuntimeProviderForTests = AtomicReference<PairingRuntimeProvider?>(null)
+
+        @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
         @JvmStatic
-        fun setPairingRuntimeForTests(runtime: PairingRuntime?) {
-            pairingRuntimeForTests = runtime
+        fun installPairingRuntimeProviderForTests(provider: () -> PairingRuntime): AutoCloseable {
+            check(BuildConfig.DEBUG) { "Pairing runtime overrides are only available in debug builds." }
+            val override = PairingRuntimeProvider { provider() }
+            check(pairingRuntimeProviderForTests.compareAndSet(null, override)) {
+                "A pairing runtime override is already installed."
+            }
+            return AutoCloseable {
+                pairingRuntimeProviderForTests.compareAndSet(override, null)
+            }
         }
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var session: PhonePairingBootstrap.SessionView? = null
     private var transportMode = PairingTransportMode.USB
+    private var pairingRuntimeSnapshot: PairingRuntime? = null
 
     private lateinit var codeView: TextView
     private lateinit var codeSection: View
@@ -76,6 +91,11 @@ class PcPairingActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pairingRuntimeSnapshot = if (BuildConfig.DEBUG) {
+            pairingRuntimeProviderForTests.get()?.snapshot()
+        } else {
+            null
+        }
         setContentView(R.layout.activity_pc_pairing)
 
         findViewById<CommonToolbar>(R.id.toolbar).apply {
@@ -114,6 +134,7 @@ class PcPairingActivity : BaseActivity() {
 
     private fun createPairingSession() {
         handler.removeCallbacks(countdown)
+        revokeCurrentSession()
         val runtime = currentPairingRuntime() ?: return
         val readiness = PcPairingReadinessPolicy.evaluate(
             lanIp = runtime.lanIp,
@@ -122,7 +143,12 @@ class PcPairingActivity : BaseActivity() {
             transportMode = transportMode
         )
         if (!readiness.ready) {
-            showUnavailable(readiness.message)
+            val message = if (readiness.errorCode == "config_lan_unavailable") {
+                getString(R.string.pc_pairing_lan_unavailable)
+            } else {
+                readiness.message
+            }
+            showUnavailable(message)
             return
         }
         val next = PhonePairingBootstrap.createSession(
@@ -150,7 +176,7 @@ class PcPairingActivity : BaseActivity() {
     }
 
     private fun currentPairingRuntime(): PairingRuntime? {
-        pairingRuntimeForTests?.let { return it }
+        pairingRuntimeSnapshot?.let { return it }
         if (!ConfigServerManager.isRunning()) {
             if (!ConfigServerManager.start(this)) {
                 showUnavailable(getString(R.string.pc_pairing_server_failed))
@@ -177,14 +203,26 @@ class PcPairingActivity : BaseActivity() {
     }
 
     private fun showUnavailable(message: String) {
-        session = null
+        revokeCurrentSession()
         codeSection.visibility = View.GONE
         codeView.text = "------"
         expiryView.text = ""
         endpointView.text = ""
+        tipView.setText(
+            if (transportMode == PairingTransportMode.LAN) {
+                R.string.pc_pairing_tip_lan_unavailable
+            } else {
+                R.string.pc_pairing_tip_usb
+            }
+        )
         payloadView.text = ""
         qrView.setImageDrawable(null)
         statusView.text = message
+    }
+
+    private fun revokeCurrentSession() {
+        session?.let { PhonePairingBootstrap.revokeSession(it.sessionId) }
+        session = null
     }
 
     private fun generateQrBitmap(content: String, size: Int): Bitmap {

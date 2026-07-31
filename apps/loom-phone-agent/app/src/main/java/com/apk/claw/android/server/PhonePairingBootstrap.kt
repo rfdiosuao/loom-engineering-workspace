@@ -149,6 +149,14 @@ object PhonePairingBootstrap {
     }
 
     @Synchronized
+    fun revokeSession(sessionId: String) {
+        val session = sessions.remove(sessionId.trim()) ?: return
+        session.bootstrapSecret.fill(0)
+        session.failedAttemptsByRemote.clear()
+        session.usedNonces.clear()
+    }
+
+    @Synchronized
     fun claim(request: ClaimRequest, remoteAddress: String): ClaimResult {
         val now = clock()
         prune(now)
