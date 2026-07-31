@@ -2,6 +2,7 @@
 /worktrees/
 /artifacts/
 /tmp/
+/.superpowers/
 /.gradle-apkclaw-qa/
 
 # Secrets and local configuration

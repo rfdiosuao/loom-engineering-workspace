@@ -1,9 +1,9 @@
 # LOOM 手机连接与 Agent 生态加固实施计划
 
 > 日期：2026-07-31  
-> 当前基线：LOOM Desktop 2.4.0 / AgentPhone 6.63  
+> 当前基线：LOOM Desktop 2.4.0 / LumiAgent 6.63；目标版本：LOOM Desktop 2.4.2 / LumiAgent 6.64
 > 适用仓库：`loom-engineering-workspace`  
-> 状态：待实施，本文档是后续开发的唯一任务入口  
+> 状态：执行中，本文档是后续开发的唯一任务入口
 > 原则：先修基础连接与模型配置，再扩展 Agent；所有外部发布、付费模型和手机写操作继续遵守确认、审计和幂等规则。
 
 ## 1. 目标与非目标
@@ -18,6 +18,9 @@
 6. 保证支持的 Agent 可以安全写入 LOOM 中转站 Base URL、API Key 和模型配置，同时不破坏官方账号和历史会话。
 7. 借鉴 OpenMinis 的 Provider、Skill、Memory、Workspace、Trace 和 Native Offload 架构，形成 APKClaw 的可商业化融合路线。
 8. 把此前审查中尚未闭环的 P0/P1 可靠性问题纳入同一执行清单。
+9. 增加可选 PRoot/Linux 兼容运行时，让适合本地批处理和 CLI 的任务减少远程往返；原生 Android 能力仍是默认快路径。
+10. 增加可选 Shizuku 增强能力层，以类型化、可审计、可撤销的接口补足标准 Android 权限，未授权时自动降级。
+11. 完成 LOOM Desktop 2.4.2 与 LumiAgent 6.64 的版本冻结、全量验证、可复现构建和产物校验。
 
 ### 1.2 非目标
 
@@ -26,6 +29,9 @@
 3. 不把多台手机的所有矩阵缩略图都升级为高帧率视频。高帧率只用于当前聚焦设备，矩阵缩略图继续自适应降帧。
 4. 不删除手机内部现有发布协议或正式发布审计链。用户要求删除的是手机设置页中的“发布中转”入口；底层能力是否删除需先做调用引用审计。
 5. 不以模拟器通过代替实体手机、真实热点、真实 USB 和真实模型验收。
+6. 不把 PRoot 宣称为所有操作的性能加速器；性能收益必须来自减少远程模型往返、本地批处理或 Native Offload，并用基准数据证明。
+7. 不把原始 `rish`、root shell、PRoot shell 或任意命令执行直接暴露给模型、LAN API、Skill 或第三方 Agent。
+8. 不复制、改名或内嵌 Shizuku 应用；LumiAgent 只通过官方兼容 API 与用户单独安装并授权的 Shizuku/Sui 服务协作。
 
 ## 2. 结论摘要
 
@@ -481,9 +487,9 @@ cd apps/loom-phone-agent
 - `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/server/ConfigServerManager.kt`
 - `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/server/PhoneNetworkMode.kt`
 - `apps/loom-platform/openclaw_new_launcher/python/api/routes_phone.py`
-- `apps/loom-platform/openclaw_new_launcher/python/core/phone_connection.py`
+- 新增 `apps/loom-platform/openclaw_new_launcher/python/core/phone_connection.py`
 - `apps/loom-platform/openclaw_new_launcher/python/tests/test_routes_phone.py`
-- `apps/loom-platform/openclaw_new_launcher/python/tests/test_phone_connection.py`
+- 新增 `apps/loom-platform/openclaw_new_launcher/python/tests/test_phone_connection.py`
 
 **实施**
 
@@ -657,24 +663,28 @@ cd apps/loom-phone-agent
 
 对 `404`、`408`、`429`、`500`、`502`、`503`、`504`、DNS、TLS、连接重置分别给中文修复建议。上游挂掉时不得覆盖本地最后一份健康配置。
 
-## Task 9：OpenMinis 启发式融合 PoC
+## Task 9：OpenMinis 启发式融合与 Mobile Runtime PoC
 
 **先写设计，不直接进生产**
 
 - 新增 `docs/superpowers/specs/loom-mobile-agent-runtime.md`
 - 新增 `docs/security/openminis-license-boundary.md`
 - 新增 `packages/contracts/mobile-agent-runtime.schema.json`
+- 新增 `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/runtime/MobileRuntimeCapability.kt`
+- 新增 `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/runtime/TypedNativeToolGateway.kt`
+- 新增 `apps/loom-phone-agent/app/src/test/java/com/apk/claw/android/runtime/TypedNativeToolGatewayTest.kt`
 
-**PoC 只做四件事**
+**PoC 做五件事**
 
 1. Provider schema 运行时发现。
 2. Workspace/Memory 隔离。
 3. Skill 元数据按需加载。
 4. Native Offload 的 typed tool gateway。
+5. Runtime backend 发现、授权、健康检查和确定性回退，不绑定具体 Linux 发行版。
 
 **明确不做**
 
-- 不打包 Alpine/PRoot。
+- 不在未完成许可证、来源、供应链和实体机评审前把 Alpine/PRoot 直接打进正式 APK；兼容运行时先以可选组件和干净接口验证。
 - 不复制 OpenMinis GPL 源码。
 - 不让手机 Agent 绕过 LOOM 的审批、授权、频控和审计。
 - 不把开放 shell 默认授予生产手机。
@@ -685,6 +695,7 @@ cd apps/loom-phone-agent
 - 手机只收到被批准的能力子集。
 - Provider credential 只写不读，失败不留下半配置。
 - 每个 Workspace 的 Memory 不跨账号、不跨客户。
+- 运行时不可用、超时或撤权后，任务能够回退原生能力或给出明确的不可执行原因，不出现半执行状态。
 
 ## Task 10：闭环此前尚未完成的可靠性问题
 
@@ -712,6 +723,66 @@ cd apps/loom-phone-agent
 
 这些问题应独立 PR，不与手机 UI 重排混合。
 
+## Task 11：Shizuku 增强能力层
+
+**先写失败测试**
+
+- 新增 `apps/loom-phone-agent/app/src/test/java/com/apk/claw/android/privilege/PrivilegeBackendSelectorTest.kt`
+- 新增 `apps/loom-phone-agent/app/src/test/java/com/apk/claw/android/privilege/PrivilegedActionPolicyTest.kt`
+- 覆盖未安装、已安装未授权、已授权、binder 失效、重启后撤权、Sui/root 默认禁用和标准模式回退。
+
+**实现**
+
+- 新增 `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/privilege/PrivilegeBackend.kt`，统一 `STANDARD`、`SHIZUKU` 和受控 `SUI` 后端能力描述。
+- 新增 `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/privilege/ShizukuPrivilegeBackend.kt`，只调用经策略批准的类型化动作，不提供通用 shell 接口。
+- 新增 `apps/loom-phone-agent/app/src/main/java/com/apk/claw/android/privilege/PrivilegedActionPolicy.kt`，按动作、账号、设备状态、用户授权和审计上下文做白名单判定。
+- 在设置页增加“增强设备能力”状态、自检、授权引导和撤销入口；未安装 Shizuku 时保持标准模式，不阻塞配对、RPA、截图和急停。
+- 日志仅记录动作类型、结果、耗时和脱敏设备标识，不记录命令正文、Key、令牌、剪贴板或用户内容。
+
+**验收**
+
+- Android 7-10 可通过电脑 ADB 启动外部 Shizuku 服务后授权；Android 11+ 同时验证无线调试路径。
+- Shizuku 被停止、升级、撤权或手机重启时，LumiAgent 不崩溃、不循环申请权限，并在 2 秒内切换到标准模式。
+- 所有增强动作都有一次性或持久授权语义、审计记录、超时和幂等键；远程调用不能提交任意命令字符串。
+
+## Task 12：可选 PRoot/Linux 兼容运行时
+
+**先写 contract 和基准测试**
+
+- 新增 `packages/contracts/mobile-linux-runtime.schema.json`，限定 runtime 状态、资源预算、挂载、网络、允许的入口点和脱敏 trace。
+- 新增 `apps/loom-phone-agent/app/src/test/java/com/apk/claw/android/runtime/LinuxRuntimePolicyTest.kt`。
+- 新增 `apps/loom-phone-agent/app/src/test/java/com/apk/claw/android/runtime/LinuxRuntimeFallbackTest.kt`。
+- 新增 `apps/loom-phone-agent/tools/benchmark-mobile-runtime.ps1`，比较原生类型化工具、PRoot 本地批处理和远程逐步调用的冷启动、热启动、耗时、内存与电量。
+
+**实现边界**
+
+- PRoot/Linux 是按需安装的兼容 backend，不替换 Android 原生 RPA、MediaProjection、网络服务或 Native Offload。
+- 运行时只挂载独立 workspace；默认只读输入、独立输出、禁止访问 app 私有凭据、系统目录、其他账号 workspace 和宿主 Unix socket。
+- 网络默认关闭；只有 manifest 声明并经用户批准的 Provider 域名可临时放行，凭据通过一次性句柄注入且不可回读。
+- Skill 只能调用 `TypedNativeToolGateway` 中批准的能力；PRoot 内部进程不能连接 Shizuku binder、`rish` 或 root shell。
+- 发行物来源、许可证、哈希、SBOM 和升级/回滚策略写入 `docs/security/mobile-linux-runtime-supply-chain.md`；在评审完成前正式 APK 不内嵌发行版 rootfs。
+
+**验收**
+
+- 兼容运行时缺失、损坏、空间不足、OOM、超时和被用户停用时均可恢复，不影响 LumiAgent 主进程与标准能力。
+- 同一批处理任务相较远程逐步调用减少模型往返并有可复现实测；若某任务比原生工具慢，调度器必须保留原生快路径。
+- workspace、Memory、输出物和缓存按账号隔离；卸载运行时能清理其可再生成数据且不删除用户业务文件。
+
+## Task 13：版本冻结、构建与 2.4.2 发布候选
+
+**先写版本失败测试**
+
+- Desktop 版本单一来源校验必须覆盖 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 `src-tauri/Cargo.lock`，目标均为 `2.4.2`。
+- LumiAgent 版本合同测试先改为期望 `versionCode 933`、`versionName 6.64-stability`，同时覆盖 Android 7 变体后再修改构建配置。
+- 新增 `docs/RELEASE_NOTES_2.4.2.md`，明确 USB 视频、PRoot 兼容运行时和 Shizuku 的已实现范围与已知限制，不把 PoC 表述为默认生产能力。
+
+**构建与校验**
+
+- 先只读检查系统盘与构建盘空间；只可清理经确认可再生成的本项目缓存，不得删除用户文件。
+- 执行全量自动测试、实体机矩阵、受保护发布验证、签名验证和 smoke test。
+- 构建 LOOM Desktop 2.4.2 NSIS 安装包以及 LumiAgent 6.64 default/android7 APK；记录绝对路径、大小、SHA256、签名、来源提交和已知限制。
+- 本任务只生成本地发布候选；未经用户明确确认，不推正式更新通道、不创建正式 GitHub Release、不对外发布。
+
 ## 6. PR 与 Worktree 划分
 
 | PR | Worktree 建议 | 内容 | 依赖 |
@@ -724,6 +795,9 @@ cd apps/loom-phone-agent
 | F | `mobile-runtime-spec` | Task 9 文档与 contract | 无 |
 | G | `reliability-p0-account` | Task 10 P0 | 独立优先 |
 | H | `reliability-p1-publish-update-media` | Task 10 P1/P2 | 可拆 3 个更小 PR |
+| I | `phone-shizuku-capabilities` | Task 11 | Task 9 typed gateway |
+| J | `phone-linux-runtime` | Task 12 | Task 9 contract；许可证与供应链评审门禁 |
+| K | `release-2.4.2` | Task 13 | A-J 全部验收后 |
 
 禁止多个会话共享同一 worktree 写入。每个 PR 在开始前必须：
 
@@ -759,17 +833,28 @@ git status --short
 1. Task 5 USB 实时画面。
 2. Grok Build / Pi 首批接入。
 3. Task 9 OpenMinis 启发式 PoC。
+4. Task 11 Shizuku 增强能力层。
+5. Task 12 PRoot/Linux 兼容运行时与性能基准。
 
-完成标准：聚焦手机 USB 低延迟预览；新增 Agent 有真实安装、检测、配置、回滚和会话保留证据。
+完成标准：聚焦手机 USB 低延迟预览；新增 Agent 有真实安装、检测、配置、回滚和会话保留证据；增强权限和 Linux 运行时均可撤销、可降级、可审计且不暴露通用 shell。
+
+### 阶段四：冻结 2.4.2 发布候选
+
+1. Task 13 版本合同、全量回归和实体机门禁。
+2. 构建 Desktop 2.4.2 与 LumiAgent 6.64 default/android7 安装产物。
+3. 生成 SHA256、签名、SBOM、来源提交、测试计数、实体机记录和已知限制证据包。
+
+完成标准：所有任务验收证据齐全且工作树可复现；只生成本地候选，不未经确认对外发布。
 
 ## 8. 总体验收门禁
 
 ### 自动测试
 
 ```powershell
-# Phone default + Android 7
+# Phone default + Android 7 compatibility property
 cd apps/loom-phone-agent
-.\gradlew.bat :app:testDefaultDebugUnitTest :app:testAndroid7DebugUnitTest
+.\gradlew.bat :app:testDebugUnitTest
+.\gradlew.bat -Pandroid7Compat=true :app:testDebugUnitTest
 
 # Desktop Python
 cd ..\loom-platform\openclaw_new_launcher
@@ -795,6 +880,8 @@ cargo check --locked
 - 10 台设备 2 小时 soak。
 - USB 聚焦画面 30 分钟。
 - 拔插 USB、锁屏、息屏、前后台、热点切换、路由器切换。
+- Shizuku 未安装、未授权、已授权、binder 中断、撤权和重启恢复。
+- PRoot/Linux runtime 首次安装、冷/热启动、空间不足、网络禁用、任务超时、强制停止、卸载和原生回退。
 
 ### Agent 与中转站
 
@@ -830,6 +917,8 @@ cargo check --locked
 7. 实时画面失败不会阻塞任务、控制和急停。
 8. OpenMinis 只借鉴公开接口思想，许可证边界有书面审查。
 9. 全量测试、发布来源和产物校验可复现。
+10. Shizuku 与 PRoot/Linux 均为可选能力；缺失、失效或撤权不会破坏 LumiAgent 基础功能，且任何远程入口都不能执行任意 shell。
+11. Desktop `2.4.2` 与 LumiAgent `6.64-stability` 的版本、签名、SHA256、来源提交和 release notes 一致。
 
 ## 10. 官方参考
 
@@ -838,13 +927,15 @@ cargo check --locked
 - Grok Build：`https://github.com/xai-org/grok-build`
 - Pi：`https://github.com/earendil-works/pi`
 - Goose：`https://github.com/aaif-goose/goose`
+- Shizuku API：`https://github.com/RikkaApps/Shizuku-API`
+- PRoot：`https://github.com/proot-me/proot`
 
 ## 11. 下次恢复工作的首条提示词
 
 ```text
 请继续执行 docs/superpowers/plans/2026-07-31-loom-phone-connectivity-agent-ecosystem-hardening.md。
 先同步 origin/main，确认当前版本、已合并 PR、工作树和测试基线；然后只领取一个未完成 Task，
-创建独立 worktree 和 codex/ 分支，按 TDD 实施。不得把截图轮询称为实时视频流，不得跳过实体机验收，
-不得在日志或命令行暴露 API Key，不得直接复制 OpenMinis 的 GPLv3 组合源码。
+在当前任务的独立 worktree 和 codex/ 分支按 TDD 顺序实施。不得把截图轮询称为实时视频流，不得跳过实体机验收，
+不得在日志或命令行暴露 API Key，不得直接复制 OpenMinis 的 GPLv3 组合源码，不得把原始 Shizuku/PRoot shell 暴露给模型或远程 API。
 完成后给出根因、变更文件、测试计数、实体机证据、残余风险和 PR 链接。
 ```
