@@ -539,6 +539,10 @@ def publish_relay_complete(
             hashlib.sha256(commit_token.encode("utf-8")).hexdigest(),
             stored_commit_hash,
         )
+        commit_expired = (
+            normalize_string(row["commit_state"]) == "authorized"
+            and int(row["commit_expires_at_ms"] or 0) <= current_ms
+        )
         if success and formal_publish and (
             normalize_string(row["commit_state"]) != "authorized"
             or normalize_string(row["commit_lease_id"]) != lease_id
@@ -549,6 +553,12 @@ def publish_relay_complete(
                 "Formal publish completion requires its one-time commit token",
                 409,
                 "RELAY_COMMIT_TOKEN_REQUIRED",
+            )
+        if success and formal_publish and commit_expired:
+            raise ActivationError(
+                "Formal publish commit token expired before completion",
+                409,
+                "RELAY_COMMIT_TOKEN_EXPIRED",
             )
         if success:
             changed = conn.execute(

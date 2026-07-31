@@ -315,6 +315,54 @@ class PublishCommitGuardTest {
     }
 
     @Test
+    fun `formal completion rejects success evidence that predates the commit`() {
+        val published = treeWithNode("发布成功")
+
+        val unchangedObservation = PublishCompletionPolicy.inspect(
+            draftOnly = false,
+            executionSucceeded = true,
+            commitAuthorized = true,
+            tree = published,
+            commitExpiresAtMs = 20_000,
+            nowMs = 10_000,
+            baselineEvidence = "",
+            observationAdvanced = false,
+        )
+        val repeatedBaselineEvidence = PublishCompletionPolicy.inspect(
+            draftOnly = false,
+            executionSucceeded = true,
+            commitAuthorized = true,
+            tree = published,
+            commitExpiresAtMs = 20_000,
+            nowMs = 10_000,
+            baselineEvidence = "发布成功",
+            observationAdvanced = true,
+        )
+
+        assertFalse(unchangedObservation.verified)
+        assertTrue(unchangedObservation.evidence.contains("fresh", ignoreCase = true))
+        assertFalse(repeatedBaselineEvidence.verified)
+        assertTrue(repeatedBaselineEvidence.evidence.contains("predates", ignoreCase = true))
+    }
+
+    @Test
+    fun `formal completion revalidates commit token expiry`() {
+        val outcome = PublishCompletionPolicy.inspect(
+            draftOnly = false,
+            executionSucceeded = true,
+            commitAuthorized = true,
+            tree = treeWithNode("发布成功"),
+            commitExpiresAtMs = 10_000,
+            nowMs = 10_001,
+            baselineEvidence = "",
+            observationAdvanced = true,
+        )
+
+        assertFalse(outcome.verified)
+        assertTrue(outcome.evidence.contains("expired", ignoreCase = true))
+    }
+
+    @Test
     fun `draft-only completion depends on execution result without publish postcondition`() {
         assertTrue(
             PublishCompletionPolicy.inspect(

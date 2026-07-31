@@ -97,11 +97,38 @@ object PublishCompletionPolicy {
         executionSucceeded: Boolean,
         commitAuthorized: Boolean,
         tree: JsonObject?,
+        commitExpiresAtMs: Long = Long.MAX_VALUE,
+        nowMs: Long = System.currentTimeMillis(),
+        baselineEvidence: String = "",
+        observationAdvanced: Boolean = true,
     ): PublishOutcomeInspection {
         if (!executionSucceeded) return PublishOutcomeInspection(verified = false)
         if (draftOnly) return PublishOutcomeInspection(verified = true)
         if (!commitAuthorized) return PublishOutcomeInspection(verified = false)
-        return PublishOutcomePolicy.inspect(tree)
+        if (commitExpiresAtMs <= nowMs) {
+            return PublishOutcomeInspection(
+                verified = false,
+                evidence = "Publish commit authorization expired before completion",
+            )
+        }
+        if (!observationAdvanced) {
+            return PublishOutcomeInspection(
+                verified = false,
+                evidence = "Formal publish requires fresh post-commit screen evidence",
+            )
+        }
+        val outcome = PublishOutcomePolicy.inspect(tree)
+        if (
+            outcome.verified &&
+            baselineEvidence.isNotBlank() &&
+            outcome.evidence.trim().equals(baselineEvidence.trim(), ignoreCase = true)
+        ) {
+            return PublishOutcomeInspection(
+                verified = false,
+                evidence = "Publish success evidence predates this commit",
+            )
+        }
+        return outcome
     }
 }
 
@@ -245,6 +272,7 @@ class PublishCommitGuard(
     private val screenTree: () -> JsonObject?,
     private val authorizeCommit: () -> PublishCommitDecision,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    private val screenObservedAt: () -> Long = nowMs,
 ) {
     @Volatile
     var commitToken: String = ""
@@ -252,6 +280,18 @@ class PublishCommitGuard(
 
     @Volatile
     var commitAuthorized: Boolean = false
+        private set
+
+    @Volatile
+    var commitExpiresAtMs: Long = 0L
+        private set
+
+    @Volatile
+    var commitBaselineObservedAt: Long = 0L
+        private set
+
+    @Volatile
+    var commitBaselineEvidence: String = ""
         private set
 
     fun beforeToolDispatch(toolName: String, params: Map<String, Any>): String? {
@@ -295,6 +335,9 @@ class PublishCommitGuard(
                 "Publish commit authorization was invalid or expired"
             } else {
                 commitToken = decision.token
+                commitExpiresAtMs = decision.expiresAtMs
+                commitBaselineObservedAt = screenObservedAt()
+                commitBaselineEvidence = PublishOutcomePolicy.inspect(currentTree).evidence
                 commitAuthorized = true
                 null
             }
@@ -303,6 +346,21 @@ class PublishCommitGuard(
             "Publish commit authorization failed${if (detail.isBlank()) "" else ": $detail"}"
         }
     }
+
+    fun inspectCompletion(
+        executionSucceeded: Boolean,
+        tree: JsonObject?,
+        observedAtMs: Long,
+    ): PublishOutcomeInspection = PublishCompletionPolicy.inspect(
+        draftOnly = draftOnly,
+        executionSucceeded = executionSucceeded,
+        commitAuthorized = commitAuthorized,
+        tree = tree,
+        commitExpiresAtMs = commitExpiresAtMs,
+        nowMs = nowMs(),
+        baselineEvidence = commitBaselineEvidence,
+        observationAdvanced = observedAtMs > commitBaselineObservedAt,
+    )
 
     private companion object {
         val observablePointerTools = setOf("tap", "long_press", "swipe", "drag")

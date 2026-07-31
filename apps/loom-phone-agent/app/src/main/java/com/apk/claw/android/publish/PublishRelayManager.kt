@@ -307,6 +307,9 @@ object PublishRelayManager {
             authorizeCommit = {
                 authorizeFormalPublishCommit(config, packet)
             },
+            screenObservedAt = {
+                ClawAccessibilityService.getInstance()?.currentPackageObservedAt ?: 0L
+            },
         )
         val response = PublishApiController.handleExecutePacket(
             session,
@@ -325,7 +328,7 @@ object PublishRelayManager {
             )
         }
 
-        val outcome = awaitFormalPublishOutcome()
+        val outcome = awaitFormalPublishOutcome(gate)
         val outcomeJson = JsonObject().apply {
             addProperty("verified", outcome.verified)
             addProperty("evidence", outcome.evidence)
@@ -347,14 +350,14 @@ object PublishRelayManager {
         return execution.copy(responseJson = responseJson)
     }
 
-    private fun awaitFormalPublishOutcome(): PublishOutcomeInspection {
+    private fun awaitFormalPublishOutcome(gate: PublishCommitGuard): PublishOutcomeInspection {
         val deadlineMs = System.currentTimeMillis() + PUBLISH_OUTCOME_WAIT_MS
         do {
-            val inspection = PublishCompletionPolicy.inspect(
-                draftOnly = false,
+            val service = ClawAccessibilityService.getInstance()
+            val inspection = gate.inspectCompletion(
                 executionSucceeded = true,
-                commitAuthorized = true,
-                tree = ClawAccessibilityService.getInstance()?.screenTreeJson,
+                tree = service?.screenTreeJson,
+                observedAtMs = service?.currentPackageObservedAt ?: 0L,
             )
             if (inspection.verified || inspection.evidence.isNotBlank()) return inspection
             if (System.currentTimeMillis() >= deadlineMs) return inspection

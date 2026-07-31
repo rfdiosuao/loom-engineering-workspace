@@ -752,6 +752,44 @@ class RelayModuleTests(unittest.TestCase):
                 }
             )
 
+    def test_formal_publish_completion_rejects_expired_commit_token(self) -> None:
+        _authorization, packet_id = self.enqueue_formal_packet(
+            "relay-expired-commit-token",
+            consumer_id="expired-commit-consumer",
+        )
+        claimed = self.server.publish_relay_claim(
+            "matrix",
+            "expired-commit-consumer",
+            30_000,
+        )
+        decision = self.server.publish_relay_authorize_commit(
+            {
+                "packetId": packet_id,
+                "leaseId": claimed["leaseId"],
+                "clientId": "expired-commit-consumer",
+            }
+        )
+        with self.server.connect() as connection:
+            connection.execute(
+                "update publish_relay_packets set commit_expires_at_ms = ? where packet_id = ?",
+                (self.server.now_ms() - 1, packet_id),
+            )
+            connection.commit()
+
+        with self.assertRaises(ActivationError) as expired:
+            self.server.publish_relay_complete(
+                {
+                    "packetId": packet_id,
+                    "leaseId": claimed["leaseId"],
+                    "clientId": "expired-commit-consumer",
+                    "commitToken": decision["commitToken"],
+                    "success": True,
+                }
+            )
+
+        self.assertEqual(409, expired.exception.status)
+        self.assertEqual("RELAY_COMMIT_TOKEN_EXPIRED", expired.exception.code)
+
     def test_revocation_after_dequeue_blocks_final_commit(self) -> None:
         _authorization, packet_id = self.enqueue_formal_packet(
             "relay-revoked-before-commit",
