@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Luming AI Matrix Acquisition Workbench",
+  "productName": "麓鸣",
   "mainBinaryName": "LOOM",
   "version": "2.4.0",
   "identifier": "top.heang.loom",
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "麓鸣AI矩阵获客工作台",
+        "title": "麓鸣",
         "width": 1200,
         "height": 800,
         "minWidth": 960,

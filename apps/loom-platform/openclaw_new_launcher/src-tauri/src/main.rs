@@ -121,10 +121,10 @@ fn ensure_webview2_before_tauri() {
         MessageBoxW, IDYES, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_YESNO,
     };
 
-    let title = wide_null("麓鸣AI矩阵获客工作台 启动环境缺失");
+    let title = wide_null("麓鸣启动环境缺失");
     if let Some(installer) = find_bundled_webview2_installer() {
         let message = wide_null(
-            "当前系统缺少 Microsoft Edge WebView2 Runtime，启动器界面可能白屏或无法打开。\n\n已在离线包中找到 WebView2 安装器。是否现在安装？安装完成后请重新打开麓鸣AI矩阵获客工作台。",
+            "当前系统缺少 Microsoft Edge WebView2 Runtime，启动器界面可能白屏或无法打开。\n\n已在离线包中找到 WebView2 安装器。是否现在安装？安装完成后请重新打开麓鸣。",
         );
         let result = unsafe {
             MessageBoxW(
@@ -139,7 +139,7 @@ fn ensure_webview2_before_tauri() {
         }
     } else {
         let message = wide_null(
-            "当前系统缺少 Microsoft Edge WebView2 Runtime，启动器界面可能白屏或无法打开。\n\n请安装 Microsoft Edge WebView2 Evergreen Runtime 后重新打开麓鸣AI矩阵获客工作台。离线交付包应包含 redist\\MicrosoftEdgeWebView2RuntimeInstallerX64.exe。",
+            "当前系统缺少 Microsoft Edge WebView2 Runtime，启动器界面可能白屏或无法打开。\n\n请安装 Microsoft Edge WebView2 Evergreen Runtime 后重新打开麓鸣。离线交付包应包含 redist\\MicrosoftEdgeWebView2RuntimeInstallerX64.exe。",
         );
         unsafe {
             MessageBoxW(

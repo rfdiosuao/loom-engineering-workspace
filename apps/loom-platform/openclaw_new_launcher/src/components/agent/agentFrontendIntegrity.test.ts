@@ -134,11 +134,11 @@ test('Agent visual identity uses a bundled brand mark with restrained status mot
   const styles = utf8.decode(await readFile(join(agentDirectory, '..', '..', 'styles', 'index.css')));
 
   assert.match(brand, /export const LoomAgentMark/);
-  assert.match(brand, /new URL\('\.\.\/\.\.\/assets\/luming-logo\.svg', import\.meta\.url\)/);
+  assert.match(brand, /new URL\('\.\.\/\.\.\/assets\/luming-logo-full\.png', import\.meta\.url\)/);
   assert.match(brand, /const LoomBrandImage/);
   assert.match(brand, /onError=\{\(\) => setFailed\(true\)\}/);
   assert.doesNotMatch(brand, /\/loom-motion\/(?:agent-core-v1|luming-wordmark(?:-light|-gold)?)\.png/);
-  assert.equal((await stat(join(agentDirectory, '..', '..', 'assets', 'luming-logo.svg'))).isFile(), true);
+  assert.equal((await stat(join(agentDirectory, '..', '..', 'assets', 'luming-logo-full.png'))).isFile(), true);
   assert.match(brand, /data-agent-executing/);
 
   assert.match(header, /<LoomAgentMark/);

@@ -347,7 +347,7 @@ for (const [controlName, key] of settingsDataDestinations) {
 test('settings about tab is an intentionally read-only surface', async ({ audit, page }) => {
   await navigateTo(audit, 'settings');
   await appMain(page).getByRole('button', { name: '关于', exact: true }).click();
-  await expect(appMain(page).getByText('麓鸣AI矩阵获客工作台', { exact: true }).first()).toBeVisible();
+  await expect(appMain(page).getByText('麓鸣', { exact: true }).first()).toBeVisible();
   await expect(appMain(page).getByRole('button')).toHaveCount(4);
 });
 

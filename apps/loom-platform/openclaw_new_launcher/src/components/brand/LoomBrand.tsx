@@ -6,7 +6,7 @@ import {
 } from '../../version';
 import { useTheme } from '../../hooks/useTheme';
 
-const DEFAULT_LOGO_SRC = new URL('../../assets/luming-logo.svg', import.meta.url).href;
+const DEFAULT_LOGO_SRC = new URL('../../assets/luming-logo-full.png', import.meta.url).href;
 
 const LoomBrandFallbackGlyph: React.FC<{ className?: string }> = ({ className = '' }) => (
   <svg viewBox="0 0 64 64" className={className} focusable="false" aria-hidden="true">

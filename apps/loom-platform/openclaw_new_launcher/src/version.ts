@@ -9,7 +9,7 @@ function buildValue(key: string, fallback: string): string {
 }
 
 export const APP_VERSION = packageJson.version;
-export const APP_DISPLAY_NAME = buildValue('VITE_LOOM_BRAND_DISPLAY_NAME', '麓鸣AI矩阵获客工作台');
+export const APP_DISPLAY_NAME = buildValue('VITE_LOOM_BRAND_DISPLAY_NAME', '麓鸣');
 export const APP_DISPLAY_SUBTITLE = buildValue('VITE_LOOM_BRAND_SUBTITLE', '手机矩阵获客与自动化总控');
 export const APP_NATIVE_AGENT_NAME = `${APP_DISPLAY_NAME} 原生智能体`;
 export const APP_BRAND_LOGO_URL = buildValue('VITE_LOOM_BRAND_LOGO_URL', '');

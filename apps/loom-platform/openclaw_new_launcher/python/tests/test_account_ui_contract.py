@@ -7,7 +7,7 @@ import unittest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LICENSE_PAGE = os.path.join(REPO_ROOT, "src", "components", "license", "LicensePage.tsx")
 BRAND_COMPONENT = os.path.join(REPO_ROOT, "src", "components", "brand", "LoomBrand.tsx")
-PACKAGED_LOGO = os.path.join(REPO_ROOT, "src", "assets", "luming-logo.svg")
+PACKAGED_LOGO = os.path.join(REPO_ROOT, "src", "assets", "luming-logo-full.png")
 SPLASH_PAGE = os.path.join(REPO_ROOT, "src", "components", "brand", "LoomSplash.tsx")
 API_FILE = os.path.join(REPO_ROOT, "src", "services", "api.ts")
 STARTUP_CACHE_FILE = os.path.join(REPO_ROOT, "src", "services", "startupCache.ts")
@@ -47,11 +47,20 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("import { LoomLogoMark } from '../brand/LoomBrand'", source)
         self.assertGreaterEqual(source.count("<LoomLogoMark"), 2)
         self.assertNotIn('/logo.png', source)
-        self.assertIn("new URL('../../assets/luming-logo.svg', import.meta.url).href", brand_source)
+        self.assertIn("new URL('../../assets/luming-logo-full.png', import.meta.url).href", brand_source)
         self.assertIn("const { logoUrl } = useTheme()", brand_source)
         self.assertIn('src={logoSrc}', brand_source)
         self.assertNotIn("'/loom-motion/logo.svg'", brand_source)
         self.assertTrue(os.path.isfile(PACKAGED_LOGO))
+
+    def test_default_brand_uses_the_full_motion_source_artwork(self) -> None:
+        expected_sha256 = "29babd1fbb5a068e7222ad239ff237f68874b64e768625db1a64761bfe8e9624"
+        import hashlib
+
+        with open(PACKAGED_LOGO, "rb") as handle:
+            actual_sha256 = hashlib.sha256(handle.read()).hexdigest()
+
+        self.assertEqual(actual_sha256, expected_sha256)
 
     def test_splash_uses_the_packaged_h264_video_without_the_legacy_iframe(self) -> None:
         with open(SPLASH_PAGE, "r", encoding="utf-8") as handle:

@@ -24,15 +24,21 @@ class PackagedBridgeRuntimeContractTests(unittest.TestCase):
         self.assertIn("../../release-manifest.json", resources)
         self.assertIn("../../release-public-key.txt", resources)
 
-    def test_tauri_product_name_uses_ascii_install_path(self) -> None:
+    def test_tauri_product_name_matches_the_visible_chinese_brand(self) -> None:
         config_path = os.path.join(REPO_ROOT, "src-tauri", "tauri.conf.json")
         with open(config_path, "r", encoding="utf-8") as handle:
             config = json.load(handle)
+        with open(os.path.join(REPO_ROOT, "index.html"), "r", encoding="utf-8") as handle:
+            index_source = handle.read()
+        with open(os.path.join(REPO_ROOT, "src", "version.ts"), "r", encoding="utf-8") as handle:
+            version_source = handle.read()
 
         product_name = config["productName"]
 
-        self.assertEqual(product_name, "Luming AI Matrix Acquisition Workbench")
-        self.assertTrue(product_name.isascii())
+        self.assertEqual(product_name, "麓鸣")
+        self.assertEqual(config["app"]["windows"][0]["title"], "麓鸣")
+        self.assertIn("<title>麓鸣</title>", index_source)
+        self.assertIn("VITE_LOOM_BRAND_DISPLAY_NAME', '麓鸣'", version_source)
 
     def test_packaged_resource_bridge_requires_bundled_runtime(self) -> None:
         source_path = os.path.join(REPO_ROOT, "src-tauri", "src", "lib.rs")
