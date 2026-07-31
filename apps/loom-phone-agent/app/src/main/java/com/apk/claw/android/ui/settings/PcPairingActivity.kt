@@ -32,6 +32,22 @@ import com.google.zxing.qrcode.QRCodeWriter
  * long-lived phone credential to the user.
  */
 class PcPairingActivity : BaseActivity() {
+    data class PairingRuntime(
+        val lanIp: String?,
+        val serverRunning: Boolean,
+        val serverPort: Int?
+    )
+
+    companion object {
+        @Volatile
+        private var pairingRuntimeForTests: PairingRuntime? = null
+
+        @JvmStatic
+        fun setPairingRuntimeForTests(runtime: PairingRuntime?) {
+            pairingRuntimeForTests = runtime
+        }
+    }
+
     private val handler = Handler(Looper.getMainLooper())
     private var session: PhonePairingBootstrap.SessionView? = null
     private var transportMode = PairingTransportMode.USB
@@ -98,17 +114,11 @@ class PcPairingActivity : BaseActivity() {
 
     private fun createPairingSession() {
         handler.removeCallbacks(countdown)
-        if (!ConfigServerManager.isRunning()) {
-            if (!ConfigServerManager.start(this)) {
-                showUnavailable(getString(R.string.pc_pairing_server_failed))
-                return
-            }
-            KVUtils.setConfigServerEnabled(true)
-        }
+        val runtime = currentPairingRuntime() ?: return
         val readiness = PcPairingReadinessPolicy.evaluate(
-            lanIp = ConfigServerManager.getLanIpAddress(this),
-            serverRunning = ConfigServerManager.isRunning(),
-            serverPort = ConfigServerManager.getPort(),
+            lanIp = runtime.lanIp,
+            serverRunning = runtime.serverRunning,
+            serverPort = runtime.serverPort,
             transportMode = transportMode
         )
         if (!readiness.ready) {
@@ -137,6 +147,22 @@ class PcPairingActivity : BaseActivity() {
             getString(R.string.pc_pairing_lan_ready)
         }
         handler.post(countdown)
+    }
+
+    private fun currentPairingRuntime(): PairingRuntime? {
+        pairingRuntimeForTests?.let { return it }
+        if (!ConfigServerManager.isRunning()) {
+            if (!ConfigServerManager.start(this)) {
+                showUnavailable(getString(R.string.pc_pairing_server_failed))
+                return null
+            }
+            KVUtils.setConfigServerEnabled(true)
+        }
+        return PairingRuntime(
+            lanIp = ConfigServerManager.getLanIpAddress(this),
+            serverRunning = ConfigServerManager.isRunning(),
+            serverPort = ConfigServerManager.getPort()
+        )
     }
 
     private fun copyPayload() {
