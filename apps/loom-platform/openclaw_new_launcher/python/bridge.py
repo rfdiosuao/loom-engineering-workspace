@@ -1220,6 +1220,7 @@ def _build_fastapi_context():
         get_bridge_identity=_get_bridge_identity,
         begin_account_transition=_begin_account_transition,
         end_account_transition=_end_account_transition,
+        account_transition_active=_account_transition_active,
         account_logout_cleanup=_account_logout_cleanup,
         shutdown_agent_service=_shutdown_agent_service,
         get_storyboard_svc=_get_storyboard_svc,

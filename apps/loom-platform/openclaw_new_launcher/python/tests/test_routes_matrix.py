@@ -462,6 +462,26 @@ class MatrixRouteContractTests(unittest.TestCase):
             self.assertEqual(ledger["tool"], "bridge:matrix.dispatch")
             self.assertEqual(ledger["actionTraceId"], trace["traceId"])
 
+    def test_matrix_dispatch_cannot_create_task_during_account_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app, client = _client(
+                temp_dir,
+                account_transition_active=lambda: True,
+            )
+
+            response = client.post(
+                "/api/matrix/dispatch",
+                json={
+                    "prompt": "不得创建",
+                    "target": {"deviceIds": ["phone-a"]},
+                },
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["code"], "account_transition_in_progress")
+            self.assertEqual(app.state.job_mgr.list(10), [])
+            self.assertFalse(os.path.exists(os.path.join(temp_dir, "matrix-tasks.json")))
+
     def test_matrix_dispatch_returns_entitlement_denial_before_queueing_job(self) -> None:
         class DeniedEntitlement:
             def current_state(self, _feature=None):
@@ -1994,6 +2014,7 @@ def _client(
     auth_error=None,
     entitlement_mgr=None,
     account_session: dict | None = None,
+    account_transition_active=None,
 ) -> tuple[FastAPI, TestClient]:
     logs: list[str] = []
     job_mgr = JobManager(logs.append, state_path=state_path)
@@ -2004,6 +2025,7 @@ def _client(
         logs,
         entitlement_mgr=entitlement_mgr,
         account_session=account_session,
+        account_transition_active=account_transition_active,
     )
     issuer = StreamTicketIssuer()
     ctx.stream_ticket_issuer = issuer
@@ -2023,6 +2045,7 @@ def _context(
     *,
     entitlement_mgr=None,
     account_session: dict | None = None,
+    account_transition_active=None,
 ) -> SimpleNamespace:
     if entitlement_mgr is None:
         class AllowEntitlement:
@@ -2066,6 +2089,8 @@ def _context(
         sanitize_text=lambda text: text,
     )
     context.get_entitlement_mgr = lambda: entitlement_mgr
+    if account_transition_active is not None:
+        context.account_transition_active = account_transition_active
     if account_session is not None:
         context.get_newapi_account_mgr = lambda: SimpleNamespace(
             current=lambda: dict(account_session),

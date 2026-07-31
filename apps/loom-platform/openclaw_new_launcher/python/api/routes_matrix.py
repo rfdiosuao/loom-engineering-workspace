@@ -236,6 +236,8 @@ def register_matrix_routes(app, ctx) -> None:
                 return ctx.fastapi_json(matrix.get_lease(device_id))
             body = await ctx.body(request)
             if request.method == "POST":
+                if response := _matrix_account_transition_blocked_response(ctx):
+                    return response
                 _authorize_phone_entitlement(ctx, [device_id], "matrix.lease.manage")
                 device_task_id = str(body.get("deviceTaskId") or "").strip()
                 if device_task_id:
@@ -248,6 +250,8 @@ def register_matrix_routes(app, ctx) -> None:
             try:
                 _authorize_phone_entitlement(ctx, [device_id], "matrix.lease.manage")
             except AccountEntitlementError:
+                resume_allowed = False
+            if _matrix_account_transition_active(ctx):
                 resume_allowed = False
             released = matrix.release_lease(
                 device_id,
@@ -273,6 +277,8 @@ def register_matrix_routes(app, ctx) -> None:
     async def matrix_device_control(device_id: str, request: Request):
         if error := ctx.auth_error(request):
             return error
+        if response := _matrix_account_transition_blocked_response(ctx):
+            return response
         body = await ctx.body(request)
         matrix = _matrix(ctx)
         try:
@@ -326,6 +332,8 @@ def register_matrix_routes(app, ctx) -> None:
     async def matrix_task_resume(device_task_id: str, request: Request):
         if error := ctx.auth_error(request):
             return error
+        if response := _matrix_account_transition_blocked_response(ctx):
+            return response
         try:
             matrix = _matrix(ctx)
             execution = matrix.task_execution_context(device_task_id)
@@ -366,6 +374,8 @@ def register_matrix_routes(app, ctx) -> None:
     async def matrix_dispatch(request: Request):
         if error := ctx.auth_error(request):
             return error
+        if response := _matrix_account_transition_blocked_response(ctx):
+            return response
         body = await ctx.body(request)
         matrix = _matrix(ctx)
         try:
@@ -655,6 +665,8 @@ def register_matrix_routes(app, ctx) -> None:
     async def matrix_retry(request: Request):
         if error := ctx.auth_error(request):
             return error
+        if response := _matrix_account_transition_blocked_response(ctx):
+            return response
         body = await ctx.body(request)
         campaign_id = str(body.get("campaignId") or body.get("id") or "").strip()
         if not campaign_id:
@@ -907,6 +919,8 @@ def register_matrix_routes(app, ctx) -> None:
     async def matrix_template_run(request: Request):
         if error := ctx.auth_error(request):
             return error
+        if response := _matrix_account_transition_blocked_response(ctx):
+            return response
         body = await ctx.body(request)
         template = str(body.get("template") or body.get("templateId") or "read-screen").strip()
         prompt = _template_prompt(template)
@@ -1043,6 +1057,29 @@ def _matrix(ctx) -> MatrixControlPlane:
         ),
         owner_account_id=owner_account_id,
         owner_account_binding=owner_binding,
+    )
+
+
+def _matrix_account_transition_active(ctx) -> bool:
+    checker = getattr(ctx, "account_transition_active", None)
+    if not callable(checker):
+        return False
+    try:
+        return checker() is True
+    except Exception:
+        return True
+
+
+def _matrix_account_transition_blocked_response(ctx):
+    if not _matrix_account_transition_active(ctx):
+        return None
+    return ctx.fastapi_json(
+        {
+            "error": "账号正在切换，Matrix 未创建或恢复任务，请稍后重试。",
+            "code": "account_transition_in_progress",
+            "retryable": True,
+        },
+        409,
     )
 
 
