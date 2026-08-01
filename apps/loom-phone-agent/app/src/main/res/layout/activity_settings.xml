@@ -29,6 +29,12 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8pt" />
 
+            <!-- 可选增强能力：不影响标准模式 -->
+            <com.apk.claw.android.widget.MenuGroup
+                android:id="@+id/capabilityGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
             <!-- 模型分组 -->
             <com.apk.claw.android.widget.MenuGroup
                 android:id="@+id/modelGroup"

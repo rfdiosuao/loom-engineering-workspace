@@ -371,6 +371,7 @@ class SettingsViewModel : ViewModel() {
         PC_PAIRING,
         LAN_CONFIG,
         CONNECTION_DIAGNOSTICS,
+        ENHANCED_CAPABILITY,
         LLM_CONFIG,
         FLOATING_CLICK,
         FLOATING_SIZE

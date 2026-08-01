@@ -346,4 +346,33 @@
     <string name="input_dialog_need_more">至少输入%d个字符</string>
     <string name="input_dialog_need_less">最多输入%d个字符</string>
     <string name="input_dialog_no_zero">请输入非零数值</string>
+
+    <!-- 可选增强设备能力 -->
+    <string name="settings_group_enhanced_capabilities">增强设备能力</string>
+    <string name="menu_enhanced_capability">Shizuku 增强能力</string>
+    <string name="enhanced_status_not_installed">未安装 · 标准模式</string>
+    <string name="enhanced_status_disabled">未开启 · 标准模式</string>
+    <string name="enhanced_status_service_stopped">服务未运行 · 标准模式</string>
+    <string name="enhanced_status_permission_required">需要授权</string>
+    <string name="enhanced_status_permission_denied">授权不可用 · 标准模式</string>
+    <string name="enhanced_status_ready">已就绪</string>
+    <string name="enhanced_status_root_disabled">Root/Sui 已禁用</string>
+    <string name="enhanced_status_standard">标准模式</string>
+    <string name="enhanced_dialog_title">Shizuku 增强设备能力</string>
+    <string name="enhanced_not_installed_message">尚未安装 Shizuku。LumiAgent 会保持标准模式并可正常使用；如需增强能力，可打开 Shizuku 官方指引安装。</string>
+    <string name="enhanced_open_official_guide">打开官方指引</string>
+    <string name="enhanced_keep_standard">保持标准模式</string>
+    <string name="enhanced_enable_message">是否开启本机 Shizuku 检测与授权？开启不会自动获得权限，且始终可以退回标准模式。</string>
+    <string name="enhanced_enable_action">开启检测</string>
+    <string name="enhanced_service_stopped_message">Shizuku 服务未启动或 Binder 已断开。请启动 Shizuku 后返回；LumiAgent 已自动降级到标准模式。</string>
+    <string name="enhanced_open_shizuku">打开 Shizuku</string>
+    <string name="enhanced_permission_message">Shizuku 已运行，但尚未授权 LumiAgent。下一步将由 Android 显示 Shizuku 官方授权弹窗。</string>
+    <string name="enhanced_request_permission">申请授权</string>
+    <string name="enhanced_request_failed">无法发起 Shizuku 授权</string>
+    <string name="enhanced_permission_denied_message">Shizuku 授权不可用或已被拒绝。可前往 Shizuku 检查，也可继续保持标准模式。</string>
+    <string name="enhanced_ready_message">Shizuku 授权已就绪。仅允许经过白名单和审批的类型化能力使用，不开放任意 Shell 或远程命令执行。</string>
+    <string name="enhanced_disable_action">关闭并使用标准模式</string>
+    <string name="enhanced_root_disabled_message">检测到 Root/Sui 身份。此版本默认禁用 Root/Sui 集成，LumiAgent 将保持标准模式。</string>
+    <string name="enhanced_standard_message">LumiAgent 正在使用标准模式。增强能力失败不会阻断配对、局域网/USB 连接或普通 Agent 任务。</string>
+    <string name="enhanced_open_failed">无法打开 Shizuku 或官方指引</string>
 </resources>

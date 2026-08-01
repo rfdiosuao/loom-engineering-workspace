@@ -763,6 +763,15 @@ cd apps/loom-phone-agent
 - Shizuku 被停止、升级、撤权或手机重启时，LumiAgent 不崩溃、不循环申请权限，并在 2 秒内切换到标准模式。
 - 所有增强动作都有一次性或持久授权语义、审计记录、超时和幂等键；远程调用不能提交任意命令字符串。
 
+**2026-08-01 自动化实施记录**
+
+- 已接入官方 `dev.rikka.shizuku:api` / `provider` `13.1.5`（MIT），只与用户另行安装的 Shizuku Manager 协作；APK 不复制、不改名、不内嵌 Shizuku 应用或 `rish`。
+- 后端状态机覆盖未安装、用户未开启、服务停止、binder 失效、待授权、授权拒绝、Shizuku 已就绪和 Sui/root 身份；增强检测默认关闭，任何异常均确定性回到 `STANDARD`，基础配对、连接和 Agent 能力保持可用。
+- `ClawApplication.attachBaseContext()` 在 Shizuku Provider 初始化前显式调用 `disableAutomaticSuiInitialization()`；2.4.2 不提供 Root/Sui 开关。设置页增加三语自检、官方安装/启动引导、授权与本地撤销入口。
+- `PrivilegedActionPolicy` 只接受枚举动作、账号/设备 scope、允许目标包、审批有效期和幂等键；保护 Android 系统、LumiAgent 自身与 Shizuku 包。审计记录仅保留动作、结果、耗时及 SHA-256 摘要，不保留命令、Key、令牌或用户内容。
+- 当前只完成能力探测、授权控制和类型化策略层，未把任何增强动作接到远程 API，也未实现通用 shell/process executor；这确保 2.4.2 不会因为“已授权”而扩大为任意命令执行面。
+- 自动化结果：官方依赖能够真实解析并完成 Android 编译；合并 Manifest 含 Shizuku Manager 查询、`API_V23` 权限和 V3 支持元数据；default 与 `android7Compat` JVM 回归均为 `649/649`、`0` skipped。Android 7-10 ADB 启动、Android 11+ 无线调试、binder 中断和重启撤权仍需实体机门禁，不能用 JVM 结果替代。
+
 ## Task 12：可选 PRoot/Linux 兼容运行时
 
 **先写 contract 和基准测试**

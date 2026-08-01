@@ -151,6 +151,8 @@ dependencies {
     implementation(libs.material)
     implementation(libs.constraintlayout)
     implementation(libs.gson)
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
 
 
     implementation(libs.oapi.sdk)

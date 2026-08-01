@@ -346,4 +346,33 @@
     <string name="input_dialog_need_more">Enter at least %d characters</string>
     <string name="input_dialog_need_less">Enter at most %d characters</string>
     <string name="input_dialog_no_zero">Please enter a non-zero value</string>
+
+    <!-- Optional enhanced device capabilities -->
+    <string name="settings_group_enhanced_capabilities">Enhanced device capabilities</string>
+    <string name="menu_enhanced_capability">Shizuku enhanced capability</string>
+    <string name="enhanced_status_not_installed">Not installed · standard mode</string>
+    <string name="enhanced_status_disabled">Off · standard mode</string>
+    <string name="enhanced_status_service_stopped">Service unavailable · standard mode</string>
+    <string name="enhanced_status_permission_required">Authorization required</string>
+    <string name="enhanced_status_permission_denied">Authorization denied · standard mode</string>
+    <string name="enhanced_status_ready">Ready</string>
+    <string name="enhanced_status_root_disabled">Root/Sui disabled</string>
+    <string name="enhanced_status_standard">Standard mode</string>
+    <string name="enhanced_dialog_title">Shizuku enhanced capability</string>
+    <string name="enhanced_not_installed_message">Shizuku is not installed. LumiAgent will remain fully usable in standard mode. You can open the official Shizuku guide to install it.</string>
+    <string name="enhanced_open_official_guide">Open official guide</string>
+    <string name="enhanced_keep_standard">Keep standard mode</string>
+    <string name="enhanced_enable_message">Enable local Shizuku detection and authorization? This does not grant access automatically, and standard mode remains available at all times.</string>
+    <string name="enhanced_enable_action">Enable detection</string>
+    <string name="enhanced_service_stopped_message">The Shizuku service is stopped or its binder is unavailable. Start Shizuku, then return here. LumiAgent has already fallen back to standard mode.</string>
+    <string name="enhanced_open_shizuku">Open Shizuku</string>
+    <string name="enhanced_permission_message">Shizuku is running, but LumiAgent has not been authorized. Android will show the official authorization dialog.</string>
+    <string name="enhanced_request_permission">Request authorization</string>
+    <string name="enhanced_request_failed">Unable to request Shizuku authorization</string>
+    <string name="enhanced_permission_denied_message">Shizuku authorization is unavailable or was denied. Review it in Shizuku, or keep using standard mode.</string>
+    <string name="enhanced_ready_message">Shizuku authorization is ready. Only explicitly allowlisted typed capabilities may use it; arbitrary shell commands and remote command execution are not exposed.</string>
+    <string name="enhanced_disable_action">Disable and use standard mode</string>
+    <string name="enhanced_root_disabled_message">A root/Sui identity was detected. Root/Sui integration is disabled in this release, so LumiAgent will stay in standard mode.</string>
+    <string name="enhanced_standard_message">LumiAgent is using standard mode. Enhanced capability failure never blocks pairing, LAN/USB connectivity, or ordinary Agent tasks.</string>
+    <string name="enhanced_open_failed">Unable to open Shizuku or its official guide</string>
 </resources>

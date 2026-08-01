@@ -17,6 +17,8 @@ import kotlinx.coroutines.launch
 import android.content.Intent
 import com.apk.claw.android.appViewModel
 import com.apk.claw.android.floating.FloatingCircleManager
+import com.apk.claw.android.privilege.PrivilegeBackendStatus
+import com.apk.claw.android.privilege.ShizukuPrivilegeBackend
 import com.apk.claw.android.server.ConfigServerManager
 
 /**
@@ -72,6 +74,7 @@ class SettingsActivity : BaseActivity() {
 
     private fun refreshSettings() {
         viewModel.refresh()
+        ShizukuPrivilegeBackend.refresh()
     }
 
     private fun initMenuGroups() {
@@ -99,6 +102,17 @@ class SettingsActivity : BaseActivity() {
             showDivider = false
         )
         menuItems[SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+
+        val capabilityGroup = findViewById<MenuGroup>(R.id.capabilityGroup)
+        capabilityGroup.setTitle(getString(R.string.settings_group_enhanced_capabilities))
+        menuItems[SettingsViewModel.MenuAction.ENHANCED_CAPABILITY.name] = capabilityGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_settings,
+            title = getString(R.string.menu_enhanced_capability),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.ENHANCED_CAPABILITY) },
+            showDivider = false
+        )
+        menuItems[SettingsViewModel.MenuAction.ENHANCED_CAPABILITY.name]
+            ?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
 
         // 通道
         val channelGroup = findViewById<MenuGroup>(R.id.channelGroup)
@@ -204,6 +218,13 @@ class SettingsActivity : BaseActivity() {
                     }
                 }
 
+                launch {
+                    ShizukuPrivilegeBackend.status.collect { status ->
+                        menuItems[SettingsViewModel.MenuAction.ENHANCED_CAPABILITY.name]
+                            ?.setTrailingText(enhancedCapabilityStatus(status))
+                    }
+                }
+
                 // 监听菜单点击事件
                 launch {
                     viewModel.menuClickEvent.collect { action ->
@@ -278,6 +299,9 @@ class SettingsActivity : BaseActivity() {
                                     viewModel.connectionDiagnostics()
                                 )
                             }
+                            SettingsViewModel.MenuAction.ENHANCED_CAPABILITY -> {
+                                showEnhancedCapabilityDialog(ShizukuPrivilegeBackend.status.value)
+                            }
                             SettingsViewModel.MenuAction.PC_PAIRING -> {
                                 pcPairingLauncher.launch(Intent(this@SettingsActivity, PcPairingActivity::class.java))
                             }
@@ -308,6 +332,98 @@ class SettingsActivity : BaseActivity() {
             actionTitle = getString(R.string.unbind_action),
             onAction = onUnbind
         )
+    }
+
+    private fun enhancedCapabilityStatus(status: PrivilegeBackendStatus): String = getString(
+        when (status.selection.reasonCode) {
+            "shizuku_not_installed" -> R.string.enhanced_status_not_installed
+            "enhanced_mode_disabled" -> R.string.enhanced_status_disabled
+            "shizuku_service_stopped", "shizuku_binder_dead" -> R.string.enhanced_status_service_stopped
+            "shizuku_permission_required" -> R.string.enhanced_status_permission_required
+            "shizuku_permission_denied" -> R.string.enhanced_status_permission_denied
+            "shizuku_ready" -> R.string.enhanced_status_ready
+            "sui_root_disabled" -> R.string.enhanced_status_root_disabled
+            else -> R.string.enhanced_status_standard
+        }
+    )
+
+    private fun showEnhancedCapabilityDialog(status: PrivilegeBackendStatus) {
+        when (status.selection.reasonCode) {
+            "shizuku_not_installed" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_not_installed_message),
+                actionTitle = getString(R.string.enhanced_open_official_guide),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = ::openShizukuManager
+            )
+            "enhanced_mode_disabled" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_enable_message),
+                actionTitle = getString(R.string.enhanced_enable_action),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = {
+                    ShizukuPrivilegeBackend.setUserEnabled(true)
+                    showEnhancedCapabilityDialog(ShizukuPrivilegeBackend.status.value)
+                }
+            )
+            "shizuku_service_stopped", "shizuku_binder_dead" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_service_stopped_message),
+                actionTitle = getString(R.string.enhanced_open_shizuku),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = ::openShizukuManager
+            )
+            "shizuku_permission_required" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_permission_message),
+                actionTitle = getString(R.string.enhanced_request_permission),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = {
+                    if (!ShizukuPrivilegeBackend.requestAuthorization()) {
+                        Toast.makeText(this, R.string.enhanced_request_failed, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+            "shizuku_permission_denied" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_permission_denied_message),
+                actionTitle = getString(R.string.enhanced_open_shizuku),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = ::openShizukuManager
+            )
+            "shizuku_ready" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_ready_message),
+                actionTitle = getString(R.string.enhanced_disable_action),
+                cancelTitle = getString(R.string.common_cancel),
+                onAction = { ShizukuPrivilegeBackend.setUserEnabled(false) }
+            )
+            "sui_root_disabled" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_root_disabled_message),
+                actionTitle = getString(R.string.enhanced_disable_action),
+                cancelTitle = getString(R.string.common_cancel),
+                onAction = { ShizukuPrivilegeBackend.setUserEnabled(false) }
+            )
+            else -> AlertDialog.show(
+                this,
+                getString(R.string.enhanced_dialog_title),
+                getString(R.string.enhanced_standard_message)
+            )
+        }
+    }
+
+    private fun openShizukuManager() {
+        if (!ShizukuPrivilegeBackend.openManagerOrDownload(this)) {
+            Toast.makeText(this, R.string.enhanced_open_failed, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun showFloatingSizeDialog() {
