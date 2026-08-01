@@ -14,6 +14,7 @@ import org.hamcrest.Description
 import org.hamcrest.TypeSafeMatcher
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.scrollTo
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withId
@@ -80,7 +81,7 @@ class PcPairingActivityTest {
         ActivityScenario.launch<PcPairingActivity>(Intent(context, PcPairingActivity::class.java)).use { scenario ->
             val originalUsbPayload = pairingPayload(scenario)
 
-            onView(withId(R.id.btnGenerate)).perform(click())
+            onView(withId(R.id.btnGenerate)).perform(scrollTo(), click())
             assertUsbPairingVisible()
             assertUsbPayloadIsRejected(originalUsbPayload)
         }
