@@ -100,6 +100,7 @@ SESSION_SECRET_PATHS = (
 )
 DEFAULT_RUNTIME_SYNC_TARGETS = ("openclaw", "opencode", "claude", "image", "desktop", "phone")
 FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS = 5
+ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS = 20
 NATIVE_PASSWORD_LOGIN_TIMEOUT_SECONDS = 10
 AUTH_CAPABILITIES_CACHE_SECONDS = 300
 PERMANENT_ENTITLEMENT_ERROR_CODES = frozenset({
@@ -2403,7 +2404,7 @@ class NewApiAccountManager:
                 **self._lease_identity_payload(),
             },
             headers={"Authorization": f"Bearer {api_token}"},
-            timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+            timeout=ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
         )
         data = _unwrap(payload)
         lease = data.get("entitlementLease") if isinstance(data, dict) else None
@@ -2449,7 +2450,7 @@ class NewApiAccountManager:
                 method="POST",
                 body=self._lease_identity_payload(),
                 headers={"Authorization": f"Bearer {api_token}"},
-                timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+                timeout=ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
             )
             entitlement_data = _unwrap(entitlement_payload)
             refreshed_lease = (

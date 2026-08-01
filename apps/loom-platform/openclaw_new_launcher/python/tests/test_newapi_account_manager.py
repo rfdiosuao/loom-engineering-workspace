@@ -192,6 +192,14 @@ class NewApiAccountManagerTests(unittest.TestCase):
                 request["headers"]["Authorization"],
                 "Bearer sk-account-token-not-real",
             )
+            self.assertEqual(
+                request["timeout"],
+                account_module.ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
+            )
+            self.assertGreater(
+                request["timeout"],
+                account_module.FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+            )
             self.assertNotIn("LM-PRO-UNUSED", repr(read_json(paths.member_session_file, {})))
             self.assertEqual(
                 manager.public_session()["accountEntitlement"]["limits"]["devices"],
@@ -1364,6 +1372,16 @@ class NewApiAccountManagerTests(unittest.TestCase):
             })
 
             refreshed = manager.refresh_current()
+
+            entitlement_request = next(
+                request
+                for request in manager.requests
+                if request["url"].endswith("/api/openclaw/entitlements/refresh")
+            )
+            self.assertEqual(
+                entitlement_request["timeout"],
+                account_module.ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
+            )
 
             manager.account_entitlement.clear_active.assert_called_once_with()
             self.assertEqual(
