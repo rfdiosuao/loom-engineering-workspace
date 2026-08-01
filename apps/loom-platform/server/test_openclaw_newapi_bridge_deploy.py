@@ -61,6 +61,12 @@ class BridgeDeployScriptContractTests(unittest.TestCase):
         self.assertIn("openclaw-ed25519-v1", self.source)
         self.assertIn("entitlement_public_key=ready", self.source)
 
+    def test_post_switch_smoke_waits_for_both_readiness_endpoints(self) -> None:
+        self.assertIn("BRIDGE_READY_RETRY_ATTEMPTS", self.source)
+        self.assertIn("BRIDGE_READY_RETRY_DELAY_SEC", self.source)
+        self.assertIn("wait_for_readiness", self.source)
+        self.assertIn('sleep "$READY_RETRY_DELAY_SEC"', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

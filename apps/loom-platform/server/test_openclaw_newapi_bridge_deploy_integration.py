@@ -71,10 +71,13 @@ class BridgeDeployIntegrationTests(unittest.TestCase):
                 root={_git_bash_path(self.root)}
                 export PATH="$root/fakebin:$PATH"
                 export FAKE_SYSTEMCTL_LOG="$root/systemctl.log"
+                export FAKE_BRIDGE_HEALTH_COUNT_FILE="$root/curl-health-count"
                 export BRIDGE_REMOTE_DIR="$root/remote"
                 export BRIDGE_SERVER_UPLOAD="$root/upload/openclaw_newapi_bridge.py"
                 export BRIDGE_ENV_FILE="$root/remote/bridge.env"
                 export BRIDGE_LOCAL_BASE_URL="http://127.0.0.1:3016"
+                export BRIDGE_READY_RETRY_ATTEMPTS=2
+                export BRIDGE_READY_RETRY_DELAY_SEC=0
                 bash "{_git_bash_path(DEPLOY_SCRIPT)}"
                 """
             ),
@@ -144,6 +147,15 @@ class BridgeDeployIntegrationTests(unittest.TestCase):
             url="${!#}"
             case "$url" in
               */health)
+                failures="${FAKE_BRIDGE_HEALTH_FAILS:-0}"
+                count=0
+                if [ -f "$FAKE_BRIDGE_HEALTH_COUNT_FILE" ]; then
+                  count="$(cat "$FAKE_BRIDGE_HEALTH_COUNT_FILE")"
+                fi
+                if [ "$count" -lt "$failures" ]; then
+                  printf '%s' "$((count + 1))" > "$FAKE_BRIDGE_HEALTH_COUNT_FILE"
+                  exit 22
+                fi
                 printf '%s' '{"success":true,"service":"openclaw-newapi-bridge"}'
                 ;;
               */api/openclaw/entitlements/public-key)
@@ -210,6 +222,15 @@ class BridgeDeployIntegrationTests(unittest.TestCase):
         self.assertEqual(
             (backups[0] / "openclaw_newapi_bridge.py").read_bytes(),
             self.old_program,
+        )
+
+    def test_delayed_health_readiness_does_not_roll_back(self) -> None:
+        result = self._run(FAKE_BRIDGE_HEALTH_FAILS="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("readiness=ready attempts=2", result.stdout)
+        self.assertEqual(
+            (self.remote / "openclaw_newapi_bridge.py").read_bytes(),
+            self.new_program,
         )
 
     def test_public_key_smoke_failure_restores_old_program(self) -> None:

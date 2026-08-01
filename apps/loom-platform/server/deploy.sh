@@ -6,6 +6,8 @@ SERVICE_NAME="${BRIDGE_SERVICE_NAME:-openclaw-newapi-bridge}"
 SERVER_UPLOAD="${BRIDGE_SERVER_UPLOAD:-/tmp/openclaw-newapi-bridge.py}"
 BRIDGE_ENV_FILE="${BRIDGE_ENV_FILE:-$REMOTE_DIR/bridge.env}"
 LOCAL_BASE_URL="${BRIDGE_LOCAL_BASE_URL:-http://127.0.0.1:3016}"
+READY_RETRY_ATTEMPTS="${BRIDGE_READY_RETRY_ATTEMPTS:-30}"
+READY_RETRY_DELAY_SEC="${BRIDGE_READY_RETRY_DELAY_SEC:-1}"
 
 case "$REMOTE_DIR" in
   /*) ;;
@@ -13,6 +15,14 @@ case "$REMOTE_DIR" in
 esac
 if [ "$REMOTE_DIR" = "/" ]; then
   echo "refusing to deploy into filesystem root" >&2
+  exit 1
+fi
+if ! [[ "$READY_RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BRIDGE_READY_RETRY_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$READY_RETRY_DELAY_SEC" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "BRIDGE_READY_RETRY_DELAY_SEC must be a non-negative number" >&2
   exit 1
 fi
 
@@ -28,6 +38,23 @@ chmod 0700 "$backup_dir"
 cache="$(mktemp -d)"
 next=""
 switched=0
+
+wait_for_readiness() {
+  attempt=1
+  while [ "$attempt" -le "$READY_RETRY_ATTEMPTS" ]; do
+    if curl -fsS "$LOCAL_BASE_URL/health" > "$cache/health.json" && \
+      curl -fsS "$LOCAL_BASE_URL/api/openclaw/entitlements/public-key" \
+        > "$cache/entitlement-public-key.json"; then
+      echo "readiness=ready attempts=$attempt"
+      return 0
+    fi
+    if [ "$attempt" -eq "$READY_RETRY_ATTEMPTS" ]; then
+      return 1
+    fi
+    sleep "$READY_RETRY_DELAY_SEC"
+    attempt=$((attempt + 1))
+  done
+}
 
 finish() {
   status=$?
@@ -152,9 +179,7 @@ systemctl start "$SERVICE_NAME"
 systemctl is-active --quiet "$SERVICE_NAME"
 
 echo "[5/7] Read-only health and entitlement public-key smoke"
-curl -fsS "$LOCAL_BASE_URL/health" > "$cache/health.json"
-curl -fsS "$LOCAL_BASE_URL/api/openclaw/entitlements/public-key" \
-  > "$cache/entitlement-public-key.json"
+wait_for_readiness
 DEPLOY_HEALTH_JSON="$cache/health.json" \
 DEPLOY_KEY_JSON="$cache/entitlement-public-key.json" \
 python3 - <<'PY'
