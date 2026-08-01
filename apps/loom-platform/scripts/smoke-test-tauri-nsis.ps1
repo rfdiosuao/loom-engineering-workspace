@@ -515,6 +515,14 @@ from core.paths import AppPaths
 from fastapi import FastAPI
 from services.agent_service import AgentService
 
+class PackagedProbeRuntime:
+    def status(self, profile_id):
+        return {
+            "profileId": profile_id,
+            "available": False,
+            "kind": "packaged-probe",
+        }
+
 app = FastAPI()
 api.fastapi_routes.register_fastapi_routes(app, SimpleNamespace())
 route_paths = {route.path for route in app.routes}
@@ -533,7 +541,7 @@ if missing_routes:
     raise SystemExit("Missing packaged routes: " + ", ".join(missing_routes))
 if source_modules:
     raise SystemExit("Managed source shadowed protected modules: " + ", ".join(source_modules))
-agent_service = AgentService(AppPaths(state_root))
+agent_service = AgentService(AppPaths(state_root), runtime=PackagedProbeRuntime())
 try:
     agent_bootstrap = agent_service.bootstrap()
 finally:
