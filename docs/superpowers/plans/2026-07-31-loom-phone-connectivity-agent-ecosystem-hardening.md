@@ -830,6 +830,14 @@ cd apps/loom-phone-agent
 - Android release 构建在签名变量缺失时真实失败关闭；没有借用未知旧项目密钥。Windows 安装包 Authenticode 状态为 `NotSigned`。
 - 当前无 ADB 实体机，所有 Wi-Fi/热点/USB/视频/Shizuku/多机 soak 门禁仍未通过；这些产物只能称本地测试候选，不能称正式发布完成。
 
+**2026-08-01 2.4.3 版本更正与候选记录**
+
+- 用户将最终 Desktop 交付版本更正为 `2.4.3`；五处版本源和版本合同已经统一，2.4.2 产物仅保留为历史中间证据。
+- 受保护 NSIS 从提交 `1fdbcef6567e2367f44de63027ccb5b3140b641d` 重建；内嵌 File/Product 版本均为 `2.4.3`，ProductName/Description 均为“麓鸣”，隔离安装/运行时/卸载冒烟通过。
+- LumiAgent 从同一干净提交重新生成 default 与 Android 7 APK；精确候选分别在 API 36 与 API 24 AVD 冷启动成功、无应用错误，instrumentation 各 `6/6`。
+- 两份 APK 的 PRoot/OpenMinis/rootfs/发行版/BusyBox 条目扫描命中均为 `0`；手机“小 Linux”仍未内置，不得宣称已经交付或提速。
+- 2.4.3 三份候选的路径、大小、SHA256、签名、自动化、虚拟机结果和未通过门禁详见 `docs/release/2.4.3-build-evidence.md`。
+
 ## 6. PR 与 Worktree 划分
 
 | PR | Worktree 建议 | 内容 | 依赖 |

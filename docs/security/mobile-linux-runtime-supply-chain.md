@@ -1,13 +1,13 @@
 # 麓鸣可选 Mobile Linux Runtime：供应链与分发门禁
 
-> 状态：2.4.2 架构/合同阶段，发行门禁关闭
+> 状态：麓鸣 2.4.3 / LumiAgent 6.64 架构与合同阶段，发行门禁关闭
 >
 > 日期：2026-08-01
 > 适用对象：LumiAgent 可选 Linux companion、PRoot 类用户态兼容层及其 rootfs/工具包
 
-## 1. 2.4.2 的确定边界
+## 1. 2.4.3 的确定边界
 
-LumiAgent 2.4.2 只交付 clean-room 合同、类型化策略、路由回退和基准工具，不在 APK 内包含 PRoot 二进制、Linux rootfs、发行版包管理器、`rish`、Root/Sui shell 或可交互终端。设置页也不宣称 Linux runtime 已安装或已带来性能提升。
+麓鸣 2.4.3 随附的 LumiAgent 6.64 只交付 clean-room 合同、类型化策略、路由回退和基准工具，不在 APK 内包含 PRoot 二进制、Linux rootfs、发行版包管理器、`rish`、Root/Sui shell 或可交互终端。设置页也不宣称 Linux runtime 已安装或已带来性能提升。
 
 未来若通过评审，Linux runtime 必须作为用户主动安装、可独立卸载的 companion 分发。LumiAgent 只发送固定 entrypoint ID、workspace handle、资源预算、审批和幂等信息；不得发送 executable path、命令正文或任意参数向量。
 
@@ -90,4 +90,4 @@ PRoot/Linux 不是通用加速器。可能的收益只来自把多步文本/文�
 
 ## 9. 当前结论
 
-2.4.2 可以安全冻结“未来怎么接”的合同和策略，但不能把 PRoot/rootfs 当作已交付功能，更不能写成已证明的加速。发行门禁只有在供应链、许可证、实体机性能和故障恢复证据全部通过后才能开启。
+2.4.3 可以安全冻结“未来怎么接”的合同和策略，但不能把 PRoot/rootfs 当作已交付功能，更不能写成已证明的加速。发行门禁只有在供应链、许可证、实体机性能和故障恢复证据全部通过后才能开启。
