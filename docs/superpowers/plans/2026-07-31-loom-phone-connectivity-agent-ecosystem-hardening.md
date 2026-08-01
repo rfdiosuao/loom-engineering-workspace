@@ -860,6 +860,7 @@ cd apps/loom-phone-agent
 - 旧授权服务部署脚本只复制单文件、可能覆盖整个环境文件且没有 entitlement 路由冒烟；提交 `3ce44e6` 已改为完整模块部署、原子环境变量更新、程序/环境回滚、数据库只备份不自动降级和强制 `401` 路由探针。
 - 桥接 `76/76`、授权服务 `205/205`、Desktop entitlement `32/32`、部署合同 `6/6`、Relay `30/30` 和 Bash 语法均通过；隔离成功部署与强制失败回滚演练均通过。
 - 无密钥后端候选 ZIP 为 `luming-entitlement-backend-3ce44e6-r1.zip`，SHA256 `F94DD9E04E7683D9F4248E9B93627A1FF3E4FB1185866C353F155BEBE6AC8182`。生产部署和真实授权码消费仍等待用户单独确认，详见 `docs/release/2.4.4-entitlement-backend-deployment-gate.md`。
+- 只读 SSH 已识别真实 unit 与目录：授权服务为 `huoshan:/opt/openclaw-license` 的 `openclaw-license.service`，桥接为 `peiqianyun:/opt/openclaw-newapi-bridge` 的 `openclaw-newapi-bridge.service`；两边进程均 active，但线上程序哈希与候选不同且路由字面量不存在。未读取任何环境值、私钥或数据库内容，未重启或写入服务器。
 
 ## 6. PR 与 Worktree 划分
 
