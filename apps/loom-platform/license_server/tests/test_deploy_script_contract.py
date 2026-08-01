@@ -35,6 +35,12 @@ class DeployScriptContractTests(unittest.TestCase):
         self.assertIn("/api/service/account-entitlements/current", self.source)
         self.assertIn("entitlement_route=ready", self.source)
 
+    def test_post_switch_smoke_waits_for_service_readiness(self) -> None:
+        self.assertIn("LICENSE_HEALTH_RETRY_ATTEMPTS", self.source)
+        self.assertIn("LICENSE_HEALTH_RETRY_DELAY_SEC", self.source)
+        self.assertIn("wait_for_health", self.source)
+        self.assertIn('sleep "$HEALTH_RETRY_DELAY_SEC"', self.source)
+
     def test_environment_change_is_rolled_back_even_before_program_switch(self) -> None:
         self.assertIn(
             'if [ "$status" -ne 0 ] && [ "$relay_updated" -eq 1 ]',

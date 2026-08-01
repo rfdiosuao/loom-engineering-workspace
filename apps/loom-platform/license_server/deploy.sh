@@ -11,6 +11,8 @@ RELAY_ENV_FILE="${LICENSE_RELAY_ENV_FILE:-$REMOTE_DIR/openclaw-license.env}"
 LICENSE_DB_PATH="${LICENSE_DB:-$REMOTE_DIR/license.db}"
 LOCAL_BASE_URL="${LICENSE_LOCAL_BASE_URL:-http://127.0.0.1:18791}"
 RELAY_TOKEN="${OPENCLAW_PUBLISH_RELAY_TOKEN:-${PUBLISH_RELAY_TOKEN:-}}"
+HEALTH_RETRY_ATTEMPTS="${LICENSE_HEALTH_RETRY_ATTEMPTS:-30}"
+HEALTH_RETRY_DELAY_SEC="${LICENSE_HEALTH_RETRY_DELAY_SEC:-1}"
 
 case "$REMOTE_DIR" in
   /*) ;;
@@ -18,6 +20,14 @@ case "$REMOTE_DIR" in
 esac
 if [ "$REMOTE_DIR" = "/" ]; then
   echo "refusing to deploy into filesystem root" >&2
+  exit 1
+fi
+if ! [[ "$HEALTH_RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "LICENSE_HEALTH_RETRY_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$HEALTH_RETRY_DELAY_SEC" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "LICENSE_HEALTH_RETRY_DELAY_SEC must be a non-negative number" >&2
   exit 1
 fi
 
@@ -34,6 +44,21 @@ switched=0
 relay_updated=0
 env_existed=0
 admin_switched=0
+
+wait_for_health() {
+  attempt=1
+  while [ "$attempt" -le "$HEALTH_RETRY_ATTEMPTS" ]; do
+    if curl -fsS "$LOCAL_BASE_URL/health" > "$cache/health.json"; then
+      echo "health=ready attempts=$attempt"
+      return 0
+    fi
+    if [ "$attempt" -eq "$HEALTH_RETRY_ATTEMPTS" ]; then
+      return 1
+    fi
+    sleep "$HEALTH_RETRY_DELAY_SEC"
+    attempt=$((attempt + 1))
+  done
+}
 
 finish() {
   status=$?
@@ -159,7 +184,7 @@ systemctl start "$SERVICE_NAME"
 systemctl is-active --quiet "$SERVICE_NAME"
 
 echo "[6/8] Read-only health, database and route smoke"
-curl -fsS "$LOCAL_BASE_URL/health" >/dev/null
+wait_for_health
 DEPLOY_DB_SOURCE="$LICENSE_DB_PATH" python3 - <<'PY'
 import os
 import sqlite3
