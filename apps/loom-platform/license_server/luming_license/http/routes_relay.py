@@ -16,9 +16,16 @@ def _send_producer_error(handler: Any, error: Exception) -> None:
         if error.status == 401
         else None
     )
+    message = str(error)
+    code = error.code
     handler.send_json(
         error.status,
-        {"ok": False, "error": str(error), "code": error.code},
+        {
+            "ok": False,
+            "error": {"message": message, "code": code},
+            "message": message,
+            "code": code,
+        },
         headers=headers,
     )
 
@@ -87,7 +94,14 @@ def _producer_status_record(
             404,
             "RELAY_PACKET_NOT_FOUND",
         ) from None
-    if context != scope:
+    if (
+        context["accountId"] != scope["accountId"]
+        or context["entitlementVersion"] != scope["entitlementVersion"]
+        or not api.secrets.compare_digest(
+            context["runtimeConfigDigest"],
+            scope["runtimeConfigDigest"],
+        )
+    ):
         raise api.ActivationError(
             "Relay packet not found",
             404,
