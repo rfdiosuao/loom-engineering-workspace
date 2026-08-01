@@ -7,10 +7,12 @@ import { FocusScreen } from './FocusScreen';
 import { ManualControls, type MatrixManualAction } from './ManualControls';
 import type { MatrixScreenFrame } from './screenScheduler';
 import { canUseMatrixManualControls, supportedMatrixTaskActions, type MatrixDeviceView } from './matrixViewModel';
+import type { PhoneVideoStreamView } from './usePhoneVideoStream';
 
 interface DeviceInspectorProps {
   device?: MatrixDeviceView;
   frame?: MatrixScreenFrame;
+  video?: PhoneVideoStreamView;
   screenError?: string;
   timeline: MatrixEvent[];
   timelineLoading: boolean;
@@ -30,6 +32,7 @@ interface DeviceInspectorProps {
 export const DeviceInspector: React.FC<DeviceInspectorProps> = ({
   device,
   frame,
+  video,
   screenError,
   timeline,
   timelineLoading,
@@ -53,7 +56,7 @@ export const DeviceInspector: React.FC<DeviceInspectorProps> = ({
     mode,
     leasedDeviceId: lease?.deviceId,
     deviceId: device.deviceId,
-    hasFrame: Boolean(frame),
+    hasFrame: Boolean(frame || video?.status === 'active'),
     screenError,
   });
   const supportedActions = device.task ? supportedMatrixTaskActions(device.task.status) : { pause: false, resume: false };
@@ -80,6 +83,7 @@ export const DeviceInspector: React.FC<DeviceInspectorProps> = ({
         <FocusScreen
           deviceName={device.name || device.deviceId}
           frame={frame}
+          video={video}
           error={screenError}
           manualEnabled={manualEnabled}
           controlsEnabled={controlsEnabled}

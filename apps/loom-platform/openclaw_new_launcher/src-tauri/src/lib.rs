@@ -322,10 +322,17 @@ fn is_safety_cleanup_request(path: &str, method: &str) -> bool {
     if normalized_method != "DELETE" {
         return false;
     }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() == 5
+        && parts[..3] == ["api", "phone-stream", "devices"]
+        && !parts[3].is_empty()
+        && parts[4] == "session"
+    {
+        return true;
+    }
     if let Some(device_id) = path.strip_prefix("api/phone/config/device/") {
         return !device_id.is_empty() && !device_id.contains('/');
     }
-    let parts: Vec<&str> = path.split('/').collect();
     parts.len() == 5
         && parts[..3] == ["api", "matrix", "devices"]
         && !parts[3].is_empty()
@@ -333,11 +340,12 @@ fn is_safety_cleanup_request(path: &str, method: &str) -> bool {
 }
 
 fn protected_feature(path: &str, method: &str) -> Option<&'static str> {
-    const RULES: [(&str, &str); 5] = [
+    const RULES: [(&str, &str); 6] = [
         ("api/matrix/acquisition/feishu", "acquisition.feishu"),
         ("api/matrix/acquisition/templates", "templates.cloud"),
         ("api/matrix/acquisition", "acquisition.workbench"),
         ("api/matrix", "matrix.devices"),
+        ("api/phone-stream", "matrix.devices"),
         ("api/phone", "matrix.devices"),
     ];
     let normalized = path
@@ -468,6 +476,10 @@ mod commercial_feature_path_tests {
             ),
             ("/api/matrix/status", Some("matrix.devices")),
             ("/api/phone/task", Some("matrix.devices")),
+            (
+                "/api/phone-stream/devices/phone-a/session",
+                Some("matrix.devices"),
+            ),
         ];
 
         for (path, expected) in cases {
@@ -578,6 +590,7 @@ mod commercial_feature_path_tests {
             ("POST", "/api/phone/daemon/stop"),
             ("POST", "/api/phone/events/stop"),
             ("DELETE", "/api/matrix/devices/phone-a/lease"),
+            ("DELETE", "/api/phone-stream/devices/phone-a/session"),
             ("POST", "/api/matrix/tasks/task-a/pause"),
         ] {
             assert_eq!(

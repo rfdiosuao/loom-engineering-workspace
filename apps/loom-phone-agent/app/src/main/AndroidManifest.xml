@@ -95,6 +95,11 @@
             android:exported="false"
             android:excludeFromRecents="true"
             android:theme="@style/Theme.Transparent" />
+        <activity
+            android:name=".server.stream.PhoneStreamPermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.Transparent" />
 
         <service
             android:name=".service.ClawAccessibilityService"
@@ -125,6 +130,11 @@
             android:foregroundServiceType="specialUse" />
         <service
             android:name=".service.ScreenRecordService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+        <service
+            android:name=".server.stream.PhoneStreamService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />

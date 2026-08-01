@@ -26,6 +26,7 @@ FEATURE_PATH_RULES: tuple[tuple[str, str], ...] = (
     ("/api/matrix/acquisition/templates", "templates.cloud"),
     ("/api/matrix/acquisition", "acquisition.workbench"),
     ("/api/matrix", "matrix.devices"),
+    ("/api/phone-stream", "matrix.devices"),
     ("/api/phone", "matrix.devices"),
     ("/api/storyboard/generate", "matrix.devices"),
 )
@@ -68,6 +69,13 @@ def _is_safety_cleanup_request(path: str, method: str | None) -> bool:
     if normalized_method != "DELETE":
         return False
     parts = path.strip("/").split("/")
+    if (
+        len(parts) == 5
+        and parts[:3] == ["api", "phone-stream", "devices"]
+        and bool(parts[3])
+        and parts[4] == "session"
+    ):
+        return True
     if parts[:4] == ["api", "phone", "config", "device"]:
         return len(parts) == 5 and bool(parts[4])
     return (

@@ -182,6 +182,24 @@ class CommercialFeatureDecisionTests(unittest.TestCase):
         self.assertEqual(denial["feature"], "acquisition.feishu")
         self.assertNotIn("token", repr(denial).lower())
 
+    def test_phone_stream_is_protected_but_stop_is_safety_cleanup(self) -> None:
+        commercial_feature_denial = feature_module().commercial_feature_denial
+        manager = RecordingLicenseManager(authorized_features=set())
+
+        start_denial = commercial_feature_denial(
+            "/api/phone-stream/devices/phone-a/session",
+            manager,
+            method="POST",
+        )
+        stop_denial = commercial_feature_denial(
+            "/api/phone-stream/devices/phone-a/session",
+            manager,
+            method="DELETE",
+        )
+
+        self.assertEqual(start_denial["feature"], "matrix.devices")
+        self.assertIsNone(stop_denial)
+
     def test_authorized_feature_and_public_routes_have_no_denial(self) -> None:
         commercial_feature_denial = feature_module().commercial_feature_denial
         manager = RecordingLicenseManager(authorized_features={"matrix.devices"})

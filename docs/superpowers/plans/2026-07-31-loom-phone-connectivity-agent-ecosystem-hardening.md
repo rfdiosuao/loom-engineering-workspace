@@ -562,6 +562,15 @@ cd apps/loom-phone-agent
 - 窗口最小化后流暂停。
 - 视频权限拒绝后截图仍可用。
 
+**2026-08-01 实施记录**
+
+- 技术门禁选择原生 `MediaProjection + MediaCodec`：复用 LumiAgent 已有的 Android 权限与前台服务边界，USB ADB forward 和 LAN 共用同一个受签名保护的 H.264 端点；当前实现不引入或复制 scrcpy-server 代码，也不增加新的常驻通用控制服务。
+- 手机端已实现聚焦会话、30 秒发起凭据、H.264 二进制分帧协议、容量为 6 的丢旧帧队列、用户授权 Activity、`mediaProjection` 前台服务以及显式停止/投屏撤销/一小时上限清理。
+- Desktop Bridge 只向 WebView 返回一次性本地 ticket；手机长期配对密钥、手机流 token 和成员 token 均保留在后端。`/api/phone-stream` 已纳入 `matrix.devices` 权限，停止会话的 `DELETE` 作为安全清理不受商业授权失效阻断。
+- 矩阵仅为当前聚焦设备启动高帧率通道；WebCodecs 不支持、用户拒绝权限、解码失败或网络中断时只把画面标为“已降级”，立即恢复截图轮询，不改变设备在线/任务状态。窗口隐藏时停止视频会话。
+- 自动化结果：前端平台合同 `221/221`、Node 合同 `98/98`、相关 Python `109/109`、商业权限 Rust `4/4`、LumiAgent `:app:testDebugUnitTest` 全量成功，Desktop 前端 production build 成功。
+- 尚未完成实体机门禁：单设备 30 分钟、USB 拔插 20 次、10 台在线仅 1 台高帧率、不同 Android/OEM 的授权行为与首帧/延迟/CPU 数据。没有实体机证据前，本任务状态为“代码与自动化完成，生产验收待完成”，不得把截图降级路径或未测 SLO 宣称为实时视频验收通过。
+
 ## Task 6：拆分 ChatGPT、Codex Desktop 与 Codex CLI 检测
 
 **修改文件**

@@ -11,6 +11,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.apk.claw.android.utils.XLog
 import fi.iki.elonen.NanoHTTPD
+import com.apk.claw.android.server.stream.PhoneStreamApiController
 
 /**
  * 局域网 HTTP 配置服务器
@@ -136,6 +137,15 @@ class ConfigServer(
                 }
                 uri == "/api/lumi/vision/action" && method == Method.POST -> handleLumiJson(session) {
                     VisionApiController.handleAction(it)
+                }
+                uri == "/api/lumi/stream/session" && method == Method.POST -> handleLumiJson(session) {
+                    PhoneStreamApiController.handleCreate(context, it)
+                }
+                uri == "/api/lumi/stream/h264" && method == Method.GET -> handleLumiGet(session) {
+                    PhoneStreamApiController.handleH264(it)
+                }
+                uri == "/api/lumi/stream/stop" && method == Method.POST -> handleLumiJson(session) {
+                    PhoneStreamApiController.handleStop(context, it)
                 }
                 uri == "/api/lumi/debug/crashes/latest" && method == Method.GET -> handleLumiGet(session) {
                     CrashLogApiController.handleLatest(context, it)

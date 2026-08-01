@@ -219,6 +219,11 @@ export async function ensureBridgeReadyForStreaming(): Promise<string> {
   return bridgeStreamUrl('');
 }
 
+export async function resolveBridgeStreamUrl(path: string): Promise<string> {
+  await ensureBridgeReadyForStreaming();
+  return bridgeStreamUrl(path);
+}
+
 async function proxyRequest(path: string, method: string = 'GET', body?: unknown) {
   await ensureBridgeStarted(invoke);
   const canRetry = method === 'GET';
@@ -1458,6 +1463,21 @@ export interface MatrixEmergencyStopResponse {
   affected: MatrixEmergencyStopAffectedTask[];
 }
 
+export interface PhoneVideoStreamSession {
+  schema: 'luming.phone.stream.session.v1';
+  state: 'active' | 'permission_required' | 'error' | 'unavailable' | string;
+  transport: 'usb-forward' | 'lan' | string;
+  fallback: 'none' | 'snapshot';
+  requiresUserConsent: boolean;
+  codec: string;
+  width: number;
+  height: number;
+  fps: number;
+  message: string;
+  ticket?: string;
+  streamUrl?: string;
+}
+
 export const matrixApi = {
   status: (): Promise<MatrixStatusSnapshot> => api('/api/matrix/status'),
   ensureStreamReady: (): Promise<string> => ensureBridgeReadyForStreaming(),
@@ -1489,6 +1509,15 @@ export const matrixApi = {
   },
   screens: (requests: MatrixScreenBatchRequest[]): Promise<MatrixScreenBatchResponse> =>
     api('/api/matrix/screens', 'POST', { requests }),
+  startPhoneStream: (deviceId: string, params: {
+    clientSessionId: string;
+    fps?: number;
+    maxLongSide?: number;
+    bitRate?: number;
+  }): Promise<PhoneVideoStreamSession> =>
+    api(`/api/phone-stream/devices/${encodeURIComponent(deviceId)}/session`, 'POST', params),
+  stopPhoneStream: (deviceId: string): Promise<{ stopped: boolean; fallback: 'snapshot' }> =>
+    api(`/api/phone-stream/devices/${encodeURIComponent(deviceId)}/session`, 'DELETE'),
   timeline: (deviceId: string, limit = 100): Promise<{ events: MatrixEvent[] }> =>
     api(`/api/matrix/devices/${encodeURIComponent(deviceId)}/timeline?limit=${Math.max(1, limit)}`),
   lease: (deviceId: string): Promise<{ lease: MatrixDeviceLease | null }> =>

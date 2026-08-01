@@ -34,6 +34,7 @@ import {
 } from './matrixViewModel';
 import { useMatrixStream } from './useMatrixStream';
 import { useVisibleScreens } from './useVisibleScreens';
+import { usePhoneVideoStream } from './usePhoneVideoStream';
 
 function campaignForDeviceTask(campaigns: MatrixCampaign[], deviceTaskId: string): MatrixCampaign | undefined {
   return campaigns.find((campaign) => campaign.deviceTasks.some((task) => task.deviceTaskId === deviceTaskId));
@@ -116,7 +117,13 @@ export const MatrixWorkbenchPage = () => {
   const activeGroup = groups.find((group) => group.id === activeGroupId) || groups[0];
   const wallDevices = React.useMemo(() => visibleDeviceViews(devices, activeGroup, query), [activeGroup, devices, query]);
   const focusedDevice = devices.find((device) => device.deviceId === focusedId);
-  const screens = useVisibleScreens(devices, visibleIds, focusedId);
+  const phoneVideo = usePhoneVideoStream(focusedDevice?.deviceId, Boolean(focusedDevice?.online));
+  const screens = useVisibleScreens(
+    devices,
+    visibleIds,
+    focusedId,
+    phoneVideo.status === 'active' ? focusedId : undefined,
+  );
 
   React.useEffect(() => {
     if (!pendingScreenRefresh) return;
@@ -608,6 +615,7 @@ export const MatrixWorkbenchPage = () => {
         <DeviceInspector
           device={focusedDevice}
           frame={focusedId ? screens.frames[focusedId] : undefined}
+          video={phoneVideo}
           screenError={focusedId ? screens.errors[focusedId] : undefined}
           timeline={timeline}
           timelineLoading={timelineLoading}
