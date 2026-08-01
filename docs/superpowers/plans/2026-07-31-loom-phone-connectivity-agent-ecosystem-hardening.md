@@ -820,6 +820,14 @@ cd apps/loom-phone-agent
 - 构建 LOOM Desktop 2.4.2 NSIS 安装包以及 LumiAgent 6.64 default/android7 APK；记录绝对路径、大小、SHA256、签名、来源提交和已知限制。
 - 本任务只生成本地发布候选；未经用户明确确认，不推正式更新通道、不创建正式 GitHub Release、不对外发布。
 
+**2026-08-01 本地候选记录**
+
+- Desktop 五处版本源已统一为 `2.4.2`；LumiAgent 固定 versionCode `933`、default `6.64-stability`、Android 7 `6.64-stability-android7`。产品名和 Windows 文件元数据均为“麓鸣”。
+- 全量结果：Frontend `221/221`、Node `100/100`、Python `2055` + `367` subtests、共享合同 `11/11`、Android 两变体各 `663/663`、Rust `30/30`；生产前端、Rust locked check 和受保护资源验证通过。
+- 已生成未商业签名的 Desktop NSIS 与两份调试签名 APK；路径、字节、SHA256、签名和来源提交详见 `docs/release/2.4.2-build-evidence.md`。
+- Android release 构建在签名变量缺失时真实失败关闭；没有借用未知旧项目密钥。Windows 安装包 Authenticode 状态为 `NotSigned`。
+- 当前无 ADB 实体机，所有 Wi-Fi/热点/USB/视频/Shizuku/多机 soak 门禁仍未通过；这些产物只能称本地测试候选，不能称正式发布完成。
+
 ## 6. PR 与 Worktree 划分
 
 | PR | Worktree 建议 | 内容 | 依赖 |
