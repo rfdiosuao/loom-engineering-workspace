@@ -858,9 +858,10 @@ cd apps/loom-phone-agent
 
 - 国内/海外桥接 `/api/status` 和授权服务 `/health` 均为 `200`，但桥接公共密钥路由和授权服务 account-entitlement 路由均为 `404`；故障边界已确认是生产后端程序版本，不是 Desktop 版本号或授权码格式。
 - 旧授权服务部署脚本只复制单文件、可能覆盖整个环境文件且没有 entitlement 路由冒烟；提交 `3ce44e6` 已改为完整模块部署、原子环境变量更新、程序/环境回滚、数据库只备份不自动降级和强制 `401` 路由探针。
-- 桥接 `76/76`、授权服务 `205/205`、Desktop entitlement `32/32`、部署合同 `6/6`、Relay `30/30` 和 Bash 语法均通过；隔离成功部署与强制失败回滚演练均通过。
-- 无密钥后端候选 ZIP 为 `luming-entitlement-backend-3ce44e6-r1.zip`，SHA256 `F94DD9E04E7683D9F4248E9B93627A1FF3E4FB1185866C353F155BEBE6AC8182`。生产部署和真实授权码消费仍等待用户单独确认，详见 `docs/release/2.4.4-entitlement-backend-deployment-gate.md`。
+- 桥接业务 `76/76`、桥接部署 `5/5 + 3/3`、桥接目录完整回归 `84/84`、授权服务 `205/205`、Desktop entitlement `32/32`、授权部署合同 `6/6`、Relay `30/30` 和两套 Bash 语法均通过；隔离成功部署、缺配置停服前拒绝与强制失败回滚演练均通过。
+- 最终无密钥后端候选 ZIP 为 `luming-entitlement-backend-991ad39-r2.zip`，SHA256 `DEFC9EE8D822EC9AACFD8ABF1AD7D6A6FA6243D970BC37CC43B9DA2D49A39118`。生产部署和真实授权码消费仍等待用户单独确认，详见 `docs/release/2.4.4-entitlement-backend-deployment-gate.md`。
 - 只读 SSH 已识别真实 unit 与目录：授权服务为 `huoshan:/opt/openclaw-license` 的 `openclaw-license.service`，桥接为 `peiqianyun:/opt/openclaw-newapi-bridge` 的 `openclaw-newapi-bridge.service`；两边进程均 active，但线上程序哈希与候选不同且路由字面量不存在。未读取任何环境值、私钥或数据库内容，未重启或写入服务器。
+- 生产键存在性检查确认授权服务和桥接尚未配置 entitlement 专用服务间 Token，桥接也缺持久化 bind DB、bind Secret 和签名密钥来源；提交 `991ad39` 的桥接部署脚本会在停服务前拒绝这种状态，不会误把缺配置部署成线上中断。
 
 ## 6. PR 与 Worktree 划分
 
