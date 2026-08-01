@@ -3032,7 +3032,7 @@ def _pi_models_text(base_url: str, provider: str, model: str) -> str:
     return json.dumps({
         "providers": {
             "loom": {
-                "name": provider or "麓鸣中转站",
+                "name": provider or "麓鸣",
                 "baseUrl": _pick_text(base_url).rstrip("/"),
                 "api": "openai-completions",
                 "apiKey": "$LOOM_PI_API_KEY",
@@ -3058,7 +3058,7 @@ def _grok_config_text(base_url: str, provider: str, model: str) -> str:
         '[model."loom"]',
         f'model = "{_toml_string(model)}"',
         f'base_url = "{_toml_string(_pick_text(base_url).rstrip("/"))}"',
-        f'name = "{_toml_string(provider or "麓鸣中转站")}"',
+        f'name = "{_toml_string(provider or "麓鸣")}"',
         'env_key = "LOOM_GROK_API_KEY"',
         "",
     ])

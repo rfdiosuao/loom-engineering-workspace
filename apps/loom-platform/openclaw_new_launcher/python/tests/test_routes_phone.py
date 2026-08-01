@@ -5252,7 +5252,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             patch("api.routes_phone._write_phone_store") as write_store,
         ):
             result = _refresh_phone_transport(
-                SimpleNamespace(),
+                SimpleNamespace(read_json=lambda *_args: {}, write_json=lambda *_args: None),
                 "phone-a",
                 probe=lambda url: {"ok": True, "baseUrl": url, "deviceInstanceId": device["deviceInstanceId"]},
             )
