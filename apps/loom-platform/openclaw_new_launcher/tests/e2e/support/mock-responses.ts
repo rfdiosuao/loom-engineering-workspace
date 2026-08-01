@@ -240,6 +240,40 @@ export function createBaselineSeed(): TauriMockSeed {
       'POST /api/matrix/screens': {
         value: { schema: 'loom.matrix.screens.v1', screens: [], errors: [] },
       },
+      'POST /api/phone-stream/devices/phone-audit-1/session': {
+        value: {
+          schema: 'luming.phone.stream.session.v1',
+          state: 'unavailable',
+          transport: 'lan',
+          fallback: 'snapshot',
+          requiresUserConsent: false,
+          codec: 'avc1.42E01F',
+          width: 0,
+          height: 0,
+          fps: 0,
+          message: '隔离审计使用截图回退',
+        },
+      },
+      'DELETE /api/phone-stream/devices/phone-audit-1/session': {
+        value: { stopped: true, fallback: 'snapshot' },
+      },
+      'POST /api/phone-stream/devices/phone-audit-2/session': {
+        value: {
+          schema: 'luming.phone.stream.session.v1',
+          state: 'unavailable',
+          transport: 'lan',
+          fallback: 'snapshot',
+          requiresUserConsent: false,
+          codec: 'avc1.42E01F',
+          width: 0,
+          height: 0,
+          fps: 0,
+          message: '隔离审计使用截图回退',
+        },
+      },
+      'DELETE /api/phone-stream/devices/phone-audit-2/session': {
+        value: { stopped: true, fallback: 'snapshot' },
+      },
       'POST /api/realtime/tickets': {
         value: {
           ticket: 'audit-single-use-ticket',

@@ -12,6 +12,8 @@ interface ConversationStreamProps {
   currentRun: AgentRun | null;
   sending: boolean;
   loading?: boolean;
+  unavailableMessage?: string;
+  onUnavailableRetry?: () => void;
   busyKey: string | null;
   onRunAction: (runId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>;
   onOpenRunDetails: (runId: string, trigger: HTMLButtonElement) => void;
@@ -91,6 +93,8 @@ export function ConversationStream({
   currentRun,
   sending,
   loading,
+  unavailableMessage = '',
+  onUnavailableRetry,
   busyKey,
   onRunAction,
   onOpenRunDetails,
@@ -120,7 +124,22 @@ export function ConversationStream({
     >
       <div className="mx-auto w-full max-w-[920px]">
         {loading ? <div className="py-10 text-center text-sm text-text-muted">正在读取对话...</div> : null}
-        {!loading && messages.length === 0 && !thinking ? (
+        {!loading && unavailableMessage ? (
+          <div role="alert" className="mx-auto mt-10 max-w-[620px] rounded-[8px] border border-status-danger/30 bg-status-danger/10 px-5 py-4 text-center text-sm leading-6 text-status-danger">
+            <div className="font-black">智能体暂不可用</div>
+            <div className="mt-1">{unavailableMessage}</div>
+            {onUnavailableRetry ? (
+              <button
+                type="button"
+                onClick={onUnavailableRetry}
+                className="mt-3 h-9 rounded-[8px] border border-status-danger/40 bg-surface px-4 text-xs font-black text-status-danger hover:bg-status-danger/10"
+              >
+                重新连接
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {!loading && !unavailableMessage && messages.length === 0 && !thinking ? (
           <div className="flex min-h-[260px] flex-col items-center justify-center text-center">
             <LoomAgentMark className="h-14 w-14" />
             <div className="mt-4 text-base font-semibold text-text">开始一段新对话</div>

@@ -161,8 +161,22 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("delete entitlement.code", cache_source)
         self.assertIn("delete entitlement.licenseCode", cache_source)
         self.assertIn("delete entitlement.redeemCode", cache_source)
-        self.assertNotIn("已显示上一次账号快照", page_source)
+        self.assertIn("usingCachedAccount", page_source)
+        self.assertIn("当前显示上次安全快照", page_source)
+        self.assertIn("待在线验证", page_source)
         self.assertNotIn("LoggedInPanel", page_source)
+
+    def test_logged_in_account_page_localizes_internal_subscription_values(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        logged_in = source.split("if (loggedIn) {", 1)[1].split("\n  return (", 1)[0]
+        self.assertIn("planDisplayName", source)
+        self.assertIn("基础套餐", source)
+        self.assertNotIn("account?.plan || '暂无'", logged_in)
+        self.assertNotIn("'登录后查看'", logged_in)
+        self.assertIn("服务暂未返回", logged_in)
+        self.assertIn('label="套餐到期时间"', logged_in)
 
     def test_runtime_ui_copy_does_not_use_relay_station_wording(self) -> None:
         forbidden = "\u4e2d\u8f6c\u7ad9"

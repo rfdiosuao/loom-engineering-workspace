@@ -9,6 +9,8 @@ interface ConversationSidebarProps {
   query: string;
   loading: boolean;
   error: string | null;
+  newDisabled?: boolean;
+  newDisabledReason?: string;
   onQueryChange: (query: string) => void;
   onRetry: () => void;
   onSelect: (sessionId: string) => void;
@@ -33,6 +35,8 @@ export function ConversationSidebar({
   query,
   loading,
   error,
+  newDisabled = false,
+  newDisabledReason = '',
   onQueryChange,
   onRetry,
   onSelect,
@@ -79,10 +83,11 @@ export function ConversationSidebar({
           </label>
           <button
             type="button"
-            title="新建对话"
-            aria-label="新建对话"
+            title={newDisabled ? newDisabledReason : '新建对话'}
+            aria-label={newDisabled ? `暂不能新建对话：${newDisabledReason}` : '新建对话'}
             onClick={onNew}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] border border-border bg-surface text-text hover:bg-hover"
+            disabled={newDisabled}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] border border-border bg-surface text-text hover:bg-hover disabled:cursor-not-allowed disabled:opacity-45"
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
           </button>

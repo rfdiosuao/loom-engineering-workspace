@@ -69,7 +69,22 @@ def _query_int(request: Request, name: str, default: int, minimum: int, maximum:
 
 def _error_response(ctx: Any, error: Exception):
     if isinstance(error, KeyError):
-        return ctx.fastapi_json({"error": "agent resource not found", "code": "AGENT_NOT_FOUND"}, 404)
+        missing = str(error.args[0] if error.args else "").strip()
+        if missing == "agent account scope":
+            return ctx.fastapi_json(
+                {
+                    "error": "模型账号已切换，智能体需要重新连接，请刷新后重试。",
+                    "code": "AGENT_ACCOUNT_CONTEXT_CHANGED",
+                },
+                409,
+            )
+        return ctx.fastapi_json(
+            {
+                "error": "当前智能体资源已不存在，请刷新会话列表后重试。",
+                "code": "AGENT_NOT_FOUND",
+            },
+            404,
+        )
     if isinstance(error, AgentServiceUnavailable):
         return ctx.fastapi_json({"error": str(error), "code": "AGENT_SERVICE_UNAVAILABLE"}, 503)
     if isinstance(error, PermissionError):

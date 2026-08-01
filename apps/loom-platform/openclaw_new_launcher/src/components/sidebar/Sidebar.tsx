@@ -197,13 +197,13 @@ const NavButton: React.FC<{
     aria-label={item.label}
     className={`group relative flex min-h-[64px] w-full flex-col items-center justify-center gap-1.5 rounded-[8px] px-1 py-2 text-center transition-all ${
       isActive
-        ? 'bg-white/[0.075] text-accent shadow-[inset_0_0_0_1px_rgba(55,213,163,0.16)]'
+        ? 'bg-white/[0.075] text-white shadow-[inset_0_0_0_1px_rgba(55,213,163,0.16)]'
         : 'text-white/58 hover:bg-white/[0.05] hover:text-white'
     }`}
   >
     {isActive && <span className="absolute right-[-8px] top-2 h-11 w-[3px] rounded-l bg-accent" />}
     <Icon name={iconFor(item)} className="h-[22px] w-[22px]" />
-    <span className={`text-[11px] font-black leading-none ${isActive ? 'text-accent' : 'text-white/68 group-hover:text-white'}`}>
+    <span className={`text-[11px] font-black leading-none ${isActive ? 'text-white' : 'text-white/68 group-hover:text-white'}`}>
       {item.label}
     </span>
   </button>

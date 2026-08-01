@@ -158,8 +158,12 @@ def _friendly_account_error(value: object, context: str = "") -> str:
         return "模型服务未返回可用模型凭证，请稍后重试或联系管理员"
     if "openclaw_auth_endpoint_unavailable" in lower:
         return "模型账号接口暂不可用，请稍后重试"
+    if (
+        "not found" in lower or "invalid url" in lower
+    ) and "subscription" in context_lower:
+        return "模型账户服务暂不可用，请稍后重试；当前已显示上次安全快照。"
     if "not found" in lower or "invalid url" in lower:
-        return "模型账号接口暂不可用，请使用密码登录或稍后重试"
+        return "模型账号接口暂不可用，请稍后重试"
     if "http_429" in lower or "too many" in lower:
         return "操作过于频繁，请稍后再试"
     if "http_401" in lower or "unauthorized" in lower:
@@ -278,6 +282,39 @@ async def _drain_existing_account_runtime(
     if identity_read_error is not None:
         return _confirmed_logout_cleanup(identity_read_error)
     if not isinstance(current, dict) or current.get("loggedIn") is not True:
+        shutdown_agent = getattr(ctx, "shutdown_agent_service", None)
+        if callable(shutdown_agent):
+            try:
+                raw_agent = await asyncio.to_thread(shutdown_agent)
+                agent = dict(raw_agent) if isinstance(raw_agent, dict) else {
+                    "stopped": False,
+                    "drained": False,
+                    "outcomeIndeterminate": True,
+                    "executionMayContinue": True,
+                    "message": "智能体停止结果无效，无法确认旧状态已终止。",
+                }
+                execution_may_continue = bool(
+                    agent.get("executionMayContinue")
+                    or agent.get("outcomeIndeterminate")
+                    or agent.get("drained") is False
+                )
+                return _confirmed_logout_cleanup({
+                    "ok": not execution_may_continue,
+                    "performed": bool(agent.get("stopped")),
+                    "agent": agent,
+                    "executionMayContinue": execution_may_continue,
+                })
+            except Exception as exc:
+                ctx.append_log(
+                    "[Account] unscoped agent cleanup failed: "
+                    f"{_redact_secret_text(exc)}\n"
+                )
+                return {
+                    "ok": False,
+                    "performed": True,
+                    "executionMayContinue": True,
+                    "message": "智能体旧状态尚未停止，已拒绝切换账号。",
+                }
         return {
             "ok": True,
             "performed": False,
@@ -648,7 +685,7 @@ def register_account_routes(app, ctx) -> None:
             subscription = await asyncio.to_thread(ctx.get_newapi_account_mgr().subscription_snapshot)
             return ctx.fastapi_json({"subscription": subscription})
         except NewApiAccountError as exc:
-            return ctx.fastapi_json({"error": _friendly_account_error(exc)}, 400)
+            return ctx.fastapi_json({"error": _friendly_account_error(exc, "subscription")}, 400)
 
     @app.post("/api/account/logout")
     async def account_logout(request: Request):

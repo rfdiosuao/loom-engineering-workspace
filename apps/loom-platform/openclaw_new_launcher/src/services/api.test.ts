@@ -112,3 +112,14 @@ test('parseErrorText localizes managed model login failures', () => {
     '请先在“模型账号”完成登录，然后返回当前页面重试。',
   );
 });
+
+test('parseErrorText never exposes raw Agent resource errors', () => {
+  assert.equal(
+    apiModule.parseErrorText('{"error":"agent resource not found","code":"AGENT_NOT_FOUND"}'),
+    '当前智能体资源已不存在，请刷新会话列表后重试。',
+  );
+  assert.equal(
+    apiModule.parseErrorText('{"error":"模型账号已切换，智能体需要重新连接，请刷新后重试。","code":"AGENT_ACCOUNT_CONTEXT_CHANGED"}'),
+    '模型账号已切换，智能体需要重新连接，请刷新后重试。',
+  );
+});

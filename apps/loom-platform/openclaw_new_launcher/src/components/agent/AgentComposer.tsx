@@ -111,11 +111,12 @@ export function AgentComposer({
             ref={fileInputRef}
             type="file"
             multiple
+            disabled={disabled || busy || attachmentsLoading}
             className="hidden"
             onChange={(event) => {
               const files = Array.from(event.currentTarget.files || []);
               event.target.value = '';
-              if (!files.length) return;
+              if (!files.length || disabled || busy || attachmentsLoading) return;
               const nextCount = draft.attachments.length + files.length;
               const nextBytes = draft.attachments.reduce((total, item) => total + item.size, 0)
                 + files.reduce((total, item) => total + item.size, 0);
@@ -129,13 +130,21 @@ export function AgentComposer({
               }
               setAttachmentError('');
               setAttachmentsLoading(true);
-              void prepareAgentAttachments(files)
-                .then((attachments) => {
-                  onChange({ attachments: [...draft.attachments, ...attachments] });
+              void Promise.allSettled(files.map((file) => prepareAgentAttachments([file])))
+                .then((results) => {
+                  const attachments = results.flatMap((result) => (
+                    result.status === 'fulfilled' ? result.value : []
+                  ));
+                  const failures = results.flatMap((result) => (
+                    result.status === 'rejected'
+                      ? [result.reason instanceof Error ? result.reason.message : '附件读取失败，请重新选择']
+                      : []
+                  ));
+                  if (attachments.length) {
+                    onChange({ attachments: [...draft.attachments, ...attachments] });
+                  }
+                  setAttachmentError(failures.join('；'));
                 })
-                .catch((reason) => setAttachmentError(
-                  reason instanceof Error ? reason.message : '附件读取失败，请重新选择',
-                ))
                 .finally(() => setAttachmentsLoading(false));
             }}
           />
@@ -143,7 +152,7 @@ export function AgentComposer({
             type="button"
             title="添加图片或文本附件"
             aria-label="添加附件"
-            disabled={disabled || attachmentsLoading}
+            disabled={disabled || busy || attachmentsLoading}
             onClick={() => fileInputRef.current?.click()}
             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[7px] text-text-muted hover:bg-hover hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
           >

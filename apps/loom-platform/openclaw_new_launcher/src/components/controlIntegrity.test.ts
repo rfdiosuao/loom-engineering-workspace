@@ -160,6 +160,14 @@ test('major workbenches share the canonical canvas and surface color hierarchy',
   assert.doesNotMatch(creative, /rounded-\[10px\]/);
 });
 
+test('active sidebar navigation keeps readable text on the dark rail', () => {
+  const source = readSource('./sidebar/Sidebar.tsx');
+  const navButton = sourceBlock(source, 'const NavButton', 'const UtilityButton');
+
+  assert.match(navButton, /isActive \? 'text-white'/);
+  assert.match(navButton, /isActive \? 'text-white' : 'text-white\/68/);
+});
+
 test('toast notifications expose one live region per message', () => {
   const common = readSource('./common/index.tsx');
   const container = sourceBlock(common, 'data-toast-container', '{toasts.map');

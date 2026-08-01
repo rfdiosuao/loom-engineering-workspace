@@ -130,6 +130,15 @@ function friendlyErrorText(text: string): string {
   if (/managed model account must be signed in again|agent_account_relogin_required/i.test(text)) {
     return '模型账号登录已失效，请重新登录后再重试。';
   }
+  if (/agent resource not found|agent_not_found/i.test(text)) {
+    return '当前智能体资源已不存在，请刷新会话列表后重试。';
+  }
+  if (/central agent service is not initialized|agent_service_unavailable/i.test(text)) {
+    return '智能体服务尚未就绪，请重启麓鸣后重试。';
+  }
+  if (/agent operation failed|agent_operation_failed/i.test(text)) {
+    return '智能体操作没有完成，请刷新状态后重试。';
+  }
   if (/not_logged_in/i.test(text)) {
     return '尚未登录模型账号';
   }

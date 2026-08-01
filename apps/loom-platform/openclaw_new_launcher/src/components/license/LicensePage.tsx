@@ -46,6 +46,21 @@ function displayValue(value: unknown, fallback = '暂无'): string {
   return String(value);
 }
 
+function planDisplayName(value: unknown): string {
+  const plan = displayValue(value, '').trim();
+  const names: Record<string, string> = {
+    default: '基础套餐',
+    free: '基础套餐',
+    basic: '基础套餐',
+    standard: '标准套餐',
+    pro: '专业套餐',
+    professional: '专业套餐',
+    enterprise: '企业套餐',
+    inactive: '未激活',
+  };
+  return names[plan.toLowerCase()] || plan || '暂无';
+}
+
 function usageValue(account: AccountSnapshot | null, keys: string[], fallback = '暂无'): string {
   const usage = account?.usage;
   if (!usage || typeof usage !== 'object') return fallback;
@@ -127,10 +142,12 @@ export const LicensePage: React.FC = () => {
   const [entitlementCode, setEntitlementCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(() => !hasCachedAccount);
+  const [usingCachedAccount, setUsingCachedAccount] = useState(hasCachedAccount);
   const [statusText, setStatusText] = useState('');
   const { checkLicense, setCurrentPage } = useAppStore();
 
   const loggedIn = Boolean(account?.loggedIn);
+  const accountWritable = loggedIn && !usingCachedAccount;
   const totalModels = modelTotal(account);
   const modelHint = useMemo(() => {
     const selected = account?.selectedModels?.text;
@@ -139,7 +156,7 @@ export const LicensePage: React.FC = () => {
   }, [account]);
   const purchaseUrl = subscription?.purchaseUrl || account?.purchaseUrl || DEFAULT_ACCOUNT_CENTER_URL;
   const subscriptionUrl = useMemo(() => safeSubscriptionUrl(purchaseUrl), [purchaseUrl]);
-  const accountStateText = loading ? '读取中' : loggedIn ? '已登录' : '未登录';
+  const accountStateText = loading ? '读取中' : usingCachedAccount ? '待在线验证' : loggedIn ? '已登录' : '未登录';
   const accountEntitlement = account?.accountEntitlement;
   const entitlementActive = accountEntitlement?.source === 'signed_lease'
     && accountEntitlement?.features?.includes('matrix.devices') === true;
@@ -147,7 +164,10 @@ export const LicensePage: React.FC = () => {
     ? formatTime(accountEntitlement?.expiresAt)
     : '未激活';
 
-  const applyAccount = useCallback((next: AccountSnapshot | null) => {
+  const applyAccount = useCallback((
+    next: AccountSnapshot | null,
+    options: { cached?: boolean; persist?: boolean } = {},
+  ) => {
     subscriptionRequestVersion.current += 1;
     const previousIdentity = accountIdentity(cachedAccount.current);
     const nextIdentity = accountIdentity(next);
@@ -155,20 +175,21 @@ export const LicensePage: React.FC = () => {
       useAgentStore.getState().reset();
     }
     cachedAccount.current = next;
-    saveCachedAccount(next);
+    if (options.persist !== false) saveCachedAccount(next);
     setAccount(next);
     setSubscription(next?.subscription || null);
+    setUsingCachedAccount(Boolean(options.cached || next?.offline || next?.stale));
   }, []);
 
   const refresh = useCallback(async (options: { background?: boolean } = {}) => {
     if (!options.background) setLoading(true);
     try {
       const resp = await accountApi.current();
-      applyAccount(resp.account || null);
+      applyAccount(resp.account || null, { persist: true });
       setStatusText('');
     } catch (error) {
       const cached = loadCachedAccount();
-      applyAccount(cached || null);
+      applyAccount(cached || null, { cached: Boolean(cached), persist: false });
       setStatusText(errorMessage(error));
     } finally {
       setLoading(false);
@@ -177,7 +198,7 @@ export const LicensePage: React.FC = () => {
 
   useEffect(() => {
     if (accountCacheUsable(cachedAccount.current)) {
-      applyAccount(cachedAccount.current);
+      applyAccount(cachedAccount.current, { cached: true, persist: false });
       setStatusText('');
       setLoading(false);
       void refresh({ background: true });
@@ -337,6 +358,12 @@ export const LicensePage: React.FC = () => {
   };
 
   const syncModels = async () => {
+    if (!accountWritable) {
+      const message = '当前显示上次安全快照，请先重试在线验证后再同步模型。';
+      setStatusText(message);
+      showToast(message, 'info');
+      return;
+    }
     setBusy(true);
     setStatusText('正在同步模型...');
     try {
@@ -355,6 +382,12 @@ export const LicensePage: React.FC = () => {
   };
 
   const handleRedeemEntitlement = async () => {
+    if (!accountWritable) {
+      const message = '当前显示上次安全快照，请先重试在线验证后再绑定商业授权。';
+      setStatusText(message);
+      showToast(message, 'info');
+      return;
+    }
     const code = entitlementCode.trim();
     if (!code) {
       showToast('请输入商业矩阵授权码', 'error');
@@ -474,7 +507,7 @@ export const LicensePage: React.FC = () => {
                 disabled={loading || busy}
                 className="h-10 rounded-[8px] border border-border bg-surface-alt px-4 text-sm font-black text-text transition hover:border-accent/50 disabled:opacity-55"
               >
-                刷新账号
+                {usingCachedAccount ? '重试在线验证' : '刷新账号'}
               </button>
               <button
                 type="button"
@@ -486,6 +519,27 @@ export const LicensePage: React.FC = () => {
             </div>
           </div>
         </header>
+
+        {usingCachedAccount ? (
+          <div
+            data-account-cache-warning
+            role="status"
+            className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-status-warning bg-status-warning-soft px-6 py-3 text-sm text-status-warning-ink xl:px-8"
+          >
+            <div>
+              <span className="font-black">当前显示上次安全快照，账号待在线验证。</span>
+              <span className="ml-2">余额、套餐和授权状态可能已变化；写入操作已暂停。</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              disabled={loading || busy}
+              className="h-8 rounded-[8px] border border-status-warning px-3 text-xs font-black disabled:opacity-55"
+            >
+              重试在线验证
+            </button>
+          </div>
+        ) : null}
 
         <main className="loom-account-main min-h-0 flex-1 overflow-y-auto px-6 py-6 xl:px-8">
           <div className="loom-account-layout mx-auto grid w-full max-w-[1320px] gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
@@ -537,6 +591,7 @@ export const LicensePage: React.FC = () => {
                   <input
                     aria-label="商业矩阵授权码"
                     value={entitlementCode}
+                    disabled={!accountWritable}
                     onChange={(event) => setEntitlementCode(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') void handleRedeemEntitlement();
@@ -551,7 +606,7 @@ export const LicensePage: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleRedeemEntitlement}
-                  disabled={busy || !entitlementCode.trim()}
+                  disabled={busy || !accountWritable || !entitlementCode.trim()}
                   className="mt-3 h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                 >
                   {busy ? '正在绑定...' : '绑定当前账号'}
@@ -566,7 +621,7 @@ export const LicensePage: React.FC = () => {
                   <button
                     type="button"
                     onClick={syncModels}
-                    disabled={busy}
+                    disabled={busy || !accountWritable}
                     className="h-11 rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:opacity-55"
                   >
                     同步模型
@@ -607,8 +662,8 @@ export const LicensePage: React.FC = () => {
                   <MetricTile label="可用余额" value={displayValue(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} accent />
                   <MetricTile label="累计消耗" value={displayValue(subscription?.usage?.usedQuota, usageValue(account, ['usedQuota', 'used', 'quotaUsed']))} />
                   <MetricTile label="请求次数" value={displayValue(subscription?.usage?.requestCount, usageValue(account, ['requestCount', 'requests']))} />
-                  <MetricTile label="我的邀请码" value={displayValue(subscription?.inviteCode || subscription?.invitationCode || subscription?.referralCode, usageValue(account, ['inviteCode', 'invitationCode', 'referralCode'], '登录后查看'))} />
-                  <MetricTile label="当前套餐" value={displayValue(subscription?.plan, account?.plan || '暂无')} />
+                  <MetricTile label="我的邀请码" value={displayValue(subscription?.inviteCode || subscription?.invitationCode || subscription?.referralCode, usageValue(account, ['inviteCode', 'invitationCode', 'referralCode'], '服务暂未返回'))} />
+                  <MetricTile label="当前套餐" value={planDisplayName(subscription?.plan || account?.plan)} />
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border/70 pt-5">
@@ -627,7 +682,7 @@ export const LicensePage: React.FC = () => {
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <InfoPanel label="到期时间" value={formatTime(subscription?.expiresAt)} />
+                  <InfoPanel label="套餐到期时间" value={formatTime(subscription?.expiresAt)} />
                   <InfoPanel label="购买入口" value={subscriptionUrl ? '浏览器打开' : '地址不可用'} />
                 </div>
               </div>
@@ -679,7 +734,7 @@ export const LicensePage: React.FC = () => {
           <aside className="rounded-[22px] border border-border/70 bg-surface-alt/35 p-5">
             <div className="text-sm font-black text-text">当前状态</div>
             <InfoRow label="账号" value={account?.account || '访客'} />
-            <InfoRow label="订阅" value={displayValue(subscription?.plan, account?.plan || '暂无')} />
+            <InfoRow label="订阅" value={planDisplayName(subscription?.plan || account?.plan)} />
             <InfoRow label="最近同步" value={formatTime(account?.lastOnlineAt)} />
           </aside>
         </div>

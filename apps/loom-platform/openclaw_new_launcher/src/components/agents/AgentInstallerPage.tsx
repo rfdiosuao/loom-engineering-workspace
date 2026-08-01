@@ -1889,6 +1889,7 @@ export const AgentInstallerPage: React.FC = () => {
                       <button
                         type="button"
                         key={component.id}
+                        data-agent-component-id={component.id}
                         onClick={() => setSelectedId(component.id)}
                         disabled={controlsLocked}
                         className={`flex w-full items-center gap-4 border-b border-border/60 px-4 py-4 text-left transition last:border-b-0 ${

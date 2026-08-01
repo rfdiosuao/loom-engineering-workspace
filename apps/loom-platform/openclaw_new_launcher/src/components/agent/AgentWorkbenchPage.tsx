@@ -333,6 +333,8 @@ export function AgentWorkbenchPage() {
 
   const [bootstrap, setBootstrap] = useState<AgentBootstrapResponse | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
+  const [startupError, setStartupError] = useState('');
+  const [startupRequestVersion, setStartupRequestVersion] = useState(0);
   const [conversationLoading, setConversationLoading] = useState(false);
   const [query, setQuery] = useState('');
   const [searchState, dispatchSearch] = useReducer(conversationSearchReducer, initialConversationSearchState);
@@ -368,16 +370,26 @@ export function AgentWorkbenchPage() {
 
   useEffect(() => {
     let active = true;
+    setInitialLoading(true);
+    setStartupError('');
     void Promise.allSettled([agentApi.bootstrap(), agentApi.sessions({ limit: 100 })]).then(([bootstrapResult, sessionsResult]) => {
       if (!active) return;
-      if (bootstrapResult.status === 'fulfilled') setBootstrap(bootstrapResult.value);
-      else showToast(errorMessage(bootstrapResult.reason, '智能体状态读取失败'), 'error');
+      if (bootstrapResult.status === 'fulfilled') {
+        setBootstrap(bootstrapResult.value);
+        setStreamStatus('idle');
+      } else {
+        const message = errorMessage(bootstrapResult.reason, '智能体状态读取失败');
+        setBootstrap(null);
+        setStartupError(message);
+        setStreamStatus('error');
+        showToast(message, 'error');
+      }
       if (sessionsResult.status === 'fulfilled') useAgentStore.getState().setSessions(sessionsResult.value.sessions);
       else showToast(errorMessage(sessionsResult.reason, '会话列表读取失败'), 'error');
       setInitialLoading(false);
     });
     return () => { active = false; };
-  }, []);
+  }, [startupRequestVersion]);
 
   useEffect(() => {
     const normalized = query.trim();
@@ -525,6 +537,10 @@ export function AgentWorkbenchPage() {
   }, []);
 
   const createSession = useCallback(() => {
+    if (startupError || !bootstrap) {
+      showToast(startupError || '智能体仍在连接，请稍后重试。', 'error');
+      return;
+    }
     const now = new Date().toISOString();
     const sessionId = localId();
     const runtimeProfileId = 'loom-native';
@@ -544,7 +560,7 @@ export function AgentWorkbenchPage() {
     void ensureRemoteSession(sessionId).catch((reason: unknown) => {
       showToast(`${errorMessage(reason, '新对话创建失败')}，草稿已保留`, 'error');
     });
-  }, [ensureRemoteSession]);
+  }, [bootstrap, ensureRemoteSession, startupError]);
 
   const renameSession = async (session: AgentSession, title: string) => {
     try {
@@ -741,8 +757,13 @@ export function AgentWorkbenchPage() {
           query={query}
           loading={initialLoading || searchState.status === 'loading'}
           error={conversationSearchError(searchState, query)}
+          newDisabled={initialLoading || Boolean(startupError) || !bootstrap}
+          newDisabledReason={initialLoading ? '智能体正在连接' : startupError || '智能体尚未就绪'}
           onQueryChange={setQuery}
-          onRetry={() => setSearchRequestVersion((version) => version + 1)}
+          onRetry={() => {
+            setSearchRequestVersion((version) => version + 1);
+            if (startupError) setStartupRequestVersion((version) => version + 1);
+          }}
           onSelect={(sessionId) => useAgentStore.getState().setCurrentSession(sessionId)}
           onNew={createSession}
           onRename={renameSession}
@@ -755,6 +776,8 @@ export function AgentWorkbenchPage() {
             currentRun={currentRun}
             sending={sending}
             loading={conversationLoading}
+            unavailableMessage={startupError}
+            onUnavailableRetry={() => setStartupRequestVersion((version) => version + 1)}
             busyKey={busyKey}
             onRunAction={matrixAction}
             onOpenRunDetails={openRunDetails}
@@ -765,7 +788,7 @@ export function AgentWorkbenchPage() {
             draft={draft}
             session={currentSession}
             bootstrap={bootstrap}
-            disabled={!currentSession || currentSession.status === 'archived'}
+            disabled={Boolean(startupError) || !bootstrap || !currentSession || currentSession.status === 'archived'}
             sending={sending}
             running={runActive}
             paused={currentRun?.status === 'paused'}

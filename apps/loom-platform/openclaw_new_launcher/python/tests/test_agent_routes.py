@@ -187,6 +187,21 @@ def test_agent_shutdown_preserves_incomplete_drain_flags() -> None:
     assert response.json()["code"] == "agent_shutdown_incomplete"
 
 
+def test_agent_account_scope_change_is_not_reported_as_a_missing_resource() -> None:
+    class StaleAccountService(FakeAgentService):
+        def bootstrap(self):
+            raise KeyError("agent account scope")
+
+    client, _service = _client(StaleAccountService())
+
+    response = client.get("/api/agent/bootstrap")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "AGENT_ACCOUNT_CONTEXT_CHANGED"
+    assert response.json()["error"] == "模型账号已切换，智能体需要重新连接，请刷新后重试。"
+    assert "agent resource not found" not in response.text
+
+
 def test_sync_agent_service_calls_do_not_block_the_event_loop() -> None:
     async def scenario() -> float:
         started = time.monotonic()

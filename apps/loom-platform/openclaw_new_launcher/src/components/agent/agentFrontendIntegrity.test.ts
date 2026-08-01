@@ -10,6 +10,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import * as agentWorkbench from './AgentWorkbenchPage.tsx';
 import { AgentComposer } from './AgentComposer.tsx';
 import { ConversationSidebar } from './ConversationSidebar.tsx';
+import { ConversationStream } from './ConversationStream.tsx';
 import { AgentMarkdown } from './messageBlocks.tsx';
 
 const agentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -367,6 +368,51 @@ test('Agent startup surfaces structured Bridge errors instead of generic fallbac
 
   assert.match(source, /import \{ accountApi, agentApi, matrixApi, parseErrorText \} from '\.\.\/\.\.\/services\/api';/);
   assert.match(source, /return parseErrorText\(reason\) \|\| fallback;/);
+});
+
+test('Agent startup failure blocks optimistic conversations and shows one recovery state', () => {
+  const sidebarMarkup = renderToStaticMarkup(React.createElement(
+    ConversationSidebar as unknown as React.ComponentType<Record<string, unknown>>,
+    {
+      sessions: [],
+      currentSessionId: null,
+      query: '',
+      loading: false,
+      error: null,
+      newDisabled: true,
+      newDisabledReason: '模型账号已切换，智能体需要重新连接，请刷新后重试。',
+      onRetry: () => undefined,
+      onQueryChange: () => undefined,
+      onSelect: () => undefined,
+      onNew: () => undefined,
+      onRename: async () => undefined,
+      onArchive: async () => undefined,
+    },
+  ));
+  const streamMarkup = renderToStaticMarkup(React.createElement(
+    ConversationStream as unknown as React.ComponentType<Record<string, unknown>>,
+    {
+      messages: [],
+      runs: {},
+      currentRun: null,
+      sending: false,
+      loading: false,
+      busyKey: null,
+      unavailableMessage: '模型账号已切换，智能体需要重新连接，请刷新后重试。',
+      onUnavailableRetry: () => undefined,
+      onRunAction: async () => undefined,
+      onOpenRunDetails: () => undefined,
+      onResolveApproval: async () => undefined,
+      onOpenWorkbench: () => undefined,
+    },
+  ));
+
+  assert.match(sidebarMarkup, /disabled=""/);
+  assert.match(sidebarMarkup, /模型账号已切换/);
+  assert.match(streamMarkup, /role="alert"/);
+  assert.match(streamMarkup, /模型账号已切换/);
+  assert.match(streamMarkup, />重新连接</);
+  assert.doesNotMatch(streamMarkup, /开始一段新对话/);
 });
 
 test('Matrix attachment controls use Matrix device-task and campaign operations', async () => {

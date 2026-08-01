@@ -113,6 +113,148 @@ class AccountRouteResponseTests(unittest.TestCase):
         self.assertEqual(events, ["begin", "login", "end"])
         self.assertFalse(transition["active"])
 
+    def test_login_from_logged_out_state_discards_the_unscoped_agent_runtime(
+        self,
+    ) -> None:
+        app = FastAPI()
+        calls: list[str] = []
+        state = {"loggedIn": False}
+
+        class Manager:
+            def public_session(self):
+                return {
+                    "loggedIn": state["loggedIn"],
+                    **(
+                        {
+                            "account": "new@example.invalid",
+                            "accountEntitlement": {"accountId": "account-new"},
+                        }
+                        if state["loggedIn"]
+                        else {}
+                    ),
+                }
+
+            def login(self, *_args, **_kwargs):
+                calls.append("login")
+                state["loggedIn"] = True
+                return {"source": "newapi_account"}
+
+            def sync_targets(self, _session):
+                return []
+
+        ctx = _ctx(Manager())
+
+        def shutdown_agent_service() -> dict:
+            calls.append("shutdown_agent")
+            return {
+                "stopped": True,
+                "drained": True,
+                "executionMayContinue": False,
+            }
+
+        ctx.shutdown_agent_service = shutdown_agent_service
+        register_account_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls[:2], ["shutdown_agent", "login"])
+
+    def test_login_from_logged_out_state_stays_fail_closed_when_agent_shutdown_is_indeterminate(
+        self,
+    ) -> None:
+        app = FastAPI()
+        login_called = threading.Event()
+
+        class Manager:
+            def public_session(self):
+                return {"loggedIn": False}
+
+            def login(self, *_args, **_kwargs):
+                login_called.set()
+                return {"source": "newapi_account"}
+
+        ctx = _ctx(Manager())
+        ctx.shutdown_agent_service = lambda: {
+            "stopped": False,
+            "drained": False,
+            "outcomeIndeterminate": True,
+            "executionMayContinue": True,
+        }
+        register_account_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(login_called.is_set())
+        self.assertTrue(response.json()["cleanup"]["executionMayContinue"])
+
+    def test_login_from_logged_out_state_stays_fail_closed_when_agent_shutdown_raises(
+        self,
+    ) -> None:
+        app = FastAPI()
+        login_called = threading.Event()
+        logs: list[str] = []
+
+        class Manager:
+            def public_session(self):
+                return {"loggedIn": False}
+
+            def login(self, *_args, **_kwargs):
+                login_called.set()
+                return {"source": "newapi_account"}
+
+        def shutdown_agent_service() -> dict:
+            raise RuntimeError("shutdown failed apiKey=do-not-leak")
+
+        ctx = _ctx(Manager())
+        ctx.append_log = logs.append
+        ctx.shutdown_agent_service = shutdown_agent_service
+        register_account_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(login_called.is_set())
+        self.assertNotIn("do-not-leak", repr(response.json()))
+        self.assertNotIn("do-not-leak", "".join(logs))
+
+    def test_login_from_logged_out_state_rejects_a_malformed_agent_shutdown_result(
+        self,
+    ) -> None:
+        app = FastAPI()
+        login_called = threading.Event()
+
+        class Manager:
+            def public_session(self):
+                return {"loggedIn": False}
+
+            def login(self, *_args, **_kwargs):
+                login_called.set()
+                return {"source": "newapi_account"}
+
+        ctx = _ctx(Manager())
+        ctx.shutdown_agent_service = lambda: None
+        register_account_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/account/login",
+            json={"email": "new@example.invalid", "password": "secret"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(login_called.is_set())
+        self.assertTrue(response.json()["cleanup"]["executionMayContinue"])
+
     def test_account_transition_fails_closed_when_current_identity_cannot_be_read(
         self,
     ) -> None:
@@ -532,6 +674,18 @@ class AccountRouteResponseTests(unittest.TestCase):
 
         self.assertIn("密码错误", message)
         self.assertNotIn("invalid username", message.lower())
+
+    def test_subscription_not_found_does_not_instruct_a_logged_in_user_to_login(self) -> None:
+        message = _friendly_account_error("HTTP_404: resource not found", "subscription")
+
+        self.assertEqual(message, "模型账户服务暂不可用，请稍后重试；当前已显示上次安全快照。")
+        self.assertNotIn("密码登录", message)
+
+    def test_sync_not_found_does_not_offer_an_unrelated_password_login_recovery(self) -> None:
+        message = _friendly_account_error("HTTP_404: resource not found", "sync")
+
+        self.assertEqual(message, "模型账号接口暂不可用，请稍后重试")
+        self.assertNotIn("密码登录", message)
 
     def test_login_email_code_occupied_error_is_not_shown_as_registration_failure(self) -> None:
         app = FastAPI()

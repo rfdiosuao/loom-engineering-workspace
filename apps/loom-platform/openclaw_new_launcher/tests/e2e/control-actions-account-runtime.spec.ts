@@ -51,7 +51,7 @@ test('agent installer controls select, inspect, detect, and submit only mocked i
       : component),
   };
   await audit.registerRoute('GET', '/api/components/status', { value: notInstalled });
-  for (const componentId of ['claude-code', 'opencode', 'openclaw-companion']) {
+  for (const componentId of ['claude-code', 'opencode', 'openclaw-companion', 'grok-build', 'pi']) {
     await audit.registerRoute('GET', `/api/components/model-config/status?componentId=${componentId}`, {
       value: {
         status: {
@@ -82,17 +82,23 @@ test('agent installer controls select, inspect, detect, and submit only mocked i
   await expect(main.getByText('前置环境已就绪')).toHaveCount(0);
 
   const agents = [
-    ['ChatGPT Codex 原版', /^1\s.*ChatGPT Codex 原版/],
-    ['Claude Code', /^2\s.*Claude Code/],
-    ['opencode', /^3\s.*opencode/],
-    ['OpenClaw', /^4\s.*OpenClaw/],
-    ['Hermes', /^5\s.*Hermes/],
+    ['codex-desktop', 'ChatGPT Codex 原版'],
+    ['chatgpt-desktop', 'ChatGPT Desktop'],
+    ['codex-cli', 'Codex CLI'],
+    ['claude-code', 'Claude Code'],
+    ['opencode', 'opencode'],
+    ['openclaw-companion', 'OpenClaw'],
+    ['hermes', 'Hermes'],
+    ['grok-build', 'Grok Build'],
+    ['pi', 'Pi'],
+    ['goose', 'Goose'],
+    ['gemini-cli', 'Gemini CLI'],
   ] as const;
-  for (const [heading, buttonName] of agents) {
-    await main.getByRole('button', { name: buttonName }).click();
+  for (const [componentId, heading] of agents) {
+    await main.locator(`[data-agent-component-id="${componentId}"]`).click();
     await expect(main.getByRole('heading', { name: heading, exact: true })).toBeVisible();
   }
-  await main.getByRole('button', { name: /^1\s.*ChatGPT Codex 原版/ }).click();
+  await main.locator('[data-agent-component-id="codex-desktop"]').click();
 
   await main.getByRole('button', { name: 'OpenAI 官方', exact: true }).click();
   await expect(main.getByRole('button', { name: '恢复 OpenAI 官方渠道' })).toBeVisible();
@@ -350,4 +356,46 @@ test('account and subscription controls refresh, navigate, sync, open mocked pay
   await expectProxyIntent(audit, beforeLogout, { method: 'POST', path: '/api/account/logout', body: null });
   await expectToast(page, '已退出模型账号');
   await expect(appMain(page).getByRole('heading', { name: '登录模型账户' })).toBeVisible();
+});
+
+test('account service outage marks cached values as read-only and localizes the default plan', async ({ audit, page }, testInfo) => {
+  const cachedAccount = {
+    ...AUDIT_ACCOUNT_WITH_CHOICES,
+    plan: 'default',
+    offline: true,
+    stale: true,
+    subscription: {
+      ...AUDIT_SUBSCRIPTION,
+      plan: 'default',
+      inviteCode: '',
+      invitationCode: '',
+      referralCode: '',
+      offline: true,
+      stale: true,
+    },
+  };
+  await page.evaluate((account) => {
+    window.localStorage.setItem('loom.startup.account.v1', JSON.stringify({
+      schema: 'loom.startup-cache.v1',
+      savedAt: Date.now(),
+      data: account,
+    }));
+  }, cachedAccount);
+  await audit.registerRoute('GET', '/api/account/current', {
+    error: 'HTTP_404: model account resource not found',
+  });
+  await expect(page.locator('[data-loom-splash]')).toBeHidden({ timeout: 12_000 });
+
+  await navigateTo(audit, 'license');
+  const main = appMain(page);
+  const warning = main.locator('[data-account-cache-warning]');
+  await expect(warning).toBeVisible();
+  await expect(warning).toContainText('当前显示上次安全快照');
+  await expect(main.getByText('基础套餐', { exact: true })).toBeVisible();
+  await expect(main.getByText('default', { exact: true })).toHaveCount(0);
+  await expect(main.getByText('服务暂未返回', { exact: true })).toBeVisible();
+  await expect(main.getByRole('button', { name: '同步模型' })).toBeDisabled();
+  await expect(main.getByRole('button', { name: '绑定当前账号' })).toBeDisabled();
+  await expect(main.getByRole('button', { name: '重试在线验证' }).first()).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('account-safe-cache-outage.png'), fullPage: false });
 });
