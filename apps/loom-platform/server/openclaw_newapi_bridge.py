@@ -596,6 +596,8 @@ def _license_service_json(path: str, body: dict[str, Any]) -> dict[str, Any]:
         headers={
             "Authorization": f"Bearer {LICENSE_ENTITLEMENT_SERVICE_TOKEN}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "LOOM-Entitlement-Bridge/1.0",
         },
         method="POST",
     )

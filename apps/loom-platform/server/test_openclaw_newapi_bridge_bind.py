@@ -596,6 +596,45 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
         self.assertEqual(invalid.exception.status_code, 502)
 
+    def test_license_service_request_identifies_bridge_and_accepts_json(self):
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = "https://license.example"
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b'{"ok": true, "entitlement": {}}'
+
+        def fake_urlopen(request, *, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return Response()
+
+        with patch.object(
+            self.bridge.urllib.request,
+            "urlopen",
+            side_effect=fake_urlopen,
+        ):
+            self.bridge._license_service_json(
+                "/api/service/account-entitlements/current",
+                {"accountId": "42"},
+            )
+
+        request = captured["request"]
+        self.assertTrue(
+            str(request.get_header("User-agent") or "").startswith(
+                "LOOM-Entitlement-Bridge/"
+            )
+        )
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(captured["timeout"], 12)
+
     def test_license_service_malformed_success_body_is_protocol_error(self):
         self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
         self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = "https://license.example"
