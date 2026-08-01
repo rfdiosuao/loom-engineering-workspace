@@ -540,7 +540,7 @@ object AgentApiController {
                                 targetPackage = packageName.orEmpty(),
                                 targetProfileId = profileId
                             )
-                            val saved = WorkflowTemplateManager.saveDraft(draft)
+                            val saved = WorkflowTemplateManager.saveLearnedSkill(draft)
                             metrics.promotionEligible = saved != null
                             metrics.templateStatus = saved?.status?.name?.lowercase(Locale.US).orEmpty()
                             metrics.templateRevision = saved?.revision ?: 0

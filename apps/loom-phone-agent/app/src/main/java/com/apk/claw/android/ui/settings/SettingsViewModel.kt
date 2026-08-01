@@ -16,6 +16,7 @@ import com.apk.claw.android.server.TokenValidator
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
 import com.apk.claw.android.widget.QRCodeDialog
+import com.apk.claw.android.workflow.WorkflowTemplateManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -69,6 +70,12 @@ class SettingsViewModel : ViewModel() {
             MenuAction.PC_PAIRING.name to SettingValue.Text(ClawApplication.instance.getString(if (phonePaired) R.string.pc_pairing_status_paired else R.string.pc_pairing_status_unpaired)),
             MenuAction.LAN_CONFIG.name to SettingValue.Text(getLanConfigTrailingText()),
             MenuAction.CONNECTION_DIAGNOSTICS.name to SettingValue.Text(ClawApplication.instance.getString(R.string.connection_diagnostics_action)),
+            MenuAction.SKILL_CENTER.name to SettingValue.Text(
+                ClawApplication.instance.getString(
+                    R.string.skill_center_count,
+                    WorkflowTemplateManager.getAllTemplates().size + 2
+                )
+            ),
             MenuAction.FLOATING_CLICK.name to SettingValue.Switch(FloatingCircleManager.isFloatingClickEnabled()),
             MenuAction.FLOATING_SIZE.name to SettingValue.Text(FloatingCircleManager.getFloatingSizeLabel(ClawApplication.instance))
         )
@@ -372,6 +379,7 @@ class SettingsViewModel : ViewModel() {
         LAN_CONFIG,
         CONNECTION_DIAGNOSTICS,
         ENHANCED_CAPABILITY,
+        SKILL_CENTER,
         LLM_CONFIG,
         FLOATING_CLICK,
         FLOATING_SIZE

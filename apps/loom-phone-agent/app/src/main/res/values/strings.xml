@@ -375,4 +375,35 @@
     <string name="enhanced_root_disabled_message">A root/Sui identity was detected. Root/Sui integration is disabled in this release, so LumiAgent will stay in standard mode.</string>
     <string name="enhanced_standard_message">LumiAgent is using standard mode. Enhanced capability failure never blocks pairing, LAN/USB connectivity, or ordinary Agent tasks.</string>
     <string name="enhanced_open_failed">Unable to open Shizuku or its official guide</string>
+
+    <!-- Skill Center and optional Linux companion -->
+    <string name="menu_skill_center">Skill Center</string>
+    <string name="skill_center_title">Skill Center</string>
+    <string name="skill_center_count">%1$d Skills</string>
+    <string name="skill_center_intro">Successful deterministic tasks are retained as reusable Skills. Read-only direct tasks can run fast on their second use; side effects keep the strict validation gate.</string>
+    <string name="skill_center_summary">%1$d of %2$d Skills are callable</string>
+    <string name="skill_runtime_title">Linux Runtime</string>
+    <string name="skill_runtime_checking">Checking companion and runtime integrity…</string>
+    <string name="skill_runtime_ready">PRoot 5.1.107.89 + Alpine 3.22.5 is ready · network denied by default</string>
+    <string name="skill_runtime_installing">Installing and running the offline health check…</string>
+    <string name="skill_runtime_missing">Optional Linux companion is not installed or initialized</string>
+    <string name="skill_runtime_damaged">Runtime integrity check failed; reinstall is required</string>
+    <string name="skill_runtime_disabled">Linux runtime is disabled; standard Agent capabilities remain available</string>
+    <string name="skill_runtime_install">Install and verify Linux runtime</string>
+    <string name="skill_runtime_recheck">Recheck Linux runtime</string>
+    <string name="skill_runtime_install_success">Linux runtime is ready</string>
+    <string name="skill_runtime_install_failed">Linux runtime setup failed: %1$s</string>
+    <string name="skill_status_ready">Ready · Agent can call it</string>
+    <string name="skill_status_needs_validation">Learned · validation required before automatic reuse</string>
+    <string name="skill_status_degraded">Paused after runtime mismatch</string>
+    <string name="skill_status_disabled">Disabled</string>
+    <string name="skill_status_runtime_required">Linux companion required</string>
+    <string name="skill_test_action">Test this Skill</string>
+    <string name="skill_agent_callable">Agent can call automatically</string>
+    <string name="skill_test_result_title">Skill test result</string>
+    <string name="skill_test_result_success">Runtime: %1$s\nDuration: %2$d ms\n\n%3$s</string>
+    <string name="skill_test_result_failed">Test failed: %1$s</string>
+    <string name="skill_delete_title">Delete learned Skill?</string>
+    <string name="skill_delete_message">Delete “%1$s”? This cannot be undone.</string>
+    <string name="skill_delete_action">Delete</string>
 </resources>

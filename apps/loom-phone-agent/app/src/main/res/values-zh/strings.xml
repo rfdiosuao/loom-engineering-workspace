@@ -375,4 +375,35 @@
     <string name="enhanced_root_disabled_message">检测到 Root/Sui 身份。此版本默认禁用 Root/Sui 集成，LumiAgent 将保持标准模式。</string>
     <string name="enhanced_standard_message">LumiAgent 正在使用标准模式。增强能力失败不会阻断配对、局域网/USB 连接或普通 Agent 任务。</string>
     <string name="enhanced_open_failed">无法打开 Shizuku 或官方指引</string>
+
+    <!-- Skill 中心与可选 Linux 伴随运行时 -->
+    <string name="menu_skill_center">Skill 中心</string>
+    <string name="skill_center_title">Skill 中心</string>
+    <string name="skill_center_count">%1$d 个 Skill</string>
+    <string name="skill_center_intro">Agent 会把成功的确定性任务沉淀为可复用 Skill。只读、直接动作可在第二次快速调用；涉及副作用的流程仍需严格验证。</string>
+    <string name="skill_center_summary">%2$d 个 Skill，已有 %1$d 个可调用</string>
+    <string name="skill_runtime_title">Linux 运行时</string>
+    <string name="skill_runtime_checking">正在检查伴随组件和运行时完整性…</string>
+    <string name="skill_runtime_ready">PRoot 5.1.107.89 + Alpine 3.22.5 已就绪 · 默认禁止联网</string>
+    <string name="skill_runtime_installing">正在安装并执行离线健康检查…</string>
+    <string name="skill_runtime_missing">尚未安装或初始化可选 Linux 伴随组件</string>
+    <string name="skill_runtime_damaged">运行时完整性检查失败，需要重新安装</string>
+    <string name="skill_runtime_disabled">Linux 运行时已停用；标准 Agent 能力不受影响</string>
+    <string name="skill_runtime_install">安装并自检 Linux 运行时</string>
+    <string name="skill_runtime_recheck">重新自检 Linux 运行时</string>
+    <string name="skill_runtime_install_success">Linux 运行时已就绪</string>
+    <string name="skill_runtime_install_failed">Linux 运行时安装失败：%1$s</string>
+    <string name="skill_status_ready">已就绪 · Agent 可调用</string>
+    <string name="skill_status_needs_validation">已学习 · 完成验证后可自动复用</string>
+    <string name="skill_status_degraded">检测到运行差异，已暂停</string>
+    <string name="skill_status_disabled">已停用</string>
+    <string name="skill_status_runtime_required">需要 Linux 伴随组件</string>
+    <string name="skill_test_action">测试这个 Skill</string>
+    <string name="skill_agent_callable">Agent 可自动调用</string>
+    <string name="skill_test_result_title">Skill 测试结果</string>
+    <string name="skill_test_result_success">运行时：%1$s\n耗时：%2$d 毫秒\n\n%3$s</string>
+    <string name="skill_test_result_failed">测试失败：%1$s</string>
+    <string name="skill_delete_title">删除已学习的 Skill？</string>
+    <string name="skill_delete_message">确定删除“%1$s”吗？删除后无法恢复。</string>
+    <string name="skill_delete_action">删除</string>
 </resources>

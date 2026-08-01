@@ -47,6 +47,7 @@ object ToolRegistry {
         register(AcceptSuggestionTool())
         register(DismissSuggestionTool())
         register(ViewBehaviorStatsTool())
+        register(RunSkillTool())
     }
 
     private fun registerTvTools() {

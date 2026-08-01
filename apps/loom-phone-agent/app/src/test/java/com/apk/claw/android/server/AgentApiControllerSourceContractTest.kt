@@ -46,14 +46,14 @@ class AgentApiControllerSourceContractTest {
     }
 
     @Test
-    fun learning_is_opt_in_sanitized_completion_only_and_draft_only() {
+    fun learning_is_opt_in_sanitized_completion_only_and_uses_guarded_skill_promotion() {
         val source = controllerSource
 
         assertTrue(source.contains("if (learnTemplate) AgentTrajectoryRecorder() else null"))
         assertTrue(source.contains("trajectoryRecorder?.beforeAction"))
         assertTrue(source.contains("trajectoryRecorder?.afterAction"))
         assertTrue(source.contains("HybridTemplateCompiler.compile"))
-        assertTrue(source.contains("WorkflowTemplateManager.saveDraft"))
+        assertTrue(source.contains("WorkflowTemplateManager.saveLearnedSkill"))
         assertTrue(source.contains("DeviceProfileProvider.current()"))
         assertTrue(source.contains("riskDeclaration = null"))
         assertTrue(!source.contains("riskDeclaration = TemplateRiskLevel.READ_ONLY"))

@@ -998,9 +998,17 @@ cargo check --locked
 8. OpenMinis 只借鉴公开接口思想，许可证边界有书面审查。
 9. 全量测试、发布来源和产物校验可复现。
 10. Shizuku 与 PRoot/Linux 均为可选能力；缺失、失效或撤权不会破坏 LumiAgent 基础功能，且任何远程入口都不能执行任意 shell。
-11. Desktop `2.4.4` 与 LumiAgent `6.64-stability` 的版本、签名、SHA256、来源提交和 release notes 一致。
+11. Desktop `2.4.4` 与 LumiAgent `6.65-stability` 的版本、签名、SHA256、来源提交和 release notes 一致。
 
-## 10. 官方参考
+## 10. 2026-08-02 Skill Center / PRoot 本地候选记录
+
+- LumiAgent 已升级到 versionCode `934`、默认版 `6.65-stability`、Android 7 版 `6.65-stability-android7`；Desktop 继续为 `2.4.4`。
+- 已实现 Skill Center、只读确定性任务首次成功后的安全沉淀、第二次模板快路径，以及 Agent 固定 `run_skill` 调用。
+- PRoot 5.1.107.89 + Alpine 3.22.5 作为独立 companion 交付本地调试候选；无 INTERNET 权限，不开放 terminal、shell、executable、argv 或 `agent.cli.batch`。
+- Android default 与 Android 7 JVM 均为 `671/671`；最终候选在 API 36 与 API 24 虚拟机的冷安装/连续 Skill instrumentation 均为 `1/1`，并完成 Skill Center 逐按钮手工路径。
+- 产物、SHA256、虚拟机证据和正式发行残余门禁见 `docs/release/2.4.4-lumiagent-6.65-skill-linux-evidence.md`。
+
+## 11. 官方参考
 
 - OpenMinis：`https://github.com/OpenMinis/OpenMinis`
 - OpenMinis Debug/Provider API：`https://github.com/OpenMinis/OpenMinis/blob/main/docs/specs/debug-server-api.md`
@@ -1010,7 +1018,7 @@ cargo check --locked
 - Shizuku API：`https://github.com/RikkaApps/Shizuku-API`
 - PRoot：`https://github.com/proot-me/proot`
 
-## 11. 下次恢复工作的首条提示词
+## 12. 下次恢复工作的首条提示词
 
 ```text
 请继续执行 docs/superpowers/plans/2026-07-31-loom-phone-connectivity-agent-ecosystem-hardening.md。

@@ -20,6 +20,7 @@ import com.apk.claw.android.floating.FloatingCircleManager
 import com.apk.claw.android.privilege.PrivilegeBackendStatus
 import com.apk.claw.android.privilege.ShizukuPrivilegeBackend
 import com.apk.claw.android.server.ConfigServerManager
+import com.apk.claw.android.ui.skill.SkillCenterActivity
 
 /**
  * 设置页面
@@ -105,6 +106,14 @@ class SettingsActivity : BaseActivity() {
 
         val capabilityGroup = findViewById<MenuGroup>(R.id.capabilityGroup)
         capabilityGroup.setTitle(getString(R.string.settings_group_enhanced_capabilities))
+        menuItems[SettingsViewModel.MenuAction.SKILL_CENTER.name] = capabilityGroup.addMenuItem(
+            leadingIcon = R.drawable.icon_book_open,
+            title = getString(R.string.menu_skill_center),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.SKILL_CENTER) },
+            showDivider = true
+        )
+        menuItems[SettingsViewModel.MenuAction.SKILL_CENTER.name]
+            ?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
         menuItems[SettingsViewModel.MenuAction.ENHANCED_CAPABILITY.name] = capabilityGroup.addMenuItem(
             leadingIcon = R.drawable.ic_settings,
             title = getString(R.string.menu_enhanced_capability),
@@ -301,6 +310,9 @@ class SettingsActivity : BaseActivity() {
                             }
                             SettingsViewModel.MenuAction.ENHANCED_CAPABILITY -> {
                                 showEnhancedCapabilityDialog(ShizukuPrivilegeBackend.status.value)
+                            }
+                            SettingsViewModel.MenuAction.SKILL_CENTER -> {
+                                startActivity(Intent(this@SettingsActivity, SkillCenterActivity::class.java))
                             }
                             SettingsViewModel.MenuAction.PC_PAIRING -> {
                                 pcPairingLauncher.launch(Intent(this@SettingsActivity, PcPairingActivity::class.java))

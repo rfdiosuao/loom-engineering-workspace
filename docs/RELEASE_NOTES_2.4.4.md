@@ -1,10 +1,23 @@
-# 麓鸣 2.4.4 / LumiAgent 6.64 发布候选说明
+# 麓鸣 2.4.4 / LumiAgent 6.65 发布候选说明
+
+> 当前配套版本：麓鸣 Desktop `2.4.4`；LumiAgent `6.65-stability`（Android 7 为
+> `6.65-stability-android7`）；手机 `versionCode` 为 `934`。
+
+## LumiAgent 6.65 新增
+
+- 新增首屏可达的 **Skill 中心**，统一展示内置 Linux Skill 与 Agent 学习沉淀的工作流。
+- 成功的只读、直接动作可在第一次执行后安全激活，第二次直接进入确定性快速路径；所有副作用、
+  视觉定位和结构选择器流程继续遵循多轮验证门禁。
+- 新增独立安装的 `Lumi Linux Runtime` 伴随 APK：PRoot `5.1.107.89` + Alpine
+  `3.22.5`，仅接受固定 Skill ID 和固定操作，不开放任意脚本、可执行路径或参数向量。
+- Linux 伴随 APK 不申请 `INTERNET` 权限，主 APK 与伴随 APK 通过签名级权限通信；安装采用
+  SHA-256/SBOM 校验、staging、健康检查、原子切换与失败回滚。
 
 ## 版本
 
 - 麓鸣 Desktop `2.4.4`
-- LumiAgent `6.64-stability`，versionCode `933`
-- Android 7 兼容变体：`6.64-stability-android7`，versionCode `933`
+- LumiAgent `6.65-stability`，versionCode `934`
+- Android 7 兼容变体：`6.65-stability-android7`，versionCode `934`
 
 本轮产品名称统一为“麓鸣”。桌面窗口、安装包产品名和应用内品牌不再使用“麓鸣AI矩阵获客工作台”等局限性名称；完整麓鸣 Logo 已恢复，启动界面原动画保持不变。
 
@@ -51,9 +64,9 @@
 
 ### PRoot/Linux 兼容运行时
 
-- 已完成共享合同、账号 workspace 隔离、资源预算、默认拒绝网络、封闭 entrypoint、原生优先路由和故障回退策略。
-- 2.4.4 未内置 PRoot、Linux rootfs、发行版包管理器或 companion 安装器；PRoot 官方许可证和未来单独分发/SBOM/签名/源码义务已形成供应链门禁。
-- 当前基准工具只区分 host harness 实测、经 SHA-256 核对的 adapter 实测和合成远程延迟模型；没有实体机 companion 数据时禁止宣称提速。
+- 商业主 APK 不内置 PRoot/rootfs；本轮提供可独立安装和卸载的 Linux companion 本地测试候选。
+- companion 包含经哈希锁定的 PRoot 5.1.107.89、Alpine 3.22.5、SBOM 与许可证说明，无 INTERNET 权限，只开放两个固定文本处理 Skill。
+- API 36 与 API 24 虚拟机已完成真实冷安装和连续执行；这只能证明本地候选可运行，不能替代实体机性能、温升、故障恢复和商业发行门禁。
 
 ## 数据与账号保护
 
@@ -64,7 +77,7 @@
 
 - 自动化测试与 Android 虚拟机不能替代实体机验收。USB 聚焦视频 30 分钟、20 次拔插、热点/Wi-Fi 切换、Android 7/10/14+、2 台并发与 10 台两小时 soak 仍需真实设备证据。
 - Shizuku 的 Android 7-10 电脑 ADB 启动、Android 11+ 无线调试、停服/升级/撤权/重启恢复仍需实体机验收。
-- 可选 PRoot/Linux companion 与 rootfs 尚未通过供应链和实体机性能门禁，因此不随本版本交付。
+- 可选 PRoot/Linux companion 已生成独立本地调试候选，但尚未通过对应源码交付、法律、商业签名和实体机性能门禁，因此不进入正式更新通道。
 - 本地候选可在没有商业代码签名的情况下用于受控测试，但不能表述为正式签名发布包；APK release 构建必须匹配仓库信任指纹。
 
 ## 发布范围
