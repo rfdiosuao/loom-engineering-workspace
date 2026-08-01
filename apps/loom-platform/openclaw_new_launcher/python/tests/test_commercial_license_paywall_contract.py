@@ -125,6 +125,16 @@ class CommercialLicensePaywallUiContractTests(unittest.TestCase):
         self.assertNotIn("gatewayAccessToken", source)
         self.assertNotIn("gatewayToken", source)
 
+    def test_visible_license_status_is_localized_instead_of_leaking_protocol_values(self) -> None:
+        source = read_text(PAYWALL_FILE)
+
+        self.assertIn("LICENSE_STATUS_LABELS", source)
+        self.assertIn("未授权", source)
+        self.assertIn("已授权", source)
+        self.assertIn("等待在线验证", source)
+        self.assertIn("{licenseStatusLabel(effectiveStatus)}", source)
+        self.assertNotIn("\n                  {effectiveStatus}\n", source)
+
     def test_app_shell_stays_available_and_phone_matrix_owns_the_paywall(self) -> None:
         source = read_text(APP_FILE)
         pages = read_text(PAGES_FILE)

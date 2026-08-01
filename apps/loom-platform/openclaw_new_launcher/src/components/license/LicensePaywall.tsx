@@ -61,6 +61,21 @@ const STATUS_COPY: Record<LicenseGateStatus, { eyebrow: string; title: string; a
   },
 };
 
+const LICENSE_STATUS_LABELS: Record<LicenseGateStatus, string> = {
+  checking: '等待在线验证',
+  authorized: '已授权',
+  unauthorized: '未授权',
+  expired: '已到期',
+  disabled: '已停用',
+  device_mismatch: '设备不匹配',
+  offline_grace: '离线授权有效',
+  service_error: '服务暂不可用',
+};
+
+function licenseStatusLabel(status: LicenseGateStatus): string {
+  return LICENSE_STATUS_LABELS[status];
+}
+
 const CAPABILITIES = [
   ['多台手机矩阵', '统一查看设备状态与执行任务'],
   ['线索与客户池', '把真实发现结果持续沉淀'],
@@ -315,7 +330,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                   <h2 className="mt-1 text-[22px] font-black leading-tight">{copy.title}</h2>
                 </div>
                 <span className="border border-current/25 bg-white/55 px-2.5 py-1 text-[11px] font-black">
-                  {effectiveStatus}
+                  {licenseStatusLabel(effectiveStatus)}
                 </span>
               </div>
               <p className="mt-2 text-[12px] font-semibold leading-5 opacity-80">{copy.action}</p>
