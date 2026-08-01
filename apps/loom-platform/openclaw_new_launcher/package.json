@@ -57,6 +57,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@lobehub/icons": "1.97.2",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
     "@types/qrcode-generator": "^0.0.16",
