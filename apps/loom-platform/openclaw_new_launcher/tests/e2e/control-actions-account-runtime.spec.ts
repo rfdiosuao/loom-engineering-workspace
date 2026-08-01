@@ -308,20 +308,13 @@ test('account and subscription controls refresh, navigate, sync, open mocked pay
   await audit.registerCommand('plugin:shell|open', { value: null });
   await navigateTo(audit, 'license');
   const main = appMain(page);
-  const accountLogo = main.locator('[data-loom-logo] img').first();
-  await expect(accountLogo).toBeVisible();
-  await expect
-    .poll(() =>
-      accountLogo.evaluate(
-        (image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0,
-      ),
-    )
-    .toBe(true);
+  await expect(main.locator('[data-account-avatar]')).toBeVisible();
+  await expect(main.locator('[data-loom-logo]')).toHaveCount(0);
   await expect(main.getByRole('heading', { name: '账户与用量' })).toBeVisible();
 
   const beforeRefresh = await markCalls(audit);
   await main.getByRole('button', { name: '刷新账号' }).click();
-  await expectProxyIntent(audit, beforeRefresh, { method: 'GET', path: '/api/account/current', body: null });
+  await expectProxyIntent(audit, beforeRefresh, { method: 'POST', path: '/api/account/sync', body: null });
 
   const beforeSync = await markCalls(audit);
   await main.getByRole('button', { name: '同步模型' }).click();
@@ -335,7 +328,7 @@ test('account and subscription controls refresh, navigate, sync, open mocked pay
   await expectProxyIntent(audit, beforeBalanceRefresh, {
     method: 'GET', path: '/api/account/subscription', body: null,
   });
-  await expectToast(page, '订阅信息已更新');
+  await expectToast(page, '余额与套餐已更新');
 
   await expect(main.getByRole('button', { name: '打开订阅页', exact: true })).toHaveCount(0);
   await expect(main.getByRole('button', { name: '微信开通 VIP', exact: true })).toHaveCount(0);
@@ -381,7 +374,7 @@ test('account service outage marks cached values as read-only and localizes the 
       data: account,
     }));
   }, cachedAccount);
-  await audit.registerRoute('GET', '/api/account/current', {
+  await audit.registerRoute('POST', '/api/account/sync', {
     error: 'HTTP_404: model account resource not found',
   });
   await expect(page.locator('[data-loom-splash]')).toBeHidden({ timeout: 12_000 });

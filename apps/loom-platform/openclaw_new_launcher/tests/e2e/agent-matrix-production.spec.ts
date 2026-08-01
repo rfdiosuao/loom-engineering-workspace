@@ -20,6 +20,8 @@ const NATIVE_AGENT_BOOTSTRAP = {
   ],
   defaultModelId: 'glm-5',
   capabilities: [],
+  executionAccess: { authorized: true, code: 'ok', message: '' },
+  permissions: { read: true, control: true, outbound: true, critical: false },
 };
 
 const SESSION = {

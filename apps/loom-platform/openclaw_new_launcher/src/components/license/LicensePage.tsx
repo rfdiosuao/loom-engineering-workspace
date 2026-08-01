@@ -559,7 +559,11 @@ export const LicensePage: React.FC = () => {
             <section className="loom-account-sidebar space-y-5">
               <div className="border-y border-border/70 py-5">
                 <div className="flex items-start gap-4">
-                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[8px] border border-border bg-surface-alt text-accent" aria-hidden="true">
+                  <span
+                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[8px] border border-border bg-surface-alt text-accent"
+                    aria-hidden="true"
+                    data-account-avatar
+                  >
                     <UserRound className="h-6 w-6" />
                   </span>
                   <div className="min-w-0">

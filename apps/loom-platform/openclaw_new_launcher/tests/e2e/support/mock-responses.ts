@@ -79,7 +79,8 @@ export const AUDIT_AGENT_BOOTSTRAP = {
     { name: 'loom.matrix.dispatch', source: 'internal', permission: 'control_safe', risk: 'safe', available: true },
     { name: 'audit.crm.lookup', source: 'mcp', permission: 'read', risk: 'safe', available: true },
   ],
-  permissions: { matrix: true, mcp: true },
+  executionAccess: { authorized: true, code: 'ok', message: '' },
+  permissions: { read: true, control: true, outbound: true, critical: false, matrix: true, mcp: true },
 };
 
 export function createBaselineSeed(): TauriMockSeed {
@@ -136,6 +137,7 @@ export function createBaselineSeed(): TauriMockSeed {
       },
       'GET /api/theme/current': { value: { theme: null, isCustom: false, merchantId: null } },
       'GET /api/account/current': { value: { account: AUDIT_ACCOUNT } },
+      'POST /api/account/sync': { value: { account: AUDIT_ACCOUNT, syncResults: [] } },
       'GET /api/account/capabilities': {
         value: {
           capabilities: {

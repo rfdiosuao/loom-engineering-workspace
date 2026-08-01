@@ -1,12 +1,14 @@
 # LOOM 手机连接与 Agent 生态加固实施计划
 
 > 日期：2026-07-31  
-> 当前基线：LOOM Desktop 2.4.0 / LumiAgent 6.63；交付目标：麓鸣 Desktop 2.4.3 / LumiAgent 6.64
+> 当前基线：LOOM Desktop 2.4.0 / LumiAgent 6.63；交付目标：麓鸣 Desktop 2.4.4 / LumiAgent 6.64
 > 适用仓库：`loom-engineering-workspace`  
 > 状态：执行中，本文档是后续开发的唯一任务入口
 > 原则：先修基础连接与模型配置，再扩展 Agent；所有外部发布、付费模型和手机写操作继续遵守确认、审计和幂等规则。
 
 > 2026-08-01 版本更正：用户明确将最终 Desktop 候选从 `2.4.2` 调整为 `2.4.3`。本文后续 Task 13 和历史证据中的 `2.4.2` 保留为当时的执行记录；当前版本合同、构建、哈希、安装冒烟和交付验收一律以 `2.4.3` 为准，LumiAgent 继续使用独立版本线 `6.64`。
+
+> 2026-08-01 再次更正：用户确认本轮 Desktop 已更新到下一补丁版 `2.4.4`。2.4.2/2.4.3 记录只作为历史候选证据保留；新的版本合同、构建、哈希、虚拟机与交付验收以 `2.4.4` 为准，LumiAgent 暂继续使用独立版本线 `6.64`。
 
 ## 1. 目标与非目标
 
@@ -22,7 +24,7 @@
 8. 把此前审查中尚未闭环的 P0/P1 可靠性问题纳入同一执行清单。
 9. 增加可选 PRoot/Linux 兼容运行时，让适合本地批处理和 CLI 的任务减少远程往返；原生 Android 能力仍是默认快路径。
 10. 增加可选 Shizuku 增强能力层，以类型化、可审计、可撤销的接口补足标准 Android 权限，未授权时自动降级。
-11. 完成麓鸣 Desktop 2.4.3 与 LumiAgent 6.64 的版本冻结、全量验证、可复现构建和产物校验。
+11. 完成麓鸣 Desktop 2.4.4 与 LumiAgent 6.64 的版本冻结、全量验证、可复现构建和产物校验。
 
 ### 1.2 非目标
 
@@ -837,6 +839,12 @@ cd apps/loom-phone-agent
 - LumiAgent 从同一干净提交重新生成 default 与 Android 7 APK；精确候选分别在 API 36 与 API 24 AVD 冷启动成功、无应用错误，instrumentation 各 `6/6`。
 - 两份 APK 的 PRoot/OpenMinis/rootfs/发行版/BusyBox 条目扫描命中均为 `0`；手机“小 Linux”仍未内置，不得宣称已经交付或提速。
 - 2.4.3 三份候选的路径、大小、SHA256、签名、自动化、虚拟机结果和未通过门禁详见 `docs/release/2.4.3-build-evidence.md`。
+
+**2026-08-01 2.4.4 版本更正**
+
+- 用户确认最终 Desktop 候选继续升级为 `2.4.4`；2.4.3 产物保留为历史中间证据，不得冒充本轮最终候选。
+- Desktop 五处版本源、版本合同和发布候选说明统一切换到 `2.4.4`；LumiAgent 暂保持 versionCode `933`、default `6.64-stability`、Android 7 `6.64-stability-android7`。
+- 2.4.4 必须从包含本轮账户、Agent 门禁、品牌和 Windows CLI 修复的干净提交重新构建，并重新生成哈希、签名与虚拟机证据。
 
 ## 6. PR 与 Worktree 划分
 
