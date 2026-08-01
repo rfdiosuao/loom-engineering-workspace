@@ -16,6 +16,7 @@ interface AgentComposerProps {
   session: AgentSession | null;
   bootstrap: AgentBootstrapResponse | null;
   disabled?: boolean;
+  disabledReason?: string;
   sending?: boolean;
   running?: boolean;
   paused?: boolean;
@@ -40,6 +41,7 @@ export function AgentComposer({
   session,
   bootstrap,
   disabled,
+  disabledReason = '',
   sending,
   running,
   paused,
@@ -61,6 +63,16 @@ export function AgentComposer({
   return (
     <div className="shrink-0 border-t border-border bg-surface px-4 pb-4 pt-3">
       <div className="mx-auto w-full max-w-[920px] overflow-visible rounded-[8px] border border-border-strong bg-input shadow-[0_10px_30px_rgba(5,35,29,0.08)] focus-within:ring-2 focus-within:ring-accent/15">
+        {disabled && disabledReason ? (
+          <div
+            id="agent-composer-disabled-reason"
+            role="status"
+            className="flex min-h-9 items-center border-b border-status-warning/25 bg-status-warning/8 px-4 text-xs font-semibold text-text-muted"
+            data-agent-composer-disabled-reason
+          >
+            {disabledReason}
+          </div>
+        ) : null}
         {paused ? (
           <div role="status" className="flex min-h-9 items-center border-b border-status-warning/25 bg-status-warning/8 px-4 text-xs font-semibold text-text-muted">
             任务已安全暂停，可继续执行或中断本轮任务。
@@ -98,6 +110,7 @@ export function AgentComposer({
           }}
           placeholder={APP_TASK_PLACEHOLDER}
           aria-label="消息内容"
+          aria-describedby={disabled && disabledReason ? 'agent-composer-disabled-reason' : undefined}
           rows={3}
           className="max-h-44 min-h-[86px] w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 text-text outline-none placeholder:text-text-subtle disabled:opacity-60"
         />

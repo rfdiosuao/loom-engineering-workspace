@@ -316,6 +316,7 @@ class AgentService:
 
     def bootstrap(self) -> Json:
         self._require_current_account()
+        execution_access = self._execution_access()
         runtime_status = redact_sensitive(self.runtime.status(NATIVE_RUNTIME_PROFILE_ID))
         if not isinstance(runtime_status, Mapping):
             runtime_status = {}
@@ -340,7 +341,13 @@ class AgentService:
             "models": models,
             "defaultModelId": default_model_id,
             "capabilities": capabilities,
-            "permissions": {"read": True, "control": True, "outbound": True, "critical": False},
+            "executionAccess": execution_access,
+            "permissions": {
+                "read": True,
+                "control": bool(execution_access["authorized"]),
+                "outbound": bool(execution_access["authorized"]),
+                "critical": False,
+            },
             "policy": {
                 "mode": self.policy.approval_mode,
                 "approvalRequired": ["critical"] if self.policy.approval_mode == "weak" else ["outbound", "critical"],
@@ -1039,15 +1046,25 @@ class AgentService:
             self._require_current_account()
         except KeyError:
             return False
+        return bool(self._execution_access()["authorized"])
+
+    def _execution_access(self) -> Json:
         entitlement = getattr(self.account_manager, "account_entitlement", None)
         current_state = getattr(entitlement, "current_state", None)
         if not callable(current_state):
-            return True
+            return {"authorized": True, "code": "ok", "message": ""}
         try:
             state = current_state()
         except Exception:
-            return False
-        return isinstance(state, Mapping) and state.get("authorized") is True
+            state = {}
+        if isinstance(state, Mapping) and state.get("authorized") is True:
+            return {"authorized": True, "code": "ok", "message": ""}
+        return {
+            "authorized": False,
+            "code": "AGENT_ENTITLEMENT_REQUIRED",
+            "message": "商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。",
+            "action": "open_account_entitlement",
+        }
 
     def _require_execution_access(self) -> None:
         self._require_current_account()

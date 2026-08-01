@@ -94,6 +94,25 @@ test('Agent header leaves conversation creation and run details to their context
   assert.doesNotMatch(source, /run\.runId/);
 });
 
+test('inactive commercial entitlement blocks every execution entry without creating a ghost session', async () => {
+  const workbench = utf8.decode(await readFile(join(agentDirectory, 'AgentWorkbenchPage.tsx')));
+  const composer = utf8.decode(await readFile(join(agentDirectory, 'AgentComposer.tsx')));
+  const stream = utf8.decode(await readFile(join(agentDirectory, 'ConversationStream.tsx')));
+
+  assert.match(workbench, /const executionGate = agentExecutionGate\(bootstrap\)/);
+  assert.match(workbench, /newDisabled=\{[^}]*executionGate\.blocked/);
+  assert.match(workbench, /disabled=\{[^}]*executionGate\.blocked/);
+  assert.match(workbench, /if \(executionGate\.blocked\)/);
+  assert.match(workbench, /purgeSessionState\(sessionId\)/);
+  assert.match(workbench, /openFeature\('license'\)/);
+  assert.match(utf8.decode(await readFile(join(agentDirectory, 'AgentHeader.tsx'))), /授权后可用/);
+  assert.match(composer, /disabledReason/);
+  assert.match(composer, /data-agent-composer-disabled-reason/);
+  assert.match(stream, /data-agent-entitlement-gate/);
+  assert.match(stream, /前往模型账号/);
+  assert.doesNotMatch(workbench, /新对话创建失败'\)}，草稿已保留/);
+});
+
 test('ordinary run summaries never render raw run campaign or device identifiers', async () => {
   const attachment = utf8.decode(await readFile(join(agentDirectory, 'AgentRunAttachment.tsx')));
 
@@ -137,7 +156,8 @@ test('Agent visual identity uses a bundled brand mark with restrained status mot
   assert.match(brand, /export const LoomAgentMark/);
   assert.match(brand, /new URL\('\.\.\/\.\.\/assets\/luming-logo-full\.png', import\.meta\.url\)/);
   assert.match(brand, /const LoomBrandImage/);
-  assert.match(brand, /onError=\{\(\) => setFailed\(true\)\}/);
+  assert.match(brand, /onError=\{advanceLogoCandidate\}/);
+  assert.match(brand, /setCandidateIndex/);
   assert.doesNotMatch(brand, /\/loom-motion\/(?:agent-core-v1|luming-wordmark(?:-light|-gold)?)\.png/);
   assert.equal((await stat(join(agentDirectory, '..', '..', 'assets', 'luming-logo-full.png'))).isFile(), true);
   assert.match(brand, /data-agent-executing/);
@@ -147,7 +167,9 @@ test('Agent visual identity uses a bundled brand mark with restrained status mot
   assert.match(header, /\blg:flex\b/);
   assert.doesNotMatch(header, /\bxl:flex\b|\bAGT\b/);
 
-  assert.match(stream, /<LoomAgentMark/);
+  assert.doesNotMatch(stream, /<LoomAgentMark/);
+  assert.match(stream, /MessageSquareText/);
+  assert.match(stream, /ShieldCheck/);
   assert.doesNotMatch(stream, /\bAGT\b/);
   assert.match(thinking, /<LoomAgentMark[^>]*executing/);
   assert.match(thinking, /loom-agent-waveform/);

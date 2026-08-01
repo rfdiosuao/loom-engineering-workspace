@@ -165,9 +165,17 @@ export interface AgentRuntimeProfile {
   error?: AgentError;
 }
 
+export interface AgentExecutionAccess {
+  authorized: boolean;
+  code: 'ok' | 'AGENT_ENTITLEMENT_REQUIRED';
+  message: string;
+  action?: 'open_account_entitlement';
+}
+
 export interface AgentBootstrapResponse {
   runtimeProfiles: AgentRuntimeProfile[];
   capabilities: AgentCapabilitySummary[];
+  executionAccess: AgentExecutionAccess;
   defaultRuntimeProfileId?: string;
   models?: AgentModelSummary[];
   defaultModelId?: string;

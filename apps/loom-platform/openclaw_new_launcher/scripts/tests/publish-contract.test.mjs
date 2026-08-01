@@ -915,7 +915,9 @@ function runNode(args, phoneRuntime = {}) {
       clearTimeout(timer);
       reject(error);
     });
-    child.on('exit', (code) => {
+    // `exit` may fire before the stdout/stderr pipes are fully drained. Waiting
+    // for `close` prevents transient empty or truncated JSON under parallel CI.
+    child.on('close', (code) => {
       clearTimeout(timer);
       if (code === 0) {
         resolve(stdout);

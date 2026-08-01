@@ -23,7 +23,12 @@ import { AgentDebugger } from './AgentDebugger';
 import { AgentHeader } from './AgentHeader';
 import { ConversationSidebar } from './ConversationSidebar';
 import { ConversationStream } from './ConversationStream';
-import { agentModelUpdateRequest, selectCurrentAgentRun } from './agentViewModel';
+import {
+  agentExecutionGate,
+  agentModelUpdateRequest,
+  isAgentEntitlementRequired,
+  selectCurrentAgentRun,
+} from './agentViewModel';
 
 type StreamStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'error';
 
@@ -361,6 +366,23 @@ export function AgentWorkbenchPage() {
     [activeRuns, currentSession?.activeRunId, currentSessionId],
   );
   const debuggerRun = debuggerRunId ? activeRuns[debuggerRunId] || null : null;
+  const executionGate = agentExecutionGate(bootstrap);
+
+  const handleExecutionDenial = useCallback((reason: unknown): boolean => {
+    if (!isAgentEntitlementRequired(reason)) return false;
+    setBootstrap((current) => current ? {
+      ...current,
+      executionAccess: {
+        authorized: false,
+        code: 'AGENT_ENTITLEMENT_REQUIRED',
+        message: '商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。',
+        action: 'open_account_entitlement',
+      },
+      permissions: { read: true, control: false, outbound: false, critical: false },
+    } : current);
+    showToast(errorMessage(reason, '商业矩阵授权尚未激活，请先绑定授权码。'), 'error');
+    return true;
+  }, []);
 
   useEffect(() => {
     useAgentStore.getState().setDebuggerOpen(false);
@@ -541,6 +563,10 @@ export function AgentWorkbenchPage() {
       showToast(startupError || '智能体仍在连接，请稍后重试。', 'error');
       return;
     }
+    if (executionGate.blocked) {
+      showToast(executionGate.message, 'error');
+      return;
+    }
     const now = new Date().toISOString();
     const sessionId = localId();
     const runtimeProfileId = 'loom-native';
@@ -558,9 +584,13 @@ export function AgentWorkbenchPage() {
     store.setCurrentSession(sessionId);
     store.updateDraft(sessionId, { runtimeProfileId });
     void ensureRemoteSession(sessionId).catch((reason: unknown) => {
-      showToast(`${errorMessage(reason, '新对话创建失败')}，草稿已保留`, 'error');
+      if (handleExecutionDenial(reason)) {
+        useAgentStore.getState().purgeSessionState(sessionId);
+        return;
+      }
+      showToast(`${errorMessage(reason, '新对话创建失败')}，本地草稿已保留`, 'error');
     });
-  }, [bootstrap, ensureRemoteSession, startupError]);
+  }, [bootstrap, ensureRemoteSession, executionGate.blocked, executionGate.message, handleExecutionDenial, startupError]);
 
   const renameSession = async (session: AgentSession, title: string) => {
     try {
@@ -592,6 +622,10 @@ export function AgentWorkbenchPage() {
 
   const sendMessage = async () => {
     if (!currentSessionId || sending) return;
+    if (executionGate.blocked) {
+      showToast(executionGate.message, 'error');
+      return;
+    }
     const initialDraft = useAgentStore.getState().drafts[currentSessionId] || draft;
     if (!initialDraft.text.trim() && initialDraft.attachments.length === 0) return;
     const submissionCoordinator = submissionCoordinatorRef.current;
@@ -636,7 +670,9 @@ export function AgentWorkbenchPage() {
       setTraceRefreshToken((value) => value + 1);
       succeeded = true;
     } catch (reason) {
-      showToast(`${errorMessage(reason, '发送失败')}，草稿已保留`, 'error');
+      if (!handleExecutionDenial(reason)) {
+        showToast(`${errorMessage(reason, '发送失败')}，草稿已保留`, 'error');
+      }
     } finally {
       submissionCoordinator.settle(submissionSessionId, succeeded);
       setSending(false);
@@ -757,8 +793,8 @@ export function AgentWorkbenchPage() {
           query={query}
           loading={initialLoading || searchState.status === 'loading'}
           error={conversationSearchError(searchState, query)}
-          newDisabled={initialLoading || Boolean(startupError) || !bootstrap}
-          newDisabledReason={initialLoading ? '智能体正在连接' : startupError || '智能体尚未就绪'}
+          newDisabled={initialLoading || Boolean(startupError) || !bootstrap || executionGate.blocked}
+          newDisabledReason={initialLoading ? '智能体正在连接' : startupError || executionGate.message || '智能体尚未就绪'}
           onQueryChange={setQuery}
           onRetry={() => {
             setSearchRequestVersion((version) => version + 1);
@@ -778,6 +814,10 @@ export function AgentWorkbenchPage() {
             loading={conversationLoading}
             unavailableMessage={startupError}
             onUnavailableRetry={() => setStartupRequestVersion((version) => version + 1)}
+            executionBlocked={executionGate.blocked}
+            executionTitle={executionGate.title}
+            executionMessage={executionGate.message}
+            onOpenAccount={() => openFeature('license')}
             busyKey={busyKey}
             onRunAction={matrixAction}
             onOpenRunDetails={openRunDetails}
@@ -788,7 +828,8 @@ export function AgentWorkbenchPage() {
             draft={draft}
             session={currentSession}
             bootstrap={bootstrap}
-            disabled={Boolean(startupError) || !bootstrap || !currentSession || currentSession.status === 'archived'}
+            disabled={Boolean(startupError) || !bootstrap || executionGate.blocked || !currentSession || currentSession.status === 'archived'}
+            disabledReason={executionGate.blocked ? executionGate.message : startupError}
             sending={sending}
             running={runActive}
             paused={currentRun?.status === 'paused'}

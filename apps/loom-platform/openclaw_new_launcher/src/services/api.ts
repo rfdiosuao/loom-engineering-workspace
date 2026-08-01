@@ -130,6 +130,9 @@ function friendlyErrorText(text: string): string {
   if (/managed model account must be signed in again|agent_account_relogin_required/i.test(text)) {
     return '模型账号登录已失效，请重新登录后再重试。';
   }
+  if (/agent_entitlement_required|account[_ ]entitlement.*inactive/i.test(text)) {
+    return '商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。';
+  }
   if (/agent resource not found|agent_not_found/i.test(text)) {
     return '当前智能体资源已不存在，请刷新会话列表后重试。';
   }

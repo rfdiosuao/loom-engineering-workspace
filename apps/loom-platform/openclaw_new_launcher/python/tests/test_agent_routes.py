@@ -202,6 +202,26 @@ def test_agent_account_scope_change_is_not_reported_as_a_missing_resource() -> N
     assert "agent resource not found" not in response.text
 
 
+def test_agent_entitlement_denial_is_actionable_and_never_leaks_internal_protocol_text() -> None:
+    class InactiveEntitlementService(FakeAgentService):
+        def create_session(self, body):
+            raise PermissionError(
+                "AGENT_ENTITLEMENT_REQUIRED: account entitlement is inactive"
+            )
+
+    client, _service = _client(InactiveEntitlementService())
+
+    response = client.post("/api/agent/sessions", json={"title": "不应创建"})
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。",
+        "code": "AGENT_ENTITLEMENT_REQUIRED",
+    }
+    assert "account entitlement" not in response.text
+    assert "is inactive" not in response.text
+
+
 def test_sync_agent_service_calls_do_not_block_the_event_loop() -> None:
     async def scenario() -> float:
         started = time.monotonic()

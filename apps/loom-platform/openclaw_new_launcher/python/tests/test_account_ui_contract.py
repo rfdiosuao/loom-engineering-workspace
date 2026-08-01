@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import os
+import json
 import unittest
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LICENSE_PAGE = os.path.join(REPO_ROOT, "src", "components", "license", "LicensePage.tsx")
 BRAND_COMPONENT = os.path.join(REPO_ROOT, "src", "components", "brand", "LoomBrand.tsx")
+SIDEBAR_COMPONENT = os.path.join(REPO_ROOT, "src", "components", "sidebar", "Sidebar.tsx")
 PACKAGED_LOGO = os.path.join(REPO_ROOT, "src", "assets", "luming-logo-full.png")
 SPLASH_PAGE = os.path.join(REPO_ROOT, "src", "components", "brand", "LoomSplash.tsx")
 API_FILE = os.path.join(REPO_ROOT, "src", "services", "api.ts")
 STARTUP_CACHE_FILE = os.path.join(REPO_ROOT, "src", "services", "startupCache.ts")
 SPLASH_VIDEO = os.path.join(REPO_ROOT, "public", "loom-motion", "luming-splash-v2.mp4")
 SPLASH_POSTER = os.path.join(REPO_ROOT, "public", "loom-motion", "luming-splash-v2-poster.jpg")
+DEFAULT_THEME = os.path.join(REPO_ROOT, "data", "themes", "default", "theme.json")
+LOOM_THEME = os.path.join(REPO_ROOT, "data", "themes", "loom", "theme.json")
 
 
 class AccountUiContractTests(unittest.TestCase):
@@ -38,20 +42,33 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("网页注册", source)
         self.assertIn("grid-cols-2", source)
 
-    def test_account_identity_uses_the_shared_packaged_logo(self) -> None:
+    def test_brand_uses_the_full_packaged_logo_before_the_emergency_glyph(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
         with open(BRAND_COMPONENT, "r", encoding="utf-8") as handle:
             brand_source = handle.read()
+        with open(SIDEBAR_COMPONENT, "r", encoding="utf-8") as handle:
+            sidebar_source = handle.read()
 
-        self.assertIn("import { LoomLogoMark } from '../brand/LoomBrand'", source)
-        self.assertGreaterEqual(source.count("<LoomLogoMark"), 2)
+        self.assertIn("UserRound", source)
+        self.assertEqual(source.count("<LoomLogoMark"), 1)
+        logged_in = source.split("if (loggedIn) {", 1)[1].split("\n  return (", 1)[0]
+        self.assertNotIn("<LoomLogoMark", logged_in)
+        self.assertNotIn("LoomLogoMark", sidebar_source)
         self.assertNotIn('/logo.png', source)
         self.assertIn("new URL('../../assets/luming-logo-full.png', import.meta.url).href", brand_source)
         self.assertIn("const { logoUrl } = useTheme()", brand_source)
+        self.assertIn("logoCandidates", brand_source)
+        self.assertIn("setCandidateIndex", brand_source)
+        self.assertIn("advanceLogoCandidate", brand_source)
         self.assertIn('src={logoSrc}', brand_source)
         self.assertNotIn("'/loom-motion/logo.svg'", brand_source)
         self.assertTrue(os.path.isfile(PACKAGED_LOGO))
+
+        for theme_path in (DEFAULT_THEME, LOOM_THEME):
+            with open(theme_path, "r", encoding="utf-8") as handle:
+                theme = json.load(handle)
+            self.assertEqual(theme["brand"]["logoUrl"], "")
 
     def test_default_brand_uses_the_full_motion_source_artwork(self) -> None:
         expected_sha256 = "29babd1fbb5a068e7222ad239ff237f68874b64e768625db1a64761bfe8e9624"
@@ -165,6 +182,33 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("当前显示上次安全快照", page_source)
         self.assertIn("待在线验证", page_source)
         self.assertNotIn("LoggedInPanel", page_source)
+
+    def test_account_refresh_verifies_logged_in_accounts_online_and_labels_subscription_cache(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        refresh_block = source.split("const refresh =", 1)[1].split("useEffect(() =>", 1)[0]
+        subscription_block = source.split("const loadSubscription =", 1)[1].split("const sendEmailCode =", 1)[0]
+        self.assertIn("accountApi.sync()", refresh_block)
+        self.assertIn("accountApi.current()", refresh_block)
+        self.assertIn("subscriptionIsCached", source)
+        self.assertIn("上次快照", source)
+        self.assertIn("在线数据", source)
+        self.assertIn("resp.subscription?.offline || resp.subscription?.stale", subscription_block)
+        self.assertNotIn("showToast('订阅信息已更新', 'success')", subscription_block)
+
+    def test_account_page_has_compact_hierarchy_and_explains_disabled_authorization_input(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        logged_in = source.split("if (loggedIn) {", 1)[1].split("\n  return (", 1)[0]
+        self.assertIn('data-account-compact-header', logged_in)
+        self.assertNotIn('px-8 py-7', logged_in)
+        self.assertIn('data-entitlement-helper', logged_in)
+        self.assertIn('aria-describedby="commercial-entitlement-help"', logged_in)
+        self.assertIn('当前为只读快照', logged_in)
+        self.assertNotIn('<InfoPanel label="购买入口"', logged_in)
+        self.assertNotIn('accent />', logged_in)
 
     def test_logged_in_account_page_localizes_internal_subscription_values(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:

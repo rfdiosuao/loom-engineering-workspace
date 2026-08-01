@@ -472,6 +472,27 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         self.assertIn("原版应用请在 Windows 设置中卸载", source)
         self.assertNotIn("'codex-desktop': new Set(['python_runtime'])", source)
 
+    def test_installer_summary_and_detection_details_are_novice_friendly(self) -> None:
+        with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("const upgradeCount =", source)
+        self.assertIn("data-agent-readiness-summary", source)
+        self.assertIn("可升级", source)
+        self.assertIn("whitespace-nowrap", source)
+        self.assertIn('label="安装来源"', source)
+        self.assertIn('label="已安装版本"', source)
+        self.assertIn('label="安装包大小"', source)
+        self.assertIn('label="组件类型"', source)
+        self.assertIn("displayComponentType", source)
+        self.assertIn("data-agent-advanced-detection", source)
+        self.assertIn("查看检测详情", source)
+        self.assertIn("displayDetectionStatus", source)
+        self.assertIn("detectionIdentityNote", source)
+        self.assertIn("OpenAI.Codex", source)
+        self.assertIn("程序入口名可能为 ChatGPT.exe", source)
+        self.assertNotIn("ChatGPT 桌面应用（内含 Codex）", source)
+
 
 if __name__ == "__main__":
     unittest.main()

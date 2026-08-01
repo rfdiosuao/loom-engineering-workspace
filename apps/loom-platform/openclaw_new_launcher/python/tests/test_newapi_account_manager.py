@@ -1282,6 +1282,8 @@ class NewApiAccountManagerTests(unittest.TestCase):
                     "baseUrl": "https://api.heang.top",
                     "userId": "u_123",
                     "account": "user@example.invalid",
+                    "offline": True,
+                    "stale": True,
                 },
                 "lease": {"tokenSource": "existing_launcher"},
                 "phoneAgent": {
@@ -1298,6 +1300,21 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertIn("gpt-4o", public_session["models"]["text"])
             self.assertNotIn("agnes-video-v2.0", public_session["models"]["text"])
             self.assertEqual(refreshed["lease"]["tokenSource"], "created_launcher_after_refresh_model_check")
+            self.assertFalse(refreshed["newApi"]["offline"])
+            self.assertFalse(refreshed["newApi"]["stale"])
+            self.assertFalse(public_session["offline"])
+            self.assertFalse(public_session["stale"])
+
+    def test_missing_subscription_data_never_invents_a_default_plan(self) -> None:
+        snapshot = account_module._extract_subscription_snapshot(
+            {},
+            base_url="https://api.heang.top",
+            fallback={},
+        )
+
+        self.assertEqual(snapshot["plan"], "")
+        self.assertEqual(snapshot["balance"], "")
+        self.assertEqual(snapshot["usage"]["usedQuota"], "")
 
     def test_refresh_clears_local_lease_when_server_returns_inactive_entitlement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

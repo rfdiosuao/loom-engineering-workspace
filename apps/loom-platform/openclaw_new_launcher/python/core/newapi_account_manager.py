@@ -843,7 +843,6 @@ def _extract_subscription_snapshot(payload: Any, *, base_url: str, fallback: dic
         account.get("group"),
         data.get("plan"),
         fallback.get("plan"),
-        "default",
     )
     balance = _pick_text(
         subscription.get("balance"),
@@ -2578,6 +2577,8 @@ class NewApiAccountManager:
             newapi.update({
                 "lastOnlineAt": _iso(now),
                 "graceExpiresAt": _iso(now + timedelta(days=SESSION_GRACE_DAYS)),
+                "offline": False,
+                "stale": False,
             })
             session["lastGoodModels"] = {
                 "models": models,
@@ -2715,7 +2716,7 @@ class NewApiAccountManager:
             "source": ACCOUNT_SOURCE,
             "account": _pick_text(newapi.get("account"), session.get("memberName")),
             "memberId": _pick_text(session.get("memberId")),
-            "plan": _pick_text(session.get("plan"), "default"),
+            "plan": _pick_text(session.get("plan")),
             "status": _pick_text(session.get("status"), "active"),
             "baseUrl": _pick_text(newapi.get("baseUrl"), DEFAULT_BASE_URL),
             "gatewayBaseUrl": _pick_text(session.get("gatewayBaseUrl")),

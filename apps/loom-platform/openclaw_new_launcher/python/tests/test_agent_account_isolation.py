@@ -188,6 +188,28 @@ def test_legacy_unowned_data_is_quarantined_from_scoped_accounts_by_default() ->
             scoped.get_session("session-legacy")
 
 
+def test_inactive_entitlement_bootstrap_exposes_a_read_only_execution_gate() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        service = _service(root, "account-a", authorized=False)
+        try:
+            bootstrap = service.bootstrap()
+        finally:
+            service.shutdown()
+
+    assert bootstrap["executionAccess"] == {
+        "authorized": False,
+        "code": "AGENT_ENTITLEMENT_REQUIRED",
+        "message": "商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。",
+        "action": "open_account_entitlement",
+    }
+    assert bootstrap["permissions"] == {
+        "read": True,
+        "control": False,
+        "outbound": False,
+        "critical": False,
+    }
+
+
 def test_expired_account_can_read_own_history_but_cannot_execute_or_resume() -> None:
     with tempfile.TemporaryDirectory() as root:
         active = _service(root, "account-a")

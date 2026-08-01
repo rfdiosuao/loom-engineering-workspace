@@ -200,6 +200,46 @@ function displayStatusLabel(status: string): string {
   return labels[status] || status || '-';
 }
 
+function displayComponentType(type: string): string {
+  const labels: Record<string, string> = {
+    msstore: 'Microsoft Store 应用',
+    installer: '安装程序',
+    zip: 'ZIP 便携包',
+    tgz: 'TGZ 软件包',
+    external: '外部工具',
+  };
+  return labels[type] || type || '-';
+}
+
+function displayInstallSource(component: ComponentSummary): string {
+  if (component.type === 'msstore') return component.version || 'Microsoft Store';
+  if (component.installMode === 'managed_npm') return '麓鸣隔离 npm 环境';
+  if (component.installMode === 'official_manual') return '官方安装入口';
+  if (component.installMode === 'detect_only') return '仅检测本机安装';
+  return component.version || '-';
+}
+
+function displayDetectionStatus(status: string): string {
+  const normalized = (status || '').trim().toLowerCase();
+  if (['ok', 'pass', 'passed', 'success', 'healthy'].includes(normalized)) return '通过';
+  if (['warn', 'warning', 'notice'].includes(normalized)) return '提示';
+  if (['fail', 'failed', 'error', 'missing', 'unhealthy'].includes(normalized)) return '未通过';
+  return '待确认';
+}
+
+function detectionIdentityNote(component: ComponentSummary): string {
+  if (component.id === 'codex-desktop') {
+    return '麓鸣按 Microsoft Store 包身份 OpenAI.Codex 识别 Codex Desktop。程序入口名可能为 ChatGPT.exe，但这不代表已安装 ChatGPT Desktop。';
+  }
+  if (component.id === 'chatgpt-desktop') {
+    return '麓鸣只按 Microsoft Store 包身份 OpenAI.ChatGPT 识别 ChatGPT Desktop，不会用 Codex 包或同名程序文件冒充。';
+  }
+  if (component.id === 'codex-cli') {
+    return 'Codex CLI 按独立命令行入口和版本识别，不会用 Codex Desktop 或 ChatGPT Desktop 的安装状态代替。';
+  }
+  return '';
+}
+
 function statusClass(status: string): string {
   if (status === 'ready' || status === 'started') return 'border-status-success/30 bg-status-success/10 text-status-success';
   if (status === 'upgrade_available') return 'border-status-success/40 bg-status-success/10 text-status-success';
@@ -1227,6 +1267,7 @@ export const AgentInstallerPage: React.FC = () => {
   const selectedModelConfig = selected ? modelConfigs[selected.id] : undefined;
   const selectedModelDraft = selected ? (modelDrafts[selected.id] || selectedModelConfig?.model || selectedModelConfig?.availableModels?.[0] || '') : '';
   const readyCount = components.filter((item) => item.status === 'ready' || item.status === 'started').length;
+  const upgradeCount = components.filter((item) => item.status === 'upgrade_available').length;
   const installActionsLocked = componentControlLocked(snapshot, selected);
   const selectedInstallLocked = componentInstallLocked(snapshot, selected);
   const selectedLogEntries = React.useMemo(() => {
@@ -1317,7 +1358,9 @@ export const AgentInstallerPage: React.FC = () => {
       const ok = await showConfirm({
         title: `${component.status === 'upgrade_available' ? '升级' : '安装'} ${component.name}`,
         message: isOfficialCodex
-          ? '将通过 Microsoft Store 安装 OpenAI 官方 ChatGPT 桌面应用（内含 Codex）。安装完成后由你手动登录 ChatGPT。继续吗？'
+          ? component.id === 'codex-desktop'
+            ? '将通过 Microsoft Store 安装 OpenAI 官方 Codex Desktop。麓鸣会按 OpenAI.Codex 包身份独立识别；安装完成后由你手动登录。继续吗？'
+            : '将通过 Microsoft Store 安装 OpenAI 官方 ChatGPT Desktop。麓鸣会按 OpenAI.ChatGPT 包身份独立识别；安装完成后由你手动登录。继续吗？'
           : `${component.status === 'upgrade_available' ? '升级' : '安装'}前会先检测必要环境；缺失时会尝试补齐 Git / Node.js / Python 等工具，然后下载、安装并启动智能体。继续吗？`,
         confirmText: isOfficialCodex ? '安装原版' : component.status === 'upgrade_available' ? '升级并启动' : '安装并启动',
       });
@@ -1833,8 +1876,13 @@ export const AgentInstallerPage: React.FC = () => {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            <span className="rounded-full border border-border/70 bg-surface-alt/50 px-3 py-2 text-xs font-bold text-text">
-              {readyCount}/{components.length} 已就绪
+            <span
+              data-agent-readiness-summary
+              className="whitespace-nowrap rounded-full border border-border/70 bg-surface-alt/50 px-3 py-2 text-xs font-bold text-text"
+            >
+              {readyCount} 已就绪
+              {upgradeCount ? ` · ${upgradeCount} 可升级` : ''}
+              <span className="font-medium text-text-subtle"> / 共 {components.length} 项</span>
             </span>
             <Button
               variant="quiet"
@@ -1904,7 +1952,7 @@ export const AgentInstallerPage: React.FC = () => {
                           <span className="block truncate text-base font-black text-text">{component.name}</span>
                           <span className="mt-1 block truncate text-xs text-text-muted">{component.description || component.id}</span>
                         </span>
-                        <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold ${statusClass(component.status)}`}>
+                        <span className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-bold ${statusClass(component.status)}`}>
                           {isWorking(component.status) ? <ActivityRing /> : null}
                           {displayStatusLabel(component.status)}
                         </span>
@@ -1928,16 +1976,16 @@ export const AgentInstallerPage: React.FC = () => {
                           <p className="mt-2 max-w-2xl text-sm leading-6 text-text-muted">{selected.description || selected.id}</p>
                         </div>
                       </div>
-                      <span className={`rounded-full border px-3 py-1.5 text-xs font-black ${statusClass(selected.status)}`}>
+                      <span className={`whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-black ${statusClass(selected.status)}`}>
                         {displayStatusLabel(selected.status)}
                       </span>
                     </div>
 
                     <div className="grid grid-cols-2 gap-x-5 gap-y-4 xl:grid-cols-4">
-                      <InfoTile label="版本" value={selected.version} />
-                      <InfoTile label="已安装" value={selected.installedVersion || '-'} />
-                      <InfoTile label="大小" value={formatSize(selected.size)} />
-                      <InfoTile label="类型" value={selected.type} />
+                      <InfoTile label="安装来源" value={displayInstallSource(selected)} />
+                      <InfoTile label="已安装版本" value={selected.installedVersion || '-'} />
+                      <InfoTile label="安装包大小" value={formatSize(selected.size)} />
+                      <InfoTile label="组件类型" value={displayComponentType(selected.type)} />
                     </div>
 
                     {selected.compatibility ? (
@@ -1961,16 +2009,24 @@ export const AgentInstallerPage: React.FC = () => {
                       >
                         <div className="text-sm font-black text-text">为什么认为可用</div>
                         <p className="mt-2 text-sm leading-6 text-text-muted">{selected.detection.reason}</p>
+                        {detectionIdentityNote(selected) ? (
+                          <p className="mt-2 rounded-[10px] border border-border/60 bg-surface/55 px-3 py-2 text-xs leading-5 text-text-muted">
+                            {detectionIdentityNote(selected)}
+                          </p>
+                        ) : null}
                         {selected.detection.items?.length ? (
-                          <div className="mt-3 space-y-2">
-                            {selected.detection.items.map((item, index) => (
-                              <div key={`${item.kind}-${index}`} className="grid gap-1 text-xs sm:grid-cols-[110px_minmax(0,1fr)_70px]">
-                                <span className="font-bold text-text-subtle">{item.label}</span>
-                                <span className="break-all font-mono text-text-muted">{item.value}</span>
-                                <span className="font-bold text-text-subtle">{item.status}</span>
-                              </div>
-                            ))}
-                          </div>
+                          <details data-agent-advanced-detection className="mt-3 border-t border-border/60 pt-3">
+                            <summary className="cursor-pointer text-xs font-bold text-text-muted">查看检测详情</summary>
+                            <div className="mt-3 space-y-2">
+                              {selected.detection.items.map((item, index) => (
+                                <div key={`${item.kind}-${index}`} className="grid gap-1 text-xs sm:grid-cols-[110px_minmax(0,1fr)_70px]">
+                                  <span className="font-bold text-text-subtle">{item.label}</span>
+                                  <span className="break-all font-mono text-text-muted">{item.value}</span>
+                                  <span className="font-bold text-text-subtle">{displayDetectionStatus(item.status)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </details>
                         ) : null}
                         <div className="mt-4 text-xs font-black text-text">下一步</div>
                         <p className="mt-1 text-xs leading-5 text-text-muted">{selected.detection.nextAction}</p>

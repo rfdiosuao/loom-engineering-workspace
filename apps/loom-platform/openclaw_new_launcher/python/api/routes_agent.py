@@ -89,7 +89,10 @@ def _error_response(ctx: Any, error: Exception):
         return ctx.fastapi_json({"error": str(error), "code": "AGENT_SERVICE_UNAVAILABLE"}, 503)
     if isinstance(error, PermissionError):
         return ctx.fastapi_json(
-            {"error": str(error), "code": "AGENT_ENTITLEMENT_REQUIRED"},
+            {
+                "error": "商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。",
+                "code": "AGENT_ENTITLEMENT_REQUIRED",
+            },
             403,
         )
     if isinstance(error, ValueError):

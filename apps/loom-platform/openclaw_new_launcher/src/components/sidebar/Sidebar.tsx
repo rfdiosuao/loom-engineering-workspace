@@ -1,5 +1,4 @@
 import React from 'react';
-import { LoomLogoMark } from '../brand/LoomBrand';
 import { APP_DISPLAY_NAME } from '../../version';
 import { showConfirm } from '../common';
 import { useTheme } from '../../hooks/useTheme';
@@ -243,11 +242,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="relative z-10 flex h-full w-[72px] shrink-0 flex-col border-r border-white/10 bg-app-sidebar text-white">
       <div className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-[linear-gradient(90deg,transparent,rgba(55,213,163,0.08))]" />
 
-      <div className="relative flex shrink-0 items-center justify-center pb-3 pt-4">
-        <LoomLogoMark className="h-10 w-10 shadow-[0_14px_30px_rgba(0,0,0,0.34),0_0_0_1px_rgba(223,250,255,0.04)]" />
-      </div>
-
-      <nav className="relative flex-1 overflow-y-auto px-2 pb-3">
+      <nav className="relative flex-1 overflow-y-auto px-2 pb-3 pt-3">
         <div className="space-y-2">
           {items.map((item) => (
             <NavButton

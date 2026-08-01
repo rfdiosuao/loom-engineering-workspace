@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-shell';
+import { UserRound } from 'lucide-react';
 import { BusyOverlay, showToast } from '../common';
 import { LoomLogoMark } from '../brand/LoomBrand';
 import {
@@ -41,7 +42,7 @@ function failedSyncResults(results?: RuntimeSyncResult[]): RuntimeSyncResult[] {
   return (results || []).filter((item) => item.ok === false);
 }
 
-function displayValue(value: unknown, fallback = '暂无'): string {
+function displayValue(value: unknown, fallback = '服务暂未返回'): string {
   if (value === undefined || value === null || value === '') return fallback;
   return String(value);
 }
@@ -58,10 +59,10 @@ function planDisplayName(value: unknown): string {
     enterprise: '企业套餐',
     inactive: '未激活',
   };
-  return names[plan.toLowerCase()] || plan || '暂无';
+  return names[plan.toLowerCase()] || plan || '服务暂未返回';
 }
 
-function usageValue(account: AccountSnapshot | null, keys: string[], fallback = '暂无'): string {
+function usageValue(account: AccountSnapshot | null, keys: string[], fallback = '服务暂未返回'): string {
   const usage = account?.usage;
   if (!usage || typeof usage !== 'object') return fallback;
   for (const key of keys) {
@@ -71,8 +72,8 @@ function usageValue(account: AccountSnapshot | null, keys: string[], fallback = 
   return fallback;
 }
 
-function formatTime(value?: string | number | null): string {
-  if (value === undefined || value === null || value === '') return '暂无';
+function formatTime(value?: string | number | null, fallback = '暂无'): string {
+  if (value === undefined || value === null || value === '') return fallback;
   const normalized = typeof value === 'number' && value < 10_000_000_000 ? value * 1000 : value;
   const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) return String(value);
@@ -148,6 +149,7 @@ export const LicensePage: React.FC = () => {
 
   const loggedIn = Boolean(account?.loggedIn);
   const accountWritable = loggedIn && !usingCachedAccount;
+  const subscriptionIsCached = Boolean(subscription?.offline || subscription?.stale);
   const totalModels = modelTotal(account);
   const modelHint = useMemo(() => {
     const selected = account?.selectedModels?.text;
@@ -184,7 +186,9 @@ export const LicensePage: React.FC = () => {
   const refresh = useCallback(async (options: { background?: boolean } = {}) => {
     if (!options.background) setLoading(true);
     try {
-      const resp = await accountApi.current();
+      const resp = cachedAccount.current?.loggedIn
+        ? await accountApi.sync()
+        : await accountApi.current();
       applyAccount(resp.account || null, { persist: true });
       setStatusText('');
     } catch (error) {
@@ -233,8 +237,14 @@ export const LicensePage: React.FC = () => {
       if (requestVersion !== subscriptionRequestVersion.current) return;
       setSubscription(resp.subscription || null);
       if (!quiet) {
-        setStatusText(resp.subscription?.message || '订阅信息已更新');
-        showToast('订阅信息已更新', 'success');
+        if (resp.subscription?.offline || resp.subscription?.stale) {
+          const message = resp.subscription?.message || '余额与套餐显示上次快照；服务恢复后可重新刷新。';
+          setStatusText(message);
+          showToast(message, 'info');
+        } else {
+          setStatusText('余额与套餐已从服务端更新');
+          showToast('余额与套餐已更新', 'success');
+        }
       }
     } catch (error) {
       if (requestVersion !== subscriptionRequestVersion.current) return;
@@ -491,12 +501,15 @@ export const LicensePage: React.FC = () => {
           detail={`${APP_DISPLAY_NAME} 正在连接模型服务。`}
         />
 
-        <header className="shrink-0 border-b border-border bg-surface px-8 py-7">
-          <div className="text-sm font-black text-accent">模型账户</div>
-          <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
+        <header
+          className="shrink-0 border-b border-border bg-surface px-6 py-4 xl:px-8"
+          data-account-compact-header
+        >
+          <div className="text-xs font-black text-accent">模型服务账户</div>
+          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h1 className="text-[30px] font-black leading-tight text-text">账户与用量</h1>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-text-muted">
+              <h1 className="text-[24px] font-black leading-tight text-text">账户与用量</h1>
+              <p className="mt-1 max-w-2xl text-xs leading-5 text-text-muted">
                 模型、余额、套餐和用量均以服务端账户数据为准。
               </p>
             </div>
@@ -546,9 +559,11 @@ export const LicensePage: React.FC = () => {
             <section className="loom-account-sidebar space-y-5">
               <div className="border-y border-border/70 py-5">
                 <div className="flex items-start gap-4">
-                  <LoomLogoMark className="h-12 w-12 rounded-[8px] border border-border bg-surface-alt" />
+                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[8px] border border-border bg-surface-alt text-accent" aria-hidden="true">
+                    <UserRound className="h-6 w-6" />
+                  </span>
                   <div className="min-w-0">
-                    <div className="text-xs font-black text-accent">已登录</div>
+                    <div className="text-xs font-black text-accent">模型服务账户 · 已登录</div>
                     <div className="mt-1 truncate text-xl font-black text-text" title={account?.account || ''}>
                       {account?.account || '模型账户'}
                     </div>
@@ -590,6 +605,7 @@ export const LicensePage: React.FC = () => {
                   <span className="mb-2 block text-xs font-bold text-text-subtle">授权码</span>
                   <input
                     aria-label="商业矩阵授权码"
+                    aria-describedby="commercial-entitlement-help"
                     value={entitlementCode}
                     disabled={!accountWritable}
                     onChange={(event) => setEntitlementCode(event.target.value)}
@@ -603,6 +619,15 @@ export const LicensePage: React.FC = () => {
                     placeholder="请输入商业矩阵授权码"
                   />
                 </label>
+                <p
+                  id="commercial-entitlement-help"
+                  className="mt-2 text-xs leading-5 text-text-muted"
+                  data-entitlement-helper
+                >
+                  {accountWritable
+                    ? '授权码仅提交给授权服务验证；麓鸣不会回显或写入日志。'
+                    : '当前为只读快照。请先完成在线验证，再输入授权码。'}
+                </p>
                 <button
                   type="button"
                   onClick={handleRedeemEntitlement}
@@ -643,23 +668,33 @@ export const LicensePage: React.FC = () => {
               data-subscription-external-fallback
               className="loom-account-subscription border-y border-border/70"
             >
-              <div className="flex items-center justify-between border-b border-border px-5 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
                 <div>
                   <h2 className="text-lg font-black text-text">账户与余额</h2>
                   <p className="mt-1 text-xs leading-5 text-text-muted">充值、消耗记录与 API 密钥由模型服务同步；购买与支付在浏览器完成。</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => loadSubscription(false)}
-                  disabled={busy}
-                  className="h-9 rounded-[8px] border border-border bg-surface-alt px-4 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
-                >
-                  刷新余额
-                </button>
+                <div className="flex items-center gap-3">
+                  <span
+                    className={subscriptionIsCached
+                      ? 'rounded-full bg-status-warning-soft px-3 py-1 text-xs font-black text-status-warning-ink'
+                      : 'rounded-full bg-accent/10 px-3 py-1 text-xs font-black text-accent'}
+                    data-subscription-provenance
+                  >
+                    {subscriptionIsCached ? '上次快照' : '在线数据'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => loadSubscription(false)}
+                    disabled={busy}
+                    className="h-9 rounded-[8px] border border-border bg-surface-alt px-4 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
+                  >
+                    刷新余额
+                  </button>
+                </div>
               </div>
               <div className="loom-account-subscription-body space-y-6 px-6 py-6">
                 <div className="loom-account-metric-grid grid gap-4">
-                  <MetricTile label="可用余额" value={displayValue(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} accent />
+                  <MetricTile label="可用余额" value={displayValue(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} />
                   <MetricTile label="累计消耗" value={displayValue(subscription?.usage?.usedQuota, usageValue(account, ['usedQuota', 'used', 'quotaUsed']))} />
                   <MetricTile label="请求次数" value={displayValue(subscription?.usage?.requestCount, usageValue(account, ['requestCount', 'requests']))} />
                   <MetricTile label="我的邀请码" value={displayValue(subscription?.inviteCode || subscription?.invitationCode || subscription?.referralCode, usageValue(account, ['inviteCode', 'invitationCode', 'referralCode'], '服务暂未返回'))} />
@@ -681,9 +716,8 @@ export const LicensePage: React.FC = () => {
                   </button>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <InfoPanel label="套餐到期时间" value={formatTime(subscription?.expiresAt)} />
-                  <InfoPanel label="购买入口" value={subscriptionUrl ? '浏览器打开' : '地址不可用'} />
+                <div className="max-w-xl">
+                  <InfoPanel label="套餐到期时间" value={formatTime(subscription?.expiresAt, '服务暂未返回')} />
                 </div>
               </div>
             </section>
@@ -960,8 +994,8 @@ const GhostTile: React.FC<{ label: string; value: string }> = ({ label, value })
   </div>
 );
 
-const MetricTile: React.FC<{ label: string; value: string; accent?: boolean }> = ({ label, value, accent }) => (
-  <div className={['min-w-0 rounded-[8px] border bg-surface-alt/40 p-4', accent ? 'border-accent/45' : 'border-border'].join(' ')}>
+const MetricTile: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <div className="min-w-0 rounded-[8px] border border-border bg-surface-alt/40 p-4">
     <div className="text-xs font-bold text-text-subtle">{label}</div>
     <div className="mt-2 truncate text-[22px] font-black text-text" title={value}>{value}</div>
   </div>
