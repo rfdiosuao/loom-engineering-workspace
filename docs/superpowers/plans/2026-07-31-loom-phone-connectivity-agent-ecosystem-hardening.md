@@ -854,6 +854,13 @@ cd apps/loom-phone-agent
 - API 24 虚拟机确认手机设置首组、USB 六位码、LAN 9527 启停和 Shizuku 标准模式；两份 APK 的 PRoot/OpenMinis/rootfs 等条目命中仍为 `0`。
 - 三份候选的绝对路径、大小、SHA256、签名、虚拟机/手工证据和未通过门禁详见 `docs/release/2.4.4-build-evidence.md`。
 
+**2026-08-02 entitlement 后端部署门禁记录**
+
+- 国内/海外桥接 `/api/status` 和授权服务 `/health` 均为 `200`，但桥接公共密钥路由和授权服务 account-entitlement 路由均为 `404`；故障边界已确认是生产后端程序版本，不是 Desktop 版本号或授权码格式。
+- 旧授权服务部署脚本只复制单文件、可能覆盖整个环境文件且没有 entitlement 路由冒烟；提交 `3ce44e6` 已改为完整模块部署、原子环境变量更新、程序/环境回滚、数据库只备份不自动降级和强制 `401` 路由探针。
+- 桥接 `76/76`、授权服务 `205/205`、Desktop entitlement `32/32`、部署合同 `6/6`、Relay `30/30` 和 Bash 语法均通过；隔离成功部署与强制失败回滚演练均通过。
+- 无密钥后端候选 ZIP 为 `luming-entitlement-backend-3ce44e6-r1.zip`，SHA256 `F94DD9E04E7683D9F4248E9B93627A1FF3E4FB1185866C353F155BEBE6AC8182`。生产部署和真实授权码消费仍等待用户单独确认，详见 `docs/release/2.4.4-entitlement-backend-deployment-gate.md`。
+
 ## 6. PR 与 Worktree 划分
 
 | PR | Worktree 建议 | 内容 | 依赖 |
@@ -868,7 +875,7 @@ cd apps/loom-phone-agent
 | H | `reliability-p1-publish-update-media` | Task 10 P1/P2 | 可拆 3 个更小 PR |
 | I | `phone-shizuku-capabilities` | Task 11 | Task 9 typed gateway |
 | J | `phone-linux-runtime` | Task 12 | Task 9 contract；许可证与供应链评审门禁 |
-| K | `release-2.4.2` | Task 13 | A-J 全部验收后 |
+| K | `release-2.4.4` | Task 13 | A-J 全部验收后 |
 
 禁止多个会话共享同一 worktree 写入。每个 PR 在开始前必须：
 
@@ -909,10 +916,10 @@ git status --short
 
 完成标准：聚焦手机 USB 低延迟预览；新增 Agent 有真实安装、检测、配置、回滚和会话保留证据；增强权限和 Linux 运行时均可撤销、可降级、可审计且不暴露通用 shell。
 
-### 阶段四：冻结 2.4.2 发布候选
+### 阶段四：冻结 2.4.4 发布候选
 
 1. Task 13 版本合同、全量回归和实体机门禁。
-2. 构建 Desktop 2.4.2 与 LumiAgent 6.64 default/android7 安装产物。
+2. 构建 Desktop 2.4.4 与 LumiAgent 6.64 default/android7 安装产物。
 3. 生成 SHA256、签名、SBOM、来源提交、测试计数、实体机记录和已知限制证据包。
 
 完成标准：所有任务验收证据齐全且工作树可复现；只生成本地候选，不未经确认对外发布。
@@ -989,7 +996,7 @@ cargo check --locked
 8. OpenMinis 只借鉴公开接口思想，许可证边界有书面审查。
 9. 全量测试、发布来源和产物校验可复现。
 10. Shizuku 与 PRoot/Linux 均为可选能力；缺失、失效或撤权不会破坏 LumiAgent 基础功能，且任何远程入口都不能执行任意 shell。
-11. Desktop `2.4.2` 与 LumiAgent `6.64-stability` 的版本、签名、SHA256、来源提交和 release notes 一致。
+11. Desktop `2.4.4` 与 LumiAgent `6.64-stability` 的版本、签名、SHA256、来源提交和 release notes 一致。
 
 ## 10. 官方参考
 
