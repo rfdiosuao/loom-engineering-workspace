@@ -1,6 +1,6 @@
 {
   "name": "loom-launcher",
-  "version": "2.4.0",
+  "version": "2.4.2",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
@@ -12,7 +12,7 @@
     "build": "tsc && vite build",
     "test:platform-contracts": "tsc --noEmit && node --import tsx --test src/theme/colorContract.test.ts src/components/controlIntegrity.test.ts src/components/agent/agentAttachments.test.ts src/components/agent/agentFrontendIntegrity.test.ts src/components/agent/agentViewModel.test.ts src/components/agents/agentModelConfig.test.ts src/components/matrix/matrixViewModel.test.ts src/components/matrix/phoneVideoProtocol.test.ts src/components/matrix/usePhoneVideoStream.test.ts src/components/phone/phoneConnectionState.test.ts src/components/storyboard/storyboardViewModel.test.ts src/components/update/UpdateCenter.test.ts src/services/api.test.ts src/services/platformContracts.test.ts src/services/realtimeStream.test.ts src/stores/agentStore.test.ts src/stores/appNavigation.test.ts",
     "test:ui-color-contracts": "node --import tsx --test src/theme/colorContract.test.ts src/components/controlIntegrity.test.ts",
-    "test:node-contracts": "node --test scripts/openclaw-phone-agent-fast-path.test.mjs scripts/openclaw-phone-daemon.test.mjs scripts/openclaw-media-phone.test.mjs scripts/tests/openclaw-image-phone-contract.test.mjs scripts/tests/phone-fleet-cancel.test.mjs scripts/tests/phone-frame-paths.test.mjs scripts/tests/publish-contract.test.mjs scripts/tests/vision-safety.test.mjs",
+    "test:node-contracts": "node --test scripts/openclaw-phone-agent-fast-path.test.mjs scripts/openclaw-phone-daemon.test.mjs scripts/openclaw-media-phone.test.mjs scripts/tests/openclaw-image-phone-contract.test.mjs scripts/tests/phone-fleet-cancel.test.mjs scripts/tests/phone-frame-paths.test.mjs scripts/tests/publish-contract.test.mjs scripts/tests/release-version-contract.test.mjs scripts/tests/vision-safety.test.mjs",
     "test:e2e": "tsc --noEmit -p tests/e2e/tsconfig.json && playwright test",
     "verify:phone": "powershell -ExecutionPolicy Bypass -File scripts/verify-phone-agent.ps1",
     "phone:image": "node scripts/openclaw-image-phone.mjs",

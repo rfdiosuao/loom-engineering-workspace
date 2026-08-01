@@ -38,7 +38,11 @@ val oemResDir = providers.gradleProperty("OEM_RES_DIR").orNull?.trim().orEmpty()
 
 fun releaseBuildRequested(): Boolean {
     return gradle.startParameter.taskNames.any { taskName ->
-        taskName.contains("Release", ignoreCase = true)
+        val leaf = taskName.substringAfterLast(':')
+        leaf.equals("build", ignoreCase = true) ||
+            leaf.equals("assemble", ignoreCase = true) ||
+            leaf.equals("bundle", ignoreCase = true) ||
+            Regex("^(assemble|bundle|package).*release.*$", RegexOption.IGNORE_CASE).matches(leaf)
     }
 }
 
@@ -82,8 +86,8 @@ android {
         applicationId = oemApplicationId
         minSdk = if (android7Compat) 24 else 28
         targetSdk = 36
-        versionCode = 932
-        versionName = if (android7Compat) "6.63-stability-android7" else "6.63-stability"
+        versionCode = 933
+        versionName = if (android7Compat) "6.64-stability-android7" else "6.64-stability"
         manifestPlaceholders["oemAppLabel"] = oemAppName
         manifestPlaceholders["oemAppIcon"] =
             if (oemResDir.isNotEmpty()) "@mipmap/ic_launcher" else "@drawable/ic_lumi_agent_launcher"

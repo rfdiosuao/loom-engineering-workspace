@@ -132,7 +132,7 @@ class HybridRpaPressureSuiteSourceContractTest {
     @Test
     fun stability_version_is_formalized_for_both_supported_variants() {
         val build = File("build.gradle.kts").readText()
-        assertTrue(build.contains("versionCode = 932"))
-        assertTrue(build.contains("if (android7Compat) \"6.63-stability-android7\" else \"6.63-stability\""))
+        assertTrue(build.contains("versionCode = 933"))
+        assertTrue(build.contains("if (android7Compat) \"6.64-stability-android7\" else \"6.64-stability\""))
     }
 }
