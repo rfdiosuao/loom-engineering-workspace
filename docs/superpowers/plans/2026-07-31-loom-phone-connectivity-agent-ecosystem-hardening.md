@@ -795,6 +795,16 @@ cd apps/loom-phone-agent
 - 同一批处理任务相较远程逐步调用减少模型往返并有可复现实测；若某任务比原生工具慢，调度器必须保留原生快路径。
 - workspace、Memory、输出物和缓存按账号隔离；卸载运行时能清理其可再生成数据且不删除用户业务文件。
 
+**2026-08-01 PoC/集成边界实施记录**
+
+- 新增 `loom.mobile-linux-runtime.v1` 共享合同和 fixture：runtime 只允许 `optional_companion`，`ready` 必须同时具备 artifact/SBOM SHA-256；正式 APK 和合同均固定 `bundledInApk=false`、`rootfsBundled=false`。
+- workspace 固定只读输入、隔离输出、不可见 app 私有数据/系统路径/其他账号 workspace/宿主 socket；网络默认拒绝，只放行审批后的完整 Provider hostname，凭据仅允许一次性 vault handle 且不可回读。
+- Kotlin 策略只接受 `workspace.text.batch`、`workspace.jsonl.transform`、`agent.cli.batch` 三个封闭 entrypoint ID，不接受 executable path、命令正文或任意 argv。scope、审批、过期、幂等键、输入/输出/超时预算、制品/SBOM 状态全部失败关闭。
+- 路由器保留 Android Native 快路径；Linux 缺失、禁用、损坏、空间不足或健康异常发生在执行前时，才选择已批准的原生/远程回退。执行开始后的 OOM、超时或停止统一返回 `linux_outcome_indeterminate` 并禁止自动重放。
+- 新增供应链门禁文档，记录 PRoot 官方 `GPL-2.0-or-later` 上游事实、companion/rootfs 独立制品、源码/许可证/SBOM/签名/回滚要求。2.4.2 未引入 PRoot/OpenMinis 源码、二进制、补丁、rootfs 或安装器。
+- 新增基准工具和固定 JSONL fixture；工具把原生 host harness、经 SHA-256 核对的可选 adapter 实测、远程延迟模型严格分开，并固定 `performanceClaimAllowed=false`。当前 adapter 缺失时明确输出 `not_measured_adapter_missing`，不会伪造 PRoot 提速数字。
+- 自动化结果：共享合同 `11/11` schema + fixture 通过；基准工具 smoke test 通过；LumiAgent default 与 `android7Compat` JVM 回归均为 `661/661`、`0` skipped。真实 companion/rootfs 安装、Android 7/10/14+ 内存/电量/温升与 20 次 P50/P95 性能仍属实体机和供应链门禁，不能在 2.4.2 中宣称已交付或已提速。
+
 ## Task 13：版本冻结、构建与 2.4.2 发布候选
 
 **先写版本失败测试**

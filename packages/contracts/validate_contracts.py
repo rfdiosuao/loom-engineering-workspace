@@ -58,7 +58,11 @@ def validate_contracts() -> list[str]:
         (
             CONTRACT_ROOT / "mobile-agent-runtime.schema.json",
             FIXTURE_ROOT / "mobile-agent-runtime.json",
-        )
+        ),
+        (
+            CONTRACT_ROOT / "mobile-linux-runtime.schema.json",
+            FIXTURE_ROOT / "mobile-linux-runtime.json",
+        ),
     ]
 
     for schema_path, fixture_path in contract_paths:
@@ -106,7 +110,7 @@ def main() -> int:
         print(f"Contract validation failed: {len(errors)} error(s).", file=sys.stderr)
         return 1
 
-    count = len(CONTRACT_NAMES) + 1
+    count = len(CONTRACT_NAMES) + 2
     print(f"Validated {count} Draft 2020-12 schemas and {count} fixtures.")
     return 0
 
