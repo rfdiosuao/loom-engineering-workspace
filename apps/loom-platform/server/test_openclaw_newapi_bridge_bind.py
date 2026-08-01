@@ -1393,6 +1393,44 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(410, status)
         self.assertEqual("legacy_migration_disabled", payload["code"])
 
+    def test_entitlement_refresh_issues_lease_for_valid_legacy_account_token(self):
+        entitlement = {
+            "source": "authorization_code",
+            "plan": "matrix_pro",
+            "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+            "limits": {"devices": 4, "concurrentTasks": 2},
+            "expiresAt": int(time.time()) + 86400,
+            "codeLabel": "OC-PRO-****-ZZ99",
+        }
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        connection.execute(
+            """
+            update tokens
+            set name = ?, model_limits_enabled = 1, model_limits = ?
+            where key = ?
+            """,
+            ("legacy account token", "agnes-2.0-flash", "sk-test-secret-value"),
+        )
+        connection.commit()
+        connection.close()
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.current_authorization_entitlement_from_license_server = (
+            lambda _account_id: dict(entitlement)
+        )
+
+        status, payload = self.bridge.handle_entitlement_refresh(
+            {"installId": "install-a", "deviceId": "host-a"},
+            "Bearer sk-test-secret-value",
+        )
+
+        self.assertEqual(200, status, payload)
+        self.assertEqual("authorization_code", payload["data"]["entitlement"]["source"])
+        lease = payload["data"]["entitlementLease"]
+        self.verify_lease_signature(lease)
+        self.assertEqual("42", lease["accountId"])
+        self.assertEqual("install-a", lease["installId"])
+        self.assertEqual("host-a", lease["deviceId"])
+
     def test_permanent_license_revocation_downgrades_account_and_revokes_old_lease(self):
         self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
         entitlement = {

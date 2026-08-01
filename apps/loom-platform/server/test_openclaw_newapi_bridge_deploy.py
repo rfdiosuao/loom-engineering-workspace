@@ -6,6 +6,7 @@ from pathlib import Path
 
 SERVER_ROOT = Path(__file__).resolve().parent
 DEPLOY_SCRIPT = SERVER_ROOT / "deploy.sh"
+SYSTEMD_STATE_DROPIN = SERVER_ROOT / "openclaw-newapi-bridge-entitlement-state.conf"
 
 
 class BridgeDeployScriptContractTests(unittest.TestCase):
@@ -66,6 +67,14 @@ class BridgeDeployScriptContractTests(unittest.TestCase):
         self.assertIn("BRIDGE_READY_RETRY_DELAY_SEC", self.source)
         self.assertIn("wait_for_readiness", self.source)
         self.assertIn('sleep "$READY_RETRY_DELAY_SEC"', self.source)
+
+    def test_systemd_dropin_declares_private_writable_state_directory(self) -> None:
+        source = SYSTEMD_STATE_DROPIN.read_text(encoding="utf-8")
+        self.assertIn("[Service]", source)
+        self.assertIn("StateDirectory=openclaw-newapi-bridge", source)
+        self.assertIn("StateDirectoryMode=0700", source)
+        self.assertNotIn("ProtectSystem=false", source)
+        self.assertNotIn("ReadWritePaths=/", source)
 
 
 if __name__ == "__main__":

@@ -2946,6 +2946,12 @@ def entitlement_public_key_response() -> tuple[int, dict[str, Any]]:
 
 def handle_entitlement_refresh(body: dict[str, Any], authorization: str = "") -> tuple[int, dict[str, Any]]:
     owner = api_token_owner(authorization)
+    if not owner:
+        return 401, entitlement_error(
+            "account_token_required",
+            "请先登录模型账号，再刷新矩阵权益。",
+            "login",
+        )
     if owner and not LICENSE_ENTITLEMENT_SERVICE_TOKEN:
         return 503, entitlement_error(
             "authorization_service_unavailable",
@@ -2992,11 +2998,28 @@ def handle_entitlement_refresh(body: dict[str, Any], authorization: str = "") ->
                         "offlineLeasePreserved": True,
                     },
                 )
-    return handle_ensure_launcher_token(
-        body,
-        authorization,
-        entitlement_source_verified=source_verified,
+    install_id, device_id = lease_identity_from_body(body)
+    status, lease_payload = issue_entitlement_lease(
+        account_id=str(owner.get("user_id") or ""),
+        group=str(owner.get("user_group") or "default"),
+        install_id=install_id,
+        device_id=device_id,
+        session_token=str(owner.get("key") or ""),
+        source_verified=source_verified,
     )
+    if (
+        status != 200
+        and str(lease_payload.get("code") or "") != "authorization_required"
+    ):
+        return status, lease_payload
+    data = {
+        "entitlement": lease_payload.get("entitlement")
+        or inactive_entitlement_policy(str(owner.get("user_group") or "default")),
+    }
+    if "entitlementLease" in lease_payload:
+        data["entitlementLease"] = lease_payload["entitlementLease"]
+        data["entitlementKey"] = lease_payload["entitlementKey"]
+    return 200, {"success": True, "data": data}
 
 
 def handle_entitlement_redeem(
