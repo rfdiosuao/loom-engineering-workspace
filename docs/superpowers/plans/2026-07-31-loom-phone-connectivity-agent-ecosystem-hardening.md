@@ -706,6 +706,15 @@ cd apps/loom-phone-agent
 - 每个 Workspace 的 Memory 不跨账号、不跨客户。
 - 运行时不可用、超时或撤权后，任务能够回退原生能力或给出明确的不可执行原因，不出现半执行状态。
 
+**2026-08-01 PoC 实施记录**
+
+- 已新增独立设计规范、OpenMinis clean-room/许可证边界、`loom.mobile-agent-runtime.v1` Draft 2020-12 合同和 fixture。官方公开资料仅用于功能级需求与许可证核对，未引入 OpenMinis 源码、submodule、二进制、rootfs 或依赖。
+- `MobileRuntimeCapability` 固定原生能力闭集；Provider schema 对敏感字段强制 `writeOnly`；Workspace/Memory 合同同时绑定账号、客户和工作区；Skill 合同只常驻元数据与来源摘要。
+- `ProviderConfigurationCoordinator` 使用 write-only vault 接口和 staging/probe/commit 流程；故障注入证明 probe 失败时旧配置不被替换，新 credential handle 回滚删除，原始 `CharArray` 在完成后清零。
+- `TypedNativeToolGateway` 对 scope、审批、过期、能力子集、参数 schema 和幂等键失败关闭；并发重复调用只执行一次，输入变化返回冲突。审计只含摘要，不含参数、输出或凭据。
+- backend selector 默认 Android Native 快路径；首选可选 runtime 不健康、未授权或缺失时在执行前确定性回退，能力完全不可用时明确拒绝。任意 shell、`rish`、root 和 Shizuku binder 不在合同能力集中。
+- 自动化结果：共享合同 `10/10` schema + fixture 校验通过；LumiAgent JVM 全量 `637/637`、`0` skipped。真实 AndroidKeyStore/Workspace/Memory 存储接线、实体机 scope 切换与可选 Linux runtime 仍由后续任务和实体机门禁完成。
+
 ## Task 10：闭环此前尚未完成的可靠性问题
 
 以下项目来自前序对抗审查，尚不能视为完成：

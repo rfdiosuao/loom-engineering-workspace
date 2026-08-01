@@ -51,9 +51,17 @@ def _instance_path(error: ValidationError) -> str:
 def validate_contracts() -> list[str]:
     errors: list[str] = []
 
-    for name in CONTRACT_NAMES:
-        schema_path = SCHEMA_ROOT / f"{name}.schema.json"
-        fixture_path = FIXTURE_ROOT / f"{name}.json"
+    contract_paths = [
+        (SCHEMA_ROOT / f"{name}.schema.json", FIXTURE_ROOT / f"{name}.json")
+        for name in CONTRACT_NAMES
+    ] + [
+        (
+            CONTRACT_ROOT / "mobile-agent-runtime.schema.json",
+            FIXTURE_ROOT / "mobile-agent-runtime.json",
+        )
+    ]
+
+    for schema_path, fixture_path in contract_paths:
         schema = _load_json(schema_path, "schema", errors)
         fixture = _load_json(fixture_path, "fixture", errors)
         if schema is _LOAD_FAILED or fixture is _LOAD_FAILED:
@@ -98,7 +106,7 @@ def main() -> int:
         print(f"Contract validation failed: {len(errors)} error(s).", file=sys.stderr)
         return 1
 
-    count = len(CONTRACT_NAMES)
+    count = len(CONTRACT_NAMES) + 1
     print(f"Validated {count} Draft 2020-12 schemas and {count} fixtures.")
     return 0
 
