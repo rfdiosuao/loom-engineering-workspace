@@ -846,6 +846,14 @@ cd apps/loom-phone-agent
 - Desktop 五处版本源、版本合同和发布候选说明统一切换到 `2.4.4`；LumiAgent 暂保持 versionCode `933`、default `6.64-stability`、Android 7 `6.64-stability-android7`。
 - 2.4.4 必须从包含本轮账户、Agent 门禁、品牌和 Windows CLI 修复的干净提交重新构建，并重新生成哈希、签名与虚拟机证据。
 
+**2026-08-01 2.4.4 最终本地候选记录**
+
+- 最终源码提交为 `e04d0eec3f2621bbd026d19efc84ad1c331058ed`；Desktop 五处版本源和安装后文件元数据均为 `2.4.4`，产品名为“麓鸣”。
+- Python `2071` + `367` subtests、Frontend `227/227`、Node `100/100`、Rust `30/30`、Playwright `210 passed / 6 skipped`、Android 两变体 JVM 各 `663/663`；API 36/API 24 精确 APK instrumentation 各 `6/6`。
+- Desktop 事务型 NSIS 全新安装和升级冒烟通过；真实 UI 逐个点击 9 个入口，新手页可见 `v2.4.4`，矩阵状态显示“未授权”而非内部枚举。
+- API 24 虚拟机确认手机设置首组、USB 六位码、LAN 9527 启停和 Shizuku 标准模式；两份 APK 的 PRoot/OpenMinis/rootfs 等条目命中仍为 `0`。
+- 三份候选的绝对路径、大小、SHA256、签名、虚拟机/手工证据和未通过门禁详见 `docs/release/2.4.4-build-evidence.md`。
+
 ## 6. PR 与 Worktree 划分
 
 | PR | Worktree 建议 | 内容 | 依赖 |
