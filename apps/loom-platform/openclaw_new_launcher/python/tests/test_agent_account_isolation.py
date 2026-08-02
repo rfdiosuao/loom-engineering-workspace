@@ -62,6 +62,25 @@ class _Account:
         }
 
 
+class _GuestAccount:
+    def __init__(self) -> None:
+        self.account_entitlement = _Entitlement("", authorized=False)
+        self.available = True
+
+    def public_session(self):
+        if not self.available:
+            raise RuntimeError("account session unavailable")
+        return {
+            "loggedIn": False,
+            "accountEntitlement": {
+                "accountId": "",
+                "authorized": False,
+            },
+            "models": {"text": []},
+            "selectedModels": {"text": ""},
+        }
+
+
 class _BrokenProductionAccount(NewApiAccountManager):
     def __init__(self) -> None:
         self.account_entitlement = _Entitlement("account-a", authorized=True)
@@ -208,6 +227,49 @@ def test_inactive_entitlement_bootstrap_exposes_a_read_only_execution_gate() -> 
         "outbound": False,
         "critical": False,
     }
+
+
+def test_logged_out_guest_bootstrap_is_read_only_not_an_account_switch() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        service = AgentService(
+            AppPaths(root),
+            runtime=_Runtime(),
+            account_manager=_GuestAccount(),
+            capabilities=_registry(),
+        )
+        try:
+            bootstrap = service.bootstrap()
+            assert service.list_sessions()["sessions"] == []
+            with pytest.raises(PermissionError, match="AGENT_ENTITLEMENT_REQUIRED"):
+                service.create_session({"title": "Blocked guest session"})
+        finally:
+            service.shutdown()
+
+    assert bootstrap["executionAccess"]["authorized"] is False
+    assert bootstrap["executionAccess"]["code"] == "AGENT_ENTITLEMENT_REQUIRED"
+    assert bootstrap["permissions"] == {
+        "read": True,
+        "control": False,
+        "outbound": False,
+        "critical": False,
+    }
+
+
+def test_logged_out_guest_still_fails_closed_if_account_session_becomes_unavailable() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        account = _GuestAccount()
+        service = AgentService(
+            AppPaths(root),
+            runtime=_Runtime(),
+            account_manager=account,
+            capabilities=_registry(),
+        )
+        try:
+            account.available = False
+            with pytest.raises(KeyError, match="agent account scope"):
+                service.bootstrap()
+        finally:
+            service.shutdown()
 
 
 def test_expired_account_can_read_own_history_but_cannot_execute_or_resume() -> None:

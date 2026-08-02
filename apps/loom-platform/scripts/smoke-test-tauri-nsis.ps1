@@ -523,6 +523,29 @@ class PackagedProbeRuntime:
             "kind": "packaged-probe",
         }
 
+class PackagedProbeEntitlement:
+    def current_state(self, _feature=None):
+        return {
+            "authorized": False,
+            "accountId": "",
+            "code": "entitlement_expired",
+        }
+
+class PackagedProbeGuestAccount:
+    def __init__(self):
+        self.account_entitlement = PackagedProbeEntitlement()
+
+    def public_session(self):
+        return {
+            "loggedIn": False,
+            "accountEntitlement": {
+                "accountId": "",
+                "authorized": False,
+            },
+            "models": {"text": []},
+            "selectedModels": {"text": ""},
+        }
+
 app = FastAPI()
 api.fastapi_routes.register_fastapi_routes(app, SimpleNamespace())
 route_paths = {route.path for route in app.routes}
@@ -541,7 +564,11 @@ if missing_routes:
     raise SystemExit("Missing packaged routes: " + ", ".join(missing_routes))
 if source_modules:
     raise SystemExit("Managed source shadowed protected modules: " + ", ".join(source_modules))
-agent_service = AgentService(AppPaths(state_root), runtime=PackagedProbeRuntime())
+agent_service = AgentService(
+    AppPaths(state_root),
+    runtime=PackagedProbeRuntime(),
+    account_manager=PackagedProbeGuestAccount(),
+)
 try:
     agent_bootstrap = agent_service.bootstrap()
 finally:
@@ -550,11 +577,16 @@ if agent_bootstrap.get("defaultRuntimeProfileId") != "loom-native":
     raise SystemExit("Packaged Agent did not select the LOOM native runtime")
 if len(agent_bootstrap.get("capabilities", [])) <= 0:
     raise SystemExit("Packaged Agent returned an empty capability catalog")
+if agent_bootstrap.get("executionAccess", {}).get("authorized") is not False:
+    raise SystemExit("Packaged guest Agent did not remain read-only")
+if agent_bootstrap.get("permissions", {}).get("read") is not True:
+    raise SystemExit("Packaged guest Agent lost read-only bootstrap access")
 print(json.dumps({
     "moduleFiles": module_files,
     "routeCount": len(route_paths),
     "agentProfile": agent_bootstrap["defaultRuntimeProfileId"],
     "agentCapabilityCount": len(agent_bootstrap["capabilities"]),
+    "guestAgentReadOnly": True,
 }))
 '@
     Invoke-ProcessAndWait -FilePath $pythonExe -Arguments @(
@@ -568,7 +600,8 @@ print(json.dumps({
         $null -eq $routeProbeResult.moduleFiles.fastapi_routes -or
         [int]$routeProbeResult.routeCount -le 0 -or
         [string]$routeProbeResult.agentProfile -ne "loom-native" -or
-        [int]$routeProbeResult.agentCapabilityCount -le 0
+        [int]$routeProbeResult.agentCapabilityCount -le 0 -or
+        [bool]$routeProbeResult.guestAgentReadOnly -ne $true
     ) {
         throw "Protected route probe returned an invalid result"
     }
@@ -661,6 +694,7 @@ print(json.dumps({
             packagedRouteModules = "protected"
             agentProfile = [string]$routeProbeResult.agentProfile
             agentCapabilities = [int]$routeProbeResult.agentCapabilityCount
+            guestAgentReadOnly = [bool]$routeProbeResult.guestAgentReadOnly
             upgradeDataPreserved = $upgradeDataPreserved
             licenseEndpoint = $licenseStatus
             matrixEndpoint = $matrixStatus

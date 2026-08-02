@@ -200,21 +200,16 @@ class AgentService:
         if runtime is None:
             self.account_manager = account_manager or NewApiAccountManager(paths, lambda _text: None)
             self.model_client = model_client or LoomModelClient(self.account_manager)
-        public_session: Mapping[str, Any] = {}
-        public_session_reader = getattr(self.account_manager, "public_session", None)
-        if callable(public_session_reader):
-            try:
-                candidate = public_session_reader()
-                if isinstance(candidate, Mapping):
-                    public_session = candidate
-            except Exception:
-                public_session = {}
+        public_session, public_session_resolved = self._read_public_account_session()
         self._account_scoped = bool(
             isinstance(self.account_manager, NewApiAccountManager)
             or (
                 self.account_manager is not None
                 and "loggedIn" in public_session
             )
+        )
+        self._initial_account_logged_out = bool(
+            public_session_resolved and public_session.get("loggedIn") is False
         )
         self.owner_account_id = _account_id_from_session(public_session)
         self.repository = AgentSessionRepository(
@@ -1024,22 +1019,35 @@ class AgentService:
         self._require_current_account()
         return self.event_bus.replay(session_id, after_seq=after_seq, limit=500)
 
-    def _public_account_session(self) -> Mapping[str, Any]:
+    def _read_public_account_session(self) -> tuple[Mapping[str, Any], bool]:
         reader = getattr(self.account_manager, "public_session", None)
         if not callable(reader):
-            return {}
+            return {}, False
         try:
             value = reader()
         except Exception:
-            return {}
-        return value if isinstance(value, Mapping) else {}
+            return {}, False
+        if not isinstance(value, Mapping):
+            return {}, False
+        return value, True
 
     def _require_current_account(self) -> None:
         if not self._account_scoped:
             return
-        current = _account_id_from_session(self._public_account_session())
-        if not current or current != self.owner_account_id:
+        current_session, current_session_resolved = self._read_public_account_session()
+        if not current_session_resolved:
             raise KeyError("agent account scope")
+        current = _account_id_from_session(current_session)
+        if current and current == self.owner_account_id:
+            return
+        if (
+            not current
+            and not self.owner_account_id
+            and self._initial_account_logged_out
+            and current_session.get("loggedIn") is False
+        ):
+            return
+        raise KeyError("agent account scope")
 
     def _execution_permitted(self) -> bool:
         try:
