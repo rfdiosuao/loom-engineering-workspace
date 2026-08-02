@@ -63,6 +63,13 @@ class DeployScriptContractTests(unittest.TestCase):
         self.assertNotIn('source "$RELAY_ENV_FILE"', self.source)
         self.assertNotIn('cat "$RELAY_ENV_FILE"', self.source)
 
+    def test_systemd_dropin_path_is_overrideable_for_isolated_rehearsal(self) -> None:
+        self.assertIn("LICENSE_SYSTEMD_DROPIN_DIR", self.source)
+        self.assertIn(
+            'dropin_dir="${LICENSE_SYSTEMD_DROPIN_DIR:-/etc/systemd/system/${SERVICE_NAME}.service.d}"',
+            self.source,
+        )
+
     def test_post_switch_smoke_waits_for_service_readiness(self) -> None:
         self.assertIn("LICENSE_HEALTH_RETRY_ATTEMPTS", self.source)
         self.assertIn("LICENSE_HEALTH_RETRY_DELAY_SEC", self.source)

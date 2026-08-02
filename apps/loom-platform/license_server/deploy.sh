@@ -14,6 +14,7 @@ RELAY_TOKEN="${OPENCLAW_PUBLISH_RELAY_TOKEN:-${PUBLISH_RELAY_TOKEN:-}}"
 HEALTH_RETRY_ATTEMPTS="${LICENSE_HEALTH_RETRY_ATTEMPTS:-30}"
 HEALTH_RETRY_DELAY_SEC="${LICENSE_HEALTH_RETRY_DELAY_SEC:-1}"
 REQUIRE_ZPAY_READY="${LICENSE_REQUIRE_ZPAY_READY:-0}"
+dropin_dir="${LICENSE_SYSTEMD_DROPIN_DIR:-/etc/systemd/system/${SERVICE_NAME}.service.d}"
 
 case "$REMOTE_DIR" in
   /*) ;;
@@ -21,6 +22,14 @@ case "$REMOTE_DIR" in
 esac
 if [ "$REMOTE_DIR" = "/" ]; then
   echo "refusing to deploy into filesystem root" >&2
+  exit 1
+fi
+case "$dropin_dir" in
+  /*) ;;
+  *) echo "LICENSE_SYSTEMD_DROPIN_DIR must be absolute" >&2; exit 1 ;;
+esac
+if [ "$dropin_dir" = "/" ]; then
+  echo "refusing to use filesystem root as systemd drop-in directory" >&2
   exit 1
 fi
 if ! [[ "$HEALTH_RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
@@ -152,7 +161,6 @@ if [ -f "$ADMIN_HTML_UPLOAD" ]; then
 fi
 
 echo "[4/8] Preserve environment and verify entitlement credential"
-dropin_dir="/etc/systemd/system/${SERVICE_NAME}.service.d"
 mkdir -p "$dropin_dir"
 cat > "$dropin_dir/runtime-env.conf" <<EOF
 [Service]
