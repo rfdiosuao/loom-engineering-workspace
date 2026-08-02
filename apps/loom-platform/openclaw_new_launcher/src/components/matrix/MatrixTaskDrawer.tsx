@@ -1,6 +1,7 @@
 import React from 'react';
 
 import type { MatrixCampaign, MatrixExecutionMode, MatrixExecutionProfile } from '../../types/matrix';
+import type { AcquisitionTemplateSummary } from '../../services/api';
 import { Button, showToast } from '../common';
 
 const PHONE_AGENT_APK_URL = 'https://gitee.com/rfdiosuao/lumiapkclaw/releases/download/lumiclaw13241/OpenClaw-AgentPhone.apk';
@@ -9,6 +10,7 @@ const PHONE_AGENT_QR_SRC = '/phone-agent-apk-qr.svg';
 interface MatrixTaskDrawerProps {
   open: boolean;
   templateId: string;
+  templateOptions: AcquisitionTemplateSummary[];
   mode: MatrixExecutionMode;
   profile: MatrixExecutionProfile;
   confirmed: boolean;
@@ -23,6 +25,7 @@ interface MatrixTaskDrawerProps {
 export const MatrixTaskDrawer: React.FC<MatrixTaskDrawerProps> = ({
   open,
   templateId,
+  templateOptions,
   mode,
   profile,
   confirmed,
@@ -52,8 +55,17 @@ export const MatrixTaskDrawer: React.FC<MatrixTaskDrawerProps> = ({
 
         <div className="mt-5 space-y-4">
           <label className="block text-[10px] font-bold text-text-muted">
-            模板 ID（留空为直接任务）
-            <input value={templateId} onChange={(event) => onTemplateIdChange(event.target.value)} className="mt-1.5 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text outline-none focus:border-focus focus:ring-2 focus:ring-focus-soft" />
+            选择共享模板
+            <select value={templateOptions.some((template) => template.templateId === templateId) ? templateId : ''} onChange={(event) => onTemplateIdChange(event.target.value)} className="mt-1.5 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text focus:border-focus focus:ring-2 focus:ring-focus-soft">
+              <option value="">不使用共享模板</option>
+              {templateOptions.map((template) => (
+                <option key={template.templateId} value={template.templateId}>{template.name} · v{template.version || 1}</option>
+              ))}
+            </select>
+            <input value={templateId} onChange={(event) => onTemplateIdChange(event.target.value)} placeholder="也可手动输入模板 ID" className="mt-2 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text outline-none focus:border-focus focus:ring-2 focus:ring-focus-soft" />
+            <span className="mt-1.5 block leading-4 text-text-subtle">
+              共享模板会携带稳定版本下发；留空时按上方任务描述直接执行。
+            </span>
           </label>
           <label className="block text-[10px] font-bold text-text-muted">
             执行模式

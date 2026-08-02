@@ -10,14 +10,7 @@ class LicenseAuthorizer(Protocol):
     def is_authorized(self, feature: str | None = None) -> bool: ...
 
 
-COMMERCIAL_FEATURES = frozenset(
-    {
-        "acquisition.workbench",
-        "acquisition.feishu",
-        "matrix.devices",
-        "templates.cloud",
-    }
-)
+COMMERCIAL_FEATURES = frozenset({"matrix.devices"})
 
 # Phone Matrix is the single commercial capability for its acquisition,
 # template, and Feishu execution surfaces. Feishu OAuth/scopes remain runtime

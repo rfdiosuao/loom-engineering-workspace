@@ -1,7 +1,8 @@
 import React from 'react';
 
-import { matrixApi, parseErrorText, waitForJob } from '../../services/api';
+import { acquisitionApi, matrixApi, parseErrorText, waitForJob, type AcquisitionTemplateSummary } from '../../services/api';
 import { useAppStore, type FeatureNavigationContext } from '../../stores/appStore';
+import { MATRIX_DISPATCH_SCHEMA } from '../../types/matrix';
 import type {
   MatrixCampaign,
   MatrixControlRequest,
@@ -48,6 +49,7 @@ export const MatrixWorkbenchPage = () => {
   const consumeNavigationContext = useAppStore((state) => state.consumeNavigationContext);
   const [prompt, setPrompt] = React.useState('');
   const [templateId, setTemplateId] = React.useState('');
+  const [templateOptions, setTemplateOptions] = React.useState<AcquisitionTemplateSummary[]>([]);
   const [mode, setMode] = React.useState<MatrixExecutionMode>('safe');
   const [profile, setProfile] = React.useState<MatrixExecutionProfile>('standard');
   const [confirmedFingerprint, setConfirmedFingerprint] = React.useState<string | null>(null);
@@ -95,6 +97,22 @@ export const MatrixWorkbenchPage = () => {
     setFocusedId(undefined);
     setSelectedIds(new Set());
   }, [consumeNavigationContext]);
+
+  React.useEffect(() => {
+    if (!drawerOpen) return undefined;
+    let active = true;
+    void acquisitionApi.templates().then((result) => {
+      if (!active) return;
+      setTemplateOptions((result.templates || []).filter((template) => template.enabled !== false));
+    }).catch((reason) => {
+      if (!active) return;
+      setTemplateOptions([]);
+      showToast(parseErrorText(reason) || '共享模板读取失败，可暂时手动输入模板 ID', 'error');
+    });
+    return () => {
+      active = false;
+    };
+  }, [drawerOpen]);
 
   const stream = useMatrixStream(true);
   const devices = React.useMemo(() => {
@@ -328,6 +346,8 @@ export const MatrixWorkbenchPage = () => {
   };
 
   const selectedOnlineIds = devices.filter((device) => selectedIds.has(device.deviceId) && device.online).map((device) => device.deviceId);
+  const selectedTemplate = templateOptions.find((template) => template.templateId === templateId.trim());
+  const templateVersion = selectedTemplate ? selectedTemplate.version || 1 : undefined;
   const dispatchFingerprint = matrixDispatchFingerprint({
     prompt,
     templateId,
@@ -366,10 +386,33 @@ export const MatrixWorkbenchPage = () => {
     setDispatching(true);
     setActionResult('正在向后端提交任务...');
     try {
+      const cleanTemplateId = templateId.trim();
+      const cleanPrompt = prompt.trim();
       const advanced = { mode, profile, confirmed: needsConfirmation ? true : confirmed };
-      const result = await matrixApi.dispatch(templateId.trim()
-        ? { prompt: prompt.trim(), templateId: templateId.trim(), target: { deviceIds: selectedOnlineIds }, ...advanced }
-        : { prompt: prompt.trim(), target: { deviceIds: selectedOnlineIds }, ...advanced });
+      const canonicalCampaignId = `campaign_ui_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+      const result = await matrixApi.dispatch(cleanTemplateId
+        ? {
+            schema: MATRIX_DISPATCH_SCHEMA,
+            campaignId: canonicalCampaignId,
+            concurrency: Math.min(selectedOnlineIds.length, 8),
+            mode,
+            profile,
+            deviceAssignments: selectedOnlineIds.map((deviceId, index) => ({
+              assignmentId: `${canonicalCampaignId}_assignment_${index + 1}`,
+              deviceId,
+              ...(cleanPrompt ? { prompt: cleanPrompt } : {}),
+              templateId: cleanTemplateId,
+              input: {
+                sharedTemplate: {
+                  templateId: cleanTemplateId,
+                  ...(templateVersion ? { version: templateVersion } : {}),
+                },
+              },
+              timeoutSec: 180,
+              retryBudget: 1,
+            })),
+          }
+        : { prompt: cleanPrompt, target: { deviceIds: selectedOnlineIds }, ...advanced });
       const campaignId = result.campaign?.campaignId || String(result.task?.campaignId || '');
       setConfirmedFingerprint(null);
       const campaignLabel = campaignId ? `任务 ${campaignId}` : '矩阵任务';
@@ -636,6 +679,7 @@ export const MatrixWorkbenchPage = () => {
       <MatrixTaskDrawer
         open={drawerOpen}
         templateId={templateId}
+        templateOptions={templateOptions}
         mode={mode}
         profile={profile}
         confirmed={confirmed}

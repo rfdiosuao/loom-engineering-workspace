@@ -760,7 +760,10 @@ def register_matrix_routes(app, ctx) -> None:
             return error
         body = await ctx.body(request)
         matrix = _matrix(ctx)
-        flow = matrix.create_acquisition_demo_flow(body)
+        try:
+            flow = matrix.create_acquisition_demo_flow(body)
+        except MatrixTargetError as exc:
+            return _matrix_target_error_response(ctx, exc)
         return ctx.fastapi_json({"flow": flow, "snapshot": matrix.acquisition_snapshot()}, 201)
 
     @app.post("/api/matrix/acquisition/import")
@@ -769,7 +772,10 @@ def register_matrix_routes(app, ctx) -> None:
             return error
         body = await ctx.body(request)
         matrix = _matrix(ctx)
-        result = matrix.import_acquisition_leads(body)
+        try:
+            result = matrix.import_acquisition_leads(body)
+        except MatrixTargetError as exc:
+            return _matrix_target_error_response(ctx, exc)
         return ctx.fastapi_json({"result": result, "snapshot": matrix.acquisition_snapshot()}, 201)
 
     @app.post("/api/matrix/acquisition/agent/run")
@@ -777,7 +783,11 @@ def register_matrix_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         body = await ctx.body(request)
-        result = _matrix(ctx).run_acquisition_agent_task(body)
+        matrix = _matrix(ctx)
+        try:
+            result = matrix.run_acquisition_agent_task(body)
+        except MatrixTargetError as exc:
+            return _matrix_target_error_response(ctx, exc)
         return ctx.fastapi_json(result, 201)
 
     @app.post("/api/matrix/acquisition/agent/result")
@@ -789,7 +799,10 @@ def register_matrix_routes(app, ctx) -> None:
         if not agent_result:
             return ctx.fastapi_json({"error": "agentResult is required"}, 400)
         matrix = _matrix(ctx)
-        ingest = matrix.ingest_acquisition_agent_result(agent_result, body)
+        try:
+            ingest = matrix.ingest_acquisition_agent_result(agent_result, body)
+        except MatrixTargetError as exc:
+            return _matrix_target_error_response(ctx, exc)
         return ctx.fastapi_json({"ingest": ingest, "snapshot": matrix.acquisition_snapshot()}, 201)
 
     @app.post("/api/matrix/acquisition/draft/confirm")
@@ -1210,7 +1223,12 @@ def _matrix_safety_error_response(ctx, exc: MatrixSafetyError):
 
 
 def _matrix_target_error_response(ctx, exc: MatrixTargetError):
-    if exc.code in {"matrix_target_not_found", "matrix_task_not_found", "matrix_campaign_not_found"}:
+    if exc.code in {
+        "matrix_target_not_found",
+        "matrix_task_not_found",
+        "matrix_campaign_not_found",
+        "matrix_template_not_found",
+    }:
         status = 404
     elif exc.code in {"matrix_invalid_lease", "matrix_invalid_control"}:
         status = 400

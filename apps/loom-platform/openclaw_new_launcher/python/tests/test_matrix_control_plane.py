@@ -988,6 +988,140 @@ class MatrixControlPlaneTests(unittest.TestCase):
         self.assertEqual(devices["phone-a"]["currentTaskId"], "")
         self.assertEqual(devices["phone-b"]["currentTaskId"], "")
 
+    def test_canonical_dispatch_accepts_external_agent_template_with_explicit_prompt(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixControlPlane
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            task = matrix.dispatch(
+                {
+                    "schema": "loom.matrix.dispatch.v2",
+                    "campaignId": "campaign_shared_template",
+                    "concurrency": 1,
+                    "mode": "safe",
+                    "profile": "fast",
+                    "deviceAssignments": [
+                        {
+                            "assignmentId": "assignment_shared_template",
+                            "deviceId": "phone-a",
+                            "prompt": "按共享模板读取公开内容并生成待人工确认草稿。",
+                            "templateId": "beauty-local",
+                            "input": {"source": "external-agent"},
+                            "timeoutSec": 180,
+                            "retryBudget": 0,
+                        }
+                    ],
+                }
+            )
+
+        device_task = task["missions"][0]["deviceTasks"][0]
+        self.assertEqual(device_task["templateId"], "beauty-local")
+        self.assertEqual(device_task["template"], "")
+        self.assertEqual(device_task["executionLayer"], "agent")
+        self.assertEqual(device_task["input"]["source"], "external-agent")
+
+    def test_canonical_dispatch_resolves_saved_shared_template_without_prompt(self) -> None:
+        from core.acquisition_templates import AcquisitionTemplateLibrary
+        from core.paths import AppPaths
+
+        env = {"LOOM_TEMPLATE_DISABLE_DEFAULT_CLOUD": "1"}
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, env, clear=False):
+            paths = AppPaths(base_path=temp_dir)
+            AcquisitionTemplateLibrary(paths).save_from_acquisition(
+                {
+                    "templateId": "beauty-runtime",
+                    "name": "美业矩阵共用模板",
+                    "platforms": ["xiaohongshu"],
+                    "targetCustomer": "本地皮肤管理客户",
+                    "keywords": ["皮肤管理"],
+                    "leadRules": ["询问价格"],
+                    "replyStyle": "先确认需求，不强推",
+                }
+            )
+            matrix = matrix_for_test(paths)
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            task = matrix.dispatch(
+                {
+                    "schema": "loom.matrix.dispatch.v2",
+                    "campaignId": "campaign_saved_template",
+                    "concurrency": 1,
+                    "mode": "safe",
+                    "profile": "fast",
+                    "deviceAssignments": [
+                        {
+                            "assignmentId": "assignment_saved_template",
+                            "deviceId": "phone-a",
+                            "templateId": "beauty-runtime",
+                            "input": {
+                                "sharedTemplate": {
+                                    "templateId": "beauty-runtime",
+                                    "version": 1,
+                                }
+                            },
+                            "timeoutSec": 180,
+                            "retryBudget": 0,
+                        }
+                    ],
+                }
+            )
+
+        device_task = task["missions"][0]["deviceTasks"][0]
+        self.assertIn("beauty-runtime@v1", device_task["prompt"])
+        self.assertIn("只读取公开可见内容", device_task["prompt"])
+        self.assertEqual(device_task["executionLayer"], "agent")
+        self.assertEqual(device_task["input"]["sharedTemplate"]["version"], 1)
+
+    def test_canonical_dispatch_validates_shared_template_version_with_explicit_prompt(self) -> None:
+        from core.acquisition_templates import AcquisitionTemplateLibrary
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixTargetError
+
+        env = {"LOOM_TEMPLATE_DISABLE_DEFAULT_CLOUD": "1"}
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, env, clear=False):
+            paths = AppPaths(base_path=temp_dir)
+            AcquisitionTemplateLibrary(paths).save_from_acquisition(
+                {
+                    "templateId": "beauty-versioned",
+                    "name": "美业版本校验模板",
+                    "platforms": ["xiaohongshu"],
+                    "targetCustomer": "本地客户",
+                    "keywords": ["皮肤管理"],
+                    "leadRules": ["询问价格"],
+                }
+            )
+            matrix = matrix_for_test(paths)
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            with self.assertRaises(MatrixTargetError) as raised:
+                matrix.dispatch(
+                    {
+                        "schema": "loom.matrix.dispatch.v2",
+                        "campaignId": "campaign_version_conflict",
+                        "concurrency": 1,
+                        "mode": "safe",
+                        "profile": "fast",
+                        "deviceAssignments": [
+                            {
+                                "assignmentId": "assignment_version_conflict",
+                                "deviceId": "phone-a",
+                                "prompt": "读取公开信息并生成待人工确认草稿。",
+                                "templateId": "beauty-versioned",
+                                "input": {
+                                    "sharedTemplate": {
+                                        "templateId": "beauty-versioned",
+                                        "version": 2,
+                                    }
+                                },
+                                "timeoutSec": 180,
+                                "retryBudget": 0,
+                            }
+                        ],
+                    }
+                )
+
+        self.assertEqual(raised.exception.code, "matrix_template_version_conflict")
+
     def test_canonical_dispatch_rejects_unsupported_template_before_mutation(self) -> None:
         from core.paths import AppPaths
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError

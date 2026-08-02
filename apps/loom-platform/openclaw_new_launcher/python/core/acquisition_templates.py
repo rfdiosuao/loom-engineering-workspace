@@ -29,6 +29,10 @@ class TemplateNotFound(TemplateError):
     pass
 
 
+class TemplateDisabled(TemplateError):
+    pass
+
+
 class TemplateVersionConflict(TemplateError):
     pass
 
@@ -108,6 +112,79 @@ class AcquisitionTemplateLibrary:
         state = self._load_state()
         current = next((item for item in state.get("templates", []) if item.get("templateId") == template["templateId"]), template)
         return _redact_json({"template": current, "upload": upload, "status": self.status()})
+
+    def resolve_template(
+        self,
+        template_id: str,
+        *,
+        expected_version: int | None = None,
+        require_enabled: bool = True,
+    ) -> Json:
+        safe_id = _template_id(template_id)
+        state = self._load_state()
+        templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
+        template = next((item for item in templates if item.get("templateId") == safe_id), None)
+        if not template:
+            raise TemplateNotFound("未找到共享模板")
+        current_version = max(1, _int(template.get("version"), 1))
+        if expected_version is not None and expected_version != current_version:
+            raise TemplateVersionConflict(
+                f"模板版本不一致（请求 {expected_version}，当前 {current_version}），请刷新后重试"
+            )
+        if require_enabled and template.get("enabled") is False:
+            raise TemplateDisabled("共享模板已停用，请启用后再执行")
+        return _redact_json(dict(template))
+
+    def materialize_request(self, raw: Json) -> Json:
+        materialized = dict(raw) if isinstance(raw, dict) else {}
+        template_id = str(materialized.get("templateId") or "").strip()
+        if not template_id:
+            return _redact_json(materialized)
+        expected_version = _optional_int(
+            materialized.get("templateVersion")
+            if "templateVersion" in materialized
+            else materialized.get("expectedVersion")
+        )
+        template = self.resolve_template(
+            template_id,
+            expected_version=expected_version,
+            require_enabled=True,
+        )
+        version = max(1, _int(template.get("version"), 1))
+        platforms = _string_list(template.get("platforms"), ["manual"])
+        platform = platforms[0] if platforms else "manual"
+        materialized.setdefault("topic", template.get("name") or "获客打法模板")
+        materialized.setdefault("platform", platform)
+        materialized.setdefault("target", template.get("targetCustomer") or "潜在客户")
+        materialized.setdefault("targetCustomer", template.get("targetCustomer") or "潜在客户")
+        materialized.setdefault("knowledge", template.get("replyStyle") or "自然、不强推、先确认需求")
+        materialized["templateId"] = str(template.get("templateId") or template_id)
+        materialized["templateVersion"] = version
+        materialized["templateName"] = str(template.get("name") or "获客打法模板")
+        materialized["sharedTemplate"] = {
+            "templateId": materialized["templateId"],
+            "version": version,
+            "name": materialized["templateName"],
+            "industry": template.get("industry") or "通用获客",
+            "platforms": platforms,
+            "targetCustomer": template.get("targetCustomer") or "潜在客户",
+            "keywords": _string_list(template.get("keywords"), []),
+            "leadRules": _string_list(template.get("leadRules"), []),
+            "replyStyle": template.get("replyStyle") or "自然、不强推、先确认需求",
+            "safetyPolicy": template.get("safetyPolicy") if isinstance(template.get("safetyPolicy"), dict) else {},
+            "feishuMapping": template.get("feishuMapping") if isinstance(template.get("feishuMapping"), dict) else {},
+        }
+        if not str(materialized.get("prompt") or "").strip():
+            keywords = "、".join(materialized["sharedTemplate"]["keywords"]) or "未指定"
+            lead_rules = "；".join(materialized["sharedTemplate"]["leadRules"]) or "按公开意向信号判断"
+            materialized["prompt"] = _clip(
+                f"使用共享模板 {materialized['templateName']}（{materialized['templateId']}@v{version}）执行获客任务。"
+                f"平台：{platform}；目标客户：{materialized['targetCustomer']}；关键词：{keywords}；"
+                f"线索规则：{lead_rules}；回复风格：{materialized['knowledge']}。"
+                "只读取公开可见内容，只生成线索与待人工确认草稿；禁止执行任何对外发送、互动、添加联系人或发布动作。",
+                2000,
+            )
+        return _redact_json(materialized)
 
     def set_enabled(self, template_id: str, enabled: bool, *, expected_version: int | None = None) -> Json:
         state = self._load_state()

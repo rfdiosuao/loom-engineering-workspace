@@ -53,6 +53,25 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         self.assertIn("/api/matrix/acquisition/agent/result", api)
         self.assertIn("/api/matrix/acquisition/agent/result", routes)
 
+    def test_matrix_workbench_selects_versioned_shared_templates_for_canonical_dispatch(self) -> None:
+        page_path = os.path.join(REPO_ROOT, "src", "components", "matrix", "MatrixWorkbenchPage.tsx")
+        drawer_path = os.path.join(REPO_ROOT, "src", "components", "matrix", "MatrixTaskDrawer.tsx")
+
+        with open(page_path, "r", encoding="utf-8") as handle:
+            page = handle.read()
+        with open(drawer_path, "r", encoding="utf-8") as handle:
+            drawer = handle.read()
+
+        self.assertIn("acquisitionApi.templates()", page)
+        self.assertIn("MATRIX_DISPATCH_SCHEMA", page)
+        self.assertIn("sharedTemplate", page)
+        self.assertIn("templateVersion", page)
+        self.assertIn("templateOptions", page)
+        self.assertIn("templateOptions", drawer)
+        self.assertIn("选择共享模板", drawer)
+        self.assertIn("template.templateId", drawer)
+        self.assertIn("template.version", drawer)
+
     def test_acquisition_page_exposes_overview_feishu_and_ai_prompt_contract(self) -> None:
         page_path = os.path.join(REPO_ROOT, "src", "components", "acquisition", "AcquisitionWorkbenchPage.tsx")
         prompt_path = os.path.join(REPO_ROOT, "src", "components", "agentAccess", "agentPrompt.ts")

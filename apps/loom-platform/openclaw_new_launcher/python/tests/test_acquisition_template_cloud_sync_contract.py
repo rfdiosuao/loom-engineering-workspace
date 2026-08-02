@@ -53,6 +53,72 @@ class AcquisitionTemplateCloudSyncContractTests(unittest.TestCase):
         self.assertEqual(current["name"], "美业模板 v2")
         self.assertEqual(current["version"], 2)
 
+    def test_shared_template_materializes_runtime_inputs_and_flows_to_feishu(self) -> None:
+        from core.acquisition_templates import AcquisitionTemplateLibrary
+        from core.paths import AppPaths
+        from tests.matrix_test_support import matrix_for_test
+
+        env = {"LOOM_TEMPLATE_DISABLE_DEFAULT_CLOUD": "1"}
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, env, clear=False):
+            paths = AppPaths(base_path=temp_dir)
+            library = AcquisitionTemplateLibrary(paths)
+            library.save_from_acquisition(
+                {
+                    "templateId": "beauty-local",
+                    "name": "本地美业获客",
+                    "industry": "美业",
+                    "platforms": ["xiaohongshu"],
+                    "targetCustomer": "准备做皮肤管理的本地客户",
+                    "keywords": ["皮肤管理", "附近美容院"],
+                    "leadRules": ["询问价格", "询问地址"],
+                    "replyStyle": "先询问预算，再给案例",
+                }
+            )
+            materialized = library.materialize_request(
+                {
+                    "templateId": "beauty-local",
+                    "templateVersion": 1,
+                    "leadSummary": "想了解附近门店的皮肤管理价格",
+                    "channel": "comment",
+                }
+            )
+            matrix = matrix_for_test(paths)
+            flow = matrix.create_acquisition_demo_flow(
+                {
+                    "templateId": "beauty-local",
+                    "templateVersion": 1,
+                    "leadSummary": "想了解附近门店的皮肤管理价格",
+                    "channel": "comment",
+                }
+            )
+            agent = matrix.run_acquisition_agent_task(
+                {
+                    "templateId": "beauty-local",
+                    "templateVersion": 1,
+                    "deviceId": "phone-template",
+                    "dryRun": True,
+                }
+            )
+            with open(os.path.join(paths.launcher_dir, "feishu-acquisition.json"), "r", encoding="utf-8") as handle:
+                feishu_state = json.load(handle)
+
+        self.assertEqual(materialized["topic"], "本地美业获客")
+        self.assertEqual(materialized["platform"], "xiaohongshu")
+        self.assertEqual(materialized["target"], "准备做皮肤管理的本地客户")
+        self.assertIn("询问价格", materialized["prompt"])
+        self.assertEqual(materialized["templateVersion"], 1)
+        self.assertEqual(flow["contentTask"]["templateId"], "beauty-local")
+        self.assertEqual(flow["lead"]["templateVersion"], 1)
+        self.assertEqual(flow["lead"]["platform"], "xiaohongshu")
+        self.assertIn("先询问预算，再给案例", flow["draft"]["body"])
+        self.assertIn("beauty-local@v1", feishu_state["pendingSync"][-1]["fields"]["来源任务"])
+        self.assertEqual(agent["agentRun"]["templateId"], "beauty-local")
+        self.assertEqual(agent["agentRun"]["phoneTask"]["templateVersion"], 1)
+        self.assertEqual(
+            agent["agentRun"]["phoneTask"]["bridgeDispatch"]["body"]["templateId"],
+            "beauty-local",
+        )
+
     def test_template_enable_and_delete_are_version_checked(self) -> None:
         from core.acquisition_templates import AcquisitionTemplateLibrary, TemplateVersionConflict
         from core.paths import AppPaths

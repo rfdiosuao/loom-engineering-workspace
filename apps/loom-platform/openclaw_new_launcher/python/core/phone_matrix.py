@@ -24,6 +24,12 @@ from typing import Any, Callable, Dict
 
 from core.paths import AppPaths
 from core.feishu_integration import FeishuAcquisitionIntegration
+from core.acquisition_templates import (
+    AcquisitionTemplateLibrary,
+    TemplateDisabled,
+    TemplateNotFound,
+    TemplateVersionConflict,
+)
 
 
 Json = Dict[str, Any]
@@ -238,6 +244,16 @@ class MatrixControlPlane:
         self._phone_authorizer = phone_authorizer
         self._owner_account_id = str(owner_account_id or "").strip()
         self._owner_account_binding = str(owner_account_binding or "").strip()
+
+    def _materialize_acquisition_request(self, raw: Json) -> Json:
+        try:
+            return AcquisitionTemplateLibrary(self.paths).materialize_request(raw)
+        except TemplateNotFound as exc:
+            raise MatrixTargetError("matrix_template_not_found", str(exc)) from exc
+        except TemplateDisabled as exc:
+            raise MatrixTargetError("matrix_template_disabled", str(exc)) from exc
+        except TemplateVersionConflict as exc:
+            raise MatrixTargetError("matrix_template_version_conflict", str(exc)) from exc
 
     def _scoped_state_path(self, stem: str, suffix: str) -> str:
         if not self._owner_account_binding:
@@ -603,28 +619,65 @@ class MatrixControlPlane:
                 field=f"deviceAssignments[{index}].templateId",
                 maximum=80,
             )
-            if not prompt and not template_id:
-                raise MatrixTargetError(
-                    "matrix_invalid_dispatch",
-                    f"deviceAssignments[{index}] requires prompt or templateId",
-                )
-            execution_template = ""
-            if template_id:
-                template_contract = _CANONICAL_TEMPLATE_EXECUTION.get(template_id)
-                if not template_contract:
-                    raise MatrixTargetError(
-                        "matrix_unsupported_assignment",
-                        f"Unsupported canonical templateId: {template_id}",
-                    )
-                execution_template, template_prompt = template_contract
-                if not prompt:
-                    prompt = template_prompt
             input_value = raw_assignment.get("input")
             if not isinstance(input_value, dict):
                 raise MatrixTargetError(
                     "matrix_invalid_dispatch",
                     f"deviceAssignments[{index}].input must be an object",
                 )
+            input_value = dict(input_value)
+            if not prompt and not template_id:
+                raise MatrixTargetError(
+                    "matrix_invalid_dispatch",
+                    f"deviceAssignments[{index}] requires prompt or templateId",
+                )
+            shared_reference = input_value.get("sharedTemplate")
+            if shared_reference is not None and not isinstance(shared_reference, dict):
+                raise MatrixTargetError(
+                    "matrix_invalid_dispatch",
+                    f"deviceAssignments[{index}].input.sharedTemplate must be an object",
+                )
+            if isinstance(shared_reference, dict):
+                referenced_template_id = _canonical_optional_text(
+                    shared_reference.get("templateId"),
+                    field=f"deviceAssignments[{index}].input.sharedTemplate.templateId",
+                    maximum=80,
+                )
+                if referenced_template_id and referenced_template_id != template_id:
+                    raise MatrixTargetError(
+                        "matrix_invalid_dispatch",
+                        f"deviceAssignments[{index}] templateId must match input.sharedTemplate.templateId",
+                    )
+            execution_template = ""
+            if template_id:
+                template_contract = _CANONICAL_TEMPLATE_EXECUTION.get(template_id)
+                if template_contract:
+                    execution_template, template_prompt = template_contract
+                    if not prompt:
+                        prompt = template_prompt
+                elif isinstance(shared_reference, dict):
+                    template_request: Json = {"templateId": template_id}
+                    if "version" in shared_reference:
+                        template_request["templateVersion"] = shared_reference.get("version")
+                    try:
+                        materialized = self._materialize_acquisition_request(template_request)
+                    except MatrixTargetError as exc:
+                        if exc.code == "matrix_template_not_found":
+                            raise MatrixTargetError(
+                                "matrix_unsupported_assignment",
+                                f"Unsupported canonical templateId: {template_id}",
+                            ) from exc
+                        raise
+                    if not prompt:
+                        prompt = str(materialized.get("prompt") or "")
+                    resolved_reference = materialized.get("sharedTemplate")
+                    if isinstance(resolved_reference, dict):
+                        input_value["sharedTemplate"] = resolved_reference
+                elif not prompt:
+                    raise MatrixTargetError(
+                        "matrix_unsupported_assignment",
+                        f"Unsupported canonical templateId: {template_id}",
+                    )
             timeout_sec = _canonical_int(
                 raw_assignment.get("timeoutSec"),
                 field=f"deviceAssignments[{index}].timeoutSec",
@@ -940,6 +993,8 @@ class MatrixControlPlane:
         )
 
     def create_acquisition_demo_flow(self, raw: Json) -> Json:
+        raw = self._materialize_acquisition_request(raw)
+        template_meta = _acquisition_template_metadata(raw)
         state = self._load_acquisition_state()
         now = _now_iso()
         topic = _clip(raw.get("topic") or "AI 矩阵获客内容", 120)
@@ -951,6 +1006,7 @@ class MatrixControlPlane:
             limit=320,
         )
         content_task = {
+            **template_meta,
             "taskId": f"content_{uuid.uuid4().hex[:10]}",
             "createdAt": now,
             "title": topic,
@@ -963,6 +1019,7 @@ class MatrixControlPlane:
             ],
         }
         lead = {
+            **template_meta,
             "leadId": f"lead_{uuid.uuid4().hex[:12]}",
             "createdAt": now,
             "updatedAt": now,
@@ -975,6 +1032,7 @@ class MatrixControlPlane:
             "tags": ["mvp-demo", channel, platform],
         }
         customer = {
+            **template_meta,
             "customerId": f"customer_{uuid.uuid4().hex[:12]}",
             "createdAt": now,
             "updatedAt": now,
@@ -985,6 +1043,7 @@ class MatrixControlPlane:
             "allowedChannels": [channel],
         }
         draft = {
+            **template_meta,
             "draftId": f"draft_{uuid.uuid4().hex[:12]}",
             "createdAt": now,
             "updatedAt": now,
@@ -1003,7 +1062,7 @@ class MatrixControlPlane:
         sync = FeishuAcquisitionIntegration(self.paths).sync_lead(
             {
                 **lead,
-                "sourceTask": content_task["title"],
+                "sourceTask": _acquisition_source_task(content_task["title"], raw),
                 "draft": draft["body"],
                 "recommendedAction": "人工确认后跟进",
                 "logId": lead["leadId"],
@@ -1030,6 +1089,8 @@ class MatrixControlPlane:
 
     @_matrix_state_guard
     def import_acquisition_leads(self, raw: Json) -> Json:
+        raw = self._materialize_acquisition_request(raw)
+        template_meta = _acquisition_template_metadata(raw)
         state = self._load_acquisition_state()
         now = _now_iso()
         topic = _clip(raw.get("topic") or "真实线索导入", 120)
@@ -1049,6 +1110,7 @@ class MatrixControlPlane:
         }
         seen: set[str] = set()
         content_task = {
+            **template_meta,
             "taskId": f"content_{uuid.uuid4().hex[:10]}",
             "createdAt": now,
             "title": topic,
@@ -1082,11 +1144,12 @@ class MatrixControlPlane:
             seen.add(dedupe_key)
             qualification = _qualify_acquisition_lead(summary, topic=topic, target=raw.get("target") or raw.get("targetCustomer"))
             lead = {
+                **template_meta,
                 "leadId": f"lead_{uuid.uuid4().hex[:12]}",
                 "createdAt": now,
                 "updatedAt": now,
                 "source": source,
-                "sourceTask": content_task["title"],
+                "sourceTask": _acquisition_source_task(content_task["title"], raw),
                 "agentTaskId": agent_task_id,
                 "deviceId": device_id,
                 "actionStatus": action_status,
@@ -1110,6 +1173,7 @@ class MatrixControlPlane:
                 "tags": ["real-import", safe_channel, safe_platform, qualification["intentLevel"]],
             }
             customer = {
+                **template_meta,
                 "customerId": f"customer_{uuid.uuid4().hex[:12]}",
                 "createdAt": now,
                 "updatedAt": now,
@@ -1123,6 +1187,7 @@ class MatrixControlPlane:
             }
             draft_body = _safe_lead_summary(row.get("draftBody"), limit=500) or _build_acquisition_followup_draft(lead, knowledge)
             draft = {
+                **template_meta,
                 "draftId": f"draft_{uuid.uuid4().hex[:12]}",
                 "createdAt": now,
                 "updatedAt": now,
@@ -1178,6 +1243,7 @@ class MatrixControlPlane:
         )
 
     def run_acquisition_agent_task(self, raw: Json) -> Json:
+        raw = self._materialize_acquisition_request(raw)
         dry_run = _truthy(raw.get("dryRun", True))
         if not dry_run and not _truthy(raw.get("confirmed")):
             return _redact_json(
@@ -1202,6 +1268,7 @@ class MatrixControlPlane:
                 "summary": "手机 Agent 任务已生成，等待真实回传入库",
             }
         agent_run = {
+            **_acquisition_template_metadata(raw),
             "schema": "loom.acquisition.agent_run.v1",
             "dryRun": dry_run,
             "taskId": _clip(agent_result.get("taskId") or raw.get("taskId") or f"agent_task_{uuid.uuid4().hex[:10]}", 80),
@@ -1227,7 +1294,11 @@ class MatrixControlPlane:
         return _redact_json({"agentRun": agent_run, "ingest": ingest, "snapshot": self.acquisition_snapshot()})
 
     def ingest_acquisition_agent_result(self, agent_result: Json, raw: Json | None = None) -> Json:
-        body = raw if isinstance(raw, dict) else {}
+        body = dict(raw) if isinstance(raw, dict) else {}
+        for key in ("templateId", "templateVersion"):
+            if key not in body and key in agent_result:
+                body[key] = agent_result.get(key)
+        body = self._materialize_acquisition_request(body)
         task_id = _clip(agent_result.get("taskId") or body.get("taskId") or f"agent_task_{uuid.uuid4().hex[:10]}", 80)
         device_id = _clip(agent_result.get("deviceId") or body.get("deviceId") or "", 80)
         platform = _acquisition_platform(agent_result.get("platform") or body.get("platform"))
@@ -1250,6 +1321,7 @@ class MatrixControlPlane:
             )
         ingest = self.import_acquisition_leads(
             {
+                **_acquisition_template_metadata(body),
                 "topic": body.get("topic") or f"{platform} 手机 Agent 获客任务",
                 "platform": platform,
                 "channel": draft.get("channel") or body.get("channel") or "comment",
@@ -3293,6 +3365,7 @@ def _acquisition_source(value: Any) -> str:
 
 
 def _acquisition_phone_task_payload(raw: Json, agent_run: Json) -> Json:
+    template_meta = _acquisition_template_metadata(raw)
     device_id = _clip(agent_run.get("deviceId") or raw.get("deviceId") or raw.get("device") or "phone-1", 80) or "phone-1"
     platform = _acquisition_platform(agent_run.get("platform") or raw.get("platform"))
     topic = _clip(raw.get("topic") or f"{platform} 手机 Agent 获客任务", 120)
@@ -3304,6 +3377,7 @@ def _acquisition_phone_task_payload(raw: Json, agent_run: Json) -> Json:
         limit=900,
     )
     payload = {
+        **template_meta,
         "schema": "loom.acquisition.phone_task.v1",
         "taskId": agent_run.get("taskId"),
         "platform": platform,
@@ -3330,6 +3404,7 @@ def _acquisition_phone_bridge_dispatch(phone_task: Json, device_id: str) -> Json
         "method": "POST",
         "endpoint": "/api/phone/task",
         "body": {
+            **_acquisition_template_metadata(phone_task),
             "taskId": phone_task.get("taskId") or "",
             "prompt": phone_task.get("prompt") or "",
             "mode": "safe",
@@ -3348,6 +3423,29 @@ def _acquisition_phone_bridge_dispatch(phone_task: Json, device_id: str) -> Json
             },
         },
     }
+
+
+def _acquisition_template_metadata(raw: Json) -> Json:
+    template_id = _clip(raw.get("templateId"), 100) if isinstance(raw, dict) else ""
+    if not template_id:
+        return {}
+    version = max(1, _int(raw.get("templateVersion"), 1))
+    return {
+        "templateId": template_id,
+        "templateVersion": version,
+        "templateName": _clip(raw.get("templateName") or template_id, 120),
+    }
+
+
+def _acquisition_source_task(title: Any, raw: Json) -> str:
+    safe_title = _clip(title, 120)
+    metadata = _acquisition_template_metadata(raw)
+    if not metadata:
+        return safe_title
+    return _clip(
+        f"{safe_title} · {metadata['templateId']}@v{metadata['templateVersion']}",
+        220,
+    )
 
 def _mode(value: Any) -> str:
     text = str(value or "safe").strip().lower()

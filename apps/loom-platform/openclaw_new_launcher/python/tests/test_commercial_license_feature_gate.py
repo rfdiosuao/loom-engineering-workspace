@@ -32,6 +32,11 @@ class CommercialFeaturePathContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.assertTrue(os.path.exists(FEATURE_MODULE), "commercial feature policy module is missing")
 
+    def test_phone_matrix_is_the_single_paid_entitlement_for_its_shared_surfaces(self) -> None:
+        feature_access = feature_module()
+
+        self.assertEqual(feature_access.COMMERCIAL_FEATURES, frozenset({"matrix.devices"}))
+
     def test_longest_prefix_wins_for_commercial_routes(self) -> None:
         feature_for_path = feature_module().feature_for_path
         cases = {

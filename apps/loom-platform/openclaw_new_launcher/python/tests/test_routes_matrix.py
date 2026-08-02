@@ -30,6 +30,55 @@ from tests.matrix_test_support import matrix_for_test
 
 
 class MatrixRouteContractTests(unittest.TestCase):
+    def test_acquisition_template_errors_are_stable_client_responses(self) -> None:
+        cases = (
+            (
+                "/api/matrix/acquisition/demo",
+                {"templateId": "missing-shared-template", "templateVersion": 1},
+            ),
+            (
+                "/api/matrix/acquisition/import",
+                {
+                    "templateId": "missing-shared-template",
+                    "templateVersion": 1,
+                    "leadSummary": "想了解价格",
+                },
+            ),
+            (
+                "/api/matrix/acquisition/agent/run",
+                {
+                    "templateId": "missing-shared-template",
+                    "templateVersion": 1,
+                    "dryRun": True,
+                },
+            ),
+            (
+                "/api/matrix/acquisition/agent/result",
+                {
+                    "templateId": "missing-shared-template",
+                    "templateVersion": 1,
+                    "agentResult": {
+                        "schema": "loom.acquisition.agent_result.v1",
+                        "taskId": "agent_template_missing",
+                        "deviceId": "phone-a",
+                        "platform": "xiaohongshu",
+                        "status": "pending_human_confirm",
+                        "leads": [],
+                        "drafts": [],
+                    },
+                },
+            ),
+        )
+        env = {"LOOM_TEMPLATE_DISABLE_DEFAULT_CLOUD": "1"}
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, env, clear=False):
+            _app, client = _client(temp_dir)
+            for endpoint, body in cases:
+                with self.subTest(endpoint=endpoint):
+                    response = client.post(endpoint, json=body)
+                    self.assertEqual(response.status_code, 404)
+                    self.assertEqual(response.json()["code"], "matrix_template_not_found")
+                    self.assertEqual(response.json()["_meta"]["status"], 404)
+
     def test_unactivated_account_without_identity_cannot_read_or_emergency_stop_matrix(self) -> None:
         class UnactivatedEntitlement:
             def current_state(self, _feature=None):
