@@ -998,7 +998,7 @@ cargo check --locked
 8. OpenMinis 只借鉴公开接口思想，许可证边界有书面审查。
 9. 全量测试、发布来源和产物校验可复现。
 10. Shizuku 与 PRoot/Linux 均为可选能力；缺失、失效或撤权不会破坏 LumiAgent 基础功能，且任何远程入口都不能执行任意 shell。
-11. Desktop `2.4.4` 与 LumiAgent `6.65-stability` 的版本、签名、SHA256、来源提交和 release notes 一致。
+11. Desktop `2.4.5` 与 LumiAgent `6.66-stability` 的版本、签名、SHA256、来源提交和 release notes 一致。
 
 ## 10. 2026-08-02 Skill Center / PRoot 本地候选记录
 
@@ -1008,7 +1008,15 @@ cargo check --locked
 - Android default 与 Android 7 JVM 均为 `671/671`；最终候选在 API 36 与 API 24 虚拟机的冷安装/连续 Skill instrumentation 均为 `1/1`，并完成 Skill Center 逐按钮手工路径。
 - 产物、SHA256、虚拟机证据和正式发行残余门禁见 `docs/release/2.4.4-lumiagent-6.65-skill-linux-evidence.md`。
 
-## 11. 官方参考
+## 11. 2026-08-03 2.4.5 Z-Pay 生产无扣款部署记录
+
+- 已完整审查新版 Z-Pay Skill 与 `https://zpayz.cn/doc.html` 的 `mapi.php`、`api.php`、notify、return、MD5 签名和 `success` 回执合同；提交 `0f334a2` 增加敏感路由无 CORS、回调 URL、订单号、二维码和跳转地址边界。
+- License 全量 `246/246`、Bridge 全量 `94/94`、前端合同 `228/228`、Launcher 账户合同 `64/64`、真实 TLS 网络合同 `1/1` 通过；生产前端 build 成功。
+- 用户明确允许迁移生产 Z-Pay 配置并部署，但禁止真实扣款。商户配置通过 SSH 内存管道从 New API PostgreSQL 迁移，明文未进入本机文件、终端输出、截图、提交或安装包。
+- 生产 License 与 Bridge 已部署 r6 后端候选，恢复点和公网验收结果见 `docs/release/2.4.5-build-evidence.md`。
+- New API 的 4 个启用套餐均标记为 `USD`，Z-Pay 当前合同只允许 `CNY`；在明确人民币定价和完成沙箱/测试账号或零金额合同验收前，生产 Provider 与主动查单保持关闭，`payment_orders=0`。
+
+## 12. 官方参考
 
 - OpenMinis：`https://github.com/OpenMinis/OpenMinis`
 - OpenMinis Debug/Provider API：`https://github.com/OpenMinis/OpenMinis/blob/main/docs/specs/debug-server-api.md`
@@ -1018,7 +1026,7 @@ cargo check --locked
 - Shizuku API：`https://github.com/RikkaApps/Shizuku-API`
 - PRoot：`https://github.com/proot-me/proot`
 
-## 12. 下次恢复工作的首条提示词
+## 13. 下次恢复工作的首条提示词
 
 ```text
 请继续执行 docs/superpowers/plans/2026-07-31-loom-phone-connectivity-agent-ecosystem-hardening.md。
