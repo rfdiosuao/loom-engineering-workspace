@@ -62,6 +62,13 @@ class BridgeDeployScriptContractTests(unittest.TestCase):
         self.assertIn("openclaw-ed25519-v1", self.source)
         self.assertIn("entitlement_public_key=ready", self.source)
 
+    def test_post_switch_smoke_requires_payment_route_contract(self) -> None:
+        self.assertIn("/api/openclaw/payments/plans", self.source)
+        self.assertIn("payment_route=ready", self.source)
+        route_smoke = self.source.index("payment_route=ready")
+        disarm = self.source.index("[7/7] Disarm rollback")
+        self.assertLess(route_smoke, disarm)
+
     def test_post_switch_smoke_waits_for_both_readiness_endpoints(self) -> None:
         self.assertIn("BRIDGE_READY_RETRY_ATTEMPTS", self.source)
         self.assertIn("BRIDGE_READY_RETRY_DELAY_SEC", self.source)

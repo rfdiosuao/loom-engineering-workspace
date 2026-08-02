@@ -178,7 +178,7 @@ mv "$next/openclaw_newapi_bridge.py" "$REMOTE_DIR/openclaw_newapi_bridge.py"
 systemctl start "$SERVICE_NAME"
 systemctl is-active --quiet "$SERVICE_NAME"
 
-echo "[5/7] Read-only health and entitlement public-key smoke"
+echo "[5/7] Read-only health, entitlement public-key and payment-route smoke"
 wait_for_readiness
 DEPLOY_HEALTH_JSON="$cache/health.json" \
 DEPLOY_KEY_JSON="$cache/entitlement-public-key.json" \
@@ -208,6 +208,21 @@ if len(public_key) != 32:
     raise SystemExit("bridge entitlement public key has an invalid length")
 print("entitlement_public_key=ready")
 PY
+
+payment_response="$(
+  curl -sS \
+    -X POST \
+    -H "Content-Type: application/json" \
+    --data '{}' \
+    -w '\n%{http_code}' \
+    "$LOCAL_BASE_URL/api/openclaw/payments/plans"
+)"
+payment_status="${payment_response##*$'\n'}"
+if [ "$payment_status" != "401" ]; then
+  echo "bridge payment route contract failed" >&2
+  exit 1
+fi
+echo "payment_route=ready"
 
 echo "[6/7] Verify environment was not changed"
 env_sha_after="$(sha256sum "$BRIDGE_ENV_FILE" | cut -d' ' -f1)"
