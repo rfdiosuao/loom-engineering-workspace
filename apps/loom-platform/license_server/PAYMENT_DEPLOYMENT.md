@@ -2,12 +2,12 @@
 
 本候选包用于把当前麓鸣账户、权益、共享矩阵授权和 Z-Pay 支付路由部署到既有授权服务。它不包含生产环境文件、商户号、商户密钥、数据库、签名私钥或任何用户数据。
 
-支付与部署代码源提交：`377efc54d84ebcbe2a7e90b30e45c3787defc2da`。
+支付与部署代码源提交：`d2180d6a547bee28f66630c3913dd002481a2d31`。
 
 ## 部署边界
 
 - 仅部署 `server.py`、完整 `luming_license` 模块树和可选管理页；部署脚本会先在线备份 SQLite、程序目录和既有环境文件。
-- `LICENSE_REQUIRE_ZPAY_READY=1` 时，脚本会在停止服务前检查九项 Z-Pay 配置，且只报告配置名和通过/失败，不打印配置值。
+- `LICENSE_REQUIRE_ZPAY_READY=1` 时，脚本会在停止服务前检查十项 Z-Pay 配置，且只报告配置名和通过/失败，不打印配置值。
 - 上传包必须包含 `luming_license/http/routes_payments.py`；切换后会以未授权请求确认账户权益路由和支付套餐路由都返回 `401`。
 - 支付通知、主动查单与发放权益仍以服务端验签、金额/商户/订单/渠道/nonce 二次核验和数据库事务为准；同步返回页不会发放权益。
 - 本流程不执行真实扣款、退款、结算、商户资料修改或正式发布。
@@ -22,11 +22,14 @@ LICENSE_ZPAY_BASE_URL=https://<已核验的支付商域名>
 LICENSE_ZPAY_PID=<商户号>
 LICENSE_ZPAY_KEY=<商户密钥>
 LICENSE_ZPAY_CREATE_PATH=/mapi.php
+LICENSE_ZPAY_CHANNELS=alipay
 LICENSE_ZPAY_QUERY_ENABLED=1
 LICENSE_ZPAY_QUERY_PATH=/api.php
 LICENSE_ZPAY_NOTIFY_URL=https://license.heang.top/api/payments/zpay/notify
 LICENSE_ZPAY_RETURN_URL=https://license.heang.top/api/payments/zpay/return
 ```
+
+`LICENSE_ZPAY_CHANNELS` 必须与商户后台实际启用的方式一致，只能填写 `alipay`、`wxpay` 或二者的逗号分隔组合。当前生产只读核验显示仅启用支付宝，因此部署候选应使用 `alipay`；后端只向客户端返回该列表，并会在创建数据库订单前拒绝未启用渠道。
 
 配置完成后，可先运行不输出配置值的只读校验：
 
