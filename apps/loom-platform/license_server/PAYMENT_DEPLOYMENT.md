@@ -4,6 +4,8 @@
 
 支付与部署代码源提交：`d2180d6a547bee28f66630c3913dd002481a2d31`。
 
+Bridge 支付转发与部署门禁源提交：`553656723a97268833caeb0c2a05ded6282523fb`。
+
 ## 部署边界
 
 - 仅部署 `server.py`、完整 `luming_license` 模块树和可选管理页；部署脚本会先在线备份 SQLite、程序目录和既有环境文件。
@@ -56,6 +58,22 @@ LICENSE_REQUIRE_ZPAY_READY=1 bash license/deploy.sh
 ```
 
 脚本会依次完成：完整备份、候选模块编译、同文件系统暂存、配置预检、原子切换、健康检查、SQLite `quick_check`、账户权益路由检查、支付路由检查。任一步失败都会恢复旧程序；如果本次更新了中转令牌，也会恢复旧环境文件。
+
+## Bridge 受控部署
+
+授权服务支付路由通过后，再把 Bridge 候选上传到脚本默认位置：
+
+```text
+bridge/openclaw_newapi_bridge.py -> /tmp/openclaw-newapi-bridge.py
+```
+
+然后执行：
+
+```bash
+bash bridge/deploy.sh
+```
+
+Bridge 脚本会备份现有程序和环境文件、编译候选、验证权益服务配置并原子切换；切换后必须同时通过健康页、权益公钥和未登录支付套餐路由 `401` 冒烟。支付路由仍为 `404`、网络异常或状态不符时会自动恢复旧程序，且不会修改 `bridge.env`。
 
 ## 上线后验收
 
