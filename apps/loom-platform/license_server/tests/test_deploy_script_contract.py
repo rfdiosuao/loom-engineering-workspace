@@ -35,6 +35,34 @@ class DeployScriptContractTests(unittest.TestCase):
         self.assertIn("/api/service/account-entitlements/current", self.source)
         self.assertIn("entitlement_route=ready", self.source)
 
+    def test_payment_route_is_required_before_switch_and_smoked_after_switch(self) -> None:
+        self.assertIn(
+            'test -f "$PACKAGE_UPLOAD/http/routes_payments.py"',
+            self.source,
+        )
+        payment_module_check = self.source.index(
+            'test -f "$PACKAGE_UPLOAD/http/routes_payments.py"'
+        )
+        switch_section = self.source.index('echo "[5/8] Guarded atomic program switch"')
+        program_stop = self.source.index(
+            'systemctl stop "$SERVICE_NAME"', switch_section
+        )
+        self.assertLess(payment_module_check, program_stop)
+        self.assertIn("/api/service/payments/plans", self.source)
+        self.assertIn("payment_route=ready", self.source)
+
+    def test_zpay_readiness_is_opt_in_and_validated_before_program_stop(self) -> None:
+        self.assertIn("LICENSE_REQUIRE_ZPAY_READY", self.source)
+        self.assertIn("DEPLOY_ENV_VALIDATE_ZPAY", self.source)
+        zpay_validation = self.source.index("DEPLOY_ENV_VALIDATE_ZPAY")
+        switch_section = self.source.index('echo "[5/8] Guarded atomic program switch"')
+        program_stop = self.source.index(
+            'systemctl stop "$SERVICE_NAME"', switch_section
+        )
+        self.assertLess(zpay_validation, program_stop)
+        self.assertNotIn('source "$RELAY_ENV_FILE"', self.source)
+        self.assertNotIn('cat "$RELAY_ENV_FILE"', self.source)
+
     def test_post_switch_smoke_waits_for_service_readiness(self) -> None:
         self.assertIn("LICENSE_HEALTH_RETRY_ATTEMPTS", self.source)
         self.assertIn("LICENSE_HEALTH_RETRY_DELAY_SEC", self.source)

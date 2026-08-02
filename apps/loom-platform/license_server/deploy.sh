@@ -13,6 +13,7 @@ LOCAL_BASE_URL="${LICENSE_LOCAL_BASE_URL:-http://127.0.0.1:18791}"
 RELAY_TOKEN="${OPENCLAW_PUBLISH_RELAY_TOKEN:-${PUBLISH_RELAY_TOKEN:-}}"
 HEALTH_RETRY_ATTEMPTS="${LICENSE_HEALTH_RETRY_ATTEMPTS:-30}"
 HEALTH_RETRY_DELAY_SEC="${LICENSE_HEALTH_RETRY_DELAY_SEC:-1}"
+REQUIRE_ZPAY_READY="${LICENSE_REQUIRE_ZPAY_READY:-0}"
 
 case "$REMOTE_DIR" in
   /*) ;;
@@ -28,6 +29,10 @@ if ! [[ "$HEALTH_RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if ! [[ "$HEALTH_RETRY_DELAY_SEC" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "LICENSE_HEALTH_RETRY_DELAY_SEC must be a non-negative number" >&2
+  exit 1
+fi
+if [ "$REQUIRE_ZPAY_READY" != "0" ] && [ "$REQUIRE_ZPAY_READY" != "1" ]; then
+  echo "LICENSE_REQUIRE_ZPAY_READY must be 0 or 1" >&2
   exit 1
 fi
 
@@ -129,6 +134,7 @@ test -f "$SERVER_UPLOAD"
 test -d "$PACKAGE_UPLOAD"
 test -f "$PACKAGE_UPLOAD/__init__.py"
 test -f "$DEPLOY_ENV_HELPER"
+test -f "$PACKAGE_UPLOAD/http/routes_payments.py"
 mapfile -d '' package_files < <(find "$PACKAGE_UPLOAD" -type f -name '*.py' -print0)
 test "${#package_files[@]}" -gt 0
 PYTHONPYCACHEPREFIX="$cache" python3 -m py_compile "$SERVER_UPLOAD" "${package_files[@]}"
@@ -164,6 +170,12 @@ DEPLOY_ENV_FILE="$RELAY_ENV_FILE" \
 DEPLOY_ENV_REQUIRE_NAME="LICENSE_ACCOUNT_REDEEM_SERVICE_TOKEN" \
   python3 "$DEPLOY_ENV_HELPER"
 echo "entitlement_service_token=configured"
+if [ "$REQUIRE_ZPAY_READY" = "1" ]; then
+  DEPLOY_ENV_FILE="$RELAY_ENV_FILE" \
+  DEPLOY_ENV_VALIDATE_ZPAY="1" \
+    python3 "$DEPLOY_ENV_HELPER"
+  echo "zpay=configured"
+fi
 systemctl daemon-reload
 
 echo "[5/8] Guarded atomic program switch"
@@ -199,6 +211,11 @@ route_status="$(curl -sS -o "$cache/entitlement-route.json" -w '%{http_code}' \
   -H 'Content-Type: application/json' -d '{}')"
 test "$route_status" = "401"
 echo "entitlement_route=ready"
+payment_route_status="$(curl -sS -o "$cache/payment-route.json" -w '%{http_code}' \
+  -X POST "$LOCAL_BASE_URL/api/service/payments/plans" \
+  -H 'Content-Type: application/json' -d '{}')"
+test "$payment_route_status" = "401"
+echo "payment_route=ready"
 if [ -n "$RELAY_TOKEN" ]; then
   curl -fsS "$LOCAL_BASE_URL/api/lumi/relay/health" \
     -H "Authorization: Bearer $RELAY_TOKEN" >/dev/null

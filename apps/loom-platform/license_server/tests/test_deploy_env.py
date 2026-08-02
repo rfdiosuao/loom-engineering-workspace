@@ -7,7 +7,7 @@ from pathlib import Path
 
 from _support import LICENSE_SERVER_ROOT  # noqa: F401
 
-from luming_license.deploy_env import upsert_env_value
+from luming_license.deploy_env import upsert_env_value, validate_zpay_env_file
 
 
 class DeployEnvironmentTests(unittest.TestCase):
@@ -44,3 +44,62 @@ class DeployEnvironmentTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 upsert_env_value(Path(temp) / "service.env", "BAD-NAME", "value")
 
+    def test_zpay_validation_accepts_complete_https_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / "openclaw-license.env"
+            env_file.write_text(
+                "LICENSE_ZPAY_ENABLED=1\n"
+                "LICENSE_ZPAY_BASE_URL=https://zpayz.cn\n"
+                "LICENSE_ZPAY_PID=merchant-id\n"
+                'LICENSE_ZPAY_KEY="secret with spaces"\n'
+                "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
+                "LICENSE_ZPAY_QUERY_ENABLED=true\n"
+                "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
+                "LICENSE_ZPAY_NOTIFY_URL=https://license.example.com/api/payments/zpay/notify\n"
+                "LICENSE_ZPAY_RETURN_URL=https://license.example.com/api/payments/zpay/return\n",
+                encoding="utf-8",
+            )
+
+            validate_zpay_env_file(env_file)
+
+    def test_zpay_validation_rejects_missing_secret_without_exposing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / "openclaw-license.env"
+            env_file.write_text(
+                "LICENSE_ZPAY_ENABLED=1\n"
+                "LICENSE_ZPAY_BASE_URL=https://zpayz.cn\n"
+                "LICENSE_ZPAY_PID=merchant-id\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "LICENSE_ZPAY_KEY") as caught:
+                validate_zpay_env_file(env_file)
+            self.assertNotIn("merchant-id", str(caught.exception))
+
+    def test_zpay_validation_rejects_disabled_or_insecure_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / "openclaw-license.env"
+            common = (
+                "LICENSE_ZPAY_PID=merchant-id\n"
+                "LICENSE_ZPAY_KEY=secret\n"
+                "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
+                "LICENSE_ZPAY_QUERY_ENABLED=1\n"
+                "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
+                "LICENSE_ZPAY_NOTIFY_URL=https://license.example.com/api/payments/zpay/notify\n"
+                "LICENSE_ZPAY_RETURN_URL=https://license.example.com/api/payments/zpay/return\n"
+            )
+            env_file.write_text(
+                "LICENSE_ZPAY_ENABLED=0\n"
+                "LICENSE_ZPAY_BASE_URL=https://zpayz.cn\n" + common,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "LICENSE_ZPAY_ENABLED"):
+                validate_zpay_env_file(env_file)
+
+            env_file.write_text(
+                "LICENSE_ZPAY_ENABLED=1\n"
+                "LICENSE_ZPAY_BASE_URL=http://zpayz.cn\n" + common,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "LICENSE_ZPAY_BASE_URL"):
+                validate_zpay_env_file(env_file)
