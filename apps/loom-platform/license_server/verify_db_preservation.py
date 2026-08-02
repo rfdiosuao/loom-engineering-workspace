@@ -26,9 +26,13 @@ PROTECTED_TABLES = (
     "account_gateway_settings",
     "publish_relay_packets",
     "account_entitlement_redemptions",
+    "payment_orders",
 )
 ALLOWED_EXPECTED_CHANGES = frozenset({"plans"})
-ADDITIVE_MIGRATION_TABLES = frozenset({"account_entitlement_redemptions"})
+ADDITIVE_MIGRATION_TABLES = frozenset({
+    "account_entitlement_redemptions",
+    "payment_orders",
+})
 TABLE_REQUIRED_COLUMNS = {
     "codes": (
         "code_hash", "code_label", "full_code", "licensee", "edition",
@@ -78,6 +82,14 @@ TABLE_REQUIRED_COLUMNS = {
     "account_entitlement_redemptions": (
         "code_hash", "account_id", "plan", "features_json", "devices",
         "concurrent_tasks", "expires_at", "code_label", "redeemed_at",
+    ),
+    "payment_orders": (
+        "order_id", "out_trade_no", "account_id", "request_id", "product_id",
+        "product_name", "plan_key", "provider", "payment_type", "amount_minor",
+        "currency", "duration_days", "features_json", "quotas_json", "nonce_hash",
+        "status", "provider_order_reference", "provider_transaction_id", "qrcode",
+        "pay_url", "expires_at", "paid_at", "entitlement_code_hash",
+        "last_error_code", "created_at", "updated_at",
     ),
     "plans": (
         "plan_key", "display_name", "duration_days", "features_json", "gateway_base_url",

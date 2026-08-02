@@ -19,7 +19,6 @@ type LobeIconComponent = React.ComponentType<{
 
 const LOBE_AGENT_LOGOS: Record<string, LobeIconComponent> = {
   'codex-desktop': OpenAI,
-  'chatgpt-desktop': OpenAI,
   'codex-cli': OpenAI,
   'claude-code': Claude.Color,
   'grok-build': Grok,
@@ -29,7 +28,6 @@ const LOBE_AGENT_LOGOS: Record<string, LobeIconComponent> = {
 
 const AGENT_LABELS: Record<string, string> = {
   'codex-desktop': 'Codex',
-  'chatgpt-desktop': 'ChatGPT',
   'codex-cli': 'Codex CLI',
   'claude-code': 'Claude Code',
   opencode: 'opencode',

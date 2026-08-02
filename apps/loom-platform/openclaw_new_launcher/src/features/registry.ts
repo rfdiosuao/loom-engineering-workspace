@@ -22,7 +22,7 @@ const GROUP_CORE = 'LOOM';
 const HIDDEN = false;
 const MODULE_FEATURES: Record<string, string[]> = {
   'agent-orchestration': ['agent', 'agents', 'agentAccess'],
-  'phone-matrix': ['phone', 'workbench', 'acquisition'],
+  'phone-matrix': ['phone', 'workbench', 'acquisition', 'skills'],
   'media-creation': ['creative'],
   'model-accounts': ['license'],
   diagnostics: ['diagnostics', 'terminal'],
@@ -40,8 +40,9 @@ export const FEATURE_DEFINITIONS: FeatureDefinition[] = [
   { key: 'dashboard', label: '总览', desc: '状态 / 演示', icon: 'HOME', group: GROUP_CORE, action: { type: 'page' } },
   { key: 'agents', label: '安装', desc: '智能体运行时', icon: 'INS', group: GROUP_CORE, action: { type: 'page' } },
   { key: 'agent', label: '智能体', desc: '对话 / 编排 / 调试', icon: 'AGT', group: GROUP_CORE, action: { type: 'page' } },
+  { key: 'skills', label: 'Skill', desc: '沉淀 / 模板 / 复用', icon: 'SKL', group: GROUP_CORE, action: { type: 'page' }, requiresLicense: true },
   { key: 'creative', label: '创作', desc: '生图 / 生视频', icon: 'CRT', group: GROUP_CORE, action: { type: 'page' } },
-  { key: 'acquisition', label: '获客', desc: '线索 / 草稿 / 跟进', icon: 'MATRIX', group: GROUP_CORE, accent: true, action: { type: 'page' } },
+  { key: 'acquisition', label: '获客', desc: '线索 / 草稿 / 跟进', icon: 'MATRIX', group: GROUP_CORE, accent: true, action: { type: 'page' }, requiresLicense: true },
   { key: 'phone', label: '手机', desc: '连接 / 截图 / 读屏', icon: 'PHN', group: GROUP_CORE, action: { type: 'page' }, requiresLicense: true, visible: HIDDEN },
   { key: 'workbench', label: '工作台', desc: '手机矩阵 / 任务发布', icon: 'MATRIX', group: GROUP_CORE, action: { type: 'page' }, requiresLicense: true },
   { key: 'license', label: '模型账户', desc: '登录 / 模型', icon: 'ACC', group: GROUP_CORE, action: { type: 'page' } },

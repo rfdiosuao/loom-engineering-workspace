@@ -82,8 +82,7 @@ test('agent installer controls select, inspect, detect, and submit only mocked i
   await expect(main.getByText('前置环境已就绪')).toHaveCount(0);
 
   const agents = [
-    ['codex-desktop', 'ChatGPT Codex 原版'],
-    ['chatgpt-desktop', 'ChatGPT Desktop'],
+    ['codex-desktop', 'Codex Desktop'],
     ['codex-cli', 'Codex CLI'],
     ['claude-code', 'Claude Code'],
     ['opencode', 'opencode'],
@@ -114,11 +113,11 @@ test('agent installer controls select, inspect, detect, and submit only mocked i
   await expectProxyIntent(audit, beforeDetect, {
     method: 'POST', path: '/api/components/detect', body: { componentId: 'codex-desktop' },
   });
-  await expectToast(page, 'ChatGPT Codex 原版 检测完成');
+  await expectToast(page, 'Codex Desktop 检测完成');
 
   const beforeInstall = await markCalls(audit);
   await main.getByRole('button', { name: '安装原版' }).click();
-  await confirmDialog(page, '安装 ChatGPT Codex 原版', '安装原版');
+  await confirmDialog(page, '安装 Codex Desktop', '安装原版');
   await expectProxyIntent(audit, beforeInstall, {
     method: 'POST', path: '/api/components/detect', body: { componentId: 'codex-desktop' },
   });
@@ -142,7 +141,7 @@ test('agent detection failures stop before any install request', async ({ audit,
   const main = appMain(page);
   const beforeInstall = await markCalls(audit);
   await main.getByRole('button', { name: '安装原版' }).click();
-  await confirmDialog(page, '安装 ChatGPT Codex 原版', '安装原版');
+  await confirmDialog(page, '安装 Codex Desktop', '安装原版');
   await expectProxyIntent(audit, beforeInstall, {
     method: 'POST', path: '/api/components/detect', body: { componentId: 'codex-desktop' },
   });
@@ -349,6 +348,112 @@ test('account and subscription controls refresh, navigate, sync, open mocked pay
   await expectProxyIntent(audit, beforeLogout, { method: 'POST', path: '/api/account/logout', body: null });
   await expectToast(page, '已退出模型账号');
   await expect(appMain(page).getByRole('heading', { name: '登录模型账户' })).toBeVisible();
+});
+
+test('native matrix checkout renders qrcode and grants shared rights only after verified paid status', async ({ audit, page }) => {
+  const paymentPlan = {
+    planKey: 'matrix-year-audit',
+    displayName: '矩阵年付测试套餐',
+    description: '手机矩阵、获客、飞书、云模板和 Skill 共用授权',
+    durationDays: 365,
+    amountMinor: 29900,
+    amount: '299.00',
+    currency: 'CNY',
+    benefits: ['不限手机数量', '共享模板中心', 'Skill 复用'],
+  };
+  const pendingOrder = {
+    orderId: 'pay_order_audit_001',
+    outTradeNo: 'LM20260802AUDIT001',
+    planKey: paymentPlan.planKey,
+    displayName: paymentPlan.displayName,
+    paymentType: 'alipay',
+    amountMinor: paymentPlan.amountMinor,
+    amount: paymentPlan.amount,
+    currency: paymentPlan.currency,
+    status: 'pending',
+    providerOrderReference: 'provider_create_reference_only',
+    qrcode: 'https://qr.example.invalid/opaque-token-for-qr-only',
+    payUrl: 'https://pay.example.invalid/submit/pay_order_audit_001',
+    expiresAt: '2099-12-31T23:59:59.000Z',
+  };
+  const paidOrder = {
+    ...pendingOrder,
+    status: 'paid',
+    paidAt: '2026-08-02T08:00:00.000Z',
+  };
+
+  await audit.registerRoute('GET', '/api/account/current', { value: { account: AUDIT_ACCOUNT_WITH_CHOICES } });
+  await audit.registerRoute('GET', '/api/account/subscription', { value: { subscription: AUDIT_SUBSCRIPTION } });
+  await audit.registerRoute('GET', '/api/account/payments/plans', {
+    value: {
+      plans: [paymentPlan],
+      payment: { provider: 'zpay', configured: true, channels: ['alipay', 'wxpay'] },
+    },
+  });
+  await audit.registerRoute('POST', '/api/account/payments/order', { value: { order: pendingOrder } });
+  await audit.registerRoute('POST', '/api/account/payments/order/status', { value: { order: pendingOrder } });
+  await audit.registerCommand('plugin:shell|open', { value: null });
+  await navigateTo(audit, 'license');
+
+  const main = appMain(page);
+  await expect(main.locator('[data-native-payment-catalog]')).toBeVisible();
+  await expect(main.getByText(paymentPlan.displayName, { exact: true })).toBeVisible();
+  await expect(main.getByText('手机矩阵、获客、飞书流转、云模板和 Skill 共用同一份矩阵授权。')).toBeVisible();
+
+  const beforeCreate = await markCalls(audit);
+  await main.getByRole('button', { name: '支付宝扫码购买' }).click();
+  await expectToast(page, '订单已创建，请使用手机扫码支付。');
+  await expect(main.getByText(`订单号：${pendingOrder.orderId}`, { exact: true })).toBeVisible();
+  const qrImage = main.getByRole('img', { name: '麓鸣套餐支付二维码' });
+  await expect(qrImage).toBeVisible();
+  await expect(qrImage).toHaveAttribute('src', /^data:image\/gif;base64,/);
+
+  await expect.poll(async () => {
+    await audit.sync();
+    return proxyIntents(callsAfter(audit, beforeCreate))
+      .filter(({ method, path }) => method === 'POST' && path === '/api/account/payments/order');
+  }).toHaveLength(1);
+  await audit.sync();
+  const createIntent = proxyIntents(callsAfter(audit, beforeCreate))
+    .find(({ method, path }) => method === 'POST' && path === '/api/account/payments/order');
+  expect(createIntent?.body).toMatchObject({
+    planKey: paymentPlan.planKey,
+    paymentType: 'alipay',
+  });
+  expect(String((createIntent?.body as Record<string, unknown>)?.requestId || ''))
+    .toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+
+  const beforeOpen = await markCalls(audit);
+  await main.getByRole('button', { name: '打开直达支付' }).click();
+  await expectInvokeIntent(audit, beforeOpen, {
+    command: 'plugin:shell|open',
+    args: { path: pendingOrder.payUrl },
+  });
+
+  const beforePendingQuery = await markCalls(audit);
+  await main.getByRole('button', { name: '我已付款，查询状态' }).click();
+  await expectProxyIntent(audit, beforePendingQuery, {
+    method: 'POST', path: '/api/account/payments/order/status', body: { orderId: pendingOrder.orderId },
+  });
+  await expectToast(page, '等待扫码支付');
+  await audit.sync();
+  expect(proxyIntents(callsAfter(audit, beforePendingQuery)))
+    .not.toContainEqual(expect.objectContaining({ path: '/api/license/authorized' }));
+
+  await audit.registerRoute('POST', '/api/account/payments/order/status', {
+    value: {
+      order: paidOrder,
+      account: AUDIT_ACCOUNT_WITH_CHOICES,
+      entitlementSyncPending: false,
+    },
+  });
+  const beforePaidQuery = await markCalls(audit);
+  await main.getByRole('button', { name: '我已付款，查询状态' }).click();
+  await expectProxyIntent(audit, beforePaidQuery, {
+    method: 'POST', path: '/api/account/payments/order/status', body: { orderId: paidOrder.orderId },
+  });
+  await expectToast(page, '支付已确认，手机矩阵、云模板和 Skill 权益已开通。');
+  await expect(main.getByText('支付成功，权益已同步', { exact: true })).toBeVisible();
 });
 
 test('account service outage marks cached values as read-only and localizes the default plan', async ({ audit, page }, testInfo) => {

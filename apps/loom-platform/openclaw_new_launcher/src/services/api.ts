@@ -887,6 +887,46 @@ export interface AccountAuthCapabilities {
   emailConfigured?: boolean;
 }
 
+export interface AccountPaymentPlan {
+  planKey: string;
+  displayName: string;
+  description?: string;
+  durationDays: number;
+  amountMinor: number;
+  amount: string;
+  currency: string;
+  benefits?: string[];
+  features?: string[];
+}
+
+export interface AccountPaymentCatalog {
+  plans: AccountPaymentPlan[];
+  payment: {
+    provider?: string;
+    configured?: boolean;
+    channels?: Array<'alipay' | 'wxpay' | string>;
+  };
+}
+
+export interface AccountPaymentOrder {
+  orderId: string;
+  outTradeNo?: string;
+  planKey?: string;
+  displayName?: string;
+  paymentType?: 'alipay' | 'wxpay' | string;
+  amountMinor?: number;
+  amount?: string;
+  currency?: string;
+  status: 'pending' | 'paid' | 'expired' | 'creation_uncertain' | 'failed' | string;
+  providerOrderReference?: string;
+  qrcode?: string;
+  payUrl?: string;
+  expiresAt?: string;
+  paidAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface AccountLoginResponse {
   account: AccountSnapshot;
   syncResults?: Array<{ target?: string; ok?: boolean; error?: string }>;
@@ -910,6 +950,12 @@ export const accountApi = {
   subscription: (): Promise<{ subscription: AccountSubscriptionSnapshot }> => api('/api/account/subscription'),
   redeemEntitlement: (params: { code: string }): Promise<AccountLoginResponse> =>
     api('/api/account/entitlement/redeem', 'POST', params),
+  paymentPlans: (): Promise<AccountPaymentCatalog> =>
+    api('/api/account/payments/plans'),
+  createPaymentOrder: (params: { planKey: string; paymentType: 'alipay' | 'wxpay'; requestId: string }): Promise<{ order: AccountPaymentOrder }> =>
+    api('/api/account/payments/order', 'POST', params),
+  paymentOrderStatus: (params: { orderId: string }): Promise<{ order: AccountPaymentOrder; account?: AccountSnapshot; entitlementSyncPending?: boolean }> =>
+    api('/api/account/payments/order/status', 'POST', params),
   selectModels: (params: { textModel?: string; imageModel?: string; videoModel?: string }): Promise<{ account: AccountSnapshot; syncResults?: Array<{ target?: string; ok?: boolean; error?: string }> }> =>
     api('/api/account/models/select', 'POST', params),
   logout: (): Promise<{ account: AccountSnapshot; loggedOut?: boolean }> => api('/api/account/logout', 'POST'),
@@ -1671,10 +1717,14 @@ export interface AcquisitionTemplateSummary {
   schema?: string;
   templateId: string;
   version?: number;
+  enabled?: boolean;
   name: string;
   industry?: string;
   platforms?: string[];
   targetCustomer?: string;
+  keywords?: string[];
+  leadRules?: string[];
+  replyStyle?: string;
   uploadStatus?: 'pending_upload' | 'upload_failed' | 'uploaded' | string;
   uploadError?: string;
   remote?: {
@@ -1685,6 +1735,7 @@ export interface AcquisitionTemplateSummary {
     serverUrl?: string;
   };
   updatedAt?: string;
+  createdAt?: string;
 }
 
 export interface AcquisitionTemplateStatus {
@@ -1699,6 +1750,7 @@ export interface AcquisitionTemplateStatus {
   };
   stats?: {
     total?: number;
+    enabled?: number;
     pendingUpload?: number;
     uploaded?: number;
   };
@@ -1758,6 +1810,9 @@ export const acquisitionApi = {
     api('/api/matrix/acquisition/draft/manual-send', 'POST', { ...params, operator: 'launcher-user' }),
   templates: (): Promise<AcquisitionTemplateStatus> => api('/api/matrix/acquisition/templates'),
   saveTemplate: (params: {
+    templateId?: string;
+    expectedVersion?: number;
+    enabled?: boolean;
     name?: string;
     topic?: string;
     industry?: string;
@@ -1777,6 +1832,72 @@ export const acquisitionApi = {
     api('/api/matrix/acquisition/templates/cloud-consent', 'POST', { enabled, retryPending }),
   retryTemplates: (): Promise<Record<string, unknown>> =>
     api('/api/matrix/acquisition/templates/retry', 'POST'),
+  setTemplateEnabled: (templateId: string, enabled: boolean, expectedVersion?: number): Promise<{ template: AcquisitionTemplateSummary; status?: AcquisitionTemplateStatus }> =>
+    api('/api/matrix/acquisition/templates/enable', 'POST', { templateId, enabled, expectedVersion }),
+  deleteTemplate: (templateId: string, expectedVersion?: number): Promise<{ status: string; templateId: string; version?: number }> =>
+    api('/api/matrix/acquisition/templates/delete', 'POST', { templateId, expectedVersion }),
+};
+
+export interface SkillSummary {
+  id: string;
+  name: string;
+  version?: string;
+  description?: string;
+  category?: string;
+  runtime?: string;
+  icon?: string;
+  applicableAgents?: string[];
+  source?: string;
+  sourceLabel?: string;
+  enabled?: boolean;
+  writable?: boolean;
+  hasReadme?: boolean;
+  invocationCount?: number;
+  successfulInvocations?: number;
+  failureCount?: number;
+  lastUsedAt?: string | null;
+  lastFailureAt?: string | null;
+  lastDurationMs?: number;
+  lastAgent?: string;
+  linkedTemplateIds?: string[];
+}
+
+export interface SkillListResponse {
+  skills: SkillSummary[];
+  directories?: Array<{ key?: string; label?: string; path?: string; writable?: boolean }>;
+  sites?: Array<{ name?: string; url?: string }>;
+}
+
+export const skillsApi = {
+  list: (): Promise<SkillListResponse> => api('/api/skills/list'),
+  installZip: (filename: string, data: string): Promise<{ skill: SkillSummary }> =>
+    api('/api/skills/install_zip', 'POST', { filename, data }),
+  setEnabled: (id: string, enabled: boolean): Promise<{ skill: SkillSummary }> =>
+    api('/api/skills/enable', 'POST', { id, enabled }),
+  uninstall: (id: string): Promise<{ status: string; id: string }> =>
+    api('/api/skills/uninstall', 'POST', { id }),
+  readme: (id: string): Promise<{ id: string; path?: string; content: string }> =>
+    api('/api/skills/readme', 'POST', { id }),
+  exportZip: (id: string): Promise<{ id: string; filename: string; mimeType: string; size: number; data: string }> =>
+    api('/api/skills/export', 'POST', { id }),
+  learn: (params: {
+    id?: string;
+    name: string;
+    summary: string;
+    steps: string[];
+    applicableAgents?: string[];
+    confirmed: boolean;
+    verifiedSuccess: boolean;
+    deterministic: boolean;
+    sideEffects: boolean;
+  }): Promise<{ skill: SkillSummary }> => api('/api/skills/learn', 'POST', params),
+  recordInvocation: (params: {
+    id: string;
+    success: boolean;
+    durationMs?: number;
+    agentId?: string;
+    templateId?: string;
+  }): Promise<{ skill: SkillSummary }> => api('/api/skills/invocation', 'POST', params),
 };
 
 export interface FeishuStatus {

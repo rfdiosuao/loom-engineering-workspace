@@ -20,7 +20,6 @@ from urllib.request import Request, urlopen
 
 from core.component_state import ComponentState, ComponentStateStore
 from core.official_codex import (
-    CHATGPT_DESKTOP_COMPONENT_ID,
     CODEX_CLI_COMPONENT_ID,
     CODEX_DESKTOP_COMPONENT_ID,
     CODEX_DESKTOP_APP_ID,
@@ -2466,7 +2465,7 @@ def _openai_desktop_probe_component(component_id: str) -> ReleaseComponent:
 
 
 def _is_openai_desktop_component_id(component_id: str | None) -> bool:
-    return component_id in {CODEX_DESKTOP_COMPONENT_ID, CHATGPT_DESKTOP_COMPONENT_ID}
+    return component_id == CODEX_DESKTOP_COMPONENT_ID
 
 
 def _is_codex_cli_component(component: ReleaseComponent) -> bool:
@@ -2798,7 +2797,7 @@ def _stop_official_codex_desktop() -> None:
     if os.name != "nt":
         raise ComponentInstallError("OpenAI 官方 Codex 重启仅支持 Windows")
     script = """
-$packageNames = @('OpenAI.Codex', 'OpenAI.ChatGPT')
+$packageNames = @('OpenAI.Codex')
 $roots = @(
   foreach ($packageName in $packageNames) {
     Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue |
@@ -2846,7 +2845,7 @@ def _official_codex_desktop_running() -> bool:
     if os.name != "nt":
         return False
     script = """
-$packageNames = @('OpenAI.Codex', 'OpenAI.ChatGPT')
+$packageNames = @('OpenAI.Codex')
 $roots = @(
   foreach ($packageName in $packageNames) {
     Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue |

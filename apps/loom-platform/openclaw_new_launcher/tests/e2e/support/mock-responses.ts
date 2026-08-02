@@ -138,6 +138,12 @@ export function createBaselineSeed(): TauriMockSeed {
       'GET /api/theme/current': { value: { theme: null, isCustom: false, merchantId: null } },
       'GET /api/account/current': { value: { account: AUDIT_ACCOUNT } },
       'POST /api/account/sync': { value: { account: AUDIT_ACCOUNT, syncResults: [] } },
+      'GET /api/account/payments/plans': {
+        value: {
+          plans: [],
+          payment: { provider: 'zpay', configured: false, channels: [] },
+        },
+      },
       'GET /api/account/capabilities': {
         value: {
           capabilities: {
@@ -236,6 +242,18 @@ export function createBaselineSeed(): TauriMockSeed {
               lastSync: {},
             },
           },
+        },
+      },
+      'GET /api/skills/list': {
+        value: { skills: [], directories: [], sites: [] },
+      },
+      'GET /api/matrix/acquisition/templates': {
+        value: {
+          schema: 'loom.acquisition.templates.v1',
+          updatedAt: '2026-07-15T00:00:00.000Z',
+          cloud: { configured: false, consentGranted: false, uploadEnabled: false },
+          stats: { total: 0, enabled: 0, pendingUpload: 0, uploaded: 0 },
+          templates: [],
         },
       },
       'GET /api/matrix/status': { value: AUDIT_MATRIX_STATUS },

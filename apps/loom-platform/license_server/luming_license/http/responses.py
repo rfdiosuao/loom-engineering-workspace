@@ -33,6 +33,8 @@ class ResponseMixin:
         default_cache_control = (
             "no-store, private"
             if path.startswith("/api/service/account-entitlements/")
+            or path.startswith("/api/service/payments/")
+            or path.startswith("/api/payments/")
             else ("no-store" if path.startswith("/admin") else "no-cache")
         )
         self.send_header(
@@ -114,6 +116,16 @@ class ResponseMixin:
             "text/html; charset=utf-8",
             None,
             write_body=write_body,
+        )
+
+    def send_text(self, status: int, text: str, *, write_body: bool = True) -> None:
+        self._send_bytes(
+            status,
+            str(text).encode("utf-8"),
+            "text/plain; charset=utf-8",
+            None,
+            write_body=write_body,
+            cache_control="no-store, private",
         )
 
     def send_file(

@@ -13,7 +13,6 @@ from core.component_installer import ComponentInstallError, ComponentInstaller
 from core.component_state import ComponentState, ComponentStateStore
 from core.newapi_account_manager import ACCOUNT_SOURCE, NewApiAccountError
 from core.official_codex import (
-    CHATGPT_DESKTOP_COMPONENT_ID,
     CODEX_CLI_COMPONENT_ID,
     CODEX_DESKTOP_COMPONENT_ID,
     virtual_openai_component,
@@ -41,22 +40,6 @@ SIMULATION_COMPONENTS: dict[str, ReleaseComponent] = {
         category="agent",
         official_url="https://openai.com/codex/",
         description="OpenAI 官方 Codex 桌面应用，由 Microsoft Store 安装和更新",
-    ),
-    "chatgpt-desktop": ReleaseComponent(
-        component_id="chatgpt-desktop",
-        name="ChatGPT Desktop",
-        version="Microsoft Store",
-        platform="windows",
-        arch="x64",
-        archive_type="msstore",
-        size=1,
-        sha256="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        urls=("https://get.microsoft.com/installer/download/9NT1R1C2HH7J?cid=website_cta_psi",),
-        install_path="agents/chatgpt-desktop",
-        entry=None,
-        category="agent",
-        official_url="https://openai.com/chatgpt/desktop/",
-        description="OpenAI 官方 ChatGPT 桌面应用，由 Microsoft Store 安装和更新",
     ),
     "codex-cli": ReleaseComponent(
         component_id="codex-cli",
@@ -152,7 +135,6 @@ def _resolve_component_for_action(
         manifest, _manifest_warning = load_installable_manifest(manifest_path)
         source_id = CODEX_DESKTOP_COMPONENT_ID if component_id in {
             CODEX_DESKTOP_COMPONENT_ID,
-            CHATGPT_DESKTOP_COMPONENT_ID,
             CODEX_CLI_COMPONENT_ID,
         } else component_id
         component = manifest.component_by_id(source_id)

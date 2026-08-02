@@ -21,6 +21,7 @@ from luming_license.http.responses import ResponseMixin
 from luming_license.http import (
     routes_admin,
     routes_auth,
+    routes_payments,
     routes_public,
     routes_relay,
     routes_service,
@@ -84,9 +85,14 @@ EXPECTED_ROUTE_MARKERS = {
     "/api/member/refresh",
     "/api/member/usage",
     "/api/public/config",
+    "/api/payments/zpay/notify",
+    "/api/payments/zpay/return",
     "/api/service/account-entitlements/current",
     "/api/service/account-entitlements/migrate-legacy",
     "/api/service/account-entitlements/redeem",
+    "/api/service/payments/orders/create",
+    "/api/service/payments/orders/status",
+    "/api/service/payments/plans",
     "/api/templates",
     "/api/v1/member/activate",
     "/api/v1/member/current",
@@ -200,6 +206,7 @@ class HttpRouteInventoryTests(unittest.TestCase):
             routes_admin,
             routes_relay,
             routes_service,
+            routes_payments,
         )
         registered: set[str] = set()
         for module in modules:

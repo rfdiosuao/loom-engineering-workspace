@@ -35,14 +35,16 @@ class CommercialFeaturePathContractTests(unittest.TestCase):
     def test_longest_prefix_wins_for_commercial_routes(self) -> None:
         feature_for_path = feature_module().feature_for_path
         cases = {
-            "/api/matrix/acquisition/feishu/status": "acquisition.feishu",
-            "/api/matrix/acquisition/feishu/create-table?confirmed=1": "acquisition.feishu",
-            "/api/matrix/acquisition/templates": "templates.cloud",
-            "/api/matrix/acquisition/templates/upload": "templates.cloud",
-            "/api/matrix/acquisition": "acquisition.workbench",
-            "/api/matrix/acquisition/agent/result": "acquisition.workbench",
+            "/api/matrix/acquisition/feishu/status": "matrix.devices",
+            "/api/matrix/acquisition/feishu/create-table?confirmed=1": "matrix.devices",
+            "/api/matrix/acquisition/templates": "matrix.devices",
+            "/api/matrix/acquisition/templates/upload": "matrix.devices",
+            "/api/matrix/acquisition": "matrix.devices",
+            "/api/matrix/acquisition/agent/result": "matrix.devices",
             "/api/matrix/status": "matrix.devices",
             "/api/phone/task": "matrix.devices",
+            "/api/skills/list": "matrix.devices",
+            "/api/skills/learn": "matrix.devices",
         }
 
         for path, expected in cases.items():
@@ -171,16 +173,30 @@ class CommercialFeatureDecisionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.assertTrue(os.path.exists(FEATURE_MODULE), "commercial feature policy module is missing")
 
-    def test_denial_uses_the_exact_feature_and_stable_public_code(self) -> None:
+    def test_acquisition_denial_uses_the_shared_matrix_feature_and_stable_public_code(self) -> None:
         commercial_feature_denial = feature_module().commercial_feature_denial
         manager = RecordingLicenseManager(authorized_features=set())
 
         denial = commercial_feature_denial("/api/matrix/acquisition/feishu/status", manager)
 
-        self.assertEqual(manager.requested, ["acquisition.feishu"])
+        self.assertEqual(manager.requested, ["matrix.devices"])
         self.assertEqual(denial["code"], "LICENSE_FEATURE_REQUIRED")
-        self.assertEqual(denial["feature"], "acquisition.feishu")
+        self.assertEqual(denial["feature"], "matrix.devices")
         self.assertNotIn("token", repr(denial).lower())
+
+    def test_matrix_entitlement_authorizes_acquisition_feishu_and_shared_templates(self) -> None:
+        commercial_feature_denial = feature_module().commercial_feature_denial
+        manager = RecordingLicenseManager(authorized_features={"matrix.devices"})
+
+        for path in (
+            "/api/matrix/acquisition",
+            "/api/matrix/acquisition/feishu/status",
+            "/api/matrix/acquisition/templates",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(commercial_feature_denial(path, manager))
+
+        self.assertEqual(manager.requested, ["matrix.devices", "matrix.devices", "matrix.devices"])
 
     def test_phone_stream_is_protected_but_stop_is_safety_cleanup(self) -> None:
         commercial_feature_denial = feature_module().commercial_feature_denial

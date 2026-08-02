@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-shell';
 import { UserRound } from 'lucide-react';
+import qrcode from 'qrcode-generator';
 import { BusyOverlay, showToast } from '../common';
 import { LoomLogoMark } from '../brand/LoomBrand';
 import {
@@ -8,6 +9,8 @@ import {
   parseErrorText,
   type AccountSnapshot,
   type AccountAuthCapabilities,
+  type AccountPaymentCatalog,
+  type AccountPaymentOrder,
   type AccountSubscriptionSnapshot,
 } from '../../services/api';
 import { accountCacheUsable, loadCachedAccount, saveCachedAccount } from '../../services/startupCache';
@@ -122,9 +125,46 @@ function accountIdentity(account: AccountSnapshot | null): string {
   ).trim();
 }
 
+function createPaymentRequestId(): string {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.getRandomValues) {
+    throw new Error('当前环境缺少安全随机数，无法安全创建支付订单');
+  }
+  if (typeof cryptoApi.randomUUID === 'function') return cryptoApi.randomUUID();
+  const bytes = new Uint8Array(16);
+  cryptoApi.getRandomValues(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+function createPaymentQrDataUri(value?: string): string {
+  const content = String(value || '').trim();
+  if (!content || content.length > 4096) return '';
+  try {
+    const qr = qrcode(0, 'M');
+    qr.addData(content);
+    qr.make();
+    const dataUrl = qr.createDataURL(5, 2);
+    return dataUrl.startsWith('data:image/gif;base64') ? dataUrl : '';
+  } catch {
+    return '';
+  }
+}
+
+function paymentStatusText(status?: string): string {
+  const values: Record<string, string> = {
+    pending: '等待扫码支付',
+    paid: '支付成功，权益已同步',
+    expired: '订单已过期，请重新下单',
+    creation_uncertain: '订单创建结果待确认，请勿重复付款',
+    failed: '订单失败，请重新下单',
+  };
+  return values[String(status || '')] || String(status || '等待确认');
+}
+
 export const LicensePage: React.FC = () => {
   const cachedAccount = useRef<AccountSnapshot | null>(loadCachedAccount());
   const subscriptionRequestVersion = useRef(0);
+  const paymentRequestVersion = useRef(0);
   const hasCachedAccount = accountCacheUsable(cachedAccount.current);
   const [account, setAccount] = useState<AccountSnapshot | null>(() => cachedAccount.current);
   const [subscription, setSubscription] = useState<AccountSubscriptionSnapshot | null>(() => cachedAccount.current?.subscription || null);
@@ -141,6 +181,11 @@ export const LicensePage: React.FC = () => {
   const [emailCode, setEmailCode] = useState('');
   const [password, setPassword] = useState('');
   const [entitlementCode, setEntitlementCode] = useState('');
+  const [paymentCatalog, setPaymentCatalog] = useState<AccountPaymentCatalog | null>(null);
+  const [paymentCatalogLoading, setPaymentCatalogLoading] = useState(false);
+  const [paymentChannel, setPaymentChannel] = useState<'alipay' | 'wxpay'>('alipay');
+  const [paymentOrder, setPaymentOrder] = useState<AccountPaymentOrder | null>(null);
+  const [paymentBusy, setPaymentBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(() => !hasCachedAccount);
   const [usingCachedAccount, setUsingCachedAccount] = useState(hasCachedAccount);
@@ -165,6 +210,11 @@ export const LicensePage: React.FC = () => {
   const entitlementExpiresAt = entitlementActive
     ? formatTime(accountEntitlement?.expiresAt)
     : '未激活';
+  const activeAccountIdentity = accountIdentity(account);
+  const paymentQrSrc = useMemo(
+    () => createPaymentQrDataUri(paymentOrder?.qrcode || paymentOrder?.payUrl),
+    [paymentOrder?.payUrl, paymentOrder?.qrcode],
+  );
 
   const applyAccount = useCallback((
     next: AccountSnapshot | null,
@@ -175,6 +225,9 @@ export const LicensePage: React.FC = () => {
     const nextIdentity = accountIdentity(next);
     if (previousIdentity !== nextIdentity) {
       useAgentStore.getState().reset();
+      paymentRequestVersion.current += 1;
+      setPaymentCatalog(null);
+      setPaymentOrder(null);
     }
     cachedAccount.current = next;
     if (options.persist !== false) saveCachedAccount(next);
@@ -229,7 +282,7 @@ export const LicensePage: React.FC = () => {
     });
   }, []);
 
-  const loadSubscription = async (quiet = false) => {
+  const loadSubscription = useCallback(async (quiet = false) => {
     const requestVersion = ++subscriptionRequestVersion.current;
     if (!quiet) setBusy(true);
     try {
@@ -256,7 +309,152 @@ export const LicensePage: React.FC = () => {
     } finally {
       if (!quiet && requestVersion === subscriptionRequestVersion.current) setBusy(false);
     }
+  }, []);
+
+  const loadPaymentPlans = useCallback(async (quiet = true) => {
+    const requestVersion = ++paymentRequestVersion.current;
+    const identity = accountIdentity(cachedAccount.current);
+    if (!cachedAccount.current?.loggedIn || !identity) return;
+    setPaymentCatalogLoading(true);
+    try {
+      const response = await accountApi.paymentPlans();
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      setPaymentCatalog(response);
+      const availableChannels = response.payment?.channels || [];
+      if (!availableChannels.includes(paymentChannel)) {
+        if (availableChannels.includes('alipay')) setPaymentChannel('alipay');
+        else if (availableChannels.includes('wxpay')) setPaymentChannel('wxpay');
+      }
+    } catch (error) {
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      setPaymentCatalog(null);
+      if (!quiet) {
+        const message = errorMessage(error);
+        setStatusText(message);
+        showToast(message || '套餐加载失败', 'error');
+      }
+    } finally {
+      if (requestVersion === paymentRequestVersion.current) {
+        setPaymentCatalogLoading(false);
+      }
+    }
+  }, [paymentChannel]);
+
+  const verifyPaymentOrder = useCallback(async (orderId: string, quiet = false) => {
+    const requestVersion = ++paymentRequestVersion.current;
+    const identity = accountIdentity(cachedAccount.current);
+    if (!identity || !orderId) return;
+    if (!quiet) setPaymentBusy(true);
+    try {
+      const response = await accountApi.paymentOrderStatus({ orderId });
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      setPaymentOrder(response.order);
+      if (response.order.status === 'paid') {
+        if (response.account) applyAccount(response.account);
+        const refreshResults = await Promise.allSettled([
+          checkLicense(),
+          loadSubscription(true),
+        ]);
+        const localSyncPending = response.entitlementSyncPending
+          || refreshResults.some((result) => result.status === 'rejected');
+        const message = localSyncPending
+          ? '支付已确认，权益正在同步；请稍后点击刷新账号。'
+          : '支付已确认，手机矩阵、云模板和 Skill 权益已开通。';
+        setStatusText(message);
+        showToast(message, localSyncPending ? 'info' : 'success');
+      } else if (!quiet) {
+        const message = paymentStatusText(response.order.status);
+        setStatusText(message);
+        showToast(message, response.order.status === 'pending' ? 'info' : 'error');
+      }
+    } catch (error) {
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      if (!quiet) {
+        const message = errorMessage(error);
+        setStatusText(message);
+        showToast(message || '订单状态查询失败', 'error');
+      }
+    } finally {
+      if (!quiet && requestVersion === paymentRequestVersion.current) {
+        setPaymentBusy(false);
+      }
+    }
+  }, [applyAccount, checkLicense, loadSubscription]);
+
+  const startPayment = async (planKey: string) => {
+    if (!accountWritable) {
+      const message = '请先完成账号在线验证，再创建支付订单。';
+      setStatusText(message);
+      showToast(message, 'info');
+      return;
+    }
+    const requestVersion = ++paymentRequestVersion.current;
+    const identity = accountIdentity(cachedAccount.current);
+    setPaymentBusy(true);
+    setPaymentOrder(null);
+    try {
+      const response = await accountApi.createPaymentOrder({
+        planKey,
+        paymentType: paymentChannel,
+        requestId: createPaymentRequestId(),
+      });
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      setPaymentOrder(response.order);
+      const message = response.order.status === 'creation_uncertain'
+        ? '订单创建结果待确认，请勿重复付款。'
+        : '订单已创建，请使用手机扫码支付。';
+      setStatusText(message);
+      showToast(message, response.order.status === 'creation_uncertain' ? 'info' : 'success');
+    } catch (error) {
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      const message = errorMessage(error);
+      setStatusText(message);
+      showToast(message || '订单创建失败', 'error');
+    } finally {
+      if (requestVersion === paymentRequestVersion.current) setPaymentBusy(false);
+    }
   };
+
+  useEffect(() => {
+    if (!accountWritable || !activeAccountIdentity) {
+      paymentRequestVersion.current += 1;
+      setPaymentCatalog(null);
+      setPaymentOrder(null);
+      return;
+    }
+    void loadPaymentPlans(true);
+  }, [accountWritable, activeAccountIdentity, loadPaymentPlans]);
+
+  useEffect(() => {
+    if (!paymentOrder?.orderId || paymentOrder.status !== 'pending') return;
+    let checking = false;
+    const timer = window.setInterval(() => {
+      if (checking) return;
+      checking = true;
+      void verifyPaymentOrder(paymentOrder.orderId, true).finally(() => {
+        checking = false;
+      });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [paymentOrder?.orderId, paymentOrder?.status, verifyPaymentOrder]);
 
   const sendEmailCode = async () => {
     if (!authCapabilities.inlineEmailCode) {
@@ -424,12 +622,15 @@ export const LicensePage: React.FC = () => {
 
   const logout = async () => {
     subscriptionRequestVersion.current += 1;
+    paymentRequestVersion.current += 1;
     setBusy(true);
     setStatusText('正在退出模型账号...');
     try {
       await accountApi.logout();
       applyAccount(null);
       setSubscription(null);
+      setPaymentCatalog(null);
+      setPaymentOrder(null);
       setEntitlementCode('');
       setStatusText('已退出账号');
       showToast('已退出模型账号', 'info');
@@ -675,7 +876,7 @@ export const LicensePage: React.FC = () => {
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
                 <div>
                   <h2 className="text-lg font-black text-text">账户与余额</h2>
-                  <p className="mt-1 text-xs leading-5 text-text-muted">充值、消耗记录与 API 密钥由模型服务同步；购买与支付在浏览器完成。</p>
+                  <p className="mt-1 text-xs leading-5 text-text-muted">充值、消耗记录与 API 密钥由模型服务同步；矩阵套餐可在麓鸣内扫码购买。</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <span
@@ -705,23 +906,164 @@ export const LicensePage: React.FC = () => {
                   <MetricTile label="当前套餐" value={planDisplayName(subscription?.plan || account?.plan)} />
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border/70 pt-5">
-                  <div>
-                    <div className="text-sm font-black text-text">套餐与购买</div>
-                    <div className="mt-1 text-xs leading-5 text-text-muted">套餐详情与支付流程由服务端账户中心提供。</div>
+                <div
+                  data-native-payment-catalog
+                  className="space-y-5 border-t border-border/70 pt-5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-black text-text">矩阵套餐与购买</div>
+                      <div className="mt-1 text-xs leading-5 text-text-muted">
+                        手机矩阵、获客、飞书流转、云模板和 Skill 共用同一份矩阵授权。
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void loadPaymentPlans(false)}
+                        disabled={paymentCatalogLoading || !accountWritable}
+                        className="h-9 rounded-[8px] border border-border bg-surface-alt px-3 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
+                      >
+                        {paymentCatalogLoading ? '加载中...' : '刷新套餐'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleOpenSubscription}
+                        disabled={!subscriptionUrl}
+                        className="h-9 rounded-[8px] border border-border bg-surface-alt px-3 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
+                      >
+                        打开账户中心
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleOpenSubscription}
-                    disabled={!subscriptionUrl}
-                    className="h-10 rounded-[8px] bg-accent px-4 text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-55"
-                  >
-                    打开账户中心
-                  </button>
-                </div>
 
-                <div className="max-w-xl">
-                  <InfoPanel label="套餐到期时间" value={formatTime(subscription?.expiresAt, '服务暂未返回')} />
+                  {paymentCatalog?.payment.configured && paymentCatalog.plans.length ? (
+                    <>
+                      <div data-payment-channel className="flex flex-wrap items-center gap-2">
+                        <span className="mr-1 text-xs font-bold text-text-subtle">支付方式</span>
+                        {paymentCatalog.payment.channels?.includes('alipay') ? (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentChannel('alipay')}
+                            className={[
+                              'h-9 rounded-[8px] border px-4 text-xs font-black transition',
+                              paymentChannel === 'alipay'
+                                ? 'border-accent bg-accent/10 text-accent'
+                                : 'border-border bg-surface-alt text-text-muted',
+                            ].join(' ')}
+                          >
+                            支付宝
+                          </button>
+                        ) : null}
+                        {paymentCatalog.payment.channels?.includes('wxpay') ? (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentChannel('wxpay')}
+                            className={[
+                              'h-9 rounded-[8px] border px-4 text-xs font-black transition',
+                              paymentChannel === 'wxpay'
+                                ? 'border-accent bg-accent/10 text-accent'
+                                : 'border-border bg-surface-alt text-text-muted',
+                            ].join(' ')}
+                          >
+                            微信支付
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <div className="grid gap-3 lg:grid-cols-2">
+                        {paymentCatalog.plans.map((plan) => (
+                          <article
+                            key={plan.planKey}
+                            className="rounded-[10px] border border-border bg-surface-alt/40 p-4"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="text-base font-black text-text">{plan.displayName}</div>
+                                <div className="mt-1 text-xs leading-5 text-text-muted">
+                                  {plan.description || `${plan.durationDays} 天矩阵授权`}
+                                </div>
+                              </div>
+                              <div className="shrink-0 text-right">
+                                <div className="text-xl font-black text-accent">¥{plan.amount}</div>
+                                <div className="text-[11px] font-bold text-text-subtle">{plan.currency}</div>
+                              </div>
+                            </div>
+                            {plan.benefits?.length ? (
+                              <ul className="mt-3 space-y-1 text-xs leading-5 text-text-muted">
+                                {plan.benefits.map((benefit) => (
+                                  <li key={benefit}>· {benefit}</li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => void startPayment(plan.planKey)}
+                              disabled={paymentBusy || !accountWritable}
+                              className="mt-4 h-10 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-55"
+                            >
+                              {paymentBusy ? '正在创建订单...' : `${paymentChannel === 'wxpay' ? '微信' : '支付宝'}扫码购买`}
+                            </button>
+                          </article>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="rounded-[8px] border border-border bg-surface-alt/35 px-4 py-3 text-xs leading-5 text-text-muted">
+                      {paymentCatalogLoading
+                        ? '正在从服务端加载可购买套餐...'
+                        : '在线扫码套餐尚未开放；仍可通过账户中心查看其他模型服务套餐。'}
+                    </div>
+                  )}
+
+                  {paymentOrder ? (
+                    <div className="grid gap-5 rounded-[12px] border border-accent/35 bg-accent/5 p-5 md:grid-cols-[180px_minmax(0,1fr)]">
+                      <div
+                        data-payment-qr
+                        className="flex min-h-[180px] items-center justify-center rounded-[8px] border border-border bg-white p-3"
+                      >
+                        {paymentQrSrc ? (
+                          <img src={paymentQrSrc} alt="麓鸣套餐支付二维码" className="h-[156px] w-[156px]" />
+                        ) : (
+                          <div className="px-3 text-center text-xs leading-5 text-slate-600">支付二维码暂不可用，请查询订单或打开直达支付。</div>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-black text-accent">{paymentStatusText(paymentOrder.status)}</div>
+                        <div className="mt-2 text-lg font-black text-text">
+                          {paymentOrder.displayName || paymentOrder.planKey || '矩阵套餐'} · ¥{paymentOrder.amount || '--'}
+                        </div>
+                        <div className="mt-2 break-all text-xs leading-5 text-text-muted">订单号：{paymentOrder.orderId}</div>
+                        <div className="mt-1 text-xs leading-5 text-text-muted">有效期：{formatTime(paymentOrder.expiresAt, '以支付页面为准')}</div>
+                        <p className="mt-3 text-xs leading-5 text-text-muted">
+                          开通只以服务端验签后的异步支付通知为准；返回页和“查询状态”按钮都不会直接发放权益。
+                        </p>
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void verifyPaymentOrder(paymentOrder.orderId, false)}
+                            disabled={paymentBusy}
+                            className="h-9 rounded-[8px] bg-accent px-4 text-xs font-black text-accent-ink disabled:opacity-55"
+                          >
+                            {paymentBusy ? '查询中...' : '我已付款，查询状态'}
+                          </button>
+                          {paymentOrder.payUrl ? (
+                            <button
+                              type="button"
+                              onClick={() => void openExternalUrl(paymentOrder.payUrl || '')}
+                              className="h-9 rounded-[8px] border border-border bg-surface px-4 text-xs font-black text-text"
+                            >
+                              打开直达支付
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="max-w-xl">
+                    <InfoPanel label="套餐到期时间" value={formatTime(subscription?.expiresAt, '服务暂未返回')} />
+                  </div>
                 </div>
               </div>
             </section>

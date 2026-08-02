@@ -20,7 +20,6 @@ import { useAppStore } from '../../stores/appStore';
 
 const PINNED_COMPONENT_IDS = [
   'codex-desktop',
-  'chatgpt-desktop',
   'codex-cli',
   'claude-code',
   'opencode',
@@ -34,7 +33,6 @@ const PINNED_COMPONENT_IDS = [
 
 const FALLBACK_COMPONENTS: Record<string, { name: string; description: string; category: string }> = {
   'codex-desktop': { name: 'Codex Desktop', description: 'OpenAI 官方 Codex 桌面应用，由 Microsoft Store 安装和更新', category: 'agent' },
-  'chatgpt-desktop': { name: 'ChatGPT Desktop', description: 'OpenAI 官方 ChatGPT 桌面应用，由 Microsoft Store 安装和更新', category: 'agent' },
   'codex-cli': { name: 'Codex CLI', description: 'OpenAI 官方 Codex 命令行智能体；与桌面应用独立检测和安装', category: 'agent' },
   'claude-code': { name: 'Claude Code', description: 'Anthropic 命令行编程智能体', category: 'agent' },
   opencode: { name: 'opencode', description: '终端优先的 AI 编程工具', category: 'agent' },
@@ -49,7 +47,6 @@ const FALLBACK_COMPONENTS: Record<string, { name: string; description: string; c
 const PREREQ_IDS = ['python_runtime', 'node', 'npm', 'git', 'git_bash', 'uv', 'webview2', 'data_dir'];
 const COMPONENT_REQUIRED_PREREQ_IDS: Record<string, Set<string>> = {
   'codex-desktop': new Set(),
-  'chatgpt-desktop': new Set(),
   'codex-cli': new Set(['python_runtime', 'node', 'npm', 'data_dir']),
   'claude-code': new Set(['python_runtime', 'node', 'npm', 'data_dir']),
   opencode: new Set(['python_runtime', 'node', 'npm', 'data_dir']),
@@ -229,13 +226,10 @@ function displayDetectionStatus(status: string): string {
 
 function detectionIdentityNote(component: ComponentSummary): string {
   if (component.id === 'codex-desktop') {
-    return '麓鸣按 Microsoft Store 包身份 OpenAI.Codex 识别 Codex Desktop。程序入口名可能为 ChatGPT.exe，但这不代表已安装 ChatGPT Desktop。';
-  }
-  if (component.id === 'chatgpt-desktop') {
-    return '麓鸣只按 Microsoft Store 包身份 OpenAI.ChatGPT 识别 ChatGPT Desktop，不会用 Codex 包或同名程序文件冒充。';
+    return '麓鸣只按 Microsoft Store 包身份 OpenAI.Codex 识别 Codex Desktop；程序入口名可能为 ChatGPT.exe，但仍属于同一个 Codex 产品。';
   }
   if (component.id === 'codex-cli') {
-    return 'Codex CLI 按独立命令行入口和版本识别，不会用 Codex Desktop 或 ChatGPT Desktop 的安装状态代替。';
+    return 'Codex CLI 按独立命令行入口和版本识别，不会用 Codex Desktop 的安装状态代替。';
   }
   return '';
 }
@@ -324,7 +318,7 @@ function isOpenClawComponent(component?: ComponentSummary): boolean {
 }
 
 function isOfficialCodexComponent(component?: ComponentSummary): boolean {
-  return component?.id === 'codex-desktop' || component?.id === 'chatgpt-desktop';
+  return component?.id === 'codex-desktop';
 }
 
 function componentWebUrl(component?: ComponentSummary): string {
@@ -1358,9 +1352,7 @@ export const AgentInstallerPage: React.FC = () => {
       const ok = await showConfirm({
         title: `${component.status === 'upgrade_available' ? '升级' : '安装'} ${component.name}`,
         message: isOfficialCodex
-          ? component.id === 'codex-desktop'
-            ? '将通过 Microsoft Store 安装 OpenAI 官方 Codex Desktop。麓鸣会按 OpenAI.Codex 包身份独立识别；安装完成后由你手动登录。继续吗？'
-            : '将通过 Microsoft Store 安装 OpenAI 官方 ChatGPT Desktop。麓鸣会按 OpenAI.ChatGPT 包身份独立识别；安装完成后由你手动登录。继续吗？'
+          ? '将通过 Microsoft Store 安装 OpenAI 官方 Codex Desktop。麓鸣会按 OpenAI.Codex 包身份识别；安装完成后由你手动登录。继续吗？'
           : `${component.status === 'upgrade_available' ? '升级' : '安装'}前会先检测必要环境；缺失时会尝试补齐 Git / Node.js / Python 等工具，然后下载、安装并启动智能体。继续吗？`,
         confirmText: isOfficialCodex ? '安装原版' : component.status === 'upgrade_available' ? '升级并启动' : '安装并启动',
       });
@@ -1386,7 +1378,7 @@ export const AgentInstallerPage: React.FC = () => {
           setSnapshot(next);
           const installed = next.components.find((item) => item.id === component.id);
           if (isOfficialCodexComponent(component) && installed?.status === 'manual_install_required') {
-            const message = '等待 Microsoft Store 完成安装；完成后点击“重新检测”，再启动原版 ChatGPT Codex。';
+            const message = '等待 Microsoft Store 完成安装；完成后点击“重新检测”，再启动 Codex Desktop。';
             pushLog(message, 'warning', component.id);
             showToast(message, 'info');
             return;

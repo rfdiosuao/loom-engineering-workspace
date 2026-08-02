@@ -7,12 +7,18 @@ from uploaded packages.
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 import os
 import re
 import shutil
+import tempfile
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from core.paths import AppPaths
 from core.storage import read_json, write_json
@@ -35,6 +41,10 @@ class SkillService:
     def __init__(self, paths: AppPaths):
         self.paths = paths
 
+    @property
+    def learned_skills_dir(self) -> str:
+        return os.path.join(self.paths.state_dir, "learned-skills")
+
     def list_skills(self) -> dict:
         self._ensure_dirs()
         state = self._read_state()
@@ -50,6 +60,7 @@ class SkillService:
                 state_item = state.get("skills", {}).get(skill_id)
                 enabled = bool(state_item.get("enabled")) if isinstance(state_item, dict) else source.default_enabled
                 installed_at = state_item.get("installedAt") if isinstance(state_item, dict) else None
+                usage = state_item if isinstance(state_item, dict) else {}
                 skills[skill_id] = {
                     **meta,
                     "source": source.key,
@@ -60,6 +71,14 @@ class SkillService:
                     "writable": source.writable,
                     "installedAt": installed_at,
                     "hasReadme": self._find_readme(skill_dir) is not None,
+                    "invocationCount": self._bounded_int(usage.get("invocationCount"), 0, 0, 2_000_000_000),
+                    "successfulInvocations": self._bounded_int(usage.get("successfulInvocations"), 0, 0, 2_000_000_000),
+                    "failureCount": self._bounded_int(usage.get("failureCount"), 0, 0, 2_000_000_000),
+                    "lastUsedAt": self._safe_text(usage.get("lastUsedAt"), 80) or None,
+                    "lastFailureAt": self._safe_text(usage.get("lastFailureAt"), 80) or None,
+                    "lastDurationMs": self._bounded_int(usage.get("lastDurationMs"), 0, 0, 86_400_000),
+                    "lastAgent": self._safe_text(usage.get("lastAgent"), 120),
+                    "linkedTemplateIds": self._safe_list(usage.get("linkedTemplateIds"), limit=50, item_limit=120),
                 }
         return {
             "skills": sorted(skills.values(), key=lambda item: (item.get("source", ""), item.get("name", ""))),
@@ -71,43 +90,195 @@ class SkillService:
     def install_zip(self, filename: str, data_base64: str) -> dict:
         self._ensure_dirs()
         safe_name = self._safe_filename(filename)
-        upload_dir = os.path.join(self.paths.launcher_dir, "skill-uploads")
-        os.makedirs(upload_dir, exist_ok=True)
-        zip_path = os.path.join(upload_dir, safe_name)
-
-        import base64
-
         try:
             payload = data_base64.split(",", 1)[1] if data_base64.startswith("data:") else data_base64
-            with open(zip_path, "wb") as file:
-                file.write(base64.b64decode(payload))
+            archive_bytes = base64.b64decode(payload, validate=True)
         except Exception as error:
-            raise SkillError(f"Skill 压缩包写入失败: {error}") from error
+            raise SkillError("Skill 压缩包不是有效的 Base64 数据") from error
+        if not archive_bytes or len(archive_bytes) > 32 * 1024 * 1024:
+            raise SkillError("Skill 压缩包为空或超过 32MB")
 
-        with zipfile.ZipFile(zip_path) as archive:
-            self._validate_zip(archive)
-            skill_root = self._detect_zip_skill_root(archive)
-            target_name = self._safe_slug(skill_root or os.path.splitext(safe_name)[0])
-            target_dir = os.path.join(self.paths.skills_dir, target_name)
+        staging_parent = tempfile.mkdtemp(prefix="skill-install-", dir=self.paths.launcher_dir)
+        target_dir = ""
+        backup_dir = ""
+        target_activated = False
+        meta: dict[str, Any] | None = None
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+                self._validate_zip(archive)
+                skill_root = self._detect_zip_skill_root(archive)
+                target_name = self._safe_slug(skill_root or os.path.splitext(safe_name)[0])
+                staging_dir = os.path.join(staging_parent, target_name)
+                target_dir = os.path.join(self.paths.skills_dir, target_name)
+                os.makedirs(staging_dir, exist_ok=True)
+                self._extract_skill_zip(archive, staging_dir, skill_root)
+            meta = self._read_skill_metadata(staging_dir)
+            if meta is None:
+                raise SkillError("未识别到有效 Skill 描述文件，请确认包内包含 skill.json、plugin.json、package.json 或 SKILL.md")
+            existing = self._find_skill(meta["id"])
+            if existing and os.path.normcase(os.path.realpath(str(existing.get("path") or ""))) != os.path.normcase(os.path.realpath(target_dir)):
+                raise SkillError(f"Skill ID 已被其他来源占用: {meta['id']}")
+
             if os.path.exists(target_dir):
-                shutil.rmtree(target_dir)
-            os.makedirs(target_dir, exist_ok=True)
-            self._extract_skill_zip(archive, target_dir, skill_root)
+                backup_dir = f"{target_dir}.backup-{uuid.uuid4().hex}"
+                os.replace(target_dir, backup_dir)
+            os.replace(staging_dir, target_dir)
+            target_activated = True
 
-        meta = self._read_skill_metadata(target_dir)
-        if meta is None:
+            state = self._read_state()
+            state.setdefault("skills", {})
+            previous_state = state["skills"].get(meta["id"], {})
+            state["skills"][meta["id"]] = {
+                **(previous_state if isinstance(previous_state, dict) else {}),
+                "enabled": True,
+                "version": meta.get("version", "0.0.0"),
+                "installedAt": self._timestamp(),
+            }
+            self._write_state(state)
+        except SkillError:
+            self._rollback_install(target_dir, backup_dir, target_activated)
+            raise
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, ValueError) as error:
+            self._rollback_install(target_dir, backup_dir, target_activated)
+            raise SkillError(f"Skill 安装失败: {self._safe_text(error, 200)}") from error
+        finally:
+            shutil.rmtree(staging_parent, ignore_errors=True)
+
+        if backup_dir:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+        assert meta is not None
+        return {"skill": {**meta, "path": target_dir, "source": "uploaded", "sourceLabel": "上传安装", "installed": True, "enabled": True}}
+
+    def create_learned_skill(self, payload: dict[str, Any]) -> dict:
+        if payload.get("confirmed") is not True:
+            raise SkillError("需要用户明确确认后才能沉淀 Skill")
+        if payload.get("verifiedSuccess") is not True or payload.get("deterministic") is not True:
+            raise SkillError("只有已验证成功且结果确定的任务才能沉淀 Skill")
+        if payload.get("sideEffects") is not False:
+            raise SkillError("带副作用的流程不能直接进入自动复用")
+
+        skill_id = self._safe_slug(str(payload.get("id") or payload.get("name") or ""))
+        name = self._safe_text(payload.get("name"), 120)
+        summary = self._safe_text(payload.get("summary"), 240)
+        steps = self._safe_list(payload.get("steps"), limit=40, item_limit=300)
+        agents = self._safe_list(payload.get("applicableAgents"), limit=20, item_limit=120)
+        if not name or not summary or not steps:
+            raise SkillError("Skill 名称、摘要和至少一个复用步骤不能为空")
+        if not agents:
+            agents = ["Codex Desktop", "Codex CLI", "LumiAgent"]
+
+        self._ensure_dirs()
+        os.makedirs(self.learned_skills_dir, exist_ok=True)
+        target_dir = os.path.join(self.learned_skills_dir, skill_id)
+        if os.path.exists(target_dir):
+            raise SkillError(f"已存在同名沉淀 Skill: {skill_id}")
+        staging_dir = tempfile.mkdtemp(prefix=f".{skill_id}-", dir=self.learned_skills_dir)
+        now = self._timestamp()
+        meta = {
+            "id": skill_id,
+            "name": name,
+            "version": "1.0.0",
+            "description": summary,
+            "category": "Agent 沉淀",
+            "runtime": "instruction",
+            "applicableAgents": agents,
+            "promotionPolicy": "verified_read_only",
+        }
+        try:
+            with open(os.path.join(staging_dir, "skill.json"), "w", encoding="utf-8") as file:
+                json.dump(meta, file, ensure_ascii=False, indent=2)
+                file.write("\n")
+            with open(os.path.join(staging_dir, "SKILL.md"), "w", encoding="utf-8") as file:
+                file.write(f"# {name}\n\n{summary}\n\n## 已验证复用步骤\n\n")
+                for index, step in enumerate(steps, 1):
+                    file.write(f"{index}. {step}\n")
+                file.write("\n仅在输入满足相同前置条件时复用；任何副作用动作必须重新请求确认。\n")
+            os.replace(staging_dir, target_dir)
+            state = self._read_state()
+            state.setdefault("skills", {})
+            state["skills"][skill_id] = {
+                "enabled": True,
+                "version": "1.0.0",
+                "installedAt": now,
+                "promotionPolicy": "verified_read_only",
+            }
+            self._write_state(state)
+        except (OSError, ValueError) as error:
             shutil.rmtree(target_dir, ignore_errors=True)
-            raise SkillError("未识别到有效 Skill 描述文件，请确认包内包含 skill.json、plugin.json、package.json 或 SKILL.md")
+            raise SkillError(f"Skill 沉淀失败: {self._safe_text(error, 200)}") from error
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        skill = self._find_skill(skill_id)
+        if skill is None:
+            raise SkillError("Skill 已保存但重新读取失败")
+        return {"skill": skill}
 
+    def record_invocation(
+        self,
+        skill_id: str,
+        *,
+        success: bool,
+        duration_ms: int = 0,
+        agent_id: str = "",
+        template_id: str = "",
+    ) -> dict:
+        skill = self._find_skill(skill_id)
+        if skill is None:
+            raise SkillError(f"未找到 Skill: {skill_id}")
         state = self._read_state()
         state.setdefault("skills", {})
-        state["skills"][meta["id"]] = {
-            "enabled": True,
-            "version": meta.get("version", "0.0.0"),
-            "installedAt": self._timestamp(),
-        }
+        item = state["skills"].setdefault(skill_id, {})
+        now = self._timestamp()
+        item["invocationCount"] = self._bounded_int(item.get("invocationCount"), 0, 0, 2_000_000_000) + 1
+        item["lastUsedAt"] = now
+        item["lastDurationMs"] = self._bounded_int(duration_ms, 0, 0, 86_400_000)
+        item["lastAgent"] = self._safe_text(agent_id, 120)
+        if success:
+            item["successfulInvocations"] = self._bounded_int(item.get("successfulInvocations"), 0, 0, 2_000_000_000) + 1
+        else:
+            item["failureCount"] = self._bounded_int(item.get("failureCount"), 0, 0, 2_000_000_000) + 1
+            item["lastFailureAt"] = now
+        linked = self._safe_list(item.get("linkedTemplateIds"), limit=50, item_limit=120)
+        fixed_template_id = self._safe_text(template_id, 120)
+        if fixed_template_id and fixed_template_id not in linked:
+            linked.append(fixed_template_id)
+        item["linkedTemplateIds"] = linked[-50:]
         self._write_state(state)
-        return {"skill": {**meta, "path": target_dir, "source": "uploaded", "sourceLabel": "上传安装", "installed": True, "enabled": True}}
+        refreshed = self._find_skill(skill_id)
+        return {"skill": refreshed or skill}
+
+    def export_zip(self, skill_id: str) -> dict:
+        skill = self._find_skill(skill_id)
+        if skill is None:
+            raise SkillError(f"未找到 Skill: {skill_id}")
+        source_dir = os.path.realpath(str(skill.get("path") or ""))
+        if not any(self._is_inside(source_dir, source.path) for source in self._sources()):
+            raise SkillError("Skill 路径不安全，已拒绝导出")
+        output = io.BytesIO()
+        total_size = 0
+        root_name = self._safe_slug(str(skill.get("id") or skill_id))
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            for directory, dir_names, file_names in os.walk(source_dir):
+                dir_names[:] = [name for name in dir_names if not os.path.islink(os.path.join(directory, name))]
+                for filename in file_names:
+                    path = os.path.join(directory, filename)
+                    if os.path.islink(path):
+                        continue
+                    size = os.path.getsize(path)
+                    total_size += size
+                    if total_size > 80 * 1024 * 1024:
+                        raise SkillError("Skill 导出内容超过 80MB")
+                    relative = os.path.relpath(path, source_dir).replace("\\", "/")
+                    archive.write(path, f"{root_name}/{relative}")
+        data = output.getvalue()
+        return {
+            "id": skill_id,
+            "filename": f"{root_name}.zip",
+            "mimeType": "application/zip",
+            "size": len(data),
+            "data": base64.b64encode(data).decode("ascii"),
+        }
 
     def set_enabled(self, skill_id: str, enabled: bool) -> dict:
         self._ensure_dirs()
@@ -127,11 +298,13 @@ class SkillService:
         skill = self._find_skill(skill_id)
         if skill is None:
             raise SkillError(f"未找到 Skill: {skill_id}")
-        if skill.get("source") != "uploaded" or not skill.get("writable"):
-            raise SkillError("只能卸载通过启动器上传安装的 Skill")
+        if skill.get("source") not in {"uploaded", "learned"} or not skill.get("writable"):
+            raise SkillError("只能删除通过麓鸣导入或经用户确认沉淀的 Skill")
 
         target = os.path.realpath(str(skill.get("path") or ""))
-        skills_root = os.path.realpath(self.paths.skills_dir)
+        skills_root = os.path.realpath(
+            self.learned_skills_dir if skill.get("source") == "learned" else self.paths.skills_dir
+        )
         if not self._is_inside(target, skills_root) or target == skills_root:
             raise SkillError("Skill 路径不安全，已拒绝卸载")
 
@@ -164,10 +337,12 @@ class SkillService:
     def _ensure_dirs(self) -> None:
         os.makedirs(self.paths.launcher_dir, exist_ok=True)
         os.makedirs(self.paths.skills_dir, exist_ok=True)
+        os.makedirs(self.learned_skills_dir, exist_ok=True)
 
     def _sources(self) -> list[SkillSource]:
         return [
             SkillSource("uploaded", "上传安装", self.paths.skills_dir, True, True),
+            SkillSource("learned", "Agent 沉淀", self.learned_skills_dir, True, True),
             SkillSource("openclaw-extensions", "OpenClaw 扩展目录", self.paths.openclaw_extensions_dir, False, False),
             SkillSource("node-modules", "OpenClaw Node 包", os.path.join(self.paths.base_path, "node_modules"), False, False),
         ]
@@ -300,6 +475,12 @@ class SkillService:
             "category": str(meta.get("category") or "未分类"),
             "runtime": str(meta.get("runtime") or "external"),
             "icon": str(meta.get("icon") or "SK"),
+            "applicableAgents": self._safe_list(
+                meta.get("applicableAgents") or meta.get("agents"),
+                limit=20,
+                item_limit=120,
+            ),
+            "promotionPolicy": self._safe_text(meta.get("promotionPolicy"), 80),
         }
 
     def _safe_filename(self, filename: str) -> str:
@@ -318,6 +499,9 @@ class SkillService:
             name = info.filename.replace("\\", "/")
             if name.startswith("/") or ".." in Path(name).parts:
                 raise SkillError("Skill 压缩包包含不安全路径")
+            unix_mode = (info.external_attr >> 16) & 0o170000
+            if unix_mode == 0o120000:
+                raise SkillError("Skill 压缩包不能包含符号链接")
             total_size += info.file_size
             if total_size > 80 * 1024 * 1024:
                 raise SkillError("Skill 压缩包解压后超过 80MB")
@@ -354,6 +538,41 @@ class SkillService:
             return os.path.commonpath([os.path.realpath(path), os.path.realpath(root)]) == os.path.realpath(root)
         except ValueError:
             return False
+
+    def _rollback_install(self, target_dir: str, backup_dir: str, target_activated: bool) -> None:
+        if target_activated and target_dir and os.path.exists(target_dir):
+            shutil.rmtree(target_dir, ignore_errors=True)
+        if backup_dir and os.path.exists(backup_dir):
+            if target_dir and os.path.exists(target_dir):
+                shutil.rmtree(target_dir, ignore_errors=True)
+            os.replace(backup_dir, target_dir)
+
+    def _safe_list(self, value: Any, *, limit: int, item_limit: int) -> list[str]:
+        if isinstance(value, str):
+            rows = re.split(r"[,\r\n]+", value)
+        elif isinstance(value, (list, tuple, set)):
+            rows = list(value)
+        else:
+            rows = []
+        result: list[str] = []
+        for row in rows:
+            text = self._safe_text(row, item_limit)
+            if text and text not in result:
+                result.append(text)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _safe_text(self, value: Any, limit: int) -> str:
+        text = str(value or "").replace("\x00", "").strip()
+        return text[:limit]
+
+    def _bounded_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(maximum, parsed))
 
     def _timestamp(self) -> str:
         import datetime

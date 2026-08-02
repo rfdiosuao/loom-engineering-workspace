@@ -316,6 +316,8 @@ class WireServiceTests(unittest.TestCase):
             with (
                 mock.patch("core.wire_config._should_persist_user_env", return_value=True),
                 mock.patch("core.wire_config._write_user_env_var") as write_env,
+                mock.patch("core.wire_config._delete_user_env_var", return_value=False),
+                mock.patch("core.wire_config._read_user_env_var", return_value=secret),
             ):
                 service.sync_from_session(session_snapshot(), targets=("opencode", "codex", "claude"))
 
@@ -608,6 +610,7 @@ class WireServiceTests(unittest.TestCase):
                 mock.patch("core.wire_config._should_persist_user_env", return_value=True),
                 mock.patch("core.wire_config._read_user_env_var", return_value="previous-key-not-real"),
                 mock.patch("core.wire_config._read_user_env_kind", return_value=None),
+                mock.patch("core.wire_config._delete_user_env_var", return_value=False),
                 mock.patch(
                     "core.wire_config._write_user_env_var",
                     side_effect=PermissionError("registry write blocked"),

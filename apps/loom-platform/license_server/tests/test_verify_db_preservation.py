@@ -35,6 +35,7 @@ REQUIRED_TABLES = (
     "publish_relay_packets",
     "plans",
     "account_entitlement_redemptions",
+    "payment_orders",
 )
 
 

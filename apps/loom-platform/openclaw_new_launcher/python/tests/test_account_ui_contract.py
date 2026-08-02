@@ -161,6 +161,40 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("expiresAt?: string | number | null", source)
         self.assertIn("redeemEntitlement: (params: { code: string })", source)
         self.assertIn("api('/api/account/entitlement/redeem', 'POST', params)", source)
+        self.assertIn("paymentPlans: ()", source)
+        self.assertIn("api('/api/account/payments/plans')", source)
+        self.assertIn("createPaymentOrder: (params", source)
+        self.assertIn("api('/api/account/payments/order', 'POST', params)", source)
+        self.assertIn("paymentOrderStatus: (params", source)
+        self.assertIn("api('/api/account/payments/order/status', 'POST', params)", source)
+
+    def test_account_page_has_native_qr_purchase_and_server_verified_fulfilment(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("qrcode-generator", source)
+        self.assertIn("data-native-payment-catalog", source)
+        self.assertIn("data-payment-channel", source)
+        self.assertIn("data-payment-qr", source)
+        self.assertIn("accountApi.createPaymentOrder", source)
+        self.assertIn("accountApi.paymentOrderStatus", source)
+        self.assertIn("entitlementSyncPending", source)
+        self.assertIn("paymentRequestVersion", source)
+        self.assertIn("await checkLicense()", source)
+        self.assertIn("打开账户中心", source)
+        self.assertNotIn("购买与支付在浏览器完成", source)
+
+    def test_paid_order_is_not_reported_as_failed_when_local_entitlement_refresh_fails(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        verify_block = source.split("const verifyPaymentOrder", 1)[1].split("const startPayment", 1)[0]
+        paid_block = verify_block.split("if (response.order.status === 'paid')", 1)[1].split("} else if", 1)[0]
+        self.assertIn("Promise.allSettled", paid_block)
+        self.assertIn("localSyncPending", paid_block)
+        self.assertIn("支付已确认", paid_block)
+        self.assertNotIn("await checkLicense();", paid_block)
+        self.assertNotIn("await loadSubscription(true);", paid_block)
 
     def test_account_page_uses_cached_safe_snapshot_before_manual_refresh(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:

@@ -96,7 +96,7 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
 
             self.assertEqual(default_manifest_path(debug_dir), parent_manifest)
 
-    def test_missing_manifest_exposes_split_openai_products_without_state_write(self) -> None:
+    def test_missing_manifest_exposes_codex_desktop_and_cli_without_duplicate_chatgpt_product(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = os.path.join(temp_dir, "components-state.json")
             catalog = ComponentCatalog(
@@ -117,7 +117,6 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
                 [component["id"] for component in status["components"]],
                 [
                     "codex-desktop",
-                    "chatgpt-desktop",
                     "codex-cli",
                     "claude-code",
                     "opencode",
@@ -130,14 +129,12 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
                 ],
             )
             codex = next(component for component in status["components"] if component["id"] == "codex-desktop")
-            chatgpt = next(component for component in status["components"] if component["id"] == "chatgpt-desktop")
             codex_cli = next(component for component in status["components"] if component["id"] == "codex-cli")
             self.assertEqual(codex["name"], "Codex Desktop")
-            self.assertEqual(chatgpt["name"], "ChatGPT Desktop")
             self.assertEqual(codex_cli["name"], "Codex CLI")
             self.assertEqual(codex["type"], "msstore")
-            self.assertEqual(chatgpt["type"], "msstore")
             self.assertNotEqual(codex_cli["type"], "msstore")
+            self.assertNotIn("chatgpt-desktop", {component["id"] for component in status["components"]})
             self.assertEqual(codex["installCommand"], [])
             self.assertTrue(codex["installLocked"])
             self.assertEqual(codex["urls"], ["https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"])

@@ -1337,7 +1337,10 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             )
 
     def test_detect_existing_entry_marks_component_ready(self) -> None:
-        component = make_component()
+        # Generic managed-entry detection must not use the Store-bound Codex
+        # Desktop identity: a loose executable can never prove OpenAI.Codex is
+        # installed. Use a normal managed agent for this generic-path contract.
+        component = make_component(component_id="generic-agent")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             install_dir = os.path.join(temp_dir, "agents", component.component_id)
@@ -1345,7 +1348,13 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             with open(os.path.join(install_dir, "Codex-Installer.exe"), "wb") as handle:
                 handle.write(b"codex")
             store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
-            installer = ComponentInstaller(base_path=temp_dir, state_store=store)
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(
+                    stdout="generic-agent 1.0.0"
+                ),
+            )
 
             state = installer.detect(component, job_id="job_detect")
 

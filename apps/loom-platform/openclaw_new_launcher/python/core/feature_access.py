@@ -19,12 +19,13 @@ COMMERCIAL_FEATURES = frozenset(
     }
 )
 
-# Rules are intentionally longest-prefix-first. A route matches only the exact
-# prefix or a slash-delimited child, never a lookalike such as /api/matrixevil.
+# Phone Matrix is the single commercial capability for its acquisition,
+# template, and Feishu execution surfaces. Feishu OAuth/scopes remain runtime
+# prerequisites, but are not a second paid entitlement.
+# A route matches only the exact prefix or a slash-delimited child, never a
+# lookalike such as /api/matrixevil.
 FEATURE_PATH_RULES: tuple[tuple[str, str], ...] = (
-    ("/api/matrix/acquisition/feishu", "acquisition.feishu"),
-    ("/api/matrix/acquisition/templates", "templates.cloud"),
-    ("/api/matrix/acquisition", "acquisition.workbench"),
+    ("/api/skills", "matrix.devices"),
     ("/api/matrix", "matrix.devices"),
     ("/api/phone-stream", "matrix.devices"),
     ("/api/phone", "matrix.devices"),

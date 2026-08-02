@@ -339,7 +339,11 @@ def publish_relay_claim(
                 return None
         except sqlite3.OperationalError as error:
             error_code = getattr(error, "sqlite_errorcode", None)
-            lock_contention = error_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+            # Python 3.10 builds do not consistently expose SQLITE_BUSY and
+            # SQLITE_LOCKED on the sqlite3 module.  SQLite keeps the primary
+            # result code in the low byte even when an extended code is used.
+            primary_error_code = error_code & 0xFF if isinstance(error_code, int) else None
+            lock_contention = primary_error_code in {5, 6}
             if not lock_contention and "locked" not in str(error).lower():
                 raise
             if attempt + 1 >= PUBLISH_RELAY_CLAIM_MAX_ATTEMPTS:

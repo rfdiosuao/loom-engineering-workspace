@@ -48,7 +48,12 @@ from core.job_ownership import (
 )
 from core.phone_matrix import MatrixControlPlane, MatrixSafetyError, MatrixTargetError
 from core.feishu_integration import FeishuAcquisitionIntegration
-from core.acquisition_templates import AcquisitionTemplateLibrary
+from core.acquisition_templates import (
+    AcquisitionTemplateLibrary,
+    TemplateError,
+    TemplateNotFound,
+    TemplateVersionConflict,
+)
 
 
 _MATRIX_STREAM_VOLATILE_KEYS = {
@@ -822,7 +827,56 @@ def register_matrix_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         body = await ctx.body(request)
-        return ctx.fastapi_json(_templates(ctx).save_from_acquisition(body), 201)
+        try:
+            return ctx.fastapi_json(_templates(ctx).save_from_acquisition(body), 201)
+        except TemplateVersionConflict as exc:
+            return ctx.fastapi_json({"error": str(exc), "code": "TEMPLATE_VERSION_CONFLICT"}, 409)
+        except TemplateError as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 400)
+
+    @app.post("/api/matrix/acquisition/templates/enable")
+    async def matrix_acquisition_template_enable(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        template_id = str(body.get("templateId") or body.get("id") or "").strip()
+        if not template_id:
+            return ctx.fastapi_json({"error": "templateId is required"}, 400)
+        expected_version = _optional_template_version(body.get("expectedVersion"))
+        try:
+            return ctx.fastapi_json(
+                _templates(ctx).set_enabled(
+                    template_id,
+                    body.get("enabled") is True,
+                    expected_version=expected_version,
+                )
+            )
+        except TemplateVersionConflict as exc:
+            return ctx.fastapi_json({"error": str(exc), "code": "TEMPLATE_VERSION_CONFLICT"}, 409)
+        except TemplateNotFound as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 404)
+        except TemplateError as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 400)
+
+    @app.post("/api/matrix/acquisition/templates/delete")
+    async def matrix_acquisition_template_delete(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        template_id = str(body.get("templateId") or body.get("id") or "").strip()
+        if not template_id:
+            return ctx.fastapi_json({"error": "templateId is required"}, 400)
+        expected_version = _optional_template_version(body.get("expectedVersion"))
+        try:
+            return ctx.fastapi_json(
+                _templates(ctx).delete_template(template_id, expected_version=expected_version)
+            )
+        except TemplateVersionConflict as exc:
+            return ctx.fastapi_json({"error": str(exc), "code": "TEMPLATE_VERSION_CONFLICT"}, 409)
+        except TemplateNotFound as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 404)
+        except TemplateError as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 400)
 
     @app.post("/api/matrix/acquisition/templates/upload")
     async def matrix_acquisition_template_upload(request: Request):
@@ -1526,6 +1580,15 @@ def _feishu(ctx) -> FeishuAcquisitionIntegration:
 
 def _templates(ctx) -> AcquisitionTemplateLibrary:
     return AcquisitionTemplateLibrary(ctx.paths)
+
+
+def _optional_template_version(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _matrix_event_sync_best_effort(ctx) -> dict:

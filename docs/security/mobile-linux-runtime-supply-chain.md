@@ -1,13 +1,13 @@
 # 麓鸣可选 Mobile Linux Runtime：供应链与分发门禁
 
-> 状态：麓鸣 2.4.4 / LumiAgent 6.65 本地测试候选已实现，正式发行门禁仍关闭
+> 状态：麓鸣 2.4.5 / LumiAgent 6.66 本地测试候选已实现，正式发行门禁仍关闭
 >
 > 日期：2026-08-02
 > 适用对象：LumiAgent 可选 Linux companion、PRoot 类用户态兼容层及其 rootfs/工具包
 
-## 1. 2.4.4 / LumiAgent 6.65 的确定边界
+## 1. 2.4.5 / LumiAgent 6.66 的确定边界
 
-LumiAgent 6.65 已交付 Skill Center、类型化 `run_skill` 工具和单独安装的 Linux companion 本地测试候选。商业主 APK 不包含 PRoot/rootfs；companion 包含经哈希锁定的 PRoot 5.1.107.89、Alpine minirootfs 3.22.5 与所需动态库。companion 无 `INTERNET` 权限、不包含可交互终端，也不暴露 `rish`、Root/Sui shell、executable path、命令正文或任意参数向量。
+LumiAgent 6.66 已交付 Skill Center、类型化 `run_skill` 工具和单独安装的 Linux companion 本地测试候选。商业主 APK 不包含 PRoot/rootfs；companion 包含经哈希锁定的 PRoot 5.1.107.89、Alpine minirootfs 3.22.5 与所需动态库。companion 无 `INTERNET` 权限、不包含可交互终端，也不暴露 `rish`、Root/Sui shell、executable path、命令正文或任意参数向量。
 
 Linux runtime 仍必须作为用户主动安装、可独立卸载的 companion 分发。LumiAgent 只发送固定 Skill ID、固定 operation 与受限文本输入；正式分发仍需完成对应源码包、法律评审和发布签名门禁。
 
@@ -72,7 +72,7 @@ Linux runtime 仍必须作为用户主动安装、可独立卸载的 companion �
 - 网络默认拒绝；只按任务 manifest 与用户审批临时放行完整 Provider hostname，不支持通配符、裸 IP 或重定向扩域。
 - 凭据只通过有时效的一次性 vault handle 注入，runtime 不可回读或持久化凭据值。
 - Native Offload 只能调用 `TypedNativeToolGateway` 的封闭能力；不得连接 Shizuku binder、`rish`、root shell 或系统包管理器。
-- entrypoint 只能是合同枚举：`workspace.text.batch`、`workspace.jsonl.transform`。`agent.cli.batch` 在 6.65 中明确禁用；模型、LAN 和 USB 均不能提交命令行或脚本。
+- entrypoint 只能是合同枚举：`workspace.text.batch`、`workspace.jsonl.transform`。`agent.cli.batch` 在 6.66 中明确禁用；模型、LAN 和 USB 均不能提交命令行或脚本。
 
 ## 7. 故障与回退
 
@@ -90,4 +90,4 @@ PRoot/Linux 不是通用加速器。可能的收益只来自把多步文本/文�
 
 ## 9. 当前结论
 
-LumiAgent 6.65 的本地调试候选已经在 API 36 与 API 24 虚拟机完成真实 PRoot/Alpine 冷安装、连续 Skill、无网络权限和越权拒绝验收；Skill Center 可以显示、复查并逐项测试固定 Skill。这些结果证明本地候选可运行，不等同于商业正式发行，也不能外推为所有任务通用加速。正式发行门禁只有在对应源码交付、法律评审、发布签名、Android 10/14+ 实体机性能与故障恢复证据全部通过后才能开启。
+LumiAgent 6.66 必须重新在 API 36 与 API 24 虚拟机完成 PRoot/Alpine 冷安装、连续 Skill、无网络权限和越权拒绝验收；Skill Center 应能显示、复查并逐项测试固定 Skill。这些结果只能证明本地候选可运行，不等同于商业正式发行，也不能外推为所有任务通用加速。正式发行门禁只有在对应源码交付、法律评审、发布签名、Android 10/14+ 实体机性能与故障恢复证据全部通过后才能开启。

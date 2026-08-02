@@ -340,10 +340,7 @@ fn is_safety_cleanup_request(path: &str, method: &str) -> bool {
 }
 
 fn protected_feature(path: &str, method: &str) -> Option<&'static str> {
-    const RULES: [(&str, &str); 6] = [
-        ("api/matrix/acquisition/feishu", "acquisition.feishu"),
-        ("api/matrix/acquisition/templates", "templates.cloud"),
-        ("api/matrix/acquisition", "acquisition.workbench"),
+    const RULES: [(&str, &str); 3] = [
         ("api/matrix", "matrix.devices"),
         ("api/phone-stream", "matrix.devices"),
         ("api/phone", "matrix.devices"),
@@ -464,15 +461,15 @@ mod commercial_feature_path_tests {
         let cases = [
             (
                 "/api/matrix/acquisition/feishu/status",
-                Some("acquisition.feishu"),
+                Some("matrix.devices"),
             ),
             (
                 "/api/matrix/acquisition/templates/upload",
-                Some("templates.cloud"),
+                Some("matrix.devices"),
             ),
             (
                 "/api/matrix/acquisition/agent/result",
-                Some("acquisition.workbench"),
+                Some("matrix.devices"),
             ),
             ("/api/matrix/status", Some("matrix.devices")),
             ("/api/phone/task", Some("matrix.devices")),

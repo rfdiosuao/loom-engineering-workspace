@@ -658,6 +658,88 @@ def register_account_routes(app, ctx) -> None:
                 status_code,
             )
 
+    @app.get("/api/account/payments/plans")
+    async def account_payment_plans(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        try:
+            result = await asyncio.to_thread(
+                ctx.get_newapi_account_mgr().payment_plans
+            )
+            return ctx.fastapi_json(result)
+        except NewApiAccountError as exc:
+            status_code = (
+                exc.status_code
+                if exc.status_code in {400, 401, 403, 404, 409, 422, 429, 502, 503}
+                else 400
+            )
+            return ctx.fastapi_json(
+                {"error": _friendly_account_error(exc, "payment_plans")},
+                status_code,
+            )
+
+    @app.post("/api/account/payments/order")
+    async def account_payment_order(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        try:
+            result = await asyncio.to_thread(
+                ctx.get_newapi_account_mgr().create_payment_order,
+                str(body.get("planKey") or ""),
+                str(body.get("paymentType") or ""),
+                str(body.get("requestId") or ""),
+            )
+            return ctx.fastapi_json(result)
+        except NewApiAccountError as exc:
+            status_code = (
+                exc.status_code
+                if exc.status_code in {400, 401, 403, 404, 409, 422, 429, 502, 503}
+                else 400
+            )
+            return ctx.fastapi_json(
+                {"error": _friendly_account_error(exc, "payment_create")},
+                status_code,
+            )
+
+    @app.post("/api/account/payments/order/status")
+    async def account_payment_order_status(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        manager = ctx.get_newapi_account_mgr()
+        try:
+            async with _account_transition_scope(ctx, account_transition_lock):
+                result = await asyncio.to_thread(
+                    manager.payment_order_status,
+                    str(body.get("orderId") or ""),
+                )
+                order = result.get("order") if isinstance(result, dict) else None
+                response = dict(result)
+                if isinstance(order, dict) and str(order.get("status") or "") == "paid":
+                    try:
+                        await asyncio.to_thread(manager.refresh_current)
+                    except NewApiAccountError as refresh_error:
+                        response["entitlementSyncPending"] = True
+                        ctx.append_log(
+                            "[Account] paid order verified; entitlement refresh pending: "
+                            f"{_redact_secret_text(refresh_error)}\n"
+                        )
+                    response["account"] = await asyncio.to_thread(
+                        manager.public_session
+                    )
+                return ctx.fastapi_json(response)
+        except NewApiAccountError as exc:
+            status_code = (
+                exc.status_code
+                if exc.status_code in {400, 401, 403, 404, 409, 422, 429, 502, 503}
+                else 400
+            )
+            return ctx.fastapi_json(
+                {"error": _friendly_account_error(exc, "payment_status")},
+                status_code,
+            )
+
     @app.post("/api/account/models/select")
     async def account_select_models(request: Request):
         if error := ctx.auth_error(request):

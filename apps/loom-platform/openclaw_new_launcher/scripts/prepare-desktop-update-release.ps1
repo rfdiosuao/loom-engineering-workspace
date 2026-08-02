@@ -163,7 +163,15 @@ if (
 ) {
     throw "LOOM_DESKTOP_UPDATE_PRIVATE_KEY or LOOM_DESKTOP_UPDATE_PRIVATE_KEY_PATH is required."
 }
-$python = (Get-Command python -ErrorAction Stop).Source
+$launcherDir = Split-Path -Parent $PSScriptRoot
+$bundledPython = Join-Path $launcherDir "python-runtime\python.exe"
+if (Test-Path -LiteralPath $bundledPython -PathType Leaf) {
+    $python = $bundledPython
+} elseif (-not [string]::IsNullOrWhiteSpace($env:PYTHON) -and (Test-Path -LiteralPath $env:PYTHON -PathType Leaf)) {
+    $python = [System.IO.Path]::GetFullPath($env:PYTHON)
+} else {
+    $python = (Get-Command python -ErrorAction Stop).Source
+}
 $signerArguments = @(
     $signerScript,
     "--installer", $canonicalInstaller,

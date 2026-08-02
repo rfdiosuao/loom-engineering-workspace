@@ -2421,6 +2421,100 @@ class NewApiAccountManager:
             expected_identity=expected_identity,
         )
 
+    def _payment_bridge_request(
+        self,
+        path: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        session = self.current()
+        if not session:
+            raise NewApiAccountError("尚未登录模型账号", status_code=401)
+        expected_identity = _account_session_identity(session)
+        newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
+        base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
+        api_token = _pick_text(session.get("memberToken"))
+        if not api_token:
+            raise NewApiAccountError("本机会话缺少 API Token，请重新登录", status_code=401)
+        payload = self._request_json(
+            urllib.request.build_opener(),
+            f"{base_url}{path}",
+            method="POST",
+            body=body,
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
+        )
+        self._assert_current_session_identity(expected_identity)
+        data = _unwrap(payload)
+        if not isinstance(data, dict):
+            raise NewApiAccountError(
+                "支付服务响应格式无效，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        return data
+
+    def payment_plans(self) -> dict[str, Any]:
+        data = self._payment_bridge_request(
+            "/api/openclaw/payments/plans",
+            {},
+        )
+        plans = data.get("plans")
+        payment = data.get("payment")
+        if not isinstance(plans, list) or not isinstance(payment, dict):
+            raise NewApiAccountError(
+                "支付服务未返回可用套餐，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        return {"plans": plans, "payment": payment}
+
+    def create_payment_order(
+        self,
+        plan_key: str,
+        payment_type: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        normalized_plan = str(plan_key or "").strip().lower()
+        normalized_type = str(payment_type or "").strip().lower()
+        normalized_request = str(request_id or "").strip()
+        if not normalized_plan or len(normalized_plan) > 80:
+            raise NewApiAccountError("请选择有效套餐", status_code=400)
+        if normalized_type not in {"alipay", "wxpay"}:
+            raise NewApiAccountError("请选择支付方式", status_code=400)
+        if not normalized_request or len(normalized_request) > 128:
+            raise NewApiAccountError("支付请求标识无效，请重试", status_code=400)
+        data = self._payment_bridge_request(
+            "/api/openclaw/payments/orders/create",
+            {
+                "planKey": normalized_plan,
+                "paymentType": normalized_type,
+                "requestId": normalized_request,
+            },
+        )
+        if not isinstance(data.get("order"), dict):
+            raise NewApiAccountError(
+                "支付服务未返回订单，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        return {"order": data["order"]}
+
+    def payment_order_status(self, order_id: str) -> dict[str, Any]:
+        normalized_order = str(order_id or "").strip()
+        if not normalized_order or len(normalized_order) > 128:
+            raise NewApiAccountError("订单编号无效", status_code=400)
+        data = self._payment_bridge_request(
+            "/api/openclaw/payments/orders/status",
+            {"orderId": normalized_order},
+        )
+        if not isinstance(data.get("order"), dict):
+            raise NewApiAccountError(
+                "支付服务未返回订单状态，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        return {"order": data["order"]}
+
     def migrate_legacy_entitlement(self) -> dict[str, Any]:
         session = self.current()
         if not session:

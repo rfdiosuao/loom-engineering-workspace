@@ -138,6 +138,9 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
             gateway_video_token text not null default '', gateway_default_model text not null default '',
             gateway_image_model text not null default '', gateway_video_model text not null default '',
             gateway_models_json text not null default '[]', quotas_json text not null default '{}',
+            payment_enabled integer not null default 0, price_minor integer not null default 0,
+            currency text not null default 'CNY', payment_description text not null default '',
+            payment_benefits_json text not null default '[]', payment_sort integer not null default 0,
             disabled integer not null default 0, created_at text not null, updated_at text not null)""",
         """create table if not exists settings (
             key text primary key, value_json text not null default '{}', updated_at text not null)""",
@@ -168,6 +171,21 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
             commit_expires_at_ms integer not null default 0, commit_lease_id text not null default '',
             commit_client_id text not null default '', commit_state text not null default '',
             outcome_indeterminate integer not null default 0)""",
+        """create table if not exists payment_orders (
+            order_id text primary key, out_trade_no text not null unique,
+            account_id text not null, request_id text not null, product_id text not null,
+            product_name text not null, plan_key text not null, provider text not null,
+            payment_type text not null, amount_minor integer not null, currency text not null,
+            duration_days integer not null, features_json text not null, quotas_json text not null,
+            nonce_hash text not null, status text not null,
+            provider_order_reference text not null default '',
+            provider_transaction_id text,
+            qrcode text not null default '', pay_url text not null default '',
+            expires_at text not null default '', paid_at text not null default '',
+            entitlement_code_hash text not null default '',
+            last_error_code text not null default '',
+            created_at text not null, updated_at text not null,
+            unique(account_id, request_id))""",
     )
     for statement in statements:
         conn.execute(statement)
@@ -175,6 +193,15 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
     conn.execute(
         """create index if not exists idx_account_entitlement_redemptions_account
            on account_entitlement_redemptions (account_id, redeemed_at)"""
+    )
+    conn.execute(
+        """create index if not exists idx_payment_orders_account_created
+           on payment_orders (account_id, created_at desc)"""
+    )
+    conn.execute(
+        """create unique index if not exists idx_payment_orders_provider_transaction
+           on payment_orders (provider_transaction_id)
+           where provider_transaction_id is not null and provider_transaction_id <> ''"""
     )
     for table, name, definition in (
         ("codes", "owner_account_id", "integer not null default 0"),
@@ -203,6 +230,12 @@ def init_db(conn: sqlite3.Connection, *, defaults: dict[str, Any] | None = None)
         ("plans", "gateway_video_model", "text not null default ''"),
         ("plans", "gateway_models_json", "text not null default '[]'"),
         ("plans", "quotas_json", "text not null default '{}'"),
+        ("plans", "payment_enabled", "integer not null default 0"),
+        ("plans", "price_minor", "integer not null default 0"),
+        ("plans", "currency", "text not null default 'CNY'"),
+        ("plans", "payment_description", "text not null default ''"),
+        ("plans", "payment_benefits_json", "text not null default '[]'"),
+        ("plans", "payment_sort", "integer not null default 0"),
         ("publish_relay_packets", "account_id", "text not null default ''"),
         ("publish_relay_packets", "commit_token_hash", "text not null default ''"),
         ("publish_relay_packets", "commit_authorized_at", "text not null default ''"),

@@ -15,12 +15,13 @@ interface SidebarProps {
   onStop: () => void;
 }
 
-type IconName = 'rocket' | 'box' | 'creative' | 'phone' | 'target' | 'matrix' | 'user' | 'capability' | 'model' | 'wrench' | 'settings' | 'power' | 'exit';
+type IconName = 'rocket' | 'box' | 'creative' | 'phone' | 'target' | 'matrix' | 'skill' | 'user' | 'capability' | 'model' | 'wrench' | 'settings' | 'power' | 'exit';
 
 function iconFor(item: NavItem): IconName {
   const key = item.key;
   if (key === 'dashboard') return 'rocket';
   if (key === 'agents') return 'box';
+  if (key === 'skills') return 'skill';
   if (key === 'creative') return 'creative';
   if (key === 'acquisition') return 'target';
   if (key === 'phone') return 'phone';
@@ -100,6 +101,15 @@ const Icon: React.FC<{ name: IconName; className?: string }> = ({ name, classNam
         <path d="M10 18h4" />
         <path d="M7 11v4" />
         <path d="M17 11v4" />
+      </svg>
+    );
+  }
+  if (name === 'skill') {
+    return (
+      <svg {...common}>
+        <path d="M7 4.5h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" />
+        <path d="M9 2.8v3.4M15 2.8v3.4" />
+        <path d="m9 12 2 2 4-4" />
       </svg>
     );
   }

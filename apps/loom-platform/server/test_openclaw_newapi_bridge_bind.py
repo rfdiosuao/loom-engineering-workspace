@@ -1275,6 +1275,66 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(payload["phoneSeatLease"]["phoneDeviceIds"], ["phone-c"])
         self.verify_lease_signature(payload["phoneSeatLease"])
 
+    def test_payment_bridge_binds_every_request_to_authenticated_account(self):
+        calls = []
+
+        def service(path, body):
+            calls.append((path, dict(body)))
+            if path.endswith("/plans"):
+                return {
+                    "ok": True,
+                    "plans": [{"planKey": "monthly", "amountMinor": 9900}],
+                    "payment": {"configured": True, "channels": ["alipay"]},
+                }
+            return {
+                "ok": True,
+                "order": {
+                    "orderId": "order-1",
+                    "planKey": "monthly",
+                    "status": "pending",
+                    "qrcode": "https://pay.example/qr/1",
+                },
+            }
+
+        self.bridge._license_service_json = service
+        token = "Bearer sk-test-secret-value"
+        status, plans = self.bridge.handle_payment_plans(
+            {"accountId": "attacker"}, token
+        )
+        self.assertEqual(200, status, plans)
+        status, created = self.bridge.handle_payment_order_create(
+            {
+                "accountId": "attacker",
+                "planKey": "monthly",
+                "paymentType": "alipay",
+                "requestId": "click-1",
+            },
+            token,
+        )
+        self.assertEqual(200, status, created)
+        status, queried = self.bridge.handle_payment_order_status(
+            {"accountId": "attacker", "orderId": "order-1"}, token
+        )
+        self.assertEqual(200, status, queried)
+        self.assertEqual(
+            [
+                "/api/service/payments/plans",
+                "/api/service/payments/orders/create",
+                "/api/service/payments/orders/status",
+            ],
+            [path for path, _body in calls],
+        )
+        self.assertTrue(all(body["accountId"] == "42" for _path, body in calls))
+        self.assertEqual("monthly", created["data"]["order"]["planKey"])
+
+        before = len(calls)
+        status, denied = self.bridge.handle_payment_order_create(
+            {"planKey": "monthly", "requestId": "click-2"}, ""
+        )
+        self.assertEqual(401, status)
+        self.assertEqual("account_token_required", denied["code"])
+        self.assertEqual(before, len(calls))
+
     def test_authorization_expiry_parsing_is_utc_and_accepts_z_suffix(self):
         self.assertEqual(
             self.bridge._entitlement_expiry_epoch("2030-01-01T00:00:00Z"),

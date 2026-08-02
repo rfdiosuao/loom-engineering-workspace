@@ -3159,6 +3159,117 @@ def handle_entitlement_check(
     )
 
 
+def _payment_bridge_error(error: BridgeUpstreamError) -> tuple[int, dict[str, Any]]:
+    upstream_status = int(error.status_code or 502)
+    public_status = (
+        upstream_status
+        if upstream_status in {400, 401, 403, 404, 409, 422, 429}
+        else 503
+    )
+    return public_status, {
+        "success": False,
+        "error": str(error),
+        "code": error.code
+        or (
+            "payment_request_rejected"
+            if public_status < 500
+            else "payment_service_unavailable"
+        ),
+    }
+
+
+def _payment_owner(authorization: str) -> tuple[str, tuple[int, dict[str, Any]] | None]:
+    owner = api_token_owner(authorization)
+    if owner:
+        return str(owner.get("user_id") or ""), None
+    return "", (
+        401,
+        entitlement_error(
+            "account_token_required",
+            "请先登录模型账号，再购买或查询套餐。",
+            "login",
+        ),
+    )
+
+
+def handle_payment_plans(
+    body: dict[str, Any], authorization: str = ""
+) -> tuple[int, dict[str, Any]]:
+    del body
+    account_id, denied = _payment_owner(authorization)
+    if denied:
+        return denied
+    try:
+        payload = _license_service_json(
+            "/api/service/payments/plans", {"accountId": account_id}
+        )
+    except BridgeUpstreamError as error:
+        return _payment_bridge_error(error)
+    return 200, {
+        "success": True,
+        "data": {
+            "plans": payload.get("plans") if isinstance(payload.get("plans"), list) else [],
+            "payment": payload.get("payment")
+            if isinstance(payload.get("payment"), dict)
+            else {},
+        },
+    }
+
+
+def handle_payment_order_create(
+    body: dict[str, Any], authorization: str = ""
+) -> tuple[int, dict[str, Any]]:
+    account_id, denied = _payment_owner(authorization)
+    if denied:
+        return denied
+    request = {
+        "accountId": account_id,
+        "planKey": str(body.get("planKey") or "").strip(),
+        "paymentType": str(body.get("paymentType") or "").strip(),
+        "requestId": str(body.get("requestId") or "").strip(),
+    }
+    try:
+        payload = _license_service_json(
+            "/api/service/payments/orders/create", request
+        )
+    except BridgeUpstreamError as error:
+        return _payment_bridge_error(error)
+    order = payload.get("order")
+    if not isinstance(order, dict):
+        return 502, {
+            "success": False,
+            "error": "支付服务响应缺少订单。",
+            "code": "payment_service_invalid_response",
+        }
+    return 200, {"success": True, "data": {"order": order}}
+
+
+def handle_payment_order_status(
+    body: dict[str, Any], authorization: str = ""
+) -> tuple[int, dict[str, Any]]:
+    account_id, denied = _payment_owner(authorization)
+    if denied:
+        return denied
+    request = {
+        "accountId": account_id,
+        "orderId": str(body.get("orderId") or "").strip(),
+    }
+    try:
+        payload = _license_service_json(
+            "/api/service/payments/orders/status", request
+        )
+    except BridgeUpstreamError as error:
+        return _payment_bridge_error(error)
+    order = payload.get("order")
+    if not isinstance(order, dict):
+        return 502, {
+            "success": False,
+            "error": "支付服务响应缺少订单。",
+            "code": "payment_service_invalid_response",
+        }
+    return 200, {"success": True, "data": {"order": order}}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         # Keep default access logging quiet to avoid accidental sensitive context.
@@ -3221,6 +3332,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.headers.get("Authorization") or "",
             ),
             "/api/openclaw/entitlements/check": lambda body: handle_entitlement_check(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/payments/plans": lambda body: handle_payment_plans(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/payments/orders/create": lambda body: handle_payment_order_create(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/payments/orders/status": lambda body: handle_payment_order_status(
                 body,
                 self.headers.get("Authorization") or "",
             ),

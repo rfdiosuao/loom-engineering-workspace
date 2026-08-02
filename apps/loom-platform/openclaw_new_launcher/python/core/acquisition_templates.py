@@ -21,6 +21,18 @@ SENSITIVE_KEY_MARKERS = ("token", "secret", "password", "credential", "api_key",
 DEFAULT_TEMPLATE_SERVER_URL = "https://api.heang.top/api/loom/templates"
 
 
+class TemplateError(RuntimeError):
+    """Safe, user-facing template library error."""
+
+
+class TemplateNotFound(TemplateError):
+    pass
+
+
+class TemplateVersionConflict(TemplateError):
+    pass
+
+
 class AcquisitionTemplateLibrary:
     def __init__(self, paths: AppPaths, *, uploader: TemplateUploader | None = None):
         self.paths = paths
@@ -47,6 +59,7 @@ class AcquisitionTemplateLibrary:
                 },
                 "stats": {
                     "total": len(templates),
+                    "enabled": sum(1 for item in templates if item.get("enabled") is not False),
                     "pendingUpload": sum(1 for item in templates if item.get("uploadStatus") in {"pending_upload", "upload_failed"}),
                     "uploaded": sum(1 for item in templates if item.get("uploadStatus") == "uploaded"),
                 },
@@ -68,7 +81,24 @@ class AcquisitionTemplateLibrary:
     def save_from_acquisition(self, raw: Json) -> Json:
         state = self._load_state()
         templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
-        template = self._build_template(raw)
+        proposed_id = _template_id(raw.get("templateId") or f"{raw.get('industry') or raw.get('category') or raw.get('topic') or '通用获客'}-{raw.get('name') or raw.get('topic') or '获客打法模板'}")
+        existing = next((item for item in templates if item.get("templateId") == proposed_id), None)
+        expected_version = _optional_int(raw.get("expectedVersion")) if "expectedVersion" in raw else None
+        if existing:
+            current_version = max(1, _int(existing.get("version"), 1))
+            if expected_version is not None and expected_version != current_version:
+                raise TemplateVersionConflict(
+                    f"模板已更新（当前版本 {current_version}），请刷新后重试"
+                )
+            source = {**existing, **raw, "templateId": proposed_id}
+            template = self._build_template(source)
+            template["version"] = current_version + 1
+            template["createdAt"] = existing.get("createdAt") or template["createdAt"]
+            template["enabled"] = raw.get("enabled") is not False if "enabled" in raw else existing.get("enabled") is not False
+        else:
+            if expected_version not in {None, 0}:
+                raise TemplateVersionConflict("模板不存在或已被删除，请刷新后重试")
+            template = self._build_template({**raw, "templateId": proposed_id})
         templates = [item for item in templates if item.get("templateId") != template["templateId"]]
         templates.append(template)
         state["templates"] = templates[-500:]
@@ -78,6 +108,43 @@ class AcquisitionTemplateLibrary:
         state = self._load_state()
         current = next((item for item in state.get("templates", []) if item.get("templateId") == template["templateId"]), template)
         return _redact_json({"template": current, "upload": upload, "status": self.status()})
+
+    def set_enabled(self, template_id: str, enabled: bool, *, expected_version: int | None = None) -> Json:
+        state = self._load_state()
+        templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
+        template = next((item for item in templates if item.get("templateId") == template_id), None)
+        if not template:
+            raise TemplateNotFound("未找到共享模板")
+        current_version = max(1, _int(template.get("version"), 1))
+        if expected_version is not None and expected_version != current_version:
+            raise TemplateVersionConflict(
+                f"模板已更新（当前版本 {current_version}），请刷新后重试"
+            )
+        template = {**template}
+        template["enabled"] = bool(enabled)
+        template["version"] = current_version + 1
+        template["updatedAt"] = _now_iso()
+        template["uploadStatus"] = "pending_upload"
+        template["uploadError"] = ""
+        template["remote"] = {}
+        self._replace_template(state, template)
+        return _redact_json({"template": template, "status": self.status()})
+
+    def delete_template(self, template_id: str, *, expected_version: int | None = None) -> Json:
+        state = self._load_state()
+        templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
+        template = next((item for item in templates if item.get("templateId") == template_id), None)
+        if not template:
+            raise TemplateNotFound("未找到共享模板")
+        current_version = max(1, _int(template.get("version"), 1))
+        if expected_version is not None and expected_version != current_version:
+            raise TemplateVersionConflict(
+                f"模板已更新（当前版本 {current_version}），请刷新后重试"
+            )
+        state["templates"] = [item for item in templates if item.get("templateId") != template_id]
+        state["updatedAt"] = _now_iso()
+        self._write_state(state)
+        return _redact_json({"status": "deleted", "templateId": template_id, "version": current_version})
 
     def upload_template(self, template_id: str) -> Json:
         state = self._load_state()
@@ -153,6 +220,7 @@ class AcquisitionTemplateLibrary:
             "schema": "loom.acquisition_template.v1",
             "templateId": template_id,
             "version": 1,
+            "enabled": raw.get("enabled") is not False,
             "name": name,
             "industry": industry,
             "platforms": platforms,
@@ -299,6 +367,13 @@ def _int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _redact_json(value: Any) -> Any:

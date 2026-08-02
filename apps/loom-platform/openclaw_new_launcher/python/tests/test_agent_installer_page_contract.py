@@ -453,19 +453,19 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         self.assertIn("const COMPONENT_START_TIMEOUT_MS = 45_000", api_source)
         self.assertIn("timeoutMs: COMPONENT_START_TIMEOUT_MS", api_source)
 
-    def test_openai_products_have_separate_cards_and_explain_detection_evidence(self) -> None:
+    def test_openai_products_keep_one_codex_desktop_card_and_independent_cli(self) -> None:
         with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("Codex Desktop", source)
-        self.assertIn("ChatGPT Desktop", source)
         self.assertIn("Codex CLI", source)
+        self.assertNotIn("ChatGPT Desktop", source)
+        self.assertNotIn("'chatgpt-desktop'", source)
         self.assertIn("data-agent-detection-evidence", source)
         self.assertIn("为什么认为可用", source)
         self.assertIn("下一步", source)
         self.assertIn("Microsoft Store", source)
         self.assertIn("'codex-desktop': new Set()", source)
-        self.assertIn("'chatgpt-desktop': new Set()", source)
         self.assertIn("'codex-cli': new Set(['python_runtime', 'node', 'npm', 'data_dir'])", source)
         self.assertIn("安装原版", source)
         self.assertIn("等待 Microsoft Store 完成安装", source)

@@ -1376,6 +1376,7 @@ class LoomAppUpdaterTests(unittest.TestCase):
                 release_api_urls=("https://api.example/releases/latest",),
                 opener=opener,
                 launcher=lambda path: launched.append(path),
+                update_cache_dir=os.path.join(temp_dir, "cache"),
             )
             success, _version, output = updater.install_latest()
 

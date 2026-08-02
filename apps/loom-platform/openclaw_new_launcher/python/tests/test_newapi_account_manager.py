@@ -36,6 +36,84 @@ from core.storage import read_json
 
 
 class NewApiAccountManagerTests(unittest.TestCase):
+    def test_payment_requests_use_current_session_token_and_never_send_account_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = PaymentFakeManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "42"},
+            })
+
+            catalog = manager.payment_plans()
+            order = manager.create_payment_order(
+                "monthly", "alipay", "payment-click-001"
+            )
+            status = manager.payment_order_status("order-1")
+
+            self.assertEqual("monthly", catalog["plans"][0]["planKey"])
+            self.assertEqual("order-1", order["order"]["orderId"])
+            self.assertEqual("pending", status["order"]["status"])
+            self.assertEqual(
+                [
+                    "/api/openclaw/payments/plans",
+                    "/api/openclaw/payments/orders/create",
+                    "/api/openclaw/payments/orders/status",
+                ],
+                [request["path"] for request in manager.requests],
+            )
+            self.assertTrue(all(
+                request["headers"]["Authorization"]
+                == "Bearer sk-account-token-not-real"
+                for request in manager.requests
+            ))
+            self.assertTrue(all(
+                "accountId" not in request["body"] for request in manager.requests
+            ))
+
+    def test_late_payment_response_cannot_cross_an_account_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            started = threading.Event()
+            release = threading.Event()
+
+            class BlockingPaymentManager(PaymentFakeManager):
+                def _request_json(self, *args, **kwargs):
+                    started.set()
+                    release.wait(2)
+                    return super()._request_json(*args, **kwargs)
+
+            manager = BlockingPaymentManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:old",
+                "memberToken": "sk-old-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "old"},
+            })
+            errors: list[Exception] = []
+
+            def load_plans() -> None:
+                try:
+                    manager.payment_plans()
+                except Exception as error:
+                    errors.append(error)
+
+            thread = threading.Thread(target=load_plans)
+            thread.start()
+            self.assertTrue(started.wait(1))
+            manager._persist_authenticated_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:new",
+                "memberToken": "sk-new-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "new"},
+            }, sync_runtime=False)
+            release.set()
+            thread.join(2)
+
+            self.assertEqual(1, len(errors))
+            self.assertIsInstance(errors[0], NewApiAccountError)
+            self.assertEqual("account_session_changed", errors[0].code)
+
     def test_background_sync_rejects_account_session_without_stable_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = NewApiAccountManager(AppPaths(temp_dir))
@@ -1990,6 +2068,40 @@ class EntitlementRedeemFakeManager(NewApiAccountManager):
                         "signature": "test-migration-signature",
                     },
                 },
+            }
+        raise AssertionError(f"unexpected request: {url}")
+
+
+class PaymentFakeManager(NewApiAccountManager):
+    def __init__(self, paths: AppPaths):
+        super().__init__(paths)
+        self.requests: list[dict] = []
+
+    def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
+        del opener, method, timeout
+        path = url.split("api.heang.top", 1)[-1]
+        self.requests.append({
+            "path": path,
+            "body": dict(body or {}),
+            "headers": dict(headers or {}),
+        })
+        if path.endswith("/payments/plans"):
+            return {
+                "success": True,
+                "data": {
+                    "plans": [{"planKey": "monthly", "amountMinor": 9900}],
+                    "payment": {"configured": True, "channels": ["alipay"]},
+                },
+            }
+        if path.endswith("/payments/orders/create"):
+            return {
+                "success": True,
+                "data": {"order": {"orderId": "order-1", "status": "pending"}},
+            }
+        if path.endswith("/payments/orders/status"):
+            return {
+                "success": True,
+                "data": {"order": {"orderId": "order-1", "status": "pending"}},
             }
         raise AssertionError(f"unexpected request: {url}")
 

@@ -24,6 +24,68 @@ from fastapi.testclient import TestClient
 
 
 class AccountRouteResponseTests(unittest.TestCase):
+    def test_payment_routes_create_query_and_refresh_entitlement_after_paid(self) -> None:
+        app = FastAPI()
+        calls: list[object] = []
+
+        class Manager:
+            def payment_plans(self):
+                calls.append("plans")
+                return {
+                    "plans": [{"planKey": "monthly", "amountMinor": 9900}],
+                    "payment": {"configured": True, "channels": ["alipay"]},
+                }
+
+            def create_payment_order(self, plan_key, payment_type, request_id):
+                calls.append(("create", plan_key, payment_type, request_id))
+                return {"order": {"orderId": "order-1", "status": "pending"}}
+
+            def payment_order_status(self, order_id):
+                calls.append(("status", order_id))
+                return {"order": {"orderId": order_id, "status": "paid"}}
+
+            def refresh_current(self):
+                calls.append("refresh")
+                return {"accountEntitlement": {"plan": "monthly"}}
+
+            def public_session(self):
+                return {
+                    "loggedIn": True,
+                    "accountEntitlement": {"plan": "monthly"},
+                }
+
+        register_account_routes(app, _ctx(Manager()))
+        client = TestClient(app)
+
+        plans = client.get("/api/account/payments/plans")
+        created = client.post(
+            "/api/account/payments/order",
+            json={
+                "planKey": "monthly",
+                "paymentType": "alipay",
+                "requestId": "click-1",
+                "accountId": "attacker",
+            },
+        )
+        paid = client.post(
+            "/api/account/payments/order/status",
+            json={"orderId": "order-1", "accountId": "attacker"},
+        )
+
+        self.assertEqual(200, plans.status_code, plans.text)
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual(200, paid.status_code, paid.text)
+        self.assertEqual("monthly", paid.json()["account"]["accountEntitlement"]["plan"])
+        self.assertEqual(
+            [
+                "plans",
+                ("create", "monthly", "alipay", "click-1"),
+                ("status", "order-1"),
+                "refresh",
+            ],
+            calls,
+        )
+
     def test_entitlement_redeem_runs_inside_account_transition_gate(self) -> None:
         app = FastAPI()
         events: list[str] = []

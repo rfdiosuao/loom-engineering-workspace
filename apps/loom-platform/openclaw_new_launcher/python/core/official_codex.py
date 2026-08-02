@@ -1,9 +1,10 @@
-"""Independent OpenAI desktop and CLI product identities.
+"""Codex Desktop and Codex CLI product identities.
 
 The signed release manifest historically used ``codex-desktop`` for the npm
 Codex CLI package.  Keep the signed bytes untouched and derive the three UI
-products at runtime so package identity, executable name, and CLI shims can no
-longer be confused with one another.
+products at runtime so package identity, executable name, and CLI shims cannot
+be confused with one another.  The Store entry executable may still be named
+``ChatGPT.exe``; the authoritative product identity remains ``OpenAI.Codex``.
 """
 
 from __future__ import annotations
@@ -14,17 +15,13 @@ from core.release_manifest import ReleaseComponent
 
 
 CODEX_DESKTOP_COMPONENT_ID = "codex-desktop"
-CHATGPT_DESKTOP_COMPONENT_ID = "chatgpt-desktop"
 CODEX_CLI_COMPONENT_ID = "codex-cli"
 
 CODEX_DESKTOP_PACKAGE_NAME = "OpenAI.Codex"
-CHATGPT_DESKTOP_PACKAGE_NAME = "OpenAI.ChatGPT"
 CODEX_DESKTOP_APP_ID = "App"
 
 CODEX_STORE_PRODUCT_ID = "9PLM9XGG6VKS"
-CHATGPT_STORE_PRODUCT_ID = "9NT1R1C2HH7J"
 CODEX_STORE_INSTALLER_URL = "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"
-CHATGPT_STORE_INSTALLER_URL = "https://get.microsoft.com/installer/download/9NT1R1C2HH7J?cid=website_cta_psi"
 CODEX_STORE_COMMAND_TIMEOUT_MS = 900000
 
 
@@ -55,17 +52,6 @@ OPENAI_DESKTOP_IDENTITIES = {
         # primary executable and also ships app/Codex.exe. Package identity is
         # therefore authoritative; the filename alone is not a product ID.
         entry_names=("app/ChatGPT.exe", "app/Codex.exe", "ChatGPT.exe", "Codex.exe"),
-    ),
-    CHATGPT_DESKTOP_COMPONENT_ID: OpenAIDesktopIdentity(
-        component_id=CHATGPT_DESKTOP_COMPONENT_ID,
-        name="ChatGPT Desktop",
-        package_name=CHATGPT_DESKTOP_PACKAGE_NAME,
-        product_id=CHATGPT_STORE_PRODUCT_ID,
-        installer_url=CHATGPT_STORE_INSTALLER_URL,
-        installer_filename="ChatGPT-Store-Installer.exe",
-        official_url="https://openai.com/chatgpt/desktop/",
-        description="OpenAI 官方 ChatGPT 桌面应用，由 Microsoft Store 安装和更新",
-        entry_names=("app/ChatGPT.exe", "ChatGPT.exe"),
     ),
 }
 
@@ -110,10 +96,6 @@ def official_codex_component(component: ReleaseComponent) -> ReleaseComponent:
     return official_desktop_component(component, CODEX_DESKTOP_COMPONENT_ID)
 
 
-def official_chatgpt_component(component: ReleaseComponent) -> ReleaseComponent:
-    return official_desktop_component(component, CHATGPT_DESKTOP_COMPONENT_ID)
-
-
 def official_codex_cli_component(component: ReleaseComponent) -> ReleaseComponent:
     """Restore the original manifest record as the independent Codex CLI."""
 
@@ -137,7 +119,6 @@ def expand_openai_components(components: tuple[ReleaseComponent, ...]) -> tuple[
         expanded.extend(
             (
                 official_codex_component(component),
-                official_chatgpt_component(component),
                 official_codex_cli_component(component),
             )
         )
@@ -149,15 +130,13 @@ def virtual_openai_component(component: ReleaseComponent, component_id: str) -> 
         return component if component.component_id == component_id else None
     if component_id == CODEX_DESKTOP_COMPONENT_ID:
         return official_codex_component(component)
-    if component_id == CHATGPT_DESKTOP_COMPONENT_ID:
-        return official_chatgpt_component(component)
     if component_id == CODEX_CLI_COMPONENT_ID:
         return official_codex_cli_component(component)
     return None
 
 
 def is_official_codex_component(component: ReleaseComponent) -> bool:
-    """Compatibility name: true for either official Store desktop product."""
+    """Return true only for the official Codex Store desktop product."""
 
     return component.component_id in OPENAI_DESKTOP_IDENTITIES and component.archive_type == "msstore"
 

@@ -67,6 +67,50 @@ def register_skills_routes(app, ctx) -> None:
         except SkillError as exc:
             return ctx.fastapi_json({"error": str(exc)}, 400)
 
+    @app.post("/api/skills/export")
+    async def skills_export(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        skill_id = str(body.get("id") or "").strip()
+        if not skill_id:
+            return ctx.fastapi_json({"error": "Skill ID 不能为空"}, 400)
+        try:
+            return ctx.fastapi_json(ctx.get_skill_svc().export_zip(skill_id))
+        except SkillError as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 400)
+
+    @app.post("/api/skills/learn")
+    async def skills_learn(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        try:
+            return ctx.fastapi_json(ctx.get_skill_svc().create_learned_skill(body), 201)
+        except SkillError as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 400)
+
+    @app.post("/api/skills/invocation")
+    async def skills_invocation(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        skill_id = str(body.get("id") or "").strip()
+        if not skill_id:
+            return ctx.fastapi_json({"error": "Skill ID 不能为空"}, 400)
+        try:
+            return ctx.fastapi_json(
+                ctx.get_skill_svc().record_invocation(
+                    skill_id,
+                    success=body.get("success") is True,
+                    duration_ms=body.get("durationMs", 0),
+                    agent_id=str(body.get("agentId") or ""),
+                    template_id=str(body.get("templateId") or ""),
+                )
+            )
+        except SkillError as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 400)
+
     @app.api_route("/api/skills/paths", methods=["GET", "POST"])
     async def skills_paths(request: Request):
         if error := ctx.auth_error(request):

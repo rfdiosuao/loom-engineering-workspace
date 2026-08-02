@@ -86,8 +86,8 @@ android {
         applicationId = oemApplicationId
         minSdk = if (android7Compat) 24 else 28
         targetSdk = 36
-        versionCode = 934
-        versionName = if (android7Compat) "6.65-stability-android7" else "6.65-stability"
+        versionCode = 935
+        versionName = if (android7Compat) "6.66-stability-android7" else "6.66-stability"
         manifestPlaceholders["oemAppLabel"] = oemAppName
         manifestPlaceholders["oemAppIcon"] =
             if (oemResDir.isNotEmpty()) "@mipmap/ic_launcher" else "@drawable/ic_lumi_agent_launcher"

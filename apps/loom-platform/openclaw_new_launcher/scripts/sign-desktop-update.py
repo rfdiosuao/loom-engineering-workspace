@@ -8,10 +8,17 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives import serialization
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    # The packaged Python runtime uses an isolated ._pth file and therefore
+    # does not automatically prepend the executed script's directory.
+    sys.path.insert(0, SCRIPT_DIR)
 
 from desktop_update_signing import (
     load_private_key,
