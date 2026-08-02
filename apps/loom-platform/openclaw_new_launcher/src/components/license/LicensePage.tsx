@@ -1375,7 +1375,6 @@ export const LicensePage: React.FC = () => {
                 <ModeButton
                   active={authMode === 'email'}
                   onClick={() => setAuthMode('email')}
-                  disabled={!authCapabilities.inlineEmailCode}
                   title={authCapabilities.emailReason}
                 >验证码登录</ModeButton>
                 <ModeButton active={authMode === 'password'} onClick={() => setAuthMode('password')}>密码登录</ModeButton>

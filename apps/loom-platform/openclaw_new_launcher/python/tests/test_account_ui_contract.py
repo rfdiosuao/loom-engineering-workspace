@@ -42,6 +42,17 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("网页注册", source)
         self.assertIn("grid-cols-2", source)
 
+    def test_email_code_mode_remains_clickable_when_capability_probe_is_unavailable(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        email_mode = source.split(">验证码登录</ModeButton>", 1)[0].rsplit(
+            "<ModeButton", 1
+        )[1]
+        self.assertNotIn("disabled={!authCapabilities.inlineEmailCode}", email_mode)
+        self.assertIn("if (!authCapabilities.inlineEmailCode)", source)
+        self.assertIn("authCapabilities.emailReason", source)
+
     def test_brand_uses_the_full_packaged_logo_before_the_emergency_glyph(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
