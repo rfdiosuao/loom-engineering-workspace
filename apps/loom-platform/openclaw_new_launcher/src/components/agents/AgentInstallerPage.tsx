@@ -1914,7 +1914,7 @@ export const AgentInstallerPage: React.FC = () => {
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <div className="text-[10px] font-bold tracking-[0.24em] text-text-subtle">可安装智能体</div>
-                <h2 className="mt-1 text-2xl font-black text-text">Codex / ChatGPT / Claude / Grok Build / Pi / Goose / Gemini CLI 等</h2>
+                <h2 className="mt-1 text-2xl font-black text-text">Codex / Claude / Grok Build / Pi / Goose / Gemini CLI 等</h2>
               </div>
               {error ? <span className="text-sm font-bold text-status-danger">{error}</span> : null}
             </div>

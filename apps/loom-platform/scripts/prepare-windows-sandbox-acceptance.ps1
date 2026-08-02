@@ -90,6 +90,9 @@ $harnessPath = Resolve-ExistingDirectory -Path $PSScriptRoot -Label "Harness"
 $bootstrapPath = Resolve-ExistingFile -Path (
     Join-Path $harnessPath "windows-sandbox-bootstrap.ps1"
 ) -Label "Bootstrap"
+$bootstrapLauncherPath = Resolve-ExistingFile -Path (
+    Join-Path $harnessPath "windows-sandbox-bootstrap.cmd"
+) -Label "Bootstrap launcher"
 $checklistPath = Resolve-ExistingFile -Path (
     Join-Path $harnessPath "windows-sandbox-acceptance-checklist.md"
 ) -Label "Checklist"
@@ -108,7 +111,8 @@ $outputPath = Resolve-ExistingDirectory -Path $outputPath -Label "Output"
 
 $wsbPath = Join-Path $outputPath "Luming-2.4.5-Acceptance.wsb"
 $sessionPath = Join-Path $outputPath "sandbox-preparation.json"
-foreach ($target in @($wsbPath, $sessionPath)) {
+$bootstrapConfigPath = Join-Path $outputPath "sandbox-bootstrap-config.json"
+foreach ($target in @($wsbPath, $sessionPath, $bootstrapConfigPath)) {
     if ((Test-Path -LiteralPath $target) -and -not $Force.IsPresent) {
         throw "Refusing to overwrite existing acceptance asset without -Force: $target"
     }
@@ -116,11 +120,15 @@ foreach ($target in @($wsbPath, $sessionPath)) {
 
 $installerItem = Get-Item -LiteralPath $installerPath
 $installerHash = Get-Sha256Hash -Path $installerPath
-$command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\LumingHarness\windows-sandbox-bootstrap.ps1"' +
-    ' -CandidateRoot "C:\LumingCandidate"' +
-    ' -EvidenceRoot "C:\LumingEvidence"' +
-    ' -InstallerName "' + $installerItem.Name + '"' +
-    ' -ExpectedSha256 "' + $installerHash + '"'
+$command = 'C:\LumingHarness\windows-sandbox-bootstrap.cmd'
+
+[pscustomobject]@{
+    schemaVersion = 1
+    candidateRoot = "C:\LumingCandidate"
+    evidenceRoot = "C:\LumingEvidence"
+    installerName = $installerItem.Name
+    expectedSha256 = $installerHash
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $bootstrapConfigPath -Encoding UTF8
 
 $settings = [System.Xml.XmlWriterSettings]::new()
 $settings.Indent = $true
@@ -166,6 +174,8 @@ finally {
     installerBytes = $installerItem.Length
     installerSha256 = $installerHash
     harness = $bootstrapPath
+    harnessLauncher = $bootstrapLauncherPath
+    bootstrapConfig = $bootstrapConfigPath
     checklist = $checklistPath
     evidenceDirectory = $outputPath
     network = "enabled"

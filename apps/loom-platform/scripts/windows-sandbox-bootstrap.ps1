@@ -1,16 +1,37 @@
 param(
-    [Parameter(Mandatory = $true)]
     [string]$CandidateRoot,
-    [Parameter(Mandatory = $true)]
     [string]$EvidenceRoot,
-    [Parameter(Mandatory = $true)]
     [string]$InstallerName,
-    [Parameter(Mandatory = $true)]
-    [ValidatePattern("^[A-Fa-f0-9]{64}$")]
-    [string]$ExpectedSha256
+    [string]$ExpectedSha256,
+    [string]$ConfigPath
 )
 
 $ErrorActionPreference = "Stop"
+$lumingDisplayName = ([char]0x9E93).ToString() + ([char]0x9E23).ToString()
+$lumingDisplayNamePattern = [regex]::Escape($lumingDisplayName) + "|LOOM|Luming"
+
+if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+        throw "Sandbox bootstrap config is unavailable: $ConfigPath"
+    }
+    $bootstrapConfig = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$bootstrapConfig.schemaVersion -ne 1) {
+        throw "Unsupported sandbox bootstrap config schema"
+    }
+    $CandidateRoot = [string]$bootstrapConfig.candidateRoot
+    $EvidenceRoot = [string]$bootstrapConfig.evidenceRoot
+    $InstallerName = [string]$bootstrapConfig.installerName
+    $ExpectedSha256 = [string]$bootstrapConfig.expectedSha256
+}
+
+foreach ($requiredValue in @($CandidateRoot, $EvidenceRoot, $InstallerName, $ExpectedSha256)) {
+    if ([string]::IsNullOrWhiteSpace([string]$requiredValue)) {
+        throw "Sandbox bootstrap requires a complete configuration"
+    }
+}
+if ($ExpectedSha256 -notmatch "^[A-Fa-f0-9]{64}$") {
+    throw "ExpectedSha256 must contain exactly 64 hexadecimal characters"
+}
 
 function Get-Sha256Hash {
     param([string]$Path)
@@ -36,6 +57,15 @@ if (-not (Test-Path -LiteralPath $CandidateRoot -PathType Container)) {
 if (-not (Test-Path -LiteralPath $EvidenceRoot -PathType Container)) {
     throw "EvidenceRoot is unavailable: $EvidenceRoot"
 }
+
+[pscustomobject]@{
+    startedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    processId = $PID
+    userName = $env:USERNAME
+    configPath = $ConfigPath
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (
+    Join-Path $EvidenceRoot "logon-command-started.json"
+) -Encoding UTF8
 
 $sourceInstaller = Join-Path $CandidateRoot $InstallerName
 if (-not (Test-Path -LiteralPath $sourceInstaller -PathType Leaf)) {
@@ -109,7 +139,18 @@ try {
 
     $checklist = "C:\LumingHarness\windows-sandbox-acceptance-checklist.md"
     if (Test-Path -LiteralPath $checklist -PathType Leaf) {
-        Start-Process -FilePath "notepad.exe" -ArgumentList ('"' + $checklist + '"')
+        try {
+            $notepad = Get-Command -Name "notepad.exe" -ErrorAction SilentlyContinue
+            if ($null -eq $notepad) {
+                throw "notepad.exe is unavailable in this Sandbox image"
+            }
+            Start-Process -FilePath $notepad.Source -ArgumentList ('"' + $checklist + '"')
+        }
+        catch {
+            $_.Exception.Message | Set-Content -LiteralPath (
+                Join-Path $sessionDirectory "checklist-viewer-unavailable.txt"
+            ) -Encoding UTF8
+        }
     }
 
     $installerProcess = Start-Process -FilePath $localInstaller -PassThru -Wait
@@ -133,7 +174,7 @@ try {
     foreach ($uninstallRoot in $uninstallRoots) {
         Get-ItemProperty -Path $uninstallRoot -ErrorAction SilentlyContinue |
             Where-Object {
-                [string]$_.DisplayName -match "麓鸣|LOOM|Luming"
+                [string]$_.DisplayName -match $lumingDisplayNamePattern
             } |
             ForEach-Object {
                 if (-not [string]::IsNullOrWhiteSpace([string]$_.DisplayIcon)) {
@@ -147,7 +188,7 @@ try {
     }
     foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
         if (-not [string]::IsNullOrWhiteSpace($root)) {
-            $appCandidates.Add((Join-Path $root "麓鸣\LOOM.exe"))
+            $appCandidates.Add((Join-Path $root (Join-Path $lumingDisplayName "LOOM.exe")))
             $appCandidates.Add((Join-Path $root "LOOM\LOOM.exe"))
         }
     }
@@ -167,13 +208,20 @@ try {
     Start-Process -FilePath $appPath | Out-Null
 
     @(
-        "麓鸣已启动，请严格按记事本中的逐按钮清单验收。",
-        "截图、脱敏说明和人工结论请保存到：$sessionDirectory",
-        "关闭 Windows Sandbox 会清空客体；映射到 LumingEvidence 的文件会保留。"
+        "Luming has started. Follow the novice click-through checklist opened in Notepad.",
+        "Save redacted screenshots and the manual acceptance result to: $sessionDirectory",
+        "Closing Windows Sandbox clears the guest. Files mapped to LumingEvidence persist."
     ) | Set-Content -LiteralPath (
         Join-Path $sessionDirectory "manual-acceptance-required.txt"
     ) -Encoding UTF8
-    Start-Process -FilePath "explorer.exe" -ArgumentList ('"' + $sessionDirectory + '"')
+    try {
+        Start-Process -FilePath "explorer.exe" -ArgumentList ('"' + $sessionDirectory + '"')
+    }
+    catch {
+        $_.Exception.Message | Set-Content -LiteralPath (
+            Join-Path $sessionDirectory "explorer-launch-unavailable.txt"
+        ) -Encoding UTF8
+    }
 }
 catch {
     [pscustomobject]@{

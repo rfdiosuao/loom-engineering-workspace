@@ -136,6 +136,20 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("parsed.pathname.replace(/\\/+$/, '') === '/topup'", source)
         self.assertNotIn("`${DEFAULT_BASE_URL}/topup`", source)
 
+    def test_guest_browsing_stays_on_a_read_only_account_page(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("const [guestBrowsing, setGuestBrowsing] = useState(false)", source)
+        self.assertIn("data-account-guest-read-only", source)
+        self.assertIn("只读访客模式", source)
+        self.assertIn("不显示缓存或模拟的余额、套餐和授权状态", source)
+        continue_as_guest = source.split("const continueAsGuest =", 1)[1].split(
+            "const busyTitle", 1
+        )[0]
+        self.assertIn("setGuestBrowsing(true)", continue_as_guest)
+        self.assertNotIn("setCurrentPage('dashboard')", continue_as_guest)
+
     def test_account_login_defaults_to_domestic_accelerated_domain(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
@@ -190,7 +204,8 @@ class AccountUiContractTests(unittest.TestCase):
 
         self.assertIn("createPaymentQrDataUri(paymentOrder?.qrcode)", source)
         self.assertNotIn("paymentOrder?.qrcode || paymentOrder?.payUrl", source)
-        self.assertIn("openExternalUrl(paymentOrder.payUrl || '')", source)
+        self.assertIn("openExternalUrl(paymentPayUrl)", source)
+        self.assertNotIn("openExternalUrl(paymentOrder.payUrl", source)
         self.assertIn("支付二维码暂不可用，请查询订单或打开直达支付。", source)
 
     def test_paid_order_is_not_reported_as_failed_when_local_entitlement_refresh_fails(self) -> None:

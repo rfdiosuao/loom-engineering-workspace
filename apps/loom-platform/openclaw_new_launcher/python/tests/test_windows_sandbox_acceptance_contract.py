@@ -20,6 +20,9 @@ PREPARE_SCRIPT = os.path.join(
 BOOTSTRAP_SCRIPT = os.path.join(
     SCRIPT_ROOT, "windows-sandbox-bootstrap.ps1"
 )
+BOOTSTRAP_LAUNCHER = os.path.join(
+    SCRIPT_ROOT, "windows-sandbox-bootstrap.cmd"
+)
 CHECKLIST = os.path.join(
     SCRIPT_ROOT, "windows-sandbox-acceptance-checklist.md"
 )
@@ -42,6 +45,8 @@ class WindowsSandboxAcceptanceContractTests(unittest.TestCase):
             "Networking",
             "LogonCommand",
             "windows-sandbox-bootstrap.ps1",
+            "windows-sandbox-bootstrap.cmd",
+            "sandbox-bootstrap-config.json",
             "Get-Sha256Hash",
             "WindowsSandbox.exe",
             "[switch]$Launch",
@@ -51,6 +56,30 @@ class WindowsSandboxAcceptanceContractTests(unittest.TestCase):
         self.assertIn("Installer must stay inside CandidateDirectory", source)
         self.assertNotIn("Enable-WindowsOptionalFeature", source)
         self.assertNotIn("dism.exe /Online /Enable-Feature", source)
+
+    def test_logon_command_uses_a_single_ascii_launcher_and_a_structured_config(self) -> None:
+        source = self._read(PREPARE_SCRIPT)
+        launcher = self._read(BOOTSTRAP_LAUNCHER)
+        bootstrap = self._read(BOOTSTRAP_SCRIPT)
+
+        self.assertIn('C:\\LumingHarness\\windows-sandbox-bootstrap.cmd', source)
+        self.assertIn('C:\\LumingEvidence\\sandbox-bootstrap-config.json', launcher)
+        self.assertIn('powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass', launcher)
+        self.assertIn('-ConfigPath C:\\LumingEvidence\\sandbox-bootstrap-config.json', launcher)
+        self.assertIn('logon-command-console.txt', launcher)
+        self.assertIn('logon-command-exit-code.txt', launcher)
+        self.assertIn('[string]$ConfigPath', bootstrap)
+        self.assertIn('ConvertFrom-Json', bootstrap)
+        self.assertIn('logon-command-started.json', bootstrap)
+
+    def test_logon_assets_are_ascii_safe_for_windows_powershell_51(self) -> None:
+        for path in (BOOTSTRAP_SCRIPT, BOOTSTRAP_LAUNCHER):
+            with open(path, "rb") as handle:
+                payload = handle.read()
+            try:
+                payload.decode("ascii")
+            except UnicodeDecodeError as error:
+                self.fail(f"Windows PowerShell 5.1 logon asset is not ASCII-safe: {path}: {error}")
 
     def test_bootstrap_keeps_installer_interactive_and_records_safe_evidence(self) -> None:
         source = self._read(BOOTSTRAP_SCRIPT)
@@ -69,6 +98,19 @@ class WindowsSandboxAcceptanceContractTests(unittest.TestCase):
         self.assertNotIn('ArgumentList = "/S"', source)
         self.assertNotIn("LICENSE_ZPAY_KEY", source)
         self.assertNotIn("LICENSE_ZPAY_PID", source)
+
+    def test_optional_checklist_and_explorer_helpers_cannot_block_the_installer(self) -> None:
+        source = self._read(BOOTSTRAP_SCRIPT)
+
+        self.assertIn('Get-Command -Name "notepad.exe" -ErrorAction SilentlyContinue', source)
+        self.assertIn('checklist-viewer-unavailable.txt', source)
+        self.assertIn('explorer-launch-unavailable.txt', source)
+        self.assertIn('Start-Process -FilePath $localInstaller -PassThru -Wait', source)
+        notepad_block = source.split('$checklist =', 1)[1].split(
+            '$installerProcess =', 1
+        )[0]
+        self.assertIn('try {', notepad_block)
+        self.assertIn('catch {', notepad_block)
 
     def test_checklist_covers_the_required_novice_click_paths_and_limits(self) -> None:
         source = self._read(CHECKLIST)
@@ -139,6 +181,24 @@ class WindowsSandboxAcceptanceContractTests(unittest.TestCase):
             self.assertEqual(mappings["C:\\LumingHarness"], "true")
             self.assertEqual(mappings["C:\\LumingEvidence"], "false")
             self.assertEqual(tree.findtext("./Networking"), "Enable")
+            self.assertEqual(
+                tree.findtext("./LogonCommand/Command"),
+                "C:\\LumingHarness\\windows-sandbox-bootstrap.cmd",
+            )
+
+            with open(
+                os.path.join(output, "sandbox-bootstrap-config.json"),
+                "r",
+                encoding="utf-8-sig",
+            ) as handle:
+                bootstrap_config = json.load(handle)
+            self.assertEqual(bootstrap_config["candidateRoot"], "C:\\LumingCandidate")
+            self.assertEqual(bootstrap_config["evidenceRoot"], "C:\\LumingEvidence")
+            self.assertEqual(bootstrap_config["installerName"], "麓鸣_2.4.5_x64-setup.exe")
+            self.assertEqual(
+                bootstrap_config["expectedSha256"],
+                hashlib.sha256(payload).hexdigest().upper(),
+            )
 
             with open(
                 os.path.join(output, "sandbox-preparation.json"),

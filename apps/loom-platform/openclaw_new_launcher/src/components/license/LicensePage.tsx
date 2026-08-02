@@ -265,6 +265,7 @@ export const LicensePage: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(() => !hasCachedAccount);
   const [usingCachedAccount, setUsingCachedAccount] = useState(hasCachedAccount);
+  const [guestBrowsing, setGuestBrowsing] = useState(false);
   const [statusText, setStatusText] = useState('');
   const { checkLicense, setCurrentPage } = useAppStore();
 
@@ -315,6 +316,7 @@ export const LicensePage: React.FC = () => {
     setAccount(next);
     setSubscription(next?.subscription || null);
     setUsingCachedAccount(Boolean(options.cached || next?.offline || next?.stale));
+    if (next?.loggedIn) setGuestBrowsing(false);
   }, []);
 
   const refresh = useCallback(async (options: { background?: boolean } = {}) => {
@@ -814,8 +816,8 @@ export const LicensePage: React.FC = () => {
   };
 
   const continueAsGuest = () => {
-    showToast('已关闭模型账号登录页。模型同步需要先登录账号。', 'info');
-    setCurrentPage('dashboard');
+    setGuestBrowsing(true);
+    showToast('已进入只读访客模式；登录后才会读取或修改账户数据。', 'info');
   };
 
   const busyTitle = '正在处理账号请求';
@@ -1210,6 +1212,92 @@ export const LicensePage: React.FC = () => {
     );
   }
 
+  if (guestBrowsing) {
+    return (
+      <div
+        data-account-subscription-page
+        data-account-guest-read-only
+        className="loom-white-page flex h-full flex-col overflow-hidden bg-app-bg text-text"
+      >
+        <header className="shrink-0 border-b border-border bg-surface px-6 py-4 xl:px-8">
+          <div className="text-xs font-black text-accent">模型服务账户</div>
+          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h1 className="text-[24px] font-black leading-tight text-text">账户与用量</h1>
+              <p className="mt-1 max-w-2xl text-xs leading-5 text-text-muted">
+                只读访客模式不会读取、缓存或修改账户数据。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setGuestBrowsing(false)}
+              className="h-10 rounded-[8px] bg-accent px-4 text-sm font-black text-accent-ink transition hover:bg-accent-hover"
+            >
+              登录模型账户
+            </button>
+          </div>
+        </header>
+
+        <main className="min-h-0 flex-1 overflow-y-auto px-6 py-6 xl:px-8">
+          <div className="mx-auto w-full max-w-[1120px]">
+            <section
+              role="status"
+              className="border border-info bg-info-soft px-5 py-4 text-info-ink"
+            >
+              <div className="text-sm font-black">当前为只读访客模式</div>
+              <p className="mt-1 text-xs font-semibold leading-5">
+                为避免把旧缓存当成在线数据，这里不显示缓存或模拟的余额、套餐和授权状态。登录并完成在线验证后才会展示服务端权威数据。
+              </p>
+            </section>
+
+            <section className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-label="访客账户状态">
+              <MetricTile label="模型账户" value="未登录" />
+              <MetricTile label="可用余额" value="未读取" />
+              <MetricTile label="当前套餐" value="未读取" />
+              <MetricTile label="商业矩阵授权" value="未验证" />
+            </section>
+
+            <section className="mt-6 border-y border-border bg-surface px-5 py-5">
+              <h2 className="text-lg font-black text-text">可用访客操作</h2>
+              <p className="mt-1 text-xs leading-5 text-text-muted">
+                访客可以了解账户入口，但不能绑定授权码、同步模型、创建支付订单或修改订阅。
+              </p>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={() => setGuestBrowsing(false)}
+                  className="h-10 rounded-[8px] bg-accent px-4 text-sm font-black text-accent-ink transition hover:bg-accent-hover"
+                >
+                  登录模型账户
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenRegistration}
+                  className="h-10 rounded-[8px] border border-border bg-surface-alt px-4 text-sm font-black text-text transition hover:border-accent/50"
+                >
+                  网页注册
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenSubscription}
+                  className="h-10 rounded-[8px] border border-border bg-surface-alt px-4 text-sm font-black text-text transition hover:border-accent/50"
+                >
+                  打开账户中心
+                </button>
+              </div>
+            </section>
+
+            {statusText ? (
+              <div className="mt-5 border border-border bg-surface-alt px-4 py-3 text-sm leading-6 text-text-muted">
+                {statusText}
+              </div>
+            ) : null}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div
       data-account-subscription-page
@@ -1233,7 +1321,7 @@ export const LicensePage: React.FC = () => {
               <GhostTile label="来源" value="api.heang.top" />
             </div>
             <div className="mt-7 rounded-[22px] border border-border/70 bg-surface-alt/45 p-6">
-              <div className="text-sm font-black text-text">演示版能力</div>
+              <div className="text-sm font-black text-text">登录后可用</div>
               <div className="mt-4 grid grid-cols-3 gap-3">
                 <SoftPill>安装器</SoftPill>
                 <SoftPill>手机控制</SoftPill>

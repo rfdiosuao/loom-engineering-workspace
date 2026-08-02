@@ -50,6 +50,17 @@ class SkillCenterUiContractTests(unittest.TestCase):
         self.assertIn("requiresLicense: true", registry)
         self.assertIn("PhoneMatrixAccessGate", pages)
         self.assertIn("GuardedSkillCenterPage", pages)
+        self.assertIn('surface="skills"', pages)
+
+    def test_skill_center_matrix_entitlement_gate_uses_skill_specific_copy(self) -> None:
+        paywall = os.path.join(ROOT, "src", "components", "license", "LicensePaywall.tsx")
+        with open(paywall, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("skill-center-access", source)
+        self.assertIn("Skill 中心授权", source)
+        self.assertIn("沉淀并复用已验证流程", source)
+        self.assertIn("共享 Skill 与模板", source)
 
 
 if __name__ == "__main__":

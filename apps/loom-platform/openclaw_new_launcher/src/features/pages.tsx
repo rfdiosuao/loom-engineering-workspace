@@ -34,19 +34,19 @@ const PhoneConnectionPage = () => (
 );
 
 const GuardedMatrixWorkbenchPage = () => (
-  <PhoneMatrixAccessGate>
+  <PhoneMatrixAccessGate surface="workbench">
     <MatrixWorkbenchPage />
   </PhoneMatrixAccessGate>
 );
 
 const GuardedSkillCenterPage = () => (
-  <PhoneMatrixAccessGate>
+  <PhoneMatrixAccessGate surface="skills">
     <SkillCenterPage />
   </PhoneMatrixAccessGate>
 );
 
 const GuardedAcquisitionWorkbenchPage = () => (
-  <PhoneMatrixAccessGate>
+  <PhoneMatrixAccessGate surface="acquisition">
     <AcquisitionWorkbenchPage />
   </PhoneMatrixAccessGate>
 );

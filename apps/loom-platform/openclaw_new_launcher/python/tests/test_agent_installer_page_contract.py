@@ -472,6 +472,13 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         self.assertIn("原版应用请在 Windows 设置中卸载", source)
         self.assertNotIn("'codex-desktop': new Set(['python_runtime'])", source)
 
+    def test_agent_catalog_heading_does_not_advertise_a_removed_chatgpt_product(self) -> None:
+        with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertNotIn("Codex / ChatGPT", source)
+        self.assertIn("Codex / Claude / Grok Build / Pi / Goose / Gemini CLI 等", source)
+
     def test_installer_summary_and_detection_details_are_novice_friendly(self) -> None:
         with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
