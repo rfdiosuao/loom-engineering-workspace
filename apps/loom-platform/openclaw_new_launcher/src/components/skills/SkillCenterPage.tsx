@@ -30,7 +30,7 @@ import { useAppStore } from '../../stores/appStore';
 import { Button, Input, Modal, TextArea, showConfirm, showToast } from '../common';
 
 type CenterTab = 'skills' | 'templates';
-type LearnedSkillDraft = { name: string; summary: string; steps: string; applicableAgents: string; verified: boolean };
+type LearnedSkillDraft = { name: string; summary: string; steps: string; applicableAgents: string; templateId: string; verified: boolean };
 type TemplateDraft = {
   templateId: string;
   expectedVersion?: number;
@@ -48,6 +48,7 @@ const EMPTY_SKILL_DRAFT: LearnedSkillDraft = {
   summary: '',
   steps: '',
   applicableAgents: 'LumiAgent, Codex Desktop, Codex CLI',
+  templateId: '',
   verified: false,
 };
 const EMPTY_TEMPLATE_DRAFT: TemplateDraft = {
@@ -142,6 +143,7 @@ export const SkillCenterPage: React.FC = () => {
   const [readme, setReadme] = React.useState<{ title: string; content: string } | null>(null);
   const [learnOpen, setLearnOpen] = React.useState(false);
   const [learnDraft, setLearnDraft] = React.useState<LearnedSkillDraft>(EMPTY_SKILL_DRAFT);
+  const [bindingTemplateId, setBindingTemplateId] = React.useState('');
   const [templateOpen, setTemplateOpen] = React.useState(false);
   const [templateDraft, setTemplateDraft] = React.useState<TemplateDraft>(EMPTY_TEMPLATE_DRAFT);
 
@@ -245,6 +247,7 @@ export const SkillCenterPage: React.FC = () => {
     const steps = splitLines(learnDraft.steps);
     if (!learnDraft.name.trim() || !learnDraft.summary.trim() || !steps.length) return showToast('请填写名称、用途和至少一个复用步骤', 'error');
     if (!learnDraft.verified) return showToast('请先确认这是已成功验证的确定性只读流程', 'error');
+    const linkedTemplate = templates.find((template) => template.templateId === learnDraft.templateId && template.enabled !== false);
     const accepted = await showConfirm({ title: '确认沉淀为 Skill', message: '麓鸣只保存说明与确定性复用步骤，不保存授权码、Token、聊天原文或任意执行脚本。后续遇到副作用动作仍会再次请求确认。', confirmText: '确认沉淀' });
     if (!accepted) return;
     setBusy('learn');
@@ -253,6 +256,7 @@ export const SkillCenterPage: React.FC = () => {
         name: learnDraft.name.trim(), summary: learnDraft.summary.trim(), steps,
         applicableAgents: splitLines(learnDraft.applicableAgents), confirmed: true,
         verifiedSuccess: true, deterministic: true, sideEffects: false,
+        ...(linkedTemplate ? { templateId: linkedTemplate.templateId, templateVersion: linkedTemplate.version || 1 } : {}),
       });
       setLearnOpen(false);
       setLearnDraft(EMPTY_SKILL_DRAFT);
@@ -260,6 +264,32 @@ export const SkillCenterPage: React.FC = () => {
       setSelectedSkillId(result.skill.id);
       showToast('成功任务已沉淀为可复用 Skill', 'success');
     } catch (error) { showToast(parseErrorText(error) || 'Skill 沉淀失败', 'error'); }
+    finally { setBusy(''); }
+  };
+
+  const bindSharedTemplate = async () => {
+    const skill = selectedSkill;
+    const template = templates.find((item) => item.templateId === bindingTemplateId && item.enabled !== false);
+    if (!skill || !template) return showToast('请选择一个已启用的共享模板', 'error');
+    setBusy(`binding:${skill.id}`);
+    try {
+      await skillsApi.setTemplateBinding({ id: skill.id, templateId: template.templateId, templateVersion: template.version || 1, linked: true });
+      setBindingTemplateId('');
+      await loadAll(true);
+      showToast('共享模板已按当前版本绑定；执行 Skill 时会严格校验', 'success');
+    } catch (error) { showToast(parseErrorText(error) || '共享模板绑定失败，请刷新后重试', 'error'); }
+    finally { setBusy(''); }
+  };
+
+  const unbindSharedTemplate = async (templateId: string, version: number) => {
+    const skill = selectedSkill;
+    if (!skill) return;
+    setBusy(`binding:${skill.id}`);
+    try {
+      await skillsApi.setTemplateBinding({ id: skill.id, templateId, templateVersion: version, linked: false });
+      await loadAll(true);
+      showToast('已解除共享模板绑定', 'success');
+    } catch (error) { showToast(parseErrorText(error) || '解除模板绑定失败', 'error'); }
     finally { setBusy(''); }
   };
 
@@ -411,6 +441,12 @@ export const SkillCenterPage: React.FC = () => {
                     <div className="rounded-[10px] border border-border bg-surface p-5"><div className="flex items-center gap-2 text-sm font-black text-text"><Smartphone className="h-4 w-4 text-accent" />适用 Agent</div><div className="mt-3 flex flex-wrap gap-2">{(selectedSkill.applicableAgents?.length ? selectedSkill.applicableAgents : ['按 Skill 说明选择']).map((agent) => <span key={agent} className="rounded-full border border-border-strong bg-surface-alt px-3 py-1.5 text-[11px] font-bold text-text-muted">{agent}</span>)}</div><div className="mt-4 border-t border-border pt-4 text-xs leading-5 text-text-muted">运行时：<strong className="text-text">{selectedSkill.runtime || 'instruction'}</strong> · 最近 Agent：<strong className="text-text">{selectedSkill.lastAgent || '尚无记录'}</strong></div></div>
                     <div className="rounded-[10px] border border-border bg-surface p-5"><div className="flex items-center gap-2 text-sm font-black text-text"><ShieldCheck className="h-4 w-4 text-accent" />安全复用边界</div><ul className="mt-3 space-y-2 text-xs leading-5 text-text-muted"><li>• 沉淀只保存脱敏步骤，不保存授权码、Token 或原聊天。</li><li>• 删除、发布、付款等副作用动作每次仍需重新确认。</li><li>• 手机 Linux 仅执行允许列表内的确定性工作区任务。</li></ul></div>
                   </div>
+                  <div className="mt-4 rounded-[10px] border border-border bg-surface p-5">
+                    <div className="flex items-center gap-2 text-sm font-black text-text"><Cloud className="h-4 w-4 text-accent" />绑定共享模板</div>
+                    <p className="mt-2 text-xs leading-5 text-text-muted">手机矩阵、获客和飞书共用这里的模板；绑定会固定当前版本，模板更新或停用后会先阻止执行并提示重新绑定。</p>
+                    <div className="mt-3 flex flex-wrap gap-2">{(selectedSkill.linkedTemplates || []).map((binding) => <span key={`${binding.templateId}@${binding.version}`} className="inline-flex items-center gap-2 rounded-full border border-border-strong bg-surface-alt px-3 py-1.5 text-[11px] font-bold text-text-muted"><span>{binding.name || binding.templateId} · v{binding.version}</span><button type="button" className="text-status-danger-ink hover:underline" onClick={() => void unbindSharedTemplate(binding.templateId, binding.version)}>解除</button></span>)}{!selectedSkill.linkedTemplates?.length ? <span className="text-xs text-text-subtle">尚未绑定，可直接复用纯 Skill 步骤。</span> : null}</div>
+                    <div className="mt-4 flex flex-col gap-2 sm:flex-row"><select aria-label="选择共享模板" value={bindingTemplateId} onChange={(event) => setBindingTemplateId(event.target.value)} className="min-h-10 flex-1 rounded-[8px] border border-border-strong bg-surface-alt px-3 text-xs font-bold text-text outline-none focus:border-accent"><option value="">选择已启用的共享模板</option>{templates.filter((template) => template.enabled !== false).map((template) => <option key={template.templateId} value={template.templateId}>{template.name} · v{template.version || 1}</option>)}</select><Button variant="quiet" disabled={busy === `binding:${selectedSkill.id}` || !bindingTemplateId} onClick={() => void bindSharedTemplate()}>绑定 / 更新版本</Button></div>
+                  </div>
                   <div className="mt-5 flex flex-wrap gap-2">{selectedSkill.hasReadme ? <Button variant="quiet" onClick={() => void openReadme(selectedSkill)}><span className="flex items-center gap-2"><BookOpen className="h-4 w-4" />查看说明</span></Button> : null}{selectedSkill.writable ? <Button variant="danger" onClick={() => void removeSkill(selectedSkill)}><span className="flex items-center gap-2"><Trash2 className="h-4 w-4" />删除</span></Button> : null}</div>
                 </div> : <EmptyState title="还没有可用 Skill" detail="先完成一次可验证任务，再从右上角沉淀；也可以导入符合规范的 Skill 包。" />}
               </div>
@@ -436,6 +472,7 @@ export const SkillCenterPage: React.FC = () => {
         <label className="block text-xs font-black text-text">用途说明<TextArea className="mt-2 min-h-20" value={learnDraft.summary} onChange={(event) => setLearnDraft({ ...learnDraft, summary: event.target.value })} placeholder="说明什么时候调用、输入和输出是什么" /></label>
         <label className="block text-xs font-black text-text">复用步骤（每行一步）<TextArea className="mt-2 min-h-32 font-mono" value={learnDraft.steps} onChange={(event) => setLearnDraft({ ...learnDraft, steps: event.target.value })} placeholder={'读取工作区输入\n校验格式\n输出结果并保留原文件'} /></label>
         <label className="block text-xs font-black text-text">适用 Agent<Input className="mt-2" value={learnDraft.applicableAgents} onChange={(event) => setLearnDraft({ ...learnDraft, applicableAgents: event.target.value })} /></label>
+        <label className="block text-xs font-black text-text">关联共享模板（可选）<select value={learnDraft.templateId} onChange={(event) => setLearnDraft({ ...learnDraft, templateId: event.target.value })} className="mt-2 min-h-10 w-full rounded-[8px] border border-border-strong bg-surface-alt px-3 text-xs font-bold text-text outline-none focus:border-accent"><option value="">不关联模板</option>{templates.filter((template) => template.enabled !== false).map((template) => <option key={template.templateId} value={template.templateId}>{template.name} · v{template.version || 1}</option>)}</select><span className="mt-1 block text-[11px] font-normal leading-5 text-text-muted">选择后会固定 templateId 与 templateVersion，执行时严格校验，不会静默换成其他版本。</span></label>
         <label className="flex cursor-pointer items-start gap-3 rounded-[8px] border border-border bg-surface-alt p-3 text-xs leading-5 text-text-muted"><input type="checkbox" checked={learnDraft.verified} onChange={(event) => setLearnDraft({ ...learnDraft, verified: event.target.checked })} className="mt-1 accent-[var(--color-accent)]" /><span>我确认这个流程已经成功运行并人工核对，步骤是确定性的、只读或只写新输出，不包含对外发布、付款、删除、提权或任意脚本。</span></label>
         <div className="flex justify-end gap-2"><Button variant="quiet" onClick={() => setLearnOpen(false)}>取消</Button><Button variant="primary" disabled={busy === 'learn' || !learnDraft.verified} onClick={() => void createLearnedSkill()}>{busy === 'learn' ? '正在沉淀…' : '确认沉淀'}</Button></div>
       </div></Modal>

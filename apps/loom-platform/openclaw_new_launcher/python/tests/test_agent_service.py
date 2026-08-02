@@ -2650,9 +2650,24 @@ class AgentServiceTests(unittest.TestCase):
                 handle.write("# Resume Screening\nRead candidate summaries before ranking.\n")
             with open(os.path.join(skill_dir, "dangerous.py"), "w", encoding="utf-8") as handle:
                 handle.write("raise RuntimeError('must never execute')\n")
+            from core.acquisition_templates import AcquisitionTemplateLibrary
+
+            with patch.dict(os.environ, {"LOOM_TEMPLATE_DISABLE_DEFAULT_CLOUD": "1"}, clear=False):
+                template = AcquisitionTemplateLibrary(paths).save_from_acquisition(
+                    {
+                        "templateId": "resume-template",
+                        "name": "候选人筛选模板",
+                        "industry": "招聘",
+                        "platforms": ["manual"],
+                        "targetCustomer": "候选人",
+                    }
+                )["template"]
 
             service = AgentService(paths, runtime=UnavailableRuntime())
             try:
+                service._skill_service.set_template_binding(
+                    "resume-screening", "resume-template", template["version"], linked=True
+                )
                 capability = service.capabilities.get("loom.skill.resume-screening")
                 result = service.capabilities.execute("loom.skill.resume-screening", {"role": "recruiter"})
             finally:
@@ -2662,6 +2677,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(capability.risk, "critical")
         self.assertIn("Read candidate summaries", result["instructions"])
         self.assertEqual(result["requestedContext"], {"role": "recruiter"})
+        self.assertEqual(result["sharedTemplates"][0]["templateId"], "resume-template")
+        self.assertEqual(result["sharedTemplates"][0]["version"], 1)
 
     def test_service_redacts_secrets_from_persisted_request_and_events(self) -> None:
         from services.agent_service import AgentService

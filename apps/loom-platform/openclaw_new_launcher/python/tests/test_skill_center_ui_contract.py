@@ -35,11 +35,15 @@ class SkillCenterUiContractTests(unittest.TestCase):
             "导出",
             "从成功任务沉淀",
             "expectedVersion",
+            "绑定共享模板",
+            "linkedTemplates",
+            "templateVersion",
         ):
             self.assertIn(marker, page)
         self.assertIn("skillsApi", api)
         self.assertIn("/api/skills/export", api)
         self.assertIn("/api/skills/learn", api)
+        self.assertIn("/api/skills/template", api)
         self.assertIn("setTemplateEnabled", api)
         self.assertIn("deleteTemplate", api)
         self.assertIn("key: 'skills'", registry)

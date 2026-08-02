@@ -1839,6 +1839,12 @@ export const acquisitionApi = {
     api('/api/matrix/acquisition/templates/delete', 'POST', { templateId, expectedVersion }),
 };
 
+export interface SkillTemplateBinding {
+  templateId: string;
+  version: number;
+  name?: string;
+}
+
 export interface SkillSummary {
   id: string;
   name: string;
@@ -1861,6 +1867,7 @@ export interface SkillSummary {
   lastDurationMs?: number;
   lastAgent?: string;
   linkedTemplateIds?: string[];
+  linkedTemplates?: SkillTemplateBinding[];
 }
 
 export interface SkillListResponse {
@@ -1891,7 +1898,10 @@ export const skillsApi = {
     verifiedSuccess: boolean;
     deterministic: boolean;
     sideEffects: boolean;
+    templateId?: string;
+    templateVersion?: number;
   }): Promise<{ skill: SkillSummary }> => api('/api/skills/learn', 'POST', params),
+  setTemplateBinding: (params: { id: string; templateId: string; templateVersion: number; linked: boolean }): Promise<{ skill: SkillSummary }> => api('/api/skills/template', 'POST', params),
   recordInvocation: (params: {
     id: string;
     success: boolean;

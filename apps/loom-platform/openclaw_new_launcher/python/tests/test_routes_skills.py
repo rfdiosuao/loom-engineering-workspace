@@ -36,6 +36,10 @@ class SkillRoutesTests(unittest.TestCase):
                 calls.append(("invocation", skill_id, kwargs))
                 return {"skill": {"id": skill_id, "invocationCount": 1}}
 
+            def set_template_binding(self, skill_id, template_id, template_version, *, linked):
+                calls.append(("template", skill_id, template_id, template_version, linked))
+                return {"skill": {"id": skill_id, "linkedTemplates": [{"templateId": template_id, "version": template_version}]}}
+
         async def body(request):
             payload = await request.json()
             return payload if isinstance(payload, dict) else {}
@@ -71,13 +75,23 @@ class SkillRoutesTests(unittest.TestCase):
                 "templateId": "beauty-local",
             },
         )
+        bound = client.post(
+            "/api/skills/template",
+            json={
+                "id": "safe-reuse",
+                "templateId": "beauty-local",
+                "templateVersion": 3,
+                "linked": True,
+            },
+        )
 
         self.assertEqual(rejected.status_code, 400)
         self.assertEqual(learned.status_code, 201)
         self.assertEqual(exported.json()["filename"], "safe-reuse.zip")
         self.assertEqual(invoked.json()["skill"]["invocationCount"], 1)
+        self.assertEqual(bound.status_code, 200)
         self.assertEqual(
-            calls[-1],
+            calls[-2],
             (
                 "invocation",
                 "safe-reuse",
@@ -89,6 +103,7 @@ class SkillRoutesTests(unittest.TestCase):
                 },
             ),
         )
+        self.assertEqual(calls[-1], ("template", "safe-reuse", "beauty-local", 3, True))
 
 
 if __name__ == "__main__":

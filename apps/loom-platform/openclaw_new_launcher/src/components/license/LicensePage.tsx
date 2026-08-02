@@ -272,8 +272,8 @@ export const LicensePage: React.FC = () => {
     : '未激活';
   const activeAccountIdentity = accountIdentity(account);
   const paymentQrSrc = useMemo(
-    () => createPaymentQrDataUri(paymentOrder?.qrcode || paymentOrder?.payUrl),
-    [paymentOrder?.payUrl, paymentOrder?.qrcode],
+    () => createPaymentQrDataUri(paymentOrder?.qrcode),
+    [paymentOrder?.qrcode],
   );
 
   const applyAccount = useCallback((

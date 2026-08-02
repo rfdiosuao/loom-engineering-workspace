@@ -184,6 +184,15 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("打开账户中心", source)
         self.assertNotIn("购买与支付在浏览器完成", source)
 
+    def test_payment_qr_never_uses_pay_url_as_qr_content(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("createPaymentQrDataUri(paymentOrder?.qrcode)", source)
+        self.assertNotIn("paymentOrder?.qrcode || paymentOrder?.payUrl", source)
+        self.assertIn("openExternalUrl(paymentOrder.payUrl || '')", source)
+        self.assertIn("支付二维码暂不可用，请查询订单或打开直达支付。", source)
+
     def test_paid_order_is_not_reported_as_failed_when_local_entitlement_refresh_fails(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()

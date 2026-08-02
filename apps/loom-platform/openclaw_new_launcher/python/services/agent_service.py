@@ -1661,12 +1661,9 @@ class AgentService:
         return self._matrix_factory().status()
 
     def _load_skill_instructions(self, skill_id: str, payload: Json) -> Json:
-        document = self._skill_service.read_readme(skill_id)
-        return {
-            "skillId": skill_id,
-            "instructions": str(document.get("content") or "")[:20_000],
-            "requestedContext": sanitize_for_storage(payload),
-        }
+        context = self._skill_service.resolve_execution_context(skill_id)
+        context["requestedContext"] = sanitize_for_storage(payload)
+        return context
 
     def _matrix_dispatch(self, payload: Json) -> Json:
         self._require_matrix_access()

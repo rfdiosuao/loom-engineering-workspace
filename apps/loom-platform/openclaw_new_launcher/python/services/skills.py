@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.acquisition_templates import AcquisitionTemplateLibrary, TemplateError
 from core.paths import AppPaths
 from core.storage import read_json, write_json
 
@@ -79,6 +80,7 @@ class SkillService:
                     "lastDurationMs": self._bounded_int(usage.get("lastDurationMs"), 0, 0, 86_400_000),
                     "lastAgent": self._safe_text(usage.get("lastAgent"), 120),
                     "linkedTemplateIds": self._safe_list(usage.get("linkedTemplateIds"), limit=50, item_limit=120),
+                    "linkedTemplates": self._normalize_template_bindings(usage.get("linkedTemplates")),
                 }
         return {
             "skills": sorted(skills.values(), key=lambda item: (item.get("source", ""), item.get("name", ""))),
@@ -168,6 +170,14 @@ class SkillService:
         if not agents:
             agents = ["Codex Desktop", "Codex CLI", "LumiAgent"]
 
+        template_binding: dict[str, Any] | None = None
+        template_id = self._safe_text(payload.get("templateId"), 120)
+        if template_id:
+            template_binding = self._validated_template_binding(
+                template_id,
+                payload.get("templateVersion"),
+            )
+
         self._ensure_dirs()
         os.makedirs(self.learned_skills_dir, exist_ok=True)
         target_dir = os.path.join(self.learned_skills_dir, skill_id)
@@ -202,6 +212,7 @@ class SkillService:
                 "version": "1.0.0",
                 "installedAt": now,
                 "promotionPolicy": "verified_read_only",
+                "linkedTemplates": [template_binding] if template_binding else [],
             }
             self._write_state(state)
         except (OSError, ValueError) as error:
@@ -229,6 +240,8 @@ class SkillService:
         state = self._read_state()
         state.setdefault("skills", {})
         item = state["skills"].setdefault(skill_id, {})
+        if "enabled" not in item:
+            item["enabled"] = skill.get("enabled") is not False
         now = self._timestamp()
         item["invocationCount"] = self._bounded_int(item.get("invocationCount"), 0, 0, 2_000_000_000) + 1
         item["lastUsedAt"] = now
@@ -247,6 +260,82 @@ class SkillService:
         self._write_state(state)
         refreshed = self._find_skill(skill_id)
         return {"skill": refreshed or skill}
+
+    def set_template_binding(
+        self,
+        skill_id: str,
+        template_id: str,
+        template_version: Any,
+        *,
+        linked: bool,
+    ) -> dict:
+        skill = self._find_skill(skill_id)
+        if skill is None:
+            raise SkillError(f"未找到 Skill: {skill_id}")
+        fixed_template_id = self._safe_text(template_id, 120)
+        if not fixed_template_id:
+            raise SkillError("共享模板 ID 不能为空")
+
+        state = self._read_state()
+        state.setdefault("skills", {})
+        item = state["skills"].setdefault(skill_id, {})
+        if "enabled" not in item:
+            item["enabled"] = skill.get("enabled") is not False
+        bindings = self._normalize_template_bindings(item.get("linkedTemplates"))
+        bindings = [binding for binding in bindings if binding.get("templateId") != fixed_template_id]
+        if linked:
+            binding = self._validated_template_binding(fixed_template_id, template_version)
+            bindings.append(binding)
+        item["linkedTemplates"] = bindings[-20:]
+        self._write_state(state)
+        refreshed = self._find_skill(skill_id)
+        return {"skill": refreshed or skill}
+
+    def resolve_execution_context(self, skill_id: str) -> dict:
+        skill = self._find_skill(skill_id)
+        if skill is None:
+            raise SkillError(f"未找到 Skill: {skill_id}")
+        if skill.get("enabled") is False:
+            raise SkillError("这个 Skill 已停用，请先在 Skill 中心启用")
+        document = self.read_readme(skill_id)
+        resolved_templates: list[dict[str, Any]] = []
+        library = AcquisitionTemplateLibrary(self.paths)
+        for binding in self._normalize_template_bindings(skill.get("linkedTemplates")):
+            try:
+                template = library.resolve_template(
+                    str(binding["templateId"]),
+                    expected_version=int(binding["version"]),
+                    require_enabled=True,
+                )
+            except TemplateError as error:
+                raise SkillError(f"Skill 关联的共享模板不可用：{error}") from error
+            resolved_templates.append(self._template_execution_payload(template))
+        return {
+            "skillId": skill_id,
+            "instructions": str(document.get("content") or "")[:20_000],
+            "sharedTemplates": resolved_templates,
+        }
+
+    def _validated_template_binding(self, template_id: str, template_version: Any) -> dict[str, Any]:
+        try:
+            version = int(template_version)
+        except (TypeError, ValueError) as error:
+            raise SkillError("绑定共享模板时必须提供明确的模板版本") from error
+        if version < 1:
+            raise SkillError("共享模板版本必须大于 0")
+        try:
+            template = AcquisitionTemplateLibrary(self.paths).resolve_template(
+                template_id,
+                expected_version=version,
+                require_enabled=True,
+            )
+        except TemplateError as error:
+            raise SkillError(f"无法绑定共享模板：{error}") from error
+        return {
+            "templateId": self._safe_text(template.get("templateId"), 120),
+            "version": version,
+            "name": self._safe_text(template.get("name"), 160),
+        }
 
     def export_zip(self, skill_id: str) -> dict:
         skill = self._find_skill(skill_id)
@@ -546,6 +635,47 @@ class SkillService:
             if target_dir and os.path.exists(target_dir):
                 shutil.rmtree(target_dir, ignore_errors=True)
             os.replace(backup_dir, target_dir)
+
+    def _normalize_template_bindings(self, value: Any) -> list[dict[str, Any]]:
+        rows = value if isinstance(value, list) else []
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            template_id = self._safe_text(row.get("templateId"), 120)
+            try:
+                version = int(row.get("version"))
+            except (TypeError, ValueError):
+                continue
+            if not template_id or version < 1 or template_id in seen:
+                continue
+            result.append(
+                {
+                    "templateId": template_id,
+                    "version": version,
+                    "name": self._safe_text(row.get("name"), 160),
+                }
+            )
+            seen.add(template_id)
+            if len(result) >= 20:
+                break
+        return result
+
+    def _template_execution_payload(self, template: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "templateId": self._safe_text(template.get("templateId"), 120),
+            "version": self._bounded_int(template.get("version"), 1, 1, 2_000_000_000),
+            "name": self._safe_text(template.get("name"), 160),
+            "industry": self._safe_text(template.get("industry"), 160),
+            "platforms": self._safe_list(template.get("platforms"), limit=20, item_limit=120),
+            "targetCustomer": self._safe_text(template.get("targetCustomer"), 300),
+            "keywords": self._safe_list(template.get("keywords"), limit=80, item_limit=160),
+            "leadRules": self._safe_list(template.get("leadRules"), limit=80, item_limit=300),
+            "replyStyle": self._safe_text(template.get("replyStyle"), 1000),
+            "safetyPolicy": template.get("safetyPolicy") if isinstance(template.get("safetyPolicy"), dict) else {},
+            "feishuMapping": template.get("feishuMapping") if isinstance(template.get("feishuMapping"), dict) else {},
+        }
 
     def _safe_list(self, value: Any, *, limit: int, item_limit: int) -> list[str]:
         if isinstance(value, str):

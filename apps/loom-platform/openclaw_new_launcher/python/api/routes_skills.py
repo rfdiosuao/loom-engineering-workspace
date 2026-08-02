@@ -90,6 +90,27 @@ def register_skills_routes(app, ctx) -> None:
         except SkillError as exc:
             return ctx.fastapi_json({"error": str(exc)}, 400)
 
+    @app.post("/api/skills/template")
+    async def skills_template(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        skill_id = str(body.get("id") or "").strip()
+        template_id = str(body.get("templateId") or "").strip()
+        if not skill_id or not template_id:
+            return ctx.fastapi_json({"error": "Skill ID 和共享模板 ID 不能为空"}, 400)
+        try:
+            return ctx.fastapi_json(
+                ctx.get_skill_svc().set_template_binding(
+                    skill_id,
+                    template_id,
+                    body.get("templateVersion"),
+                    linked=body.get("linked") is not False,
+                )
+            )
+        except SkillError as exc:
+            return ctx.fastapi_json({"error": str(exc)}, 400)
+
     @app.post("/api/skills/invocation")
     async def skills_invocation(request: Request):
         if error := ctx.auth_error(request):
