@@ -38,6 +38,17 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(parsed, maximum))
 
 
+def _payment_channels(value: Any) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        raw = value
+    else:
+        raw = str(value if value is not None else "").split(",")
+    normalized = (
+        str(item if item is not None else "").strip().lower() for item in raw
+    )
+    return tuple(dict.fromkeys(item for item in normalized if item))
+
+
 @dataclass(frozen=True)
 class ZPayConfig:
     enabled: bool
@@ -47,6 +58,7 @@ class ZPayConfig:
     create_path: str
     notify_url: str
     return_url: str
+    channels: tuple[str, ...]
     order_ttl_seconds: int = 600
     query_enabled: bool = False
     query_path: str = "/api.php"
@@ -61,6 +73,9 @@ class ZPayConfig:
             create_path=str(os.environ.get("LICENSE_ZPAY_CREATE_PATH", "/mapi.php") or "").strip(),
             notify_url=str(os.environ.get("LICENSE_ZPAY_NOTIFY_URL", "") or "").strip(),
             return_url=str(os.environ.get("LICENSE_ZPAY_RETURN_URL", "") or "").strip(),
+            channels=_payment_channels(
+                os.environ.get("LICENSE_ZPAY_CHANNELS", "")
+            ),
             order_ttl_seconds=_bounded_int(
                 os.environ.get("LICENSE_ZPAY_ORDER_TTL_SECONDS", "600"),
                 600,
@@ -107,6 +122,18 @@ class ZPayConfig:
             raise PaymentError("支付服务路径配置无效。", 503, invalid_code)
         return urllib.parse.urlunsplit((base.scheme, base.netloc, path.path, "", ""))
 
+    def enabled_channels(self) -> tuple[str, ...]:
+        channels = _payment_channels(self.channels)
+        if not channels or any(
+            channel not in ALLOWED_PAYMENT_TYPES for channel in channels
+        ):
+            raise PaymentError(
+                "支付渠道配置无效。",
+                503,
+                "PAYMENT_CHANNELS_INVALID",
+            )
+        return channels
+
     def create_url(self) -> str:
         if not self.notify_url or not self.return_url:
             raise PaymentError(
@@ -123,9 +150,11 @@ class ZPayConfig:
                 raise PaymentError(
                     "支付回调必须使用 HTTPS。", 503, "PAYMENT_CALLBACK_INSECURE"
                 )
-        return self._provider_url(
+        provider_url = self._provider_url(
             self.create_path, "PAYMENT_PROVIDER_PATH_INVALID"
         )
+        self.enabled_channels()
+        return provider_url
 
     def query_url(self) -> str:
         if not self.query_enabled:
@@ -281,7 +310,7 @@ class ZPayProvider:
             "clientip": str(request.get("clientip") or "").strip(),
             "device": "pc",
         }
-        if fields["type"] not in ALLOWED_PAYMENT_TYPES:
+        if fields["type"] not in self.config.enabled_channels():
             raise PaymentError(
                 "支付渠道不受支持。", 400, "PAYMENT_CHANNEL_UNSUPPORTED"
             )

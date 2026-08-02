@@ -53,6 +53,7 @@ class PaymentHttpTests(unittest.TestCase):
             "LICENSE_ZPAY_PID": "merchant-001",
             "LICENSE_ZPAY_KEY": "merchant-secret",
             "LICENSE_ZPAY_CREATE_PATH": "/mapi.php",
+            "LICENSE_ZPAY_CHANNELS": "alipay",
             "LICENSE_ZPAY_NOTIFY_URL": "https://license.example.test/api/payments/zpay/notify",
             "LICENSE_ZPAY_RETURN_URL": "https://license.example.test/api/payments/zpay/return",
         }
@@ -108,8 +109,31 @@ class PaymentHttpTests(unittest.TestCase):
         plans = self.post("/api/service/payments/plans", {})
         self.assertEqual("SERVICE_AUTH_REQUIRED", unauthorized["code"])
         self.assertEqual("monthly", plans["plans"][0]["planKey"])
+        self.assertEqual(["alipay"], plans["payment"]["channels"])
         self.assertNotIn("merchant-secret", json.dumps(plans))
         self.assertNotIn("merchant-001", json.dumps(plans))
+
+        with patch(
+            "luming_license.http.routes_payments.ZPayProvider.create_payment"
+        ) as create_payment:
+            unsupported = self.post(
+                "/api/service/payments/orders/create",
+                {
+                    "accountId": "http-account",
+                    "planKey": "monthly",
+                    "paymentType": "wxpay",
+                    "requestId": "http-click-unsupported",
+                },
+                expected=400,
+            )
+        self.assertEqual("PAYMENT_CHANNEL_UNSUPPORTED", unsupported["code"])
+        create_payment.assert_not_called()
+        with self.server.connect() as connection:
+            persisted = connection.execute(
+                "select count(*) from payment_orders where request_id = ?",
+                ("http-click-unsupported",),
+            ).fetchone()[0]
+        self.assertEqual(0, persisted)
 
         with patch(
             "luming_license.http.routes_payments.ZPayProvider.create_payment",

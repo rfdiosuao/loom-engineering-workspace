@@ -213,6 +213,7 @@ class PaymentNetworkIntegrationTests(unittest.TestCase):
             "LICENSE_ZPAY_PID": MERCHANT_ID,
             "LICENSE_ZPAY_KEY": MERCHANT_KEY,
             "LICENSE_ZPAY_CREATE_PATH": "/mapi.php",
+            "LICENSE_ZPAY_CHANNELS": "alipay",
             "LICENSE_ZPAY_QUERY_ENABLED": "1",
             "LICENSE_ZPAY_QUERY_PATH": "/api.php",
             "LICENSE_ZPAY_NOTIFY_URL": "https://license.example.invalid/api/payments/zpay/notify",

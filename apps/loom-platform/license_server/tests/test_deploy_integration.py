@@ -118,6 +118,7 @@ class LicenseDeployIntegrationTests(unittest.TestCase):
                 "LICENSE_ZPAY_PID=test-merchant-id\n"
                 'LICENSE_ZPAY_KEY="test secret placeholder"\n'
                 "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
+                "LICENSE_ZPAY_CHANNELS=alipay\n"
                 "LICENSE_ZPAY_QUERY_ENABLED=1\n"
                 "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
                 "LICENSE_ZPAY_NOTIFY_URL=https://license.example.invalid/api/payments/zpay/notify\n"

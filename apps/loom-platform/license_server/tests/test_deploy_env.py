@@ -53,6 +53,7 @@ class DeployEnvironmentTests(unittest.TestCase):
                 "LICENSE_ZPAY_PID=merchant-id\n"
                 'LICENSE_ZPAY_KEY="secret with spaces"\n'
                 "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
+                "LICENSE_ZPAY_CHANNELS=alipay\n"
                 "LICENSE_ZPAY_QUERY_ENABLED=true\n"
                 "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
                 "LICENSE_ZPAY_NOTIFY_URL=https://license.example.com/api/payments/zpay/notify\n"
@@ -61,6 +62,31 @@ class DeployEnvironmentTests(unittest.TestCase):
             )
 
             validate_zpay_env_file(env_file)
+
+    def test_zpay_validation_rejects_missing_or_unknown_channels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / "openclaw-license.env"
+            common = (
+                "LICENSE_ZPAY_ENABLED=1\n"
+                "LICENSE_ZPAY_BASE_URL=https://zpayz.cn\n"
+                "LICENSE_ZPAY_PID=merchant-id\n"
+                "LICENSE_ZPAY_KEY=secret\n"
+                "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
+                "LICENSE_ZPAY_QUERY_ENABLED=1\n"
+                "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
+                "LICENSE_ZPAY_NOTIFY_URL=https://license.example.com/api/payments/zpay/notify\n"
+                "LICENSE_ZPAY_RETURN_URL=https://license.example.com/api/payments/zpay/return\n"
+            )
+            env_file.write_text(common, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "LICENSE_ZPAY_CHANNELS"):
+                validate_zpay_env_file(env_file)
+
+            env_file.write_text(
+                common + "LICENSE_ZPAY_CHANNELS=alipay,card\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "LICENSE_ZPAY_CHANNELS"):
+                validate_zpay_env_file(env_file)
 
     def test_zpay_validation_rejects_missing_secret_without_exposing_it(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -83,6 +109,7 @@ class DeployEnvironmentTests(unittest.TestCase):
                 "LICENSE_ZPAY_PID=merchant-id\n"
                 "LICENSE_ZPAY_KEY=secret\n"
                 "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
+                "LICENSE_ZPAY_CHANNELS=alipay\n"
                 "LICENSE_ZPAY_QUERY_ENABLED=1\n"
                 "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
                 "LICENSE_ZPAY_NOTIFY_URL=https://license.example.com/api/payments/zpay/notify\n"

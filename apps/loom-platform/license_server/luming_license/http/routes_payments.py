@@ -67,8 +67,10 @@ def post_payment_plans(handler: Any, parsed: Any) -> None:
     config = ZPayConfig.from_env()
     try:
         config.create_url()
+        channels = list(config.enabled_channels())
         provider_configured = True
     except PaymentError:
+        channels = []
         provider_configured = False
     try:
         config.query_url()
@@ -84,7 +86,7 @@ def post_payment_plans(handler: Any, parsed: Any) -> None:
                 "provider": "zpay",
                 "configured": provider_configured,
                 "reconciliationConfigured": reconciliation_configured,
-                "channels": ["alipay", "wxpay"],
+                "channels": channels,
             },
         },
     )
@@ -96,10 +98,13 @@ def post_payment_order_create(handler: Any, parsed: Any) -> None:
         return
     try:
         body = handler.read_json()
+        config = ZPayConfig.from_env()
+        channels = config.enabled_channels()
         order = create_payment_order(
             body,
             connect_fn=handler.facade.connect,
-            provider=ZPayProvider(ZPayConfig.from_env()),
+            provider=ZPayProvider(config),
+            allowed_payment_types=channels,
         )
         handler.send_json(200, {"ok": True, "order": order})
     except PaymentError as error:

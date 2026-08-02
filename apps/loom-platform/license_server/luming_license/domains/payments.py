@@ -6,7 +6,7 @@ import json
 import re
 import secrets
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
@@ -229,6 +229,7 @@ def create_payment_order(
     provider: PaymentProvider,
     now_fn: UtcNowFn = utc_now,
     token_fn: TokenFn = secrets.token_urlsafe,
+    allowed_payment_types: Collection[str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise PaymentError("下单参数无效。", 400, "PAYMENT_INVALID_REQUEST")
@@ -240,7 +241,16 @@ def create_payment_order(
         raise PaymentError("请选择套餐。", 400, "PAYMENT_PLAN_REQUIRED")
     if not request_id or len(request_id) > 128:
         raise PaymentError("本次下单标识无效，请重新选择套餐。", 400, "PAYMENT_REQUEST_ID_INVALID")
-    if payment_type not in ALLOWED_PAYMENT_TYPES:
+    enabled_types = (
+        ALLOWED_PAYMENT_TYPES
+        if allowed_payment_types is None
+        else frozenset(
+            _text(item).lower() for item in allowed_payment_types if _text(item)
+        )
+    )
+    if (
+        payment_type not in ALLOWED_PAYMENT_TYPES or payment_type not in enabled_types
+    ):
         raise PaymentError("请选择支付宝或微信支付。", 400, "PAYMENT_CHANNEL_UNSUPPORTED")
 
     with connect_fn() as connection:

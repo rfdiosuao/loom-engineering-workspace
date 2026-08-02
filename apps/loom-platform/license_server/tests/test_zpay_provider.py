@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from email.parser import BytesParser
 from email.policy import default
+from unittest.mock import patch
 
 from _support import LICENSE_SERVER_ROOT  # noqa: F401 - package import path
 from luming_license.domains.payment_provider_zpay import ZPayConfig, ZPayProvider
@@ -20,6 +22,7 @@ class ZPayProviderTests(unittest.TestCase):
             "create_path": "/mapi.php",
             "notify_url": "https://license.example.test/api/payments/zpay/notify",
             "return_url": "https://license.example.test/api/payments/zpay/return",
+            "channels": ("alipay", "wxpay"),
             "order_ttl_seconds": 600,
         }
         values.update(overrides)
@@ -79,6 +82,37 @@ class ZPayProviderTests(unittest.TestCase):
         self.assertEqual("alipays://platformapi/startapp?token=a&b=1", result["qrcode"])
         self.assertEqual("https://merchant.example.test/cashier/order-123", result["payUrl"])
         self.assertEqual("2026-08-02T12:10:00Z", result["expiresAt"])
+
+    def test_configured_channels_are_required_and_enforced(self) -> None:
+        environment = {
+            "LICENSE_ZPAY_ENABLED": "1",
+            "LICENSE_ZPAY_BASE_URL": "https://merchant.example.test",
+            "LICENSE_ZPAY_PID": "merchant-001",
+            "LICENSE_ZPAY_KEY": "merchant-secret",
+            "LICENSE_ZPAY_CREATE_PATH": "/mapi.php",
+            "LICENSE_ZPAY_CHANNELS": "alipay",
+            "LICENSE_ZPAY_NOTIFY_URL": "https://license.example.test/api/payments/zpay/notify",
+            "LICENSE_ZPAY_RETURN_URL": "https://license.example.test/api/payments/zpay/return",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            config = ZPayConfig.from_env()
+        self.assertEqual(("alipay",), config.channels)
+        provider = ZPayProvider(
+            config,
+            requester=lambda *_args: self.fail("disabled channel reached provider transport"),
+        )
+        with self.assertRaises(PaymentError) as raised:
+            provider.create_payment(
+                {
+                    "out_trade_no": "LM-UNSUPPORTED",
+                    "type": "wxpay",
+                    "name": "月卡",
+                    "money": "99.00",
+                    "param": "nonce",
+                    "clientip": "203.0.113.42",
+                }
+            )
+        self.assertEqual("PAYMENT_CHANNEL_UNSUPPORTED", raised.exception.code)
 
     def test_provider_fails_closed_for_insecure_or_malformed_contract(self) -> None:
         for config, expected in (

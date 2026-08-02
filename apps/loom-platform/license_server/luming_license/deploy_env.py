@@ -9,12 +9,14 @@ from urllib.parse import unquote, urlsplit
 
 ENV_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 ENABLED_VALUES = {"1", "true", "yes", "on", "enabled"}
+ZPAY_ALLOWED_CHANNELS = frozenset({"alipay", "wxpay"})
 ZPAY_REQUIRED_NAMES = (
     "LICENSE_ZPAY_ENABLED",
     "LICENSE_ZPAY_BASE_URL",
     "LICENSE_ZPAY_PID",
     "LICENSE_ZPAY_KEY",
     "LICENSE_ZPAY_CREATE_PATH",
+    "LICENSE_ZPAY_CHANNELS",
     "LICENSE_ZPAY_QUERY_ENABLED",
     "LICENSE_ZPAY_QUERY_PATH",
     "LICENSE_ZPAY_NOTIFY_URL",
@@ -103,6 +105,16 @@ def _validate_provider_path(name: str, value: str) -> None:
         raise ValueError(f"invalid provider path setting: {name}")
 
 
+def _validate_channels(value: str) -> None:
+    raw = str(value or "").split(",")
+    channels = [item.strip().lower() for item in raw]
+    if (
+        not channels
+        or any(not item or item not in ZPAY_ALLOWED_CHANNELS for item in channels)
+    ):
+        raise ValueError("invalid payment channel setting: LICENSE_ZPAY_CHANNELS")
+
+
 def validate_zpay_env_file(path: Path) -> None:
     """Validate production payment readiness without returning secret values."""
 
@@ -124,6 +136,7 @@ def validate_zpay_env_file(path: Path) -> None:
     _validate_provider_path(
         "LICENSE_ZPAY_QUERY_PATH", values["LICENSE_ZPAY_QUERY_PATH"]
     )
+    _validate_channels(values["LICENSE_ZPAY_CHANNELS"])
     _validate_https_url(
         "LICENSE_ZPAY_NOTIFY_URL",
         values["LICENSE_ZPAY_NOTIFY_URL"],
