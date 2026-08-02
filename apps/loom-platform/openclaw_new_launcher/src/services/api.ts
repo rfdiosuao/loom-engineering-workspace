@@ -904,6 +904,7 @@ export interface AccountPaymentCatalog {
   payment: {
     provider?: string;
     configured?: boolean;
+    reconciliationConfigured?: boolean;
     channels?: Array<'alipay' | 'wxpay' | string>;
   };
 }
@@ -954,7 +955,7 @@ export const accountApi = {
     api('/api/account/payments/plans'),
   createPaymentOrder: (params: { planKey: string; paymentType: 'alipay' | 'wxpay'; requestId: string }): Promise<{ order: AccountPaymentOrder }> =>
     api('/api/account/payments/order', 'POST', params),
-  paymentOrderStatus: (params: { orderId: string }): Promise<{ order: AccountPaymentOrder; account?: AccountSnapshot; entitlementSyncPending?: boolean }> =>
+  paymentOrderStatus: (params: { orderId: string; reconcile?: boolean }): Promise<{ order: AccountPaymentOrder; account?: AccountSnapshot; entitlementSyncPending?: boolean }> =>
     api('/api/account/payments/order/status', 'POST', params),
   selectModels: (params: { textModel?: string; imageModel?: string; videoModel?: string }): Promise<{ account: AccountSnapshot; syncResults?: Array<{ target?: string; ok?: boolean; error?: string }> }> =>
     api('/api/account/models/select', 'POST', params),

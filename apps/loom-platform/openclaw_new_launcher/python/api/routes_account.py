@@ -713,6 +713,7 @@ def register_account_routes(app, ctx) -> None:
                 result = await asyncio.to_thread(
                     manager.payment_order_status,
                     str(body.get("orderId") or ""),
+                    reconcile=body.get("reconcile") is True,
                 )
                 order = result.get("order") if isinstance(result, dict) else None
                 response = dict(result)

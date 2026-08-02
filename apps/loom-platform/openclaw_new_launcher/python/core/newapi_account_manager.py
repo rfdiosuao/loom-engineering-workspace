@@ -2499,13 +2499,15 @@ class NewApiAccountManager:
             )
         return {"order": data["order"]}
 
-    def payment_order_status(self, order_id: str) -> dict[str, Any]:
+    def payment_order_status(
+        self, order_id: str, *, reconcile: bool = False
+    ) -> dict[str, Any]:
         normalized_order = str(order_id or "").strip()
         if not normalized_order or len(normalized_order) > 128:
             raise NewApiAccountError("订单编号无效", status_code=400)
         data = self._payment_bridge_request(
             "/api/openclaw/payments/orders/status",
-            {"orderId": normalized_order},
+            {"orderId": normalized_order, "reconcile": reconcile is True},
         )
         if not isinstance(data.get("order"), dict):
             raise NewApiAccountError(

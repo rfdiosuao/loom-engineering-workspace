@@ -40,8 +40,8 @@ class AccountRouteResponseTests(unittest.TestCase):
                 calls.append(("create", plan_key, payment_type, request_id))
                 return {"order": {"orderId": "order-1", "status": "pending"}}
 
-            def payment_order_status(self, order_id):
-                calls.append(("status", order_id))
+            def payment_order_status(self, order_id, reconcile=False):
+                calls.append(("status", order_id, reconcile))
                 return {"order": {"orderId": order_id, "status": "paid"}}
 
             def refresh_current(self):
@@ -69,7 +69,11 @@ class AccountRouteResponseTests(unittest.TestCase):
         )
         paid = client.post(
             "/api/account/payments/order/status",
-            json={"orderId": "order-1", "accountId": "attacker"},
+            json={
+                "orderId": "order-1",
+                "accountId": "attacker",
+                "reconcile": True,
+            },
         )
 
         self.assertEqual(200, plans.status_code, plans.text)
@@ -80,7 +84,7 @@ class AccountRouteResponseTests(unittest.TestCase):
             [
                 "plans",
                 ("create", "monthly", "alipay", "click-1"),
-                ("status", "order-1"),
+                ("status", "order-1", True),
                 "refresh",
             ],
             calls,

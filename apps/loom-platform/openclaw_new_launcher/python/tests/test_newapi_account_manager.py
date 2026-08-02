@@ -50,7 +50,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
             order = manager.create_payment_order(
                 "monthly", "alipay", "payment-click-001"
             )
-            status = manager.payment_order_status("order-1")
+            status = manager.payment_order_status("order-1", reconcile=True)
 
             self.assertEqual("monthly", catalog["plans"][0]["planKey"])
             self.assertEqual("order-1", order["order"]["orderId"])
@@ -71,6 +71,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertTrue(all(
                 "accountId" not in request["body"] for request in manager.requests
             ))
+            self.assertTrue(manager.requests[-1]["body"]["reconcile"])
 
     def test_late_payment_response_cannot_cross_an_account_switch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

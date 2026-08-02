@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import bcrypt
@@ -1308,12 +1309,19 @@ class BindTicketTests(unittest.TestCase):
                 "planKey": "monthly",
                 "paymentType": "alipay",
                 "requestId": "click-1",
+                "clientIp": "198.51.100.200",
             },
             token,
+            "203.0.113.41",
         )
         self.assertEqual(200, status, created)
         status, queried = self.bridge.handle_payment_order_status(
-            {"accountId": "attacker", "orderId": "order-1"}, token
+            {
+                "accountId": "attacker",
+                "orderId": "order-1",
+                "reconcile": True,
+            },
+            token,
         )
         self.assertEqual(200, status, queried)
         self.assertEqual(
@@ -1325,6 +1333,8 @@ class BindTicketTests(unittest.TestCase):
             [path for path, _body in calls],
         )
         self.assertTrue(all(body["accountId"] == "42" for _path, body in calls))
+        self.assertEqual("203.0.113.41", calls[1][1]["clientIp"])
+        self.assertTrue(calls[2][1]["reconcile"])
         self.assertEqual("monthly", created["data"]["order"]["planKey"])
 
         before = len(calls)
@@ -1334,6 +1344,24 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(401, status)
         self.assertEqual("account_token_required", denied["code"])
         self.assertEqual(before, len(calls))
+
+    def test_payment_client_ip_only_trusts_local_reverse_proxy_header(self):
+        proxied = SimpleNamespace(
+            client_address=("127.0.0.1", 12345),
+            headers={"X-Real-IP": "203.0.113.88"},
+        )
+        direct = SimpleNamespace(
+            client_address=("198.51.100.20", 12345),
+            headers={"X-Real-IP": "203.0.113.99"},
+        )
+        malformed = SimpleNamespace(
+            client_address=("127.0.0.1", 12345),
+            headers={"X-Real-IP": "not-an-ip"},
+        )
+
+        self.assertEqual("203.0.113.88", self.bridge._payment_client_ip(proxied))
+        self.assertEqual("198.51.100.20", self.bridge._payment_client_ip(direct))
+        self.assertEqual("127.0.0.1", self.bridge._payment_client_ip(malformed))
 
     def test_authorization_expiry_parsing_is_utc_and_accepts_z_suffix(self):
         self.assertEqual(

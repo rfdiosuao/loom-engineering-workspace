@@ -15,6 +15,7 @@ import binascii
 import http.cookiejar
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -3192,6 +3193,23 @@ def _payment_owner(authorization: str) -> tuple[str, tuple[int, dict[str, Any]] 
     )
 
 
+def _payment_client_ip(handler: Any) -> str:
+    peer_value = str(getattr(handler, "client_address", ("",))[0] or "").strip()
+    try:
+        peer = ipaddress.ip_address(peer_value)
+    except ValueError:
+        return ""
+    if peer.is_loopback:
+        headers = getattr(handler, "headers", {})
+        forwarded = str(headers.get("X-Real-IP") or "").strip()
+        if forwarded:
+            try:
+                return str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                pass
+    return str(peer)
+
+
 def handle_payment_plans(
     body: dict[str, Any], authorization: str = ""
 ) -> tuple[int, dict[str, Any]]:
@@ -3217,16 +3235,21 @@ def handle_payment_plans(
 
 
 def handle_payment_order_create(
-    body: dict[str, Any], authorization: str = ""
+    body: dict[str, Any], authorization: str = "", client_ip: str = ""
 ) -> tuple[int, dict[str, Any]]:
     account_id, denied = _payment_owner(authorization)
     if denied:
         return denied
+    try:
+        normalized_client_ip = str(ipaddress.ip_address(str(client_ip or "").strip()))
+    except ValueError:
+        normalized_client_ip = ""
     request = {
         "accountId": account_id,
         "planKey": str(body.get("planKey") or "").strip(),
         "paymentType": str(body.get("paymentType") or "").strip(),
         "requestId": str(body.get("requestId") or "").strip(),
+        "clientIp": normalized_client_ip,
     }
     try:
         payload = _license_service_json(
@@ -3253,6 +3276,7 @@ def handle_payment_order_status(
     request = {
         "accountId": account_id,
         "orderId": str(body.get("orderId") or "").strip(),
+        "reconcile": body.get("reconcile") is True,
     }
     try:
         payload = _license_service_json(
@@ -3342,6 +3366,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/openclaw/payments/orders/create": lambda body: handle_payment_order_create(
                 body,
                 self.headers.get("Authorization") or "",
+                _payment_client_ip(self),
             ),
             "/api/openclaw/payments/orders/status": lambda body: handle_payment_order_status(
                 body,

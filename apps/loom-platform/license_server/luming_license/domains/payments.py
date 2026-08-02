@@ -38,6 +38,8 @@ class PaymentProvider(Protocol):
 
     def create_payment(self, request: dict[str, object]) -> dict[str, object]: ...
 
+    def query_payment(self, request: dict[str, object]) -> dict[str, object]: ...
+
 
 def _text(value: Any) -> str:
     return str(value if value is not None else "").strip()
@@ -61,8 +63,7 @@ def canonical_signing_text(fields: Mapping[str, Any], merchant_key: str) -> str:
         if logical == "":
             continue
         parts.append(f"{key}={logical}")
-    parts.append(f"key={merchant_key}")
-    return "&".join(parts)
+    return "&".join(parts) + str(merchant_key)
 
 
 def sign_md5(fields: Mapping[str, Any], merchant_key: str) -> str:
@@ -300,6 +301,7 @@ def create_payment_order(
             "name": _text(plan["display_name"]),
             "money": money_text(int(plan["price_minor"])),
             "param": nonce,
+            "clientip": _text(body.get("clientIp")),
         }
 
     try:
@@ -365,7 +367,7 @@ def _mark_creation_uncertain(
 
 
 def payment_order_status(
-    body: dict[str, Any], *, connect_fn: ConnectFn
+    body: dict[str, Any], *, connect_fn: ConnectFn, now_fn: UtcNowFn = utc_now
 ) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise PaymentError("订单查询参数无效。", 400, "PAYMENT_INVALID_REQUEST")
@@ -378,9 +380,61 @@ def payment_order_status(
             "select * from payment_orders where order_id = ? and account_id = ?",
             (order_id, account_id),
         ).fetchone()
+        if row is None:
+            raise PaymentError("未找到该账号的支付订单。", 404, "PAYMENT_ORDER_NOT_FOUND")
+        now_value = now_fn()
+        if _text(row["status"]) == "pending" and _deadline_reached(
+            row["expires_at"], now_value
+        ):
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "select * from payment_orders where order_id = ? and account_id = ?",
+                (order_id, account_id),
+            ).fetchone()
+            if row is None:
+                raise PaymentError(
+                    "未找到该账号的支付订单。",
+                    404,
+                    "PAYMENT_ORDER_NOT_FOUND",
+                )
+            if _text(row["status"]) == "pending" and _deadline_reached(
+                row["expires_at"], now_value
+            ):
+                connection.execute(
+                    """
+                    update payment_orders
+                    set status = 'expired', qrcode = '', pay_url = '', updated_at = ?
+                    where order_id = ? and account_id = ? and status = 'pending'
+                    """,
+                    (now_value, order_id, account_id),
+                )
+            row = connection.execute(
+                "select * from payment_orders where order_id = ? and account_id = ?",
+                (order_id, account_id),
+            ).fetchone()
+            connection.commit()
     if row is None:
-        raise PaymentError("未找到该账号的支付订单。", 404, "PAYMENT_ORDER_NOT_FOUND")
+        raise PaymentError("支付订单状态读取失败。", 500, "PAYMENT_ORDER_LOST")
     return _order_snapshot(row)
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _deadline_reached(deadline: Any, now_value: Any) -> bool:
+    parsed_deadline = _parse_iso_datetime(deadline)
+    parsed_now = _parse_iso_datetime(now_value)
+    return bool(parsed_deadline and parsed_now and parsed_now >= parsed_deadline)
 
 
 def _expected_nonce(row: sqlite3.Row, callback_value: Any) -> bool:
@@ -525,18 +579,15 @@ def _paid_audit(connection: sqlite3.Connection, row: sqlite3.Row, paid_at: str) 
     )
 
 
-def process_zpay_notification(
+def _fulfil_verified_payment(
     payload: Mapping[str, Any],
     *,
     connect_fn: ConnectFn,
     merchant_id: str,
-    merchant_key: str,
     now_fn: UtcNowFn = utc_now,
 ) -> dict[str, Any]:
-    if not merchant_id or not merchant_key:
+    if not merchant_id:
         raise PaymentError("支付回调服务尚未配置。", 503, "PAYMENT_PROVIDER_NOT_CONFIGURED")
-    if not verify_md5(payload, merchant_key):
-        raise PaymentError("支付通知签名无效。", 400, "PAYMENT_SIGNATURE_INVALID")
     if _text(payload.get("pid")) != merchant_id:
         raise PaymentError("支付通知商户不匹配。", 400, "PAYMENT_MERCHANT_MISMATCH")
     if _text(payload.get("trade_status")).upper() != SUCCESS_TRADE_STATUS:
@@ -581,7 +632,7 @@ def process_zpay_notification(
             result = _order_snapshot(row)
             result["duplicate"] = True
             return result
-        if _text(row["status"]) not in {"pending", "creation_uncertain"}:
+        if _text(row["status"]) not in {"pending", "creation_uncertain", "expired"}:
             raise PaymentError("订单当前状态不允许入账。", 409, "PAYMENT_ORDER_STATE_INVALID")
 
         paid_at = now_fn()
@@ -607,6 +658,106 @@ def process_zpay_notification(
     return result
 
 
+def process_zpay_notification(
+    payload: Mapping[str, Any],
+    *,
+    connect_fn: ConnectFn,
+    merchant_id: str,
+    merchant_key: str,
+    now_fn: UtcNowFn = utc_now,
+) -> dict[str, Any]:
+    if not merchant_id or not merchant_key:
+        raise PaymentError("支付回调服务尚未配置。", 503, "PAYMENT_PROVIDER_NOT_CONFIGURED")
+    if not verify_md5(payload, merchant_key):
+        raise PaymentError("支付通知签名无效。", 400, "PAYMENT_SIGNATURE_INVALID")
+    return _fulfil_verified_payment(
+        payload,
+        connect_fn=connect_fn,
+        merchant_id=merchant_id,
+        now_fn=now_fn,
+    )
+
+
+def reconcile_payment_order(
+    body: dict[str, Any],
+    *,
+    connect_fn: ConnectFn,
+    provider: PaymentProvider,
+    merchant_id: str,
+    now_fn: UtcNowFn = utc_now,
+) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise PaymentError("订单查单参数无效。", 400, "PAYMENT_INVALID_REQUEST")
+    account_id = normalize_account_id(body.get("accountId"))
+    order_id = _text(body.get("orderId"))
+    if not order_id:
+        raise PaymentError("缺少订单号。", 400, "PAYMENT_ORDER_REQUIRED")
+    with connect_fn() as connection:
+        row = connection.execute(
+            "select * from payment_orders where order_id = ? and account_id = ?",
+            (order_id, account_id),
+        ).fetchone()
+    if row is None:
+        raise PaymentError("未找到该账号的支付订单。", 404, "PAYMENT_ORDER_NOT_FOUND")
+    if _text(row["status"]) == "paid":
+        result = _order_snapshot(row)
+        result["duplicate"] = True
+        result["reconciled"] = False
+        return result
+    if _text(row["provider"]).lower() != _text(provider.name).lower():
+        raise PaymentError(
+            "支付订单与查单服务不匹配。",
+            409,
+            "PAYMENT_PROVIDER_MISMATCH",
+        )
+
+    observed = provider.query_payment(
+        {"out_trade_no": _text(row["out_trade_no"])}
+    )
+    if not isinstance(observed, dict):
+        raise PaymentError(
+            "支付平台查单响应格式无效。",
+            502,
+            "PAYMENT_RECONCILIATION_INVALID_RESPONSE",
+        )
+    observed_status = _text(observed.get("status")).lower()
+    observed_out_trade_no = _text(observed.get("outTradeNo"))
+    if observed_out_trade_no != _text(row["out_trade_no"]):
+        raise PaymentError(
+            "支付平台返回的订单号不匹配。",
+            409,
+            "PAYMENT_ORDER_MISMATCH",
+        )
+    if observed_status == "pending":
+        result = payment_order_status(body, connect_fn=connect_fn, now_fn=now_fn)
+        result["reconciled"] = True
+        return result
+    if observed_status != "paid":
+        raise PaymentError(
+            "支付平台查单状态无效。",
+            502,
+            "PAYMENT_RECONCILIATION_INVALID_RESPONSE",
+        )
+    result = _fulfil_verified_payment(
+        {
+            "pid": observed.get("merchantId"),
+            "trade_no": observed.get("providerTransactionId"),
+            "out_trade_no": observed_out_trade_no,
+            "type": observed.get("paymentType"),
+            "name": observed.get("productName"),
+            "money": observed.get("money"),
+            "currency": observed.get("currency"),
+            "param": observed.get("param"),
+            "trade_status": SUCCESS_TRADE_STATUS,
+        },
+        connect_fn=connect_fn,
+        merchant_id=merchant_id,
+        now_fn=now_fn,
+    )
+    result["reconciled"] = True
+    return result
+
+
 __all__ = [
     "ALLOWED_PAYMENT_TYPES",
     "PaymentError",
@@ -619,6 +770,7 @@ __all__ = [
     "money_text",
     "payment_order_status",
     "process_zpay_notification",
+    "reconcile_payment_order",
     "sign_md5",
     "verify_md5",
 ]

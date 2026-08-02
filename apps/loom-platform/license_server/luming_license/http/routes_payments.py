@@ -11,6 +11,7 @@ from ..domains.payments import (
     list_payment_plans,
     payment_order_status,
     process_zpay_notification,
+    reconcile_payment_order,
 )
 
 
@@ -69,6 +70,11 @@ def post_payment_plans(handler: Any, parsed: Any) -> None:
         provider_configured = True
     except PaymentError:
         provider_configured = False
+    try:
+        config.query_url()
+        reconciliation_configured = True
+    except PaymentError:
+        reconciliation_configured = False
     handler.send_json(
         200,
         {
@@ -77,6 +83,7 @@ def post_payment_plans(handler: Any, parsed: Any) -> None:
             "payment": {
                 "provider": "zpay",
                 "configured": provider_configured,
+                "reconciliationConfigured": reconciliation_configured,
                 "channels": ["alipay", "wxpay"],
             },
         },
@@ -110,7 +117,16 @@ def post_payment_order_status(handler: Any, parsed: Any) -> None:
         return
     try:
         body = handler.read_json()
-        order = payment_order_status(body, connect_fn=handler.facade.connect)
+        if body.get("reconcile") is True:
+            config = ZPayConfig.from_env()
+            order = reconcile_payment_order(
+                body,
+                connect_fn=handler.facade.connect,
+                provider=ZPayProvider(config),
+                merchant_id=config.merchant_id,
+            )
+        else:
+            order = payment_order_status(body, connect_fn=handler.facade.connect)
         handler.send_json(200, {"ok": True, "order": order})
     except PaymentError as error:
         _payment_error(handler, error)
@@ -125,8 +141,17 @@ def _flatten(values: dict[str, list[str]]) -> dict[str, str]:
     return {key: items[-1] if items else "" for key, items in values.items()}
 
 
+def _parse_callback_form(value: str) -> dict[str, list[str]]:
+    return parse_qs(value, keep_blank_values=True, max_num_fields=64)
+
+
 def _callback_fields(handler: Any, parsed: Any) -> dict[str, Any]:
-    fields = _flatten(parse_qs(parsed.query, keep_blank_values=True))
+    try:
+        fields = _flatten(_parse_callback_form(parsed.query))
+    except ValueError as error:
+        raise PaymentError(
+            "支付通知格式无效。", 400, "PAYMENT_CALLBACK_INVALID"
+        ) from error
     if str(getattr(handler, "command", "GET")).upper() != "POST":
         return fields
     length = int(handler.headers.get("Content-Length", "0") or 0)
@@ -144,8 +169,10 @@ def _callback_fields(handler: Any, parsed: Any) -> dict[str, Any]:
             fields.update({str(key): value for key, value in decoded.items()})
         else:
             fields.update(
-                _flatten(parse_qs(raw.decode("utf-8-sig"), keep_blank_values=True))
+                _flatten(_parse_callback_form(raw.decode("utf-8-sig")))
             )
+        if len(fields) > 64:
+            raise ValueError
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
         raise PaymentError(
             "支付通知格式无效。", 400, "PAYMENT_CALLBACK_INVALID"

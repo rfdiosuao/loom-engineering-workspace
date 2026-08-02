@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import unittest
-from urllib.parse import parse_qs
+from email.parser import BytesParser
+from email.policy import default
 
 from _support import LICENSE_SERVER_ROOT  # noqa: F401 - package import path
 from luming_license.domains.payment_provider_zpay import ZPayConfig, ZPayProvider
@@ -24,7 +25,7 @@ class ZPayProviderTests(unittest.TestCase):
         values.update(overrides)
         return ZPayConfig(**values)
 
-    def test_create_signs_raw_values_then_form_encodes_transport(self) -> None:
+    def test_create_signs_raw_values_then_uses_multipart_transport(self) -> None:
         captured: dict[str, object] = {}
 
         def requester(url: str, data: bytes, headers: dict[str, str], timeout: int) -> bytes:
@@ -50,14 +51,28 @@ class ZPayProviderTests(unittest.TestCase):
                 "name": "麓鸣 月卡 A&B=1",
                 "money": "99.00",
                 "param": "nonce with space&=",
+                "clientip": "203.0.113.42",
             }
         )
 
         self.assertEqual("https://merchant.example.test/mapi.php", captured["url"])
-        form = {key: values[0] for key, values in parse_qs(captured["data"].decode("utf-8"), keep_blank_values=True).items()}
+        content_type = captured["headers"]["Content-Type"]
+        self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
+        message = BytesParser(policy=default).parsebytes(
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii")
+            + captured["data"]
+        )
+        form = {
+            str(part.get_param("name", header="content-disposition")): part.get_payload(
+                decode=True
+            ).decode("utf-8")
+            for part in message.iter_parts()
+        }
         self.assertEqual("merchant-001", form["pid"])
         self.assertEqual("麓鸣 月卡 A&B=1", form["name"])
         self.assertEqual("nonce with space&=", form["param"])
+        self.assertEqual("203.0.113.42", form["clientip"])
+        self.assertEqual("pc", form["device"])
         self.assertEqual("MD5", form["sign_type"])
         self.assertEqual(sign_md5(form, "merchant-secret"), form["sign"])
         self.assertEqual("CREATE-REF-123", result["providerOrderReference"])
@@ -79,6 +94,7 @@ class ZPayProviderTests(unittest.TestCase):
                         "name": "月卡",
                         "money": "99.00",
                         "param": "nonce",
+                        "clientip": "203.0.113.42",
                     }
                 )
             self.assertEqual(expected, raised.exception.code)
@@ -95,9 +111,61 @@ class ZPayProviderTests(unittest.TestCase):
                     "name": "月卡",
                     "money": "99.00",
                     "param": "nonce",
+                    "clientip": "203.0.113.42",
                 }
             )
         self.assertEqual("PAYMENT_PROVIDER_INVALID_RESPONSE", raised.exception.code)
+
+    def test_query_uses_explicit_server_side_contract_and_normalizes_paid_result(self) -> None:
+        captured: dict[str, object] = {}
+
+        def query_requester(
+            url: str,
+            params: dict[str, str],
+            headers: dict[str, str],
+            timeout: int,
+        ) -> bytes:
+            captured.update(url=url, params=dict(params), headers=headers, timeout=timeout)
+            return json.dumps(
+                {
+                    "code": 1,
+                    "trade_no": "FINAL-QUERY-001",
+                    "out_trade_no": "LM-001",
+                    "type": "alipay",
+                    "pid": "merchant-001",
+                    "name": "麓鸣月卡",
+                    "money": "99.00",
+                    "status": 1,
+                    "param": "nonce-001",
+                }
+            ).encode("utf-8")
+
+        provider = ZPayProvider(
+            self.config(query_enabled=True, query_path="/api.php"),
+            query_requester=query_requester,
+        )
+        result = provider.query_payment({"out_trade_no": "LM-001"})
+
+        self.assertEqual("https://merchant.example.test/api.php", captured["url"])
+        self.assertEqual(
+            {
+                "act": "order",
+                "pid": "merchant-001",
+                "key": "merchant-secret",
+                "out_trade_no": "LM-001",
+            },
+            captured["params"],
+        )
+        self.assertNotIn("merchant-secret", str(captured["url"]))
+        self.assertEqual("paid", result["status"])
+        self.assertEqual("FINAL-QUERY-001", result["providerTransactionId"])
+        self.assertEqual("nonce-001", result["param"])
+
+    def test_query_is_disabled_until_the_merchant_contract_is_explicitly_enabled(self) -> None:
+        provider = ZPayProvider(self.config(query_enabled=False))
+        with self.assertRaises(PaymentError) as raised:
+            provider.query_payment({"out_trade_no": "LM-001"})
+        self.assertEqual("PAYMENT_RECONCILIATION_NOT_CONFIGURED", raised.exception.code)
 
 
 if __name__ == "__main__":

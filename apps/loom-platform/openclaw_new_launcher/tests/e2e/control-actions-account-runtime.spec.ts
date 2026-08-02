@@ -433,7 +433,7 @@ test('native matrix checkout renders qrcode and grants shared rights only after 
   const beforePendingQuery = await markCalls(audit);
   await main.getByRole('button', { name: '我已付款，查询状态' }).click();
   await expectProxyIntent(audit, beforePendingQuery, {
-    method: 'POST', path: '/api/account/payments/order/status', body: { orderId: pendingOrder.orderId },
+    method: 'POST', path: '/api/account/payments/order/status', body: { orderId: pendingOrder.orderId, reconcile: true },
   });
   await expectToast(page, '等待扫码支付');
   await audit.sync();
@@ -450,10 +450,129 @@ test('native matrix checkout renders qrcode and grants shared rights only after 
   const beforePaidQuery = await markCalls(audit);
   await main.getByRole('button', { name: '我已付款，查询状态' }).click();
   await expectProxyIntent(audit, beforePaidQuery, {
-    method: 'POST', path: '/api/account/payments/order/status', body: { orderId: paidOrder.orderId },
+    method: 'POST', path: '/api/account/payments/order/status', body: { orderId: paidOrder.orderId, reconcile: true },
   });
   await expectToast(page, '支付已确认，手机矩阵、云模板和 Skill 权益已开通。');
   await expect(main.getByText('支付成功，权益已同步', { exact: true })).toBeVisible();
+});
+
+test('checkout reuses the same idempotency key after an uncertain create result', async ({ audit, page }) => {
+  const plan = {
+    planKey: 'matrix-retry-audit', displayName: '矩阵恢复测试套餐', description: '',
+    durationDays: 31, amountMinor: 9900, amount: '99.00', currency: 'CNY', benefits: [],
+  };
+  const order = {
+    orderId: 'pay_retry_audit_001', outTradeNo: 'LMRETRYAUDIT001', planKey: plan.planKey,
+    displayName: plan.displayName, paymentType: 'alipay', amountMinor: plan.amountMinor,
+    amount: plan.amount, currency: plan.currency, status: 'pending',
+    providerOrderReference: 'provider-retry-reference', qrcode: 'retry-qr-content',
+    payUrl: '', expiresAt: '2099-12-31T23:59:59.000Z',
+  };
+  await audit.registerRoute('GET', '/api/account/current', { value: { account: AUDIT_ACCOUNT_WITH_CHOICES } });
+  await audit.registerRoute('GET', '/api/account/subscription', { value: { subscription: AUDIT_SUBSCRIPTION } });
+  await audit.registerRoute('GET', '/api/account/payments/plans', {
+    value: { plans: [plan], payment: { provider: 'zpay', configured: true, channels: ['alipay'] } },
+  });
+  await audit.registerRoute('POST', '/api/account/payments/order', {
+    error: 'HTTP_503: 支付订单创建结果待确认',
+  });
+  await audit.registerRoute('POST', '/api/account/payments/order/status', { value: { order } });
+  await navigateTo(audit, 'license');
+  const main = appMain(page);
+  const beforeCreate = await markCalls(audit);
+
+  await main.getByRole('button', { name: '支付宝扫码购买' }).click();
+  await expectToast(page, /支付订单创建结果待确认/);
+  await audit.registerRoute('POST', '/api/account/payments/order', { value: { order } });
+  await main.getByRole('button', { name: '支付宝扫码购买' }).click();
+  await expect(main.getByText(`订单号：${order.orderId}`, { exact: true })).toBeVisible();
+
+  await expect.poll(async () => {
+    await audit.sync();
+    return proxyIntents(callsAfter(audit, beforeCreate))
+      .filter(({ method, path }) => method === 'POST' && path === '/api/account/payments/order');
+  }).toHaveLength(2);
+  await audit.sync();
+  const attempts = proxyIntents(callsAfter(audit, beforeCreate))
+    .filter(({ method, path }) => method === 'POST' && path === '/api/account/payments/order');
+  expect((attempts[0]?.body as Record<string, unknown>)?.requestId).toBe(
+    (attempts[1]?.body as Record<string, unknown>)?.requestId,
+  );
+});
+
+test('checkout restores a pending order after application reload without creating another order', async ({ audit, page }) => {
+  const plan = {
+    planKey: 'matrix-reload-audit', displayName: '矩阵重启恢复套餐', description: '',
+    durationDays: 31, amountMinor: 9900, amount: '99.00', currency: 'CNY', benefits: [],
+  };
+  const order = {
+    orderId: 'pay_reload_audit_001', outTradeNo: 'LMRELOADAUDIT001', planKey: plan.planKey,
+    displayName: plan.displayName, paymentType: 'alipay', amountMinor: plan.amountMinor,
+    amount: plan.amount, currency: plan.currency, status: 'pending',
+    providerOrderReference: 'provider-reload-reference', qrcode: 'reload-qr-content',
+    payUrl: '', expiresAt: '2099-12-31T23:59:59.000Z',
+  };
+  await audit.registerRoute('GET', '/api/account/current', { value: { account: AUDIT_ACCOUNT_WITH_CHOICES } });
+  await audit.registerRoute('GET', '/api/account/subscription', { value: { subscription: AUDIT_SUBSCRIPTION } });
+  await audit.registerRoute('GET', '/api/account/payments/plans', {
+    value: { plans: [plan], payment: { provider: 'zpay', configured: true, channels: ['alipay'] } },
+  });
+  await audit.registerRoute('POST', '/api/account/payments/order', { value: { order } });
+  await audit.registerRoute('POST', '/api/account/payments/order/status', { value: { order } });
+  await navigateTo(audit, 'license');
+  const main = appMain(page);
+  const beforeCreate = await markCalls(audit);
+  await main.getByRole('button', { name: '支付宝扫码购买' }).click();
+  await expect(main.getByText(`订单号：${order.orderId}`, { exact: true })).toBeVisible();
+  await audit.sync();
+  expect(
+    proxyIntents(callsAfter(audit, beforeCreate))
+      .filter(({ method, path }) => method === 'POST' && path === '/api/account/payments/order'),
+  ).toHaveLength(1);
+
+  await page.addInitScript(({ restoredAccount, restoredSubscription, restoredPlan, restoredOrder }) => {
+    const registerAfterAuditBoot = () => {
+      if (!window.__TAURI_AUDIT__) {
+        window.setTimeout(registerAfterAuditBoot, 0);
+        return;
+      }
+      window.__TAURI_AUDIT__.registerRoute('GET /api/account/current', {
+        value: { account: restoredAccount },
+      });
+      window.__TAURI_AUDIT__.registerRoute('GET /api/account/subscription', {
+        value: { subscription: restoredSubscription },
+      });
+      window.__TAURI_AUDIT__.registerRoute('GET /api/account/payments/plans', {
+        value: {
+          plans: [restoredPlan],
+          payment: { provider: 'zpay', configured: true, channels: ['alipay'] },
+        },
+      });
+      window.__TAURI_AUDIT__.registerRoute('POST /api/account/payments/order/status', {
+        value: { order: restoredOrder },
+      });
+    };
+    registerAfterAuditBoot();
+  }, {
+    restoredAccount: AUDIT_ACCOUNT_WITH_CHOICES,
+    restoredSubscription: AUDIT_SUBSCRIPTION,
+    restoredPlan: plan,
+    restoredOrder: order,
+  });
+  await page.reload();
+  await expect(page.locator('[data-commercial-app-shell]')).toBeVisible({ timeout: 15_000 });
+  await audit.navigateTo({ key: 'license', readySelector: '[data-account-subscription-page]' });
+  await expect(appMain(page).getByText(`订单号：${order.orderId}`, { exact: true })).toBeVisible();
+  await audit.sync();
+  const restoredStatusCalls = proxyIntents(audit.callLogs)
+    .filter(({ method, path }) => method === 'POST' && path === '/api/account/payments/order/status');
+  expect(restoredStatusCalls.length).toBeGreaterThan(0);
+  expect(restoredStatusCalls.every(({ body }) => (
+    body as Record<string, unknown>
+  )?.reconcile === false)).toBe(true);
+  const createCalls = proxyIntents(audit.callLogs)
+    .filter(({ method, path }) => method === 'POST' && path === '/api/account/payments/order');
+  expect(createCalls).toHaveLength(0);
 });
 
 test('account service outage marks cached values as read-only and localizes the default plan', async ({ audit, page }, testInfo) => {

@@ -125,6 +125,65 @@ function accountIdentity(account: AccountSnapshot | null): string {
   ).trim();
 }
 
+const PAYMENT_RESUME_STORAGE_KEY = 'loom.account.payment.resume.v1';
+const PAYMENT_RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+interface PaymentResumeState {
+  schema: 'loom.payment-resume.v1';
+  accountIdentity: string;
+  planKey: string;
+  paymentType: 'alipay' | 'wxpay';
+  requestId: string;
+  orderId?: string;
+  savedAt: number;
+}
+
+function readPaymentResume(identity: string): PaymentResumeState | null {
+  try {
+    const raw = window.localStorage.getItem(PAYMENT_RESUME_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PaymentResumeState>;
+    const valid = parsed.schema === 'loom.payment-resume.v1'
+      && parsed.accountIdentity === identity
+      && typeof parsed.planKey === 'string'
+      && ['alipay', 'wxpay'].includes(String(parsed.paymentType || ''))
+      && typeof parsed.requestId === 'string'
+      && /^[A-Za-z0-9_-]{16,128}$/.test(parsed.requestId)
+      && typeof parsed.savedAt === 'number'
+      && Date.now() - parsed.savedAt <= PAYMENT_RESUME_MAX_AGE_MS
+      && (!parsed.orderId || /^[A-Za-z0-9_-]{1,160}$/.test(parsed.orderId));
+    if (!valid) {
+      window.localStorage.removeItem(PAYMENT_RESUME_STORAGE_KEY);
+      return null;
+    }
+    return parsed as PaymentResumeState;
+  } catch {
+    return null;
+  }
+}
+
+function writePaymentResume(state: Omit<PaymentResumeState, 'schema' | 'savedAt'>): void {
+  try {
+    window.localStorage.setItem(PAYMENT_RESUME_STORAGE_KEY, JSON.stringify({
+      schema: 'loom.payment-resume.v1',
+      ...state,
+      savedAt: Date.now(),
+    } satisfies PaymentResumeState));
+  } catch {
+    // The server-side idempotency key still protects the current in-memory attempt.
+  }
+}
+
+function clearPaymentResume(identity: string): void {
+  const current = readPaymentResume(identity);
+  if (!current) return;
+  try {
+    window.localStorage.removeItem(PAYMENT_RESUME_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable in hardened WebView profiles.
+  }
+}
+
 function createPaymentRequestId(): string {
   const cryptoApi = globalThis.crypto;
   if (!cryptoApi?.getRandomValues) {
@@ -165,6 +224,7 @@ export const LicensePage: React.FC = () => {
   const cachedAccount = useRef<AccountSnapshot | null>(loadCachedAccount());
   const subscriptionRequestVersion = useRef(0);
   const paymentRequestVersion = useRef(0);
+  const paymentRestoreIdentity = useRef('');
   const hasCachedAccount = accountCacheUsable(cachedAccount.current);
   const [account, setAccount] = useState<AccountSnapshot | null>(() => cachedAccount.current);
   const [subscription, setSubscription] = useState<AccountSubscriptionSnapshot | null>(() => cachedAccount.current?.subscription || null);
@@ -226,6 +286,7 @@ export const LicensePage: React.FC = () => {
     if (previousIdentity !== nextIdentity) {
       useAgentStore.getState().reset();
       paymentRequestVersion.current += 1;
+      paymentRestoreIdentity.current = '';
       setPaymentCatalog(null);
       setPaymentOrder(null);
     }
@@ -346,19 +407,24 @@ export const LicensePage: React.FC = () => {
     }
   }, [paymentChannel]);
 
-  const verifyPaymentOrder = useCallback(async (orderId: string, quiet = false) => {
+  const verifyPaymentOrder = useCallback(async (
+    orderId: string,
+    quiet = false,
+    reconcile = false,
+  ) => {
     const requestVersion = ++paymentRequestVersion.current;
     const identity = accountIdentity(cachedAccount.current);
     if (!identity || !orderId) return;
     if (!quiet) setPaymentBusy(true);
     try {
-      const response = await accountApi.paymentOrderStatus({ orderId });
+      const response = await accountApi.paymentOrderStatus({ orderId, reconcile });
       if (
         requestVersion !== paymentRequestVersion.current
         || identity !== accountIdentity(cachedAccount.current)
       ) return;
       setPaymentOrder(response.order);
       if (response.order.status === 'paid') {
+        clearPaymentResume(identity);
         if (response.account) applyAccount(response.account);
         const refreshResults = await Promise.allSettled([
           checkLicense(),
@@ -371,7 +437,11 @@ export const LicensePage: React.FC = () => {
           : '支付已确认，手机矩阵、云模板和 Skill 权益已开通。';
         setStatusText(message);
         showToast(message, localSyncPending ? 'info' : 'success');
-      } else if (!quiet) {
+      } else {
+        if (['expired', 'failed'].includes(response.order.status)) {
+          clearPaymentResume(identity);
+        }
+        if (quiet) return;
         const message = paymentStatusText(response.order.status);
         setStatusText(message);
         showToast(message, response.order.status === 'pending' ? 'info' : 'error');
@@ -402,19 +472,44 @@ export const LicensePage: React.FC = () => {
     }
     const requestVersion = ++paymentRequestVersion.current;
     const identity = accountIdentity(cachedAccount.current);
+    const previousAttempt = readPaymentResume(identity);
+    const requestId = previousAttempt?.planKey === planKey
+      && previousAttempt.paymentType === paymentChannel
+      ? previousAttempt.requestId
+      : createPaymentRequestId();
+    writePaymentResume({
+      accountIdentity: identity,
+      planKey,
+      paymentType: paymentChannel,
+      requestId,
+      orderId: previousAttempt?.planKey === planKey
+        && previousAttempt.paymentType === paymentChannel
+        ? previousAttempt.orderId
+        : undefined,
+    });
     setPaymentBusy(true);
     setPaymentOrder(null);
     try {
       const response = await accountApi.createPaymentOrder({
         planKey,
         paymentType: paymentChannel,
-        requestId: createPaymentRequestId(),
+        requestId,
       });
       if (
         requestVersion !== paymentRequestVersion.current
         || identity !== accountIdentity(cachedAccount.current)
       ) return;
       setPaymentOrder(response.order);
+      writePaymentResume({
+        accountIdentity: identity,
+        planKey,
+        paymentType: paymentChannel,
+        requestId,
+        orderId: response.order.orderId,
+      });
+      if (['paid', 'expired', 'failed'].includes(response.order.status)) {
+        clearPaymentResume(identity);
+      }
       const message = response.order.status === 'creation_uncertain'
         ? '订单创建结果待确认，请勿重复付款。'
         : '订单已创建，请使用手机扫码支付。';
@@ -442,6 +537,21 @@ export const LicensePage: React.FC = () => {
     }
     void loadPaymentPlans(true);
   }, [accountWritable, activeAccountIdentity, loadPaymentPlans]);
+
+  useEffect(() => {
+    if (!accountWritable || !activeAccountIdentity) {
+      paymentRestoreIdentity.current = '';
+      return;
+    }
+    if (paymentRestoreIdentity.current === activeAccountIdentity) return;
+    paymentRestoreIdentity.current = activeAccountIdentity;
+    const resumable = readPaymentResume(activeAccountIdentity);
+    if (resumable?.orderId) {
+      void verifyPaymentOrder(resumable.orderId, true);
+    } else if (resumable) {
+      setStatusText('检测到上次未完成的下单请求；再次选择同一套餐即可安全恢复。');
+    }
+  }, [accountWritable, activeAccountIdentity, verifyPaymentOrder]);
 
   useEffect(() => {
     if (!paymentOrder?.orderId || paymentOrder.status !== 'pending') return;
@@ -623,6 +733,7 @@ export const LicensePage: React.FC = () => {
   const logout = async () => {
     subscriptionRequestVersion.current += 1;
     paymentRequestVersion.current += 1;
+    clearPaymentResume(activeAccountIdentity);
     setBusy(true);
     setStatusText('正在退出模型账号...');
     try {
@@ -1036,12 +1147,12 @@ export const LicensePage: React.FC = () => {
                         <div className="mt-2 break-all text-xs leading-5 text-text-muted">订单号：{paymentOrder.orderId}</div>
                         <div className="mt-1 text-xs leading-5 text-text-muted">有效期：{formatTime(paymentOrder.expiresAt, '以支付页面为准')}</div>
                         <p className="mt-3 text-xs leading-5 text-text-muted">
-                          开通只以服务端验签后的异步支付通知为准；返回页和“查询状态”按钮都不会直接发放权益。
+                          开通只以服务端验签通知或服务端向支付平台主动查单并严格核对后的结果为准；返回页不会直接发放权益。
                         </p>
                         <div className="mt-4 flex flex-wrap gap-2">
                           <button
                             type="button"
-                            onClick={() => void verifyPaymentOrder(paymentOrder.orderId, false)}
+                            onClick={() => void verifyPaymentOrder(paymentOrder.orderId, false, true)}
                             disabled={paymentBusy}
                             className="h-9 rounded-[8px] bg-accent px-4 text-xs font-black text-accent-ink disabled:opacity-55"
                           >
