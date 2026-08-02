@@ -263,6 +263,10 @@ class PaymentDomainTests(unittest.TestCase):
 
         self.assertEqual("paid", paid["status"])
         self.assertFalse(paid["duplicate"])
+        self.assertEqual("", paid["qrcode"])
+        self.assertEqual("", paid["payUrl"])
+        self.assertEqual("", duplicate["qrcode"])
+        self.assertEqual("", duplicate["payUrl"])
         self.assertTrue(duplicate["duplicate"])
         self.assertEqual("CREATE-REFERENCE-001", created["providerOrderReference"])
         self.assertEqual("FINAL-TRANSACTION-999", paid["providerTransactionId"])

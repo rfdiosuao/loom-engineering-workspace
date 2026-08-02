@@ -628,6 +628,19 @@ def _fulfil_verified_payment(
         if _text(row["status"]) == "paid":
             if _text(row["provider_transaction_id"]) != provider_transaction_id:
                 raise PaymentError("订单已由其他支付流水完成。", 409, "PAYMENT_TRANSACTION_MISMATCH")
+            if _text(row["qrcode"]) or _text(row["pay_url"]):
+                connection.execute(
+                    """
+                    update payment_orders
+                    set qrcode = '', pay_url = ''
+                    where order_id = ?
+                    """,
+                    (row["order_id"],),
+                )
+                row = connection.execute(
+                    "select * from payment_orders where order_id = ?",
+                    (row["order_id"],),
+                ).fetchone()
             connection.commit()
             result = _order_snapshot(row)
             result["duplicate"] = True
@@ -642,7 +655,8 @@ def _fulfil_verified_payment(
             """
             update payment_orders
             set status = 'paid', provider_transaction_id = ?, paid_at = ?,
-                entitlement_code_hash = ?, updated_at = ?, last_error_code = ''
+                entitlement_code_hash = ?, qrcode = '', pay_url = '',
+                updated_at = ?, last_error_code = ''
             where order_id = ?
             """,
             (provider_transaction_id, paid_at, code_hash, paid_at, row["order_id"]),

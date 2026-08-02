@@ -8,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from _support import LICENSE_SERVER_ROOT
@@ -66,9 +67,10 @@ class LicenseDeployIntegrationTests(unittest.TestCase):
         )
 
         self.database = self.remote / "license.db"
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("create table deployment_marker(value text not null)")
             connection.execute("insert into deployment_marker values ('preserve-me')")
+            connection.commit()
 
         self.environment = self.remote / "openclaw-license.env"
         self._write_environment(include_zpay=True)
@@ -247,7 +249,7 @@ class LicenseDeployIntegrationTests(unittest.TestCase):
         )
 
     def _database_marker(self) -> str:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection:
             row = connection.execute("select value from deployment_marker").fetchone()
         return str(row[0])
 

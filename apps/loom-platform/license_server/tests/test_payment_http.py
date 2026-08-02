@@ -117,7 +117,7 @@ class PaymentHttpTests(unittest.TestCase):
                 "providerOrderReference": "CREATE-REF-HTTP",
                 "qrcode": "https://pay.example.test/qr/http",
                 "payUrl": "https://pay.example.test/jump/http",
-                "expiresAt": "2026-08-02T13:00:00Z",
+                "expiresAt": "2099-08-02T13:00:00Z",
             },
         ):
             created = self.post(
@@ -154,7 +154,7 @@ class PaymentHttpTests(unittest.TestCase):
                     "providerOrderReference": "CREATE-REF-CALLBACK",
                     "qrcode": "https://pay.example.test/qr/callback",
                     "payUrl": "",
-                    "expiresAt": "2026-08-02T13:00:00Z",
+                    "expiresAt": "2099-08-02T13:00:00Z",
                 }
 
         provider = Provider()
@@ -231,7 +231,7 @@ class PaymentHttpTests(unittest.TestCase):
                     "providerOrderReference": "CREATE-REF-RECONCILE",
                     "qrcode": "https://pay.example.test/qr/reconcile",
                     "payUrl": "",
-                    "expiresAt": "2026-08-02T13:00:00Z",
+                    "expiresAt": "2099-08-02T13:00:00Z",
                 }
 
         provider = Provider()
