@@ -62,7 +62,7 @@ export const MatrixTaskDrawer: React.FC<MatrixTaskDrawerProps> = ({
                 <option key={template.templateId} value={template.templateId}>{template.name} · v{template.version || 1}</option>
               ))}
             </select>
-            <input value={templateId} onChange={(event) => onTemplateIdChange(event.target.value)} placeholder="也可手动输入模板 ID" className="mt-2 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text outline-none focus:border-focus focus:ring-2 focus:ring-focus-soft" />
+            <input aria-label="模板 ID（留空为直接任务）" value={templateId} onChange={(event) => onTemplateIdChange(event.target.value)} placeholder="也可手动输入模板 ID" className="mt-2 w-full rounded-[6px] border border-border bg-input px-3 py-2 text-xs text-text outline-none focus:border-focus focus:ring-2 focus:ring-focus-soft" />
             <span className="mt-1.5 block leading-4 text-text-subtle">
               共享模板会携带稳定版本下发；留空时按上方任务描述直接执行。
             </span>

@@ -96,6 +96,24 @@ export async function expectProxyIntent(
   }).toContainEqual(expected);
 }
 
+export async function waitForProxyIntent(
+  audit: AuditHarness,
+  afterIndex: number,
+  method: string,
+  path: string,
+): Promise<ProxyIntent> {
+  let matched: ProxyIntent | undefined;
+  await expect.poll(async () => {
+    await audit.sync();
+    matched = proxyIntents(callsAfter(audit, afterIndex)).find((intent) => (
+      intent.method === method.toUpperCase() && intent.path === path
+    ));
+    return matched;
+  }).not.toBeUndefined();
+  if (!matched) throw new Error(`Proxy intent was not observed: ${method.toUpperCase()} ${path}`);
+  return matched;
+}
+
 export async function expectInvokeIntent(
   audit: AuditHarness,
   afterIndex: number,
