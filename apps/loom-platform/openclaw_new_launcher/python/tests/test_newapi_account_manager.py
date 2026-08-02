@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.request
 from unittest.mock import Mock, patch
 
 
@@ -66,6 +67,10 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertTrue(all(
                 request["headers"]["Authorization"]
                 == "Bearer sk-account-token-not-real"
+                for request in manager.requests
+            ))
+            self.assertTrue(all(
+                request["hasCookieProcessor"] is False
                 for request in manager.requests
             ))
             self.assertTrue(all(
@@ -2079,9 +2084,13 @@ class PaymentFakeManager(NewApiAccountManager):
         self.requests: list[dict] = []
 
     def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
-        del opener, method, timeout
+        del method, timeout
         path = url.split("api.heang.top", 1)[-1]
         self.requests.append({
+            "hasCookieProcessor": any(
+                isinstance(handler, urllib.request.HTTPCookieProcessor)
+                for handler in opener.handlers
+            ),
             "path": path,
             "body": dict(body or {}),
             "headers": dict(headers or {}),

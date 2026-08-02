@@ -114,6 +114,138 @@ class ZPayProviderTests(unittest.TestCase):
             )
         self.assertEqual("PAYMENT_CHANNEL_UNSUPPORTED", raised.exception.code)
 
+    def test_callback_urls_reject_query_parameters_and_fragments(self) -> None:
+        invalid_callbacks = (
+            {"notify_url": "https://license.example.test/api/payments/zpay/notify?tenant=1"},
+            {"return_url": "https://license.example.test/api/payments/zpay/return#paid"},
+        )
+        for override in invalid_callbacks:
+            with self.subTest(override=override):
+                with self.assertRaises(PaymentError) as raised:
+                    ZPayProvider(
+                        self.config(**override),
+                        requester=lambda *_args: self.fail("invalid callback reached provider transport"),
+                    ).create_payment(
+                        {
+                            "out_trade_no": "LM-001",
+                            "type": "alipay",
+                            "name": "月卡",
+                            "money": "99.00",
+                            "param": "nonce",
+                            "clientip": "203.0.113.42",
+                        }
+                    )
+                self.assertEqual("PAYMENT_CALLBACK_INVALID", raised.exception.code)
+
+    def test_create_filters_untrusted_payurl_when_qrcode_is_available(self) -> None:
+        request = {
+            "out_trade_no": "LM-001",
+            "type": "alipay",
+            "name": "月卡",
+            "money": "99.00",
+            "param": "nonce",
+            "clientip": "203.0.113.42",
+        }
+        for pay_url in (
+            "javascript:alert(1)",
+            "http://merchant.example.test/cashier/order-123",
+            "https://attacker.example/cashier/order-123",
+            "https://user:password@merchant.example.test/cashier/order-123",
+            "https://merchant.example.test/" + "x" * 2050,
+        ):
+            with self.subTest(pay_url=pay_url[:80]):
+                provider = ZPayProvider(
+                    self.config(),
+                    requester=lambda *_args, candidate=pay_url: json.dumps(
+                        {
+                            "code": 1,
+                            "trade_no": "CREATE-REF",
+                            "qrcode": "alipays://platformapi/startapp?token=safe",
+                            "payurl": candidate,
+                        }
+                    ).encode("utf-8"),
+                )
+                result = provider.create_payment(request)
+                self.assertEqual("", result["payUrl"])
+                self.assertTrue(result["qrcode"].startswith("alipays://"))
+
+    def test_create_rejects_order_with_only_untrusted_payurl(self) -> None:
+        provider = ZPayProvider(
+            self.config(),
+            requester=lambda *_args: json.dumps(
+                {
+                    "code": 1,
+                    "trade_no": "CREATE-REF",
+                    "payurl": "https://attacker.example/cashier/order-123",
+                }
+            ).encode("utf-8"),
+        )
+        with self.assertRaises(PaymentError) as raised:
+            provider.create_payment(
+                {
+                    "out_trade_no": "LM-001",
+                    "type": "alipay",
+                    "name": "月卡",
+                    "money": "99.00",
+                    "param": "nonce",
+                    "clientip": "203.0.113.42",
+                }
+            )
+        self.assertEqual("PAYMENT_PROVIDER_INVALID_RESPONSE", raised.exception.code)
+
+    def test_out_trade_no_respects_official_32_character_limit(self) -> None:
+        oversized = "L" * 33
+        provider = ZPayProvider(
+            self.config(query_enabled=True),
+            requester=lambda *_args: self.fail("oversized create order reached transport"),
+            query_requester=lambda *_args: self.fail("oversized query reached transport"),
+        )
+
+        with self.assertRaises(PaymentError) as create_error:
+            provider.create_payment(
+                {
+                    "out_trade_no": oversized,
+                    "type": "alipay",
+                    "name": "月卡",
+                    "money": "99.00",
+                    "param": "nonce",
+                    "clientip": "203.0.113.42",
+                }
+            )
+        self.assertEqual("PAYMENT_PROVIDER_REQUEST_INVALID", create_error.exception.code)
+
+        with self.assertRaises(PaymentError) as query_error:
+            provider.query_payment({"out_trade_no": oversized})
+        self.assertEqual(
+            "PAYMENT_RECONCILIATION_REQUEST_INVALID",
+            query_error.exception.code,
+        )
+
+    def test_create_keeps_https_payurl_on_provider_subdomain(self) -> None:
+        provider = ZPayProvider(
+            self.config(),
+            requester=lambda *_args: json.dumps(
+                {
+                    "code": 1,
+                    "trade_no": "CREATE-REF",
+                    "payurl": "https://cashier.merchant.example.test/order/123",
+                }
+            ).encode("utf-8"),
+        )
+        result = provider.create_payment(
+            {
+                "out_trade_no": "LM-001",
+                "type": "alipay",
+                "name": "月卡",
+                "money": "99.00",
+                "param": "nonce",
+                "clientip": "203.0.113.42",
+            }
+        )
+        self.assertEqual(
+            "https://cashier.merchant.example.test/order/123", result["payUrl"]
+        )
+
     def test_provider_fails_closed_for_insecure_or_malformed_contract(self) -> None:
         for config, expected in (
             (self.config(base_url="http://merchant.example.test"), "PAYMENT_PROVIDER_INSECURE"),

@@ -116,6 +116,22 @@ function safeSubscriptionUrl(url: string): string {
   }
 }
 
+function safePaymentPayUrl(url?: string): string {
+  const candidate = String(url || '').trim();
+  if (!candidate || candidate.length > 2048 || isLocalSubscriptionUrl(candidate)) return '';
+  try {
+    const parsed = new URL(candidate);
+    if (
+      parsed.protocol !== 'https:'
+      || parsed.username || parsed.password
+      || parsed.hash
+    ) return '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
 function accountIdentity(account: AccountSnapshot | null): string {
   return String(
     account?.accountEntitlement?.accountId
@@ -274,6 +290,10 @@ export const LicensePage: React.FC = () => {
   const paymentQrSrc = useMemo(
     () => createPaymentQrDataUri(paymentOrder?.qrcode),
     [paymentOrder?.qrcode],
+  );
+  const paymentPayUrl = useMemo(
+    () => safePaymentPayUrl(paymentOrder?.payUrl),
+    [paymentOrder?.payUrl],
   );
 
   const applyAccount = useCallback((
@@ -1158,10 +1178,10 @@ export const LicensePage: React.FC = () => {
                           >
                             {paymentBusy ? '查询中...' : '我已付款，查询状态'}
                           </button>
-                          {paymentOrder.payUrl ? (
+                          {paymentPayUrl ? (
                             <button
                               type="button"
-                              onClick={() => void openExternalUrl(paymentOrder.payUrl || '')}
+                              onClick={() => void openExternalUrl(paymentPayUrl)}
                               className="h-9 rounded-[8px] border border-border bg-surface px-4 text-xs font-black text-text"
                             >
                               打开直达支付

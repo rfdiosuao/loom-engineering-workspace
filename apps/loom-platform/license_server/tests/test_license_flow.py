@@ -1750,6 +1750,24 @@ class LicenseServerFlowTests(unittest.TestCase):
         )
         self.assertEqual(public_headers.get("Access-Control-Allow-Origin"), "*")
 
+        for path in (
+            "/api/service/account-entitlements/current",
+            "/api/service/payments/plans",
+            "/api/service/payments/orders/create",
+            "/api/service/payments/orders/status",
+            "/api/payments/zpay/notify",
+            "/api/payments/zpay/return",
+        ):
+            with self.subTest(path=path):
+                _, sensitive_headers = self.request_raw(
+                    "OPTIONS",
+                    path,
+                    headers={"Origin": "https://evil.example"},
+                    expected_status=204,
+                )
+                self.assertIsNone(sensitive_headers.get("Access-Control-Allow-Origin"))
+                self.assertIsNone(sensitive_headers.get("Access-Control-Allow-Headers"))
+
     def test_login_and_register_rate_limits_block_repeated_attempts(self) -> None:
         self.server.create_account_record(
             username="rate-user",

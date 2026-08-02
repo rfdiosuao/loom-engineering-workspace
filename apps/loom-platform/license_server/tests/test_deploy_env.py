@@ -54,6 +54,7 @@ class DeployEnvironmentTests(unittest.TestCase):
                 'LICENSE_ZPAY_KEY="secret with spaces"\n'
                 "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
                 "LICENSE_ZPAY_CHANNELS=alipay\n"
+                "LICENSE_ZPAY_PAY_URL_HOSTS=cashier.zpayz.cn\n"
                 "LICENSE_ZPAY_QUERY_ENABLED=true\n"
                 "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
                 "LICENSE_ZPAY_NOTIFY_URL=https://license.example.com/api/payments/zpay/notify\n"
@@ -129,4 +130,61 @@ class DeployEnvironmentTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "LICENSE_ZPAY_BASE_URL"):
+                validate_zpay_env_file(env_file)
+
+    def test_zpay_validation_rejects_callback_query_and_fragment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / "openclaw-license.env"
+            common = (
+                "LICENSE_ZPAY_ENABLED=1\n"
+                "LICENSE_ZPAY_BASE_URL=https://zpayz.cn\n"
+                "LICENSE_ZPAY_PID=merchant-id\n"
+                "LICENSE_ZPAY_KEY=secret\n"
+                "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
+                "LICENSE_ZPAY_CHANNELS=alipay\n"
+                "LICENSE_ZPAY_QUERY_ENABLED=1\n"
+                "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
+            )
+            invalid_callbacks = (
+                (
+                    "LICENSE_ZPAY_NOTIFY_URL",
+                    "https://license.example.com/api/payments/zpay/notify?tenant=1",
+                    "https://license.example.com/api/payments/zpay/return",
+                ),
+                (
+                    "LICENSE_ZPAY_RETURN_URL",
+                    "https://license.example.com/api/payments/zpay/notify",
+                    "https://license.example.com/api/payments/zpay/return#paid",
+                ),
+            )
+            for expected_name, notify_url, return_url in invalid_callbacks:
+                with self.subTest(expected_name=expected_name):
+                    env_file.write_text(
+                        common
+                        + f"LICENSE_ZPAY_NOTIFY_URL={notify_url}\n"
+                        + f"LICENSE_ZPAY_RETURN_URL={return_url}\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, expected_name):
+                        validate_zpay_env_file(env_file)
+
+    def test_zpay_validation_rejects_malformed_redirect_host_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / "openclaw-license.env"
+            env_file.write_text(
+                "LICENSE_ZPAY_ENABLED=1\n"
+                "LICENSE_ZPAY_BASE_URL=https://zpayz.cn\n"
+                "LICENSE_ZPAY_PID=merchant-id\n"
+                "LICENSE_ZPAY_KEY=secret\n"
+                "LICENSE_ZPAY_CREATE_PATH=/mapi.php\n"
+                "LICENSE_ZPAY_CHANNELS=alipay\n"
+                "LICENSE_ZPAY_PAY_URL_HOSTS=https://attacker.example/path\n"
+                "LICENSE_ZPAY_QUERY_ENABLED=1\n"
+                "LICENSE_ZPAY_QUERY_PATH=/api.php\n"
+                "LICENSE_ZPAY_NOTIFY_URL=https://license.example.com/api/payments/zpay/notify\n"
+                "LICENSE_ZPAY_RETURN_URL=https://license.example.com/api/payments/zpay/return\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "LICENSE_ZPAY_PAY_URL_HOSTS"):
                 validate_zpay_env_file(env_file)

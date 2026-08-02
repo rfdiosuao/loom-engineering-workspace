@@ -85,6 +85,7 @@ def _validate_https_url(name: str, value: str, *, base_only: bool) -> None:
         or parsed.username
         or parsed.password
         or parsed.fragment
+        or parsed.query
     ):
         raise ValueError(f"invalid HTTPS setting: {name}")
     if base_only and (parsed.path not in {"", "/"} or parsed.query):
@@ -113,6 +114,32 @@ def _validate_channels(value: str) -> None:
         or any(not item or item not in ZPAY_ALLOWED_CHANNELS for item in channels)
     ):
         raise ValueError("invalid payment channel setting: LICENSE_ZPAY_CHANNELS")
+
+
+def _validate_pay_url_hosts(value: str) -> None:
+    for raw in str(value or "").split(","):
+        hostname = raw.strip().rstrip(".").lower()
+        if not hostname:
+            continue
+        labels = hostname.split(".")
+        if (
+            len(hostname) > 253
+            or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or any(
+                    not character.isascii()
+                    or not (character.isalnum() or character == "-")
+                    for character in label
+                )
+                for label in labels
+            )
+        ):
+            raise ValueError(
+                "invalid payment redirect host setting: LICENSE_ZPAY_PAY_URL_HOSTS"
+            )
 
 
 def validate_zpay_env_file(path: Path) -> None:
@@ -146,6 +173,9 @@ def validate_zpay_env_file(path: Path) -> None:
         "LICENSE_ZPAY_RETURN_URL",
         values["LICENSE_ZPAY_RETURN_URL"],
         base_only=False,
+    )
+    _validate_pay_url_hosts(
+        _value_from_lines(_read_lines(Path(path)), "LICENSE_ZPAY_PAY_URL_HOSTS")
     )
 
 

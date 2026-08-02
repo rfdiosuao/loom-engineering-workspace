@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1344,6 +1345,32 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(401, status)
         self.assertEqual("account_token_required", denied["code"])
         self.assertEqual(before, len(calls))
+
+    def test_payment_http_boundary_requires_bearer_and_grants_no_browser_cors(self):
+        status, denied = self.bridge.handle_payment_plans({}, "")
+        self.assertEqual(401, status)
+        self.assertEqual("account_token_required", denied["code"])
+
+        response_headers = []
+        response = SimpleNamespace(
+            headers={"Origin": "https://evil.example"},
+            wfile=BytesIO(),
+            send_response=lambda value: None,
+            send_header=lambda name, value: response_headers.append((name, value)),
+            end_headers=lambda: None,
+        )
+        self.bridge.Handler._send(response, status, denied)
+
+        names = {name.lower() for name, _value in response_headers}
+        self.assertNotIn("access-control-allow-origin", names)
+        self.assertNotIn("access-control-allow-credentials", names)
+        self.assertNotIn("access-control-allow-headers", names)
+        self.assertEqual(
+            "no-store",
+            next(
+                value for name, value in response_headers if name.lower() == "cache-control"
+            ),
+        )
 
     def test_payment_client_ip_only_trusts_local_reverse_proxy_header(self):
         proxied = SimpleNamespace(

@@ -207,6 +207,17 @@ test('web registration opener reports success and failure instead of rejecting s
   assert.match(handler, /showToast\([^\n]+, 'error'\)/);
 });
 
+test('payment fallback validates HTTPS before exposing the external opener', () => {
+  const source = readSource('./license/LicensePage.tsx');
+
+  assert.match(source, /function safePaymentPayUrl\(/);
+  assert.match(source, /parsed\.protocol !== 'https:'/);
+  assert.match(source, /parsed\.username \|\| parsed\.password/);
+  assert.match(source, /const paymentPayUrl = useMemo/);
+  assert.doesNotMatch(source, /openExternalUrl\(paymentOrder\.payUrl/);
+  assert.match(source, /openExternalUrl\(paymentPayUrl\)/);
+});
+
 test('Models page does not render an unreachable re-login notice branch', () => {
   const source = readSource('./models/ModelsPage.tsx');
 

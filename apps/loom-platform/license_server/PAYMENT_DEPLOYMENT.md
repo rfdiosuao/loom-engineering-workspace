@@ -25,6 +25,7 @@ LICENSE_ZPAY_PID=<商户号>
 LICENSE_ZPAY_KEY=<商户密钥>
 LICENSE_ZPAY_CREATE_PATH=/mapi.php
 LICENSE_ZPAY_CHANNELS=alipay
+LICENSE_ZPAY_PAY_URL_HOSTS=<支付商明确返回的额外 HTTPS 跳转域名，可留空>
 LICENSE_ZPAY_QUERY_ENABLED=1
 LICENSE_ZPAY_QUERY_PATH=/api.php
 LICENSE_ZPAY_NOTIFY_URL=https://license.heang.top/api/payments/zpay/notify
@@ -32,6 +33,8 @@ LICENSE_ZPAY_RETURN_URL=https://license.heang.top/api/payments/zpay/return
 ```
 
 `LICENSE_ZPAY_CHANNELS` 必须与商户后台实际启用的方式一致，只能填写 `alipay`、`wxpay` 或二者的逗号分隔组合。当前生产只读核验显示仅启用支付宝，因此部署候选应使用 `alipay`；后端只向客户端返回该列表，并会在创建数据库订单前拒绝未启用渠道。
+
+`payurl` 只在 HTTPS 且域名等于支付商主域名、其子域名或 `LICENSE_ZPAY_PAY_URL_HOSTS` 明确列出的域名时才会返回桌面端；未知域名会被丢弃，二维码仍可正常使用。不要为通过测试而填写泛域名。
 
 配置完成后，可先运行不输出配置值的只读校验：
 

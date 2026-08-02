@@ -301,6 +301,30 @@ class HttpRouteInventoryTests(unittest.TestCase):
                     probe.header("Cache-Control"),
                 )
 
+    def test_sensitive_service_and_payment_routes_expose_no_cors(self) -> None:
+        for path in (
+            "/api/service/account-entitlements/current?accountId=account-1",
+            "/api/service/payments/plans",
+            "/api/service/payments/orders/create",
+            "/api/service/payments/orders/status",
+            "/api/payments/zpay/notify",
+            "/api/payments/zpay/return",
+        ):
+            with self.subTest(path=path):
+                probe = ResponseProbe(path, origin="https://evil.example")
+                probe.send_json(200, {"ok": True})
+
+                for header in (
+                    "Access-Control-Allow-Origin",
+                    "Access-Control-Allow-Methods",
+                    "Access-Control-Allow-Headers",
+                ):
+                    self.assertIsNone(probe.header(header), (path, header))
+                self.assertEqual(
+                    "no-store, private",
+                    probe.header("Cache-Control"),
+                )
+
     def test_missing_file_head_keeps_error_content_length_without_body(self) -> None:
         probe = ResponseProbe("/logo.ico")
         with tempfile.TemporaryDirectory() as temp_dir:

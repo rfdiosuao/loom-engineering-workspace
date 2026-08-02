@@ -15,6 +15,11 @@ class ResponseMixin:
         return self.facade.json.loads(data.decode("utf-8-sig"))
 
     def send_cors_headers(self) -> None:
+        path = self.facade.urlparse(self.path).path
+        if path.startswith("/api/service/") or path.startswith("/api/payments/"):
+            # These routes are server-to-server Bearer APIs or provider callbacks.
+            # They must never become browser-callable through permissive CORS.
+            return
         origin = str(self.headers.get("Origin") or "").strip()
         if self.facade.is_admin_request_path(self.path):
             if origin and self.facade.admin_cors_origin_allowed(origin):

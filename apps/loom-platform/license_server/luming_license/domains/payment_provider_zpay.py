@@ -60,6 +60,7 @@ class ZPayConfig:
     return_url: str
     channels: tuple[str, ...]
     order_ttl_seconds: int = 600
+    pay_url_hosts: tuple[str, ...] = ()
     query_enabled: bool = False
     query_path: str = "/api.php"
 
@@ -75,6 +76,9 @@ class ZPayConfig:
             return_url=str(os.environ.get("LICENSE_ZPAY_RETURN_URL", "") or "").strip(),
             channels=_payment_channels(
                 os.environ.get("LICENSE_ZPAY_CHANNELS", "")
+            ),
+            pay_url_hosts=_payment_channels(
+                os.environ.get("LICENSE_ZPAY_PAY_URL_HOSTS", "")
             ),
             order_ttl_seconds=_bounded_int(
                 os.environ.get("LICENSE_ZPAY_ORDER_TTL_SECONDS", "600"),
@@ -134,6 +138,38 @@ class ZPayConfig:
             )
         return channels
 
+    def allowed_pay_url_hosts(self) -> tuple[str, ...]:
+        provider = urllib.parse.urlsplit(self.base_url)
+        configured = _payment_channels(self.pay_url_hosts)
+        candidates = (str(provider.hostname or ""), *configured)
+        normalized: list[str] = []
+        for value in candidates:
+            hostname = str(value or "").strip().rstrip(".").lower()
+            labels = hostname.split(".")
+            if (
+                not hostname
+                or len(hostname) > 253
+                or any(
+                    not label
+                    or len(label) > 63
+                    or label.startswith("-")
+                    or label.endswith("-")
+                    or any(
+                        not character.isascii()
+                        or not (character.isalnum() or character == "-")
+                        for character in label
+                    )
+                    for label in labels
+                )
+            ):
+                raise PaymentError(
+                    "支付跳转域名白名单配置无效。",
+                    503,
+                    "PAYMENT_REDIRECT_HOSTS_INVALID",
+                )
+            normalized.append(hostname)
+        return tuple(dict.fromkeys(normalized))
+
     def create_url(self) -> str:
         if not self.notify_url or not self.return_url:
             raise PaymentError(
@@ -150,10 +186,17 @@ class ZPayConfig:
                 raise PaymentError(
                     "支付回调必须使用 HTTPS。", 503, "PAYMENT_CALLBACK_INSECURE"
                 )
+            if parsed.query or parsed.fragment:
+                raise PaymentError(
+                    "支付回调地址不能包含查询参数或片段。",
+                    503,
+                    "PAYMENT_CALLBACK_INVALID",
+                )
         provider_url = self._provider_url(
             self.create_path, "PAYMENT_PROVIDER_PATH_INVALID"
         )
         self.enabled_channels()
+        self.allowed_pay_url_hosts()
         return provider_url
 
     def query_url(self) -> str:
@@ -280,6 +323,40 @@ def _expiry(now_value: str, ttl_seconds: int) -> str:
     ).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _safe_provider_pay_url(value: Any, allowed_hosts: tuple[str, ...]) -> str:
+    candidate = str(value or "").strip()
+    if not candidate or len(candidate) > 2048:
+        return ""
+    if any(ord(character) < 32 or ord(character) == 127 for character in candidate):
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+    except ValueError:
+        return ""
+    hostname = str(parsed.hostname or "").rstrip(".").lower()
+    allowed = False
+    for allowed_host in allowed_hosts:
+        if hostname == allowed_host:
+            allowed = True
+            break
+        try:
+            ipaddress.ip_address(allowed_host)
+        except ValueError:
+            if hostname.endswith(f".{allowed_host}"):
+                allowed = True
+                break
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or not allowed
+    ):
+        return ""
+    return urllib.parse.urlunsplit(parsed)
+
+
 class ZPayProvider:
     name = "zpay"
 
@@ -318,6 +395,10 @@ class ZPayProvider:
             raise PaymentError(
                 "支付下单参数不完整。", 400, "PAYMENT_PROVIDER_REQUEST_INVALID"
             )
+        if len(fields["out_trade_no"]) > 32:
+            raise PaymentError(
+                "支付订单号格式无效。", 400, "PAYMENT_PROVIDER_REQUEST_INVALID"
+            )
         try:
             ipaddress.ip_address(fields["clientip"])
         except ValueError as error:
@@ -353,7 +434,14 @@ class ZPayProvider:
             )
         reference = str(payload.get("trade_no") or "").strip()
         qrcode = str(payload.get("qrcode") or payload.get("qr_code") or "").strip()
-        pay_url = str(payload.get("payurl") or payload.get("pay_url") or "").strip()
+        if len(qrcode) > 4096 or any(
+            character in qrcode for character in ("\r", "\n", "\x00")
+        ):
+            qrcode = ""
+        pay_url = _safe_provider_pay_url(
+            payload.get("payurl") or payload.get("pay_url"),
+            self.config.allowed_pay_url_hosts(),
+        )
         if not reference or not (qrcode or pay_url):
             raise PaymentError(
                 "支付服务未返回可用二维码。",
@@ -370,7 +458,7 @@ class ZPayProvider:
     def query_payment(self, request: dict[str, object]) -> dict[str, object]:
         url = self.config.query_url()
         out_trade_no = str(request.get("out_trade_no") or "").strip()
-        if not out_trade_no or len(out_trade_no) > 64:
+        if not out_trade_no or len(out_trade_no) > 32:
             raise PaymentError(
                 "支付查单参数无效。",
                 400,
