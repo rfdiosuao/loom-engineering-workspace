@@ -103,6 +103,7 @@ FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS = 5
 ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS = 20
 NATIVE_PASSWORD_LOGIN_TIMEOUT_SECONDS = 10
 AUTH_CAPABILITIES_CACHE_SECONDS = 300
+SUBSCRIPTION_REQUEST_BUDGET_SECONDS = 3.0
 PERMANENT_ENTITLEMENT_ERROR_CODES = frozenset({
     "account_entitlement_not_found",
     "account_entitlement_revoked",
@@ -1739,13 +1740,17 @@ class NewApiAccountManager:
             if _pick_text(newapi.get("sessionCookie"))
             else managed_paths + native_paths
         )
+        deadline = time.monotonic() + SUBSCRIPTION_REQUEST_BUDGET_SECONDS
         for path in paths:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
                 headers = self._session_headers(
                     session,
                     include_api_token=path.startswith("/api/openclaw/"),
                 )
-                payload = self._request_json(opener, f"{base_url}{path}", headers=headers, timeout=20)
+                payload = self._request_json(opener, f"{base_url}{path}", headers=headers, timeout=remaining)
                 snapshot = _extract_subscription_snapshot(payload, base_url=base_url, fallback=fallback)
                 snapshot["loggedIn"] = True
                 snapshot["offline"] = False

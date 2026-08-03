@@ -264,7 +264,8 @@ export const LicensePage: React.FC = () => {
   const [paymentCatalogLoading, setPaymentCatalogLoading] = useState(false);
   const [paymentChannel, setPaymentChannel] = useState<'alipay' | 'wxpay'>('alipay');
   const [paymentOrder, setPaymentOrder] = useState<AccountPaymentOrder | null>(null);
-  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [creatingPaymentPlanKey, setCreatingPaymentPlanKey] = useState('');
+  const [paymentStatusBusy, setPaymentStatusBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(() => !hasCachedAccount);
   const [usingCachedAccount, setUsingCachedAccount] = useState(hasCachedAccount);
@@ -313,6 +314,8 @@ export const LicensePage: React.FC = () => {
       paymentRestoreIdentity.current = '';
       setPaymentCatalog(null);
       setPaymentOrder(null);
+      setCreatingPaymentPlanKey('');
+      setPaymentStatusBusy(false);
     }
     cachedAccount.current = next;
     if (options.persist !== false) saveCachedAccount(next);
@@ -440,7 +443,7 @@ export const LicensePage: React.FC = () => {
     const requestVersion = ++paymentRequestVersion.current;
     const identity = accountIdentity(cachedAccount.current);
     if (!identity || !orderId) return;
-    if (!quiet) setPaymentBusy(true);
+    if (!quiet) setPaymentStatusBusy(true);
     try {
       const response = await accountApi.paymentOrderStatus({ orderId, reconcile });
       if (
@@ -480,7 +483,7 @@ export const LicensePage: React.FC = () => {
       }
     } finally {
       if (!quiet && requestVersion === paymentRequestVersion.current) {
-        setPaymentBusy(false);
+        setPaymentStatusBusy(false);
       }
     }
   }, [applyAccount, loadSubscription]);
@@ -509,7 +512,7 @@ export const LicensePage: React.FC = () => {
         ? previousAttempt.orderId
         : undefined,
     });
-    setPaymentBusy(true);
+    setCreatingPaymentPlanKey(planKey);
     setPaymentOrder(null);
     try {
       const response = await accountApi.createPaymentOrder({
@@ -546,7 +549,7 @@ export const LicensePage: React.FC = () => {
       setStatusText(message);
       showToast(message || '订单创建失败', 'error');
     } finally {
-      if (requestVersion === paymentRequestVersion.current) setPaymentBusy(false);
+      if (requestVersion === paymentRequestVersion.current) setCreatingPaymentPlanKey('');
     }
   };
 
@@ -555,6 +558,8 @@ export const LicensePage: React.FC = () => {
       paymentRequestVersion.current += 1;
       setPaymentCatalog(null);
       setPaymentOrder(null);
+      setCreatingPaymentPlanKey('');
+      setPaymentStatusBusy(false);
       return;
     }
     void loadPaymentPlans(true);
@@ -1105,7 +1110,9 @@ export const LicensePage: React.FC = () => {
                       </div>
 
                       <div className="grid gap-3 lg:grid-cols-2">
-                        {paymentCatalog.plans.map((plan) => (
+                        {paymentCatalog.plans.map((plan) => {
+                          const isCreatingThisPlan = creatingPaymentPlanKey === plan.planKey;
+                          return (
                           <article
                             key={plan.planKey}
                             className="rounded-[10px] border border-border bg-surface-alt/40 p-4"
@@ -1132,13 +1139,14 @@ export const LicensePage: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => void startPayment(plan.planKey)}
-                              disabled={paymentBusy || !accountWritable}
+                              disabled={Boolean(creatingPaymentPlanKey) || paymentStatusBusy || !accountWritable}
                               className="mt-4 h-10 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-55"
                             >
-                              {paymentBusy ? '正在创建订单...' : `${paymentChannel === 'wxpay' ? '微信' : '支付宝'}扫码购买`}
+                              {isCreatingThisPlan ? '正在创建订单...' : `${paymentChannel === 'wxpay' ? '微信' : '支付宝'}扫码购买`}
                             </button>
                           </article>
-                        ))}
+                          );
+                        })}
                       </div>
                     </>
                   ) : (
@@ -1175,10 +1183,10 @@ export const LicensePage: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => void verifyPaymentOrder(paymentOrder.orderId, false, true)}
-                            disabled={paymentBusy}
+                            disabled={paymentStatusBusy || Boolean(creatingPaymentPlanKey)}
                             className="h-9 rounded-[8px] bg-accent px-4 text-xs font-black text-accent-ink disabled:opacity-55"
                           >
-                            {paymentBusy ? '查询中...' : '我已付款，查询状态'}
+                            {paymentStatusBusy ? '查询中...' : '我已付款，查询状态'}
                           </button>
                           {paymentPayUrl ? (
                             <button

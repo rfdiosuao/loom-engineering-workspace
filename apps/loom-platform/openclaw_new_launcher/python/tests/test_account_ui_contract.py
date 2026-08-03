@@ -222,6 +222,15 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertNotIn("openExternalUrl(paymentOrder.payUrl", source)
         self.assertIn("支付二维码暂不可用，请查询订单或打开直达支付。", source)
 
+    def test_payment_creation_and_status_query_use_independent_busy_states(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("const [creatingPaymentPlanKey, setCreatingPaymentPlanKey]", source)
+        self.assertIn("const [paymentStatusBusy, setPaymentStatusBusy]", source)
+        self.assertIn("creatingPaymentPlanKey === plan.planKey", source)
+        self.assertNotIn("const [paymentBusy, setPaymentBusy]", source)
+
     def test_paid_order_is_not_reported_as_failed_when_local_entitlement_refresh_fails(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()

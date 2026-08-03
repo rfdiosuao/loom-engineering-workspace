@@ -363,6 +363,13 @@ test('native model subscription checkout renders qrcode and never grants matrix 
     pricingRule: 'nominal_1_to_1',
     benefits: ['模型调用额度', '服务端原生订阅'],
   };
+  const alternatePlan = {
+    ...paymentPlan,
+    planKey: 'newapi-plan-pro-audit',
+    displayName: '专业模型订阅',
+    amountMinor: 10000,
+    amount: '100.00',
+  };
   const pendingOrder = {
     orderId: 'pay_order_audit_001',
     outTradeNo: 'LM20260802AUDIT001',
@@ -388,11 +395,11 @@ test('native model subscription checkout renders qrcode and never grants matrix 
   await audit.registerRoute('GET', '/api/account/subscription', { value: { subscription: AUDIT_SUBSCRIPTION } });
   await audit.registerRoute('GET', '/api/account/payments/plans', {
     value: {
-      plans: [paymentPlan],
+      plans: [paymentPlan, alternatePlan],
       payment: { provider: 'newapi-epay', configured: true, channels: ['alipay', 'wxpay'] },
     },
   });
-  await audit.registerRoute('POST', '/api/account/payments/order', { value: { order: pendingOrder } });
+  await audit.registerRoute('POST', '/api/account/payments/order', { delayMs: 500, value: { order: pendingOrder } });
   await audit.registerRoute('POST', '/api/account/payments/order/status', { value: { order: pendingOrder } });
   await audit.registerCommand('plugin:shell|open', { value: null });
   await navigateTo(audit, 'license');
@@ -400,11 +407,16 @@ test('native model subscription checkout renders qrcode and never grants matrix 
   const main = appMain(page);
   await expect(main.locator('[data-native-payment-catalog]')).toBeVisible();
   await expect(main.getByText(paymentPlan.displayName, { exact: true })).toBeVisible();
+  await expect(main.getByText(alternatePlan.displayName, { exact: true })).toBeVisible();
   await expect(main.getByText('直接购买服务端原生订阅；服务端 USD 数值按 1:1 显示为人民币，不做汇率换算。矩阵授权仍独立管理。')).toBeVisible();
   await expect(main.getByText('¥50.00', { exact: true })).toBeVisible();
 
   const beforeCreate = await markCalls(audit);
-  await main.getByRole('button', { name: '支付宝扫码购买' }).click();
+  const selectedPlanCard = main.locator('article').filter({ hasText: paymentPlan.displayName });
+  const alternatePlanCard = main.locator('article').filter({ hasText: alternatePlan.displayName });
+  await selectedPlanCard.getByRole('button', { name: '支付宝扫码购买' }).click();
+  await expect(selectedPlanCard.getByRole('button', { name: '正在创建订单...' })).toBeVisible();
+  await expect(alternatePlanCard.getByRole('button', { name: '支付宝扫码购买' })).toBeVisible();
   await expectToast(page, '订单已创建，请使用手机扫码支付。');
   await expect(main.getByText(`订单号：${pendingOrder.orderId}`, { exact: true })).toBeVisible();
   const qrImage = main.getByRole('img', { name: '麓鸣套餐支付二维码' });
@@ -444,6 +456,7 @@ test('native model subscription checkout renders qrcode and never grants matrix 
     .not.toContainEqual(expect.objectContaining({ path: '/api/license/authorized' }));
 
   await audit.registerRoute('POST', '/api/account/payments/order/status', {
+    delayMs: 500,
     value: {
       order: paidOrder,
       account: AUDIT_ACCOUNT_WITH_CHOICES,
@@ -452,6 +465,9 @@ test('native model subscription checkout renders qrcode and never grants matrix 
   });
   const beforePaidQuery = await markCalls(audit);
   await main.getByRole('button', { name: '我已付款，查询状态' }).click();
+  await expect(main.getByRole('button', { name: '查询中...' })).toBeVisible();
+  await expect(selectedPlanCard.getByRole('button', { name: '支付宝扫码购买' })).toBeVisible();
+  await expect(alternatePlanCard.getByRole('button', { name: '支付宝扫码购买' })).toBeVisible();
   await expectProxyIntent(audit, beforePaidQuery, {
     method: 'POST', path: '/api/account/payments/order/status', body: { orderId: paidOrder.orderId, reconcile: true },
   });

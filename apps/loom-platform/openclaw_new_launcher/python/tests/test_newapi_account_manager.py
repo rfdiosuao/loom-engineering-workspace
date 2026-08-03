@@ -1715,6 +1715,35 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertEqual(snapshot["inviteCode"], "AFF42")
             self.assertFalse(snapshot["offline"])
 
+    def test_subscription_snapshot_has_one_bounded_request_budget(self) -> None:
+        class OfflineSubscriptionManager(NewApiAccountManager):
+            def __init__(self, paths: AppPaths):
+                super().__init__(paths)
+                self.timeouts: list[float] = []
+
+            def current(self) -> dict:
+                return {
+                    "source": ACCOUNT_SOURCE,
+                    "plan": "cached-plan",
+                    "memberToken": "sk-offline-test-not-real",
+                    "newApi": {"baseUrl": DEFAULT_BASE_URL},
+                }
+
+            def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
+                del opener, url, method, body, headers
+                self.timeouts.append(timeout)
+                raise NewApiAccountError("network unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = OfflineSubscriptionManager(AppPaths(temp_dir))
+            with patch.object(account_module.time, "monotonic", side_effect=[0.0, 0.0, 2.2, 3.1]):
+                snapshot = manager.subscription_snapshot()
+
+            self.assertEqual(len(manager.timeouts), 2)
+            self.assertLessEqual(max(manager.timeouts), 3.0)
+            self.assertTrue(snapshot["offline"])
+            self.assertEqual(snapshot["plan"], "cached-plan")
+
     def test_password_bridge_does_not_treat_launcher_token_limit_as_account_balance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = NewApiAccountManager(AppPaths(temp_dir))

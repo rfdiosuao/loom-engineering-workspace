@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "2.4.6"
+version = "2.4.7"
 description = "麓鸣 Desktop"
 authors = ["Yu Hang (He Ang)"]
 license = "AGPL-3.0-only"
