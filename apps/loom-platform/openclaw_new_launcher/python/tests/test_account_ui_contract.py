@@ -286,6 +286,9 @@ class AccountUiContractTests(unittest.TestCase):
         logged_in = source.split("if (loggedIn) {", 1)[1].split("\n  return (", 1)[0]
         self.assertIn("planDisplayName", source)
         self.assertIn("基础套餐", source)
+        self.assertIn("matrix_basic: '基础套餐'", source)
+        self.assertIn("matrix_pro: '专业套餐'", source)
+        self.assertIn("matrix_enterprise: '企业套餐'", source)
         self.assertNotIn("account?.plan || '暂无'", logged_in)
         self.assertNotIn("'登录后查看'", logged_in)
         self.assertIn("服务暂未返回", logged_in)

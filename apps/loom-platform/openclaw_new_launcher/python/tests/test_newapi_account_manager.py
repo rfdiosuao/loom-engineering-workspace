@@ -1655,6 +1655,87 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertEqual(snapshot["usage"]["usedQuota"], "12")
             self.assertEqual(snapshot["purchaseUrl"], "https://api.heang.top/wallet")
 
+    def test_subscription_snapshot_prefers_bearer_authenticated_managed_contract(self) -> None:
+        class ManagedSubscriptionManager(NewApiAccountManager):
+            def __init__(self, paths: AppPaths):
+                super().__init__(paths)
+                self.requests: list[dict] = []
+
+            def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
+                self.requests.append({
+                    "url": url,
+                    "headers": dict(headers or {}),
+                })
+                if url.endswith("/api/openclaw/account/subscription"):
+                    return {
+                        "success": True,
+                        "data": {
+                            "subscription": {
+                                "plan": "matrix_basic",
+                                "balance": 8800,
+                                "expiresAt": 2_000_000_000,
+                                "purchaseUrl": "https://api.heang.top/wallet",
+                            },
+                            "usage": {
+                                "used_quota": 1200,
+                                "request_count": 34,
+                            },
+                            "aff_code": "AFF42",
+                        },
+                    }
+                raise NewApiAccountError("http_404", status_code=404)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ManagedSubscriptionManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberName": "user@example.invalid",
+                "memberToken": "sk-managed-subscription-not-real",
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "42",
+                    "account": "user@example.invalid",
+                },
+            })
+
+            snapshot = manager.subscription_snapshot()
+
+            self.assertEqual(
+                manager.requests[0]["url"],
+                "https://api.heang.top/api/openclaw/account/subscription",
+            )
+            self.assertEqual(
+                manager.requests[0]["headers"]["Authorization"],
+                "Bearer sk-managed-subscription-not-real",
+            )
+            self.assertEqual(snapshot["balance"], "8800")
+            self.assertEqual(snapshot["usage"]["usedQuota"], "1200")
+            self.assertEqual(snapshot["usage"]["requestCount"], "34")
+            self.assertEqual(snapshot["inviteCode"], "AFF42")
+            self.assertFalse(snapshot["offline"])
+
+    def test_password_bridge_does_not_treat_launcher_token_limit_as_account_balance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = NewApiAccountManager(AppPaths(temp_dir))
+
+            session = manager._build_bridge_session(
+                "https://api.heang.top",
+                "user@example.invalid",
+                "sk-launcher-not-real",
+                {
+                    "account": "user@example.invalid",
+                    "userId": "42",
+                    "group": "default",
+                    "remainQuota": 0,
+                    "models": ["glm-5.2-coding"],
+                    "apiBaseUrl": "https://api.heang.top/v1",
+                },
+                account_module.http.cookiejar.CookieJar(),
+            )
+
+            self.assertIsNone(session["usage"]["quota"])
+
     def test_session_file_protects_secret_fields_on_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = NewApiAccountManager(AppPaths(temp_dir))

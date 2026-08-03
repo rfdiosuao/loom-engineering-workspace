@@ -512,6 +512,7 @@ import api.fastapi_routes
 import api.routes_agent
 import api.routes_matrix
 from core.paths import AppPaths
+from core.newapi_account_manager import NewApiAccountManager
 from fastapi import FastAPI
 from services.agent_service import AgentService
 
@@ -558,6 +559,7 @@ module_files = {
     "fastapi_routes": api.fastapi_routes.__file__,
     "routes_agent": api.routes_agent.__file__,
     "routes_matrix": api.routes_matrix.__file__,
+    "newapi_account_manager": sys.modules[NewApiAccountManager.__module__].__file__,
 }
 source_modules = [path for path in module_files.values() if not path.lower().endswith(".pyc")]
 if missing_routes:
@@ -581,12 +583,50 @@ if agent_bootstrap.get("executionAccess", {}).get("authorized") is not False:
     raise SystemExit("Packaged guest Agent did not remain read-only")
 if agent_bootstrap.get("permissions", {}).get("read") is not True:
     raise SystemExit("Packaged guest Agent lost read-only bootstrap access")
+
+subscription_calls = []
+account_manager = NewApiAccountManager.__new__(NewApiAccountManager)
+account_manager.current = lambda: {
+    "memberToken": "packaged-probe-token",
+    "newApi": {
+        "baseUrl": "https://account-probe.invalid",
+        "sessionCookie": "",
+        "userId": "packaged-probe-user",
+    },
+}
+def packaged_subscription_request(_opener, url, *, headers=None, **_kwargs):
+    subscription_calls.append({"url": url, "headers": dict(headers or {})})
+    return {
+        "success": True,
+        "data": {
+            "subscription": {
+                "plan": "matrix_basic",
+                "balance": 123,
+                "expiresAt": "2027-08-03T00:00:00Z",
+                "inviteCode": "packaged-probe-invite",
+                "purchaseUrl": "https://api.heang.top/wallet",
+            },
+            "usage": {"usedQuota": 12, "requestCount": 3},
+        },
+    }
+account_manager._request_json = packaged_subscription_request
+subscription_snapshot = account_manager.subscription_snapshot()
+if not subscription_calls:
+    raise SystemExit("Packaged subscription client did not issue a request")
+first_subscription_call = subscription_calls[0]
+if not first_subscription_call["url"].endswith("/api/openclaw/account/subscription"):
+    raise SystemExit("Packaged subscription client did not prefer the managed endpoint")
+if first_subscription_call["headers"].get("Authorization") != "Bearer packaged-probe-token":
+    raise SystemExit("Packaged subscription client did not attach the launcher bearer token")
+if subscription_snapshot.get("offline") is not False or str(subscription_snapshot.get("balance")) != "123":
+    raise SystemExit("Packaged subscription client did not parse the managed response")
 print(json.dumps({
     "moduleFiles": module_files,
     "routeCount": len(route_paths),
     "agentProfile": agent_bootstrap["defaultRuntimeProfileId"],
     "agentCapabilityCount": len(agent_bootstrap["capabilities"]),
     "guestAgentReadOnly": True,
+    "accountSubscriptionBearer": True,
 }))
 '@
     Invoke-ProcessAndWait -FilePath $pythonExe -Arguments @(
@@ -601,7 +641,8 @@ print(json.dumps({
         [int]$routeProbeResult.routeCount -le 0 -or
         [string]$routeProbeResult.agentProfile -ne "loom-native" -or
         [int]$routeProbeResult.agentCapabilityCount -le 0 -or
-        [bool]$routeProbeResult.guestAgentReadOnly -ne $true
+        [bool]$routeProbeResult.guestAgentReadOnly -ne $true -or
+        [bool]$routeProbeResult.accountSubscriptionBearer -ne $true
     ) {
         throw "Protected route probe returned an invalid result"
     }
@@ -695,6 +736,7 @@ print(json.dumps({
             agentProfile = [string]$routeProbeResult.agentProfile
             agentCapabilities = [int]$routeProbeResult.agentCapabilityCount
             guestAgentReadOnly = [bool]$routeProbeResult.guestAgentReadOnly
+            accountSubscriptionBearer = [bool]$routeProbeResult.accountSubscriptionBearer
             upgradeDataPreserved = $upgradeDataPreserved
             licenseEndpoint = $licenseStatus
             matrixEndpoint = $matrixStatus

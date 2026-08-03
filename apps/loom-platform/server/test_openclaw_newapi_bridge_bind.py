@@ -227,6 +227,10 @@ class BindTicketTests(unittest.TestCase):
                     status integer,
                     email text,
                     "group" text,
+                    quota integer default 0,
+                    used_quota integer default 0,
+                    request_count integer default 0,
+                    aff_code text default '',
                     deleted_at datetime
                 );
                 create table tokens (
@@ -435,6 +439,81 @@ class BindTicketTests(unittest.TestCase):
                 payload["data"]["entitlement"]["source"],
                 "authorization_required",
             )
+
+    def test_account_subscription_requires_a_valid_launcher_token(self):
+        status, payload = self.bridge.handle_account_subscription("")
+
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["code"], "subscription_auth_required")
+
+    def test_account_subscription_returns_authoritative_user_metrics(self):
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        try:
+            connection.execute(
+                """
+                update users
+                set quota = ?, used_quota = ?, request_count = ?, aff_code = ?
+                where id = ?
+                """,
+                (8800, 1200, 34, "AFF42", 42),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            {
+                "source": "authorization_code",
+                "plan": "matrix_basic",
+                "features": [
+                    "matrix.devices",
+                    "matrix.tasks",
+                    "matrix.diagnostics",
+                ],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 3,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": 2_000_000_000,
+                "codeLabel": "LM-BASIC-****-TEST",
+            },
+            action="test_subscription_seed",
+        )
+
+        status, payload = self.bridge.handle_account_subscription(
+            "Bearer sk-test-secret-value"
+        )
+
+        self.assertEqual(status, 200, payload)
+        data = payload["data"]
+        self.assertEqual(data["subscription"]["plan"], "matrix_basic")
+        self.assertEqual(data["subscription"]["balance"], 8800)
+        self.assertEqual(data["subscription"]["expiresAt"], 2_000_000_000)
+        self.assertEqual(data["subscription"]["inviteCode"], "AFF42")
+        self.assertEqual(data["usage"]["usedQuota"], 1200)
+        self.assertEqual(data["usage"]["requestCount"], 34)
+        self.assertNotIn("key", repr(payload).lower())
+
+    def test_account_subscription_is_available_through_the_managed_get_route(self):
+        server = self.bridge.ThreadingHTTPServer(("127.0.0.1", 0), self.bridge.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = self.bridge.urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/openclaw/account/subscription",
+                headers={"Authorization": "Bearer sk-test-secret-value"},
+                method="GET",
+            )
+            with self.bridge.urllib.request.urlopen(request, timeout=5) as response:
+                payload = self.bridge.json.loads(response.read().decode("utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["data"]["subscription"]["plan"], "default")
 
     def test_legacy_plan_default_grant_cannot_activate_phone_access(self):
         now = int(time.time())

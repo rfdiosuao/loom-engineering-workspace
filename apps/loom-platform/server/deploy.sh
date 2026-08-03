@@ -178,7 +178,7 @@ mv "$next/openclaw_newapi_bridge.py" "$REMOTE_DIR/openclaw_newapi_bridge.py"
 systemctl start "$SERVICE_NAME"
 systemctl is-active --quiet "$SERVICE_NAME"
 
-echo "[5/7] Read-only health, entitlement public-key and payment-route smoke"
+echo "[5/7] Read-only health, entitlement, payment and subscription route smoke"
 wait_for_readiness
 DEPLOY_HEALTH_JSON="$cache/health.json" \
 DEPLOY_KEY_JSON="$cache/entitlement-public-key.json" \
@@ -223,6 +223,18 @@ if [ "$payment_status" != "401" ]; then
   exit 1
 fi
 echo "payment_route=ready"
+
+account_subscription_response="$(
+  curl -sS \
+    -w '\n%{http_code}' \
+    "$LOCAL_BASE_URL/api/openclaw/account/subscription"
+)"
+account_subscription_status="${account_subscription_response##*$'\n'}"
+if [ "$account_subscription_status" != "401" ]; then
+  echo "bridge account subscription route contract failed" >&2
+  exit 1
+fi
+echo "account_subscription_route=ready"
 
 echo "[6/7] Verify environment was not changed"
 env_sha_after="$(sha256sum "$BRIDGE_ENV_FILE" | cut -d' ' -f1)"

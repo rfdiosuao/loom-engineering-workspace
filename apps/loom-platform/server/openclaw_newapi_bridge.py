@@ -1045,6 +1045,64 @@ def api_token_owner(authorization: str) -> dict[str, Any] | None:
     return row
 
 
+def handle_account_subscription(authorization: str) -> tuple[int, dict[str, Any]]:
+    owner = api_token_owner(authorization)
+    if not owner:
+        return 401, {
+            "success": False,
+            "error": "valid API token is required",
+            "code": "subscription_auth_required",
+        }
+    user_id = str(owner.get("user_id") or "").strip()
+    user = _newapi_fetchone(
+        """
+        select id, "group", quota, used_quota, request_count, aff_code
+        from users
+        where id = ? and deleted_at is null
+        """,
+        (user_id,),
+    )
+    if not user:
+        return 404, {
+            "success": False,
+            "error": "account not found",
+            "code": "subscription_account_not_found",
+        }
+    group = str(owner.get("user_group") or user.get("group") or "default").strip() or "default"
+    entitlement = effective_entitlement_policy(user_id, group)
+    entitlement_active = entitlement.get("source") == "authorization_code"
+    plan = str(entitlement.get("plan") or group) if entitlement_active else group
+    expires_at = entitlement.get("expiresAt") if entitlement_active else None
+    invite_code = str(
+        user.get("aff_code")
+        or user.get("invite_code")
+        or user.get("invitation_code")
+        or ""
+    ).strip()
+    parsed_public_base = urllib.parse.urlparse(PUBLIC_API_BASE)
+    public_origin = (
+        f"{parsed_public_base.scheme}://{parsed_public_base.netloc}"
+        if parsed_public_base.scheme and parsed_public_base.netloc
+        else PUBLIC_API_BASE.rstrip("/").removesuffix("/v1")
+    )
+    return 200, {
+        "success": True,
+        "data": {
+            "subscription": {
+                "plan": plan,
+                "balance": user.get("quota"),
+                "expiresAt": expires_at,
+                "inviteCode": invite_code,
+                "purchaseUrl": f"{public_origin.rstrip('/')}/wallet",
+            },
+            "usage": {
+                "usedQuota": user.get("used_quota"),
+                "requestCount": user.get("request_count"),
+            },
+        },
+    }
+
+
 def create_token(opener: urllib.request.OpenerDirector, user_id: str, group: str) -> dict[str, Any] | None:
     token_name = f"OpenClaw Launcher {int(time.time())}-{secrets.token_hex(3)}"
     headers = {"New-Api-User": user_id}
@@ -3321,17 +3379,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self) -> None:
-        if self.path == "/health":
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/health":
             self._send(200, {"success": True, "service": "openclaw-newapi-bridge"})
             return
-        if self.path == "/api/openclaw/auth/capabilities":
+        if path == "/api/openclaw/auth/capabilities":
             self._send(200, {"success": True, "data": auth_capabilities_payload()})
             return
-        if self.path == "/api/openclaw/entitlements/public-key":
+        if path == "/api/openclaw/entitlements/public-key":
             status, payload = entitlement_public_key_response()
             self._send(status, payload)
             return
-        if self.path in ("/api/openclaw/bind/page", "/openclaw-bind"):
+        if path in (
+            "/api/openclaw/account/subscription",
+            "/api/openclaw/subscription",
+        ):
+            status, payload = handle_account_subscription(
+                self.headers.get("Authorization") or ""
+            )
+            self._send(status, payload)
+            return
+        if path in ("/api/openclaw/bind/page", "/openclaw-bind"):
             self._send_html(200, BIND_PAGE_HTML)
             return
         self._send(404, {"success": False, "error": "not found"})

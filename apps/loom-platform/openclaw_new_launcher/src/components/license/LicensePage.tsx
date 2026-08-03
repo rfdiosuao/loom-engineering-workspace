@@ -56,10 +56,13 @@ function planDisplayName(value: unknown): string {
     default: '基础套餐',
     free: '基础套餐',
     basic: '基础套餐',
+    matrix_basic: '基础套餐',
     standard: '标准套餐',
     pro: '专业套餐',
     professional: '专业套餐',
+    matrix_pro: '专业套餐',
     enterprise: '企业套餐',
+    matrix_enterprise: '企业套餐',
     inactive: '未激活',
   };
   return names[plan.toLowerCase()] || plan || '服务暂未返回';

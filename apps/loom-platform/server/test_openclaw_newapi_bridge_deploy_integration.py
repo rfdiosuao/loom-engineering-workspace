@@ -182,6 +182,18 @@ class BridgeDeployIntegrationTests(unittest.TestCase):
                   printf '\\n%s' "$code"
                 fi
                 ;;
+              */api/openclaw/account/subscription)
+                if [ "${FAKE_BRIDGE_SUBSCRIPTION_FAIL:-0}" = "1" ]; then
+                  printf '%s' '{"success":false,"error":"not found"}'
+                  code=404
+                else
+                  printf '%s' '{"success":false,"code":"subscription_auth_required"}'
+                  code=401
+                fi
+                if [ "$write_status" -eq 1 ]; then
+                  printf '\\n%s' "$code"
+                fi
+                ;;
               *) exit 22 ;;
             esac
             """,
@@ -266,6 +278,18 @@ class BridgeDeployIntegrationTests(unittest.TestCase):
 
     def test_payment_route_smoke_failure_restores_old_program(self) -> None:
         result = self._run(FAKE_BRIDGE_PAYMENT_FAIL="1")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            (self.remote / "openclaw_newapi_bridge.py").read_bytes(),
+            self.old_program,
+        )
+        self.assertEqual(self.environment.read_bytes(), self.original_environment)
+        actions = self.systemctl_log.read_text(encoding="utf-8").splitlines()
+        self.assertGreaterEqual(actions.count("stop openclaw-newapi-bridge"), 2)
+        self.assertGreaterEqual(actions.count("start openclaw-newapi-bridge"), 2)
+
+    def test_subscription_route_smoke_failure_restores_old_program(self) -> None:
+        result = self._run(FAKE_BRIDGE_SUBSCRIPTION_FAIL="1")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             (self.remote / "openclaw_newapi_bridge.py").read_bytes(),

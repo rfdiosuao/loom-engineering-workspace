@@ -881,6 +881,22 @@ def _extract_subscription_snapshot(payload: Any, *, base_url: str, fallback: dic
         ),
         base_url=base_url,
     )
+    invite_code = _pick_text(
+        subscription.get("inviteCode"),
+        subscription.get("invitationCode"),
+        subscription.get("referralCode"),
+        account.get("inviteCode"),
+        account.get("affCode"),
+        account.get("aff_code"),
+        data.get("inviteCode"),
+        data.get("invitationCode"),
+        data.get("referralCode"),
+        data.get("affCode"),
+        data.get("aff_code"),
+        fallback_usage.get("inviteCode"),
+        fallback_usage.get("affCode"),
+        fallback_usage.get("aff_code"),
+    )
     return {
         "mode": "native",
         "plan": plan,
@@ -896,6 +912,7 @@ def _extract_subscription_snapshot(payload: Any, *, base_url: str, fallback: dic
                 fallback_usage.get("requestCount"),
             ),
         },
+        "inviteCode": invite_code,
         "purchaseUrl": purchase_url,
         "updatedAt": _iso(_utc_now()),
     }
@@ -1702,7 +1719,6 @@ class NewApiAccountManager:
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
         base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
         opener = urllib.request.build_opener()
-        headers = self._session_headers(session)
         fallback = {
             "plan": session.get("plan"),
             "expiresAt": session.get("expiresAt") or session.get("leaseExpiresAt"),
@@ -1710,8 +1726,25 @@ class NewApiAccountManager:
             "leaseExpiresAt": session.get("leaseExpiresAt"),
         }
         errors: list[str] = []
-        for path in OPENCLAW_SUBSCRIPTION_PATHS:
+        native_paths = tuple(
+            path for path in OPENCLAW_SUBSCRIPTION_PATHS
+            if not path.startswith("/api/openclaw/")
+        )
+        managed_paths = tuple(
+            path for path in OPENCLAW_SUBSCRIPTION_PATHS
+            if path.startswith("/api/openclaw/")
+        )
+        paths = (
+            native_paths + managed_paths
+            if _pick_text(newapi.get("sessionCookie"))
+            else managed_paths + native_paths
+        )
+        for path in paths:
             try:
+                headers = self._session_headers(
+                    session,
+                    include_api_token=path.startswith("/api/openclaw/"),
+                )
                 payload = self._request_json(opener, f"{base_url}{path}", headers=headers, timeout=20)
                 snapshot = _extract_subscription_snapshot(payload, base_url=base_url, fallback=fallback)
                 snapshot["loggedIn"] = True
@@ -1862,9 +1895,15 @@ class NewApiAccountManager:
                 continue
         return model_ids
 
-    def _session_headers(self, session: dict[str, Any]) -> dict[str, str]:
+    def _session_headers(
+        self,
+        session: dict[str, Any],
+        *,
+        include_api_token: bool = False,
+    ) -> dict[str, str]:
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
-        headers = self._auth_headers("", _pick_text(newapi.get("userId")))
+        access_token = _pick_text(session.get("memberToken")) if include_api_token else ""
+        headers = self._auth_headers(access_token, _pick_text(newapi.get("userId")))
         cookie = _pick_text(newapi.get("sessionCookie"))
         if cookie:
             headers["Cookie"] = cookie
@@ -2033,7 +2072,7 @@ class NewApiAccountManager:
             "username": account,
             "email": account if _looks_like_email(account) else "",
             "group": group,
-            "quota": token_meta.get("remainQuota"),
+            "quota": token_meta.get("accountBalance"),
         }
         payload = {"success": True, "data": user_data}
         models = token_meta.get("models") if isinstance(token_meta.get("models"), list) else []

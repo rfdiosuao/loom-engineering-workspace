@@ -69,6 +69,13 @@ class BridgeDeployScriptContractTests(unittest.TestCase):
         disarm = self.source.index("[7/7] Disarm rollback")
         self.assertLess(route_smoke, disarm)
 
+    def test_post_switch_smoke_requires_account_subscription_route_contract(self) -> None:
+        self.assertIn("/api/openclaw/account/subscription", self.source)
+        self.assertIn("account_subscription_route=ready", self.source)
+        route_smoke = self.source.index("account_subscription_route=ready")
+        disarm = self.source.index("[7/7] Disarm rollback")
+        self.assertLess(route_smoke, disarm)
+
     def test_post_switch_smoke_waits_for_both_readiness_endpoints(self) -> None:
         self.assertIn("BRIDGE_READY_RETRY_ATTEMPTS", self.source)
         self.assertIn("BRIDGE_READY_RETRY_DELAY_SEC", self.source)
