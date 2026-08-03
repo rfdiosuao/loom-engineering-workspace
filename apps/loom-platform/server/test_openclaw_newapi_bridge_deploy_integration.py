@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,8 @@ class BridgeDeployIntegrationTests(unittest.TestCase):
         (self.upload / "openclaw_newapi_bridge.py").write_bytes(self.new_program)
         self.private_key = self.root / "entitlement-private-key.b64"
         self.private_key.write_text("test-private-key-placeholder\n", encoding="utf-8")
+        self.companion = self.root / "LumiLinuxRuntime.apk"
+        self.companion.write_bytes(b"integration-test-linux-companion")
         self.environment = self.remote / "bridge.env"
         self._write_environment(include_service_token=True)
         self.original_environment = self.environment.read_bytes()
@@ -95,6 +98,8 @@ class BridgeDeployIntegrationTests(unittest.TestCase):
         )
         bind_db = str(self.root / "bridge-state.db").replace("\\", "/")
         private_key = str(self.private_key).replace("\\", "/")
+        companion = str(self.companion).replace("\\", "/")
+        companion_sha256 = hashlib.sha256(self.companion.read_bytes()).hexdigest().upper()
         self.environment.write_text(
             token_line
             + "OPENCLAW_LICENSE_ENTITLEMENT_SERVICE_BASE=https://license.example.invalid\n"
@@ -102,6 +107,12 @@ class BridgeDeployIntegrationTests(unittest.TestCase):
             + "OPENCLAW_BIND_TICKET_SECRET="
             + "s" * 40
             + "\n"
+            + "OPENCLAW_SUBSCRIPTION_CHECKOUT_SECRET="
+            + "c" * 40
+            + "\n"
+            + "OPENCLAW_SUBSCRIPTION_PAYMENT_FORM_HOSTS=zpayz.cn\n"
+            + f"OPENCLAW_LINUX_COMPANION_APK_PATH={companion}\n"
+            + f"OPENCLAW_LINUX_COMPANION_APK_SHA256={companion_sha256}\n"
             + f"OPENCLAW_ENTITLEMENT_PRIVATE_KEY_FILE={private_key}\n"
             + "OPENCLAW_ENTITLEMENT_KEY_ID=openclaw-ed25519-v1\n",
             encoding="utf-8",

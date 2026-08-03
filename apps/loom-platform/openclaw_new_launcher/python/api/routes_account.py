@@ -721,9 +721,9 @@ def register_account_routes(app, ctx) -> None:
                     try:
                         await asyncio.to_thread(manager.refresh_current)
                     except NewApiAccountError as refresh_error:
-                        response["entitlementSyncPending"] = True
+                        response["subscriptionSyncPending"] = True
                         ctx.append_log(
-                            "[Account] paid order verified; entitlement refresh pending: "
+                            "[Account] paid native subscription verified; account refresh pending: "
                             f"{_redact_secret_text(refresh_error)}\n"
                         )
                     response["account"] = await asyncio.to_thread(

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import base64
+import hashlib
+import json
 import sqlite3
 import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -231,6 +234,7 @@ class BindTicketTests(unittest.TestCase):
                     used_quota integer default 0,
                     request_count integer default 0,
                     aff_code text default '',
+                    access_token char(32),
                     deleted_at datetime
                 );
                 create table tokens (
@@ -256,6 +260,41 @@ class BindTicketTests(unittest.TestCase):
                     key text primary key,
                     value text
                 );
+                create table subscription_plans (
+                    id integer primary key,
+                    title text not null,
+                    subtitle text default '',
+                    price_amount numeric not null,
+                    currency text not null,
+                    duration_unit text not null,
+                    duration_value integer not null,
+                    custom_seconds integer default 0,
+                    enabled numeric default 1,
+                    sort_order integer default 0,
+                    allow_balance_pay numeric default 1,
+                    allow_wallet_overflow numeric default 1,
+                    max_purchase_per_user integer default 0,
+                    upgrade_group text default '',
+                    downgrade_group text default '',
+                    total_amount integer default 0,
+                    quota_reset_period text default 'never',
+                    quota_reset_custom_seconds integer default 0,
+                    created_at integer default 0,
+                    updated_at integer default 0
+                );
+                create table subscription_orders (
+                    id integer primary key autoincrement,
+                    user_id integer not null,
+                    plan_id integer not null,
+                    money numeric not null,
+                    trade_no text not null unique,
+                    payment_method text not null,
+                    payment_provider text not null,
+                    status text not null,
+                    create_time integer not null,
+                    complete_time integer default 0,
+                    provider_payload text default ''
+                );
                 """
             )
             password_hash = bcrypt.hashpw(b"password-not-real", bcrypt.gensalt(rounds=4)).decode("utf-8")
@@ -266,6 +305,16 @@ class BindTicketTests(unittest.TestCase):
             connection.execute(
                 'insert into tokens(user_id, key, status, name, created_time, expired_time, remain_quota, unlimited_quota, model_limits_enabled, model_limits, "group", deleted_at) values(42, ?, 1, ?, 1, -1, 0, 1, 0, "", "default", null)',
                 ("sk-test-secret-value", "LOOM test token"),
+            )
+            connection.execute(
+                """
+                insert into subscription_plans(
+                    id, title, subtitle, price_amount, currency,
+                    duration_unit, duration_value, enabled, sort_order,
+                    max_purchase_per_user, total_amount, quota_reset_period
+                ) values(1, '基础套餐', '模型服务基础订阅', 50, 'USD',
+                         'month', 1, 1, 100, 0, 100000000, 'daily')
+                """
             )
             connection.commit()
         finally:
@@ -1356,37 +1405,97 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(payload["phoneSeatLease"]["phoneDeviceIds"], ["phone-c"])
         self.verify_lease_signature(payload["phoneSeatLease"])
 
-    def test_payment_bridge_binds_every_request_to_authenticated_account(self):
+    def test_payment_bridge_buys_native_subscription_with_nominal_usd_cny_mapping(self):
         calls = []
+        trade_no = "SUBUSR42NOABC123456789"
 
-        def service(path, body):
-            calls.append((path, dict(body)))
-            if path.endswith("/plans"):
+        def upstream(_opener, path, *, method="GET", body=None, headers=None, timeout=20):
+            calls.append((path, method, dict(body or {}), dict(headers or {})))
+            self.assertNotIn("sk-test-secret-value", json.dumps(headers or {}))
+            self.assertEqual("42", (headers or {}).get("New-Api-User"))
+            self.assertTrue(str((headers or {}).get("Authorization") or "").startswith("Bearer "))
+            if path == "/api/subscription/plans":
                 return {
-                    "ok": True,
-                    "plans": [{"planKey": "monthly", "amountMinor": 9900}],
-                    "payment": {"configured": True, "channels": ["alipay"]},
+                    "success": True,
+                    "data": [
+                        {
+                            "plan": {
+                                "id": 1,
+                                "title": "基础套餐",
+                                "subtitle": "模型服务基础订阅",
+                                "price_amount": 50,
+                                "currency": "USD",
+                                "duration_unit": "month",
+                                "duration_value": 1,
+                                "enabled": True,
+                                "total_amount": 100000000,
+                                "quota_reset_period": "daily",
+                            }
+                        }
+                    ],
                 }
-            return {
-                "ok": True,
-                "order": {
-                    "orderId": "order-1",
-                    "planKey": "monthly",
-                    "status": "pending",
-                    "qrcode": "https://pay.example/qr/1",
-                },
-            }
+            if path == "/api/user/topup/info":
+                return {
+                    "success": True,
+                    "data": {
+                        "enable_online_topup": True,
+                        "payment_compliance_confirmed": True,
+                        "pay_methods": [{"name": "支付宝", "type": "alipay"}],
+                    },
+                }
+            if path == "/api/subscription/epay/pay":
+                self.assertEqual(
+                    {"plan_id": 1, "payment_method": "alipay"}, body
+                )
+                connection = sqlite3.connect(self.bridge.DB_PATH)
+                try:
+                    connection.execute(
+                        """
+                        insert into subscription_orders(
+                            user_id, plan_id, money, trade_no, payment_method,
+                            payment_provider, status, create_time
+                        ) values(42, 1, 50, ?, 'alipay', 'epay', 'pending', ?)
+                        """,
+                        (trade_no, int(time.time())),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                return {
+                    "message": "success",
+                    "url": "https://zpayz.cn/submit.php",
+                    "data": {
+                        "pid": "merchant-1",
+                        "type": "alipay",
+                        "out_trade_no": trade_no,
+                        "notify_url": "https://api.example/api/subscription/epay/notify",
+                        "return_url": "https://api.example/api/subscription/epay/return",
+                        "name": "SUB:基础套餐",
+                        "money": "50.00",
+                        "sign": "fixed-order-signature",
+                        "sign_type": "MD5",
+                    },
+                }
+            raise AssertionError(f"unexpected upstream path: {path}")
 
-        self.bridge._license_service_json = service
+        self.bridge.request_json = upstream
+        self.bridge.PUBLIC_API_BASE = "https://api.heang.top/v1"
+        self.bridge.SUBSCRIPTION_PAYMENT_FORM_HOSTS = frozenset({"zpayz.cn"})
         token = "Bearer sk-test-secret-value"
         status, plans = self.bridge.handle_payment_plans(
             {"accountId": "attacker"}, token
         )
         self.assertEqual(200, status, plans)
+        plan = plans["data"]["plans"][0]
+        self.assertEqual("newapi-subscription-1", plan["planKey"])
+        self.assertEqual("50.00", plan["amount"])
+        self.assertEqual("CNY", plan["currency"])
+        self.assertEqual("USD", plan["sourceCurrency"])
+        self.assertEqual("nominal_1_to_1", plan["pricingRule"])
         status, created = self.bridge.handle_payment_order_create(
             {
                 "accountId": "attacker",
-                "planKey": "monthly",
+                "planKey": "newapi-subscription-1",
                 "paymentType": "alipay",
                 "requestId": "click-1",
                 "clientIp": "198.51.100.200",
@@ -1395,35 +1504,126 @@ class BindTicketTests(unittest.TestCase):
             "203.0.113.41",
         )
         self.assertEqual(200, status, created)
+        order = created["data"]["order"]
+        self.assertEqual(trade_no, order["orderId"])
+        self.assertEqual("pending", order["status"])
+        self.assertEqual("50.00", order["amount"])
+        self.assertEqual("CNY", order["currency"])
+        checkout_url = urllib.parse.urlparse(order["qrcode"])
+        self.assertEqual("https", checkout_url.scheme)
+        self.assertEqual("api.heang.top", checkout_url.hostname)
+        self.assertEqual("/api/openclaw/subscriptions/checkout", checkout_url.path)
+        checkout_token = urllib.parse.parse_qs(checkout_url.query)["token"][0]
+        self.assertNotIn(checkout_token.encode("utf-8"), Path(self.bridge.BIND_DB_PATH).read_bytes())
+
+        status, repeated = self.bridge.handle_payment_order_create(
+            {
+                "planKey": "newapi-subscription-1",
+                "paymentType": "alipay",
+                "requestId": "click-1",
+            },
+            token,
+            "203.0.113.41",
+        )
+        self.assertEqual(200, status, repeated)
+        self.assertEqual(trade_no, repeated["data"]["order"]["orderId"])
+        self.assertEqual(
+            1,
+            len([call for call in calls if call[0] == "/api/subscription/epay/pay"]),
+        )
+
+        status, checkout_html, form_origin = self.bridge.handle_subscription_checkout(
+            checkout_token
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("https://zpayz.cn", form_origin)
+        self.assertIn('action="https://zpayz.cn/submit.php"', checkout_html)
+        self.assertIn('name="out_trade_no"', checkout_html)
+        self.assertIn('value="fixed-order-signature"', checkout_html)
+        self.assertNotIn("sk-test-secret-value", checkout_html)
+
         status, queried = self.bridge.handle_payment_order_status(
             {
                 "accountId": "attacker",
-                "orderId": "order-1",
+                "orderId": trade_no,
                 "reconcile": True,
             },
             token,
         )
         self.assertEqual(200, status, queried)
-        self.assertEqual(
-            [
-                "/api/service/payments/plans",
-                "/api/service/payments/orders/create",
-                "/api/service/payments/orders/status",
-            ],
-            [path for path, _body in calls],
+        self.assertEqual("pending", queried["data"]["order"]["status"])
+
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        try:
+            connection.execute(
+                "update subscription_orders set status = 'success', complete_time = ? where trade_no = ?",
+                (int(time.time()), trade_no),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        status, queried = self.bridge.handle_payment_order_status(
+            {"orderId": trade_no}, token
         )
-        self.assertTrue(all(body["accountId"] == "42" for _path, body in calls))
-        self.assertEqual("203.0.113.41", calls[1][1]["clientIp"])
-        self.assertTrue(calls[2][1]["reconcile"])
-        self.assertEqual("monthly", created["data"]["order"]["planKey"])
+        self.assertEqual(200, status, queried)
+        self.assertEqual("paid", queried["data"]["order"]["status"])
 
         before = len(calls)
         status, denied = self.bridge.handle_payment_order_create(
-            {"planKey": "monthly", "requestId": "click-2"}, ""
+            {"planKey": "newapi-subscription-1", "requestId": "click-2"}, ""
         )
         self.assertEqual(401, status)
         self.assertEqual("account_token_required", denied["code"])
         self.assertEqual(before, len(calls))
+
+    def test_subscription_payment_request_id_cannot_be_reused_for_other_terms(self):
+        connection = self.bridge._bind_connection()
+        try:
+            connection.execute(
+                """
+                insert into subscription_checkout_requests(
+                    account_id, request_id, plan_id, payment_method, status,
+                    order_id, order_json, checkout_token_hash, checkout_payload,
+                    created_at, expires_at
+                ) values('42', 'same-click', 1, 'alipay', 'pending',
+                         'SUB-1', '{}', '', '{}', ?, ?)
+                """,
+                (int(time.time()), int(time.time()) + 3600),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        status, payload = self.bridge.handle_payment_order_create(
+            {
+                "planKey": "newapi-subscription-2",
+                "paymentType": "alipay",
+                "requestId": "same-click",
+            },
+            "Bearer sk-test-secret-value",
+        )
+
+        self.assertEqual(409, status)
+        self.assertEqual("payment_request_conflict", payload["code"])
+
+    def test_linux_companion_download_is_bound_to_an_immutable_digest(self):
+        artifact = Path(self.tmp.name) / "LumiLinuxRuntime.apk"
+        artifact.write_bytes(b"verified-companion-apk")
+        expected = hashlib.sha256(artifact.read_bytes()).hexdigest().upper()
+        original_path = self.bridge.LINUX_COMPANION_APK_PATH
+        original_hash = self.bridge.LINUX_COMPANION_APK_SHA256
+        try:
+            self.bridge.LINUX_COMPANION_APK_PATH = str(artifact)
+            self.bridge.LINUX_COMPANION_APK_SHA256 = expected
+            verified = self.bridge.linux_companion_artifact()
+            self.assertIsNotNone(verified)
+            self.assertEqual(str(artifact), verified[0])
+            self.assertEqual(artifact.stat().st_size, verified[1])
+            artifact.write_bytes(b"tampered")
+            self.assertIsNone(self.bridge.linux_companion_artifact())
+        finally:
+            self.bridge.LINUX_COMPANION_APK_PATH = original_path
+            self.bridge.LINUX_COMPANION_APK_SHA256 = original_hash
 
     def test_payment_http_boundary_requires_bearer_and_grants_no_browser_cors(self):
         status, denied = self.bridge.handle_payment_plans({}, "")

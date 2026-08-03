@@ -231,7 +231,7 @@ function createPaymentQrDataUri(value?: string): string {
 function paymentStatusText(status?: string): string {
   const values: Record<string, string> = {
     pending: '等待扫码支付',
-    paid: '支付成功，权益已同步',
+    paid: '支付成功，模型订阅已同步',
     expired: '订单已过期，请重新下单',
     creation_uncertain: '订单创建结果待确认，请勿重复付款',
     failed: '订单失败，请重新下单',
@@ -451,15 +451,12 @@ export const LicensePage: React.FC = () => {
       if (response.order.status === 'paid') {
         clearPaymentResume(identity);
         if (response.account) applyAccount(response.account);
-        const refreshResults = await Promise.allSettled([
-          checkLicense(),
-          loadSubscription(true),
-        ]);
-        const localSyncPending = response.entitlementSyncPending
+        const refreshResults = await Promise.allSettled([loadSubscription(true)]);
+        const localSyncPending = response.subscriptionSyncPending
           || refreshResults.some((result) => result.status === 'rejected');
         const message = localSyncPending
-          ? '支付已确认，权益正在同步；请稍后点击刷新账号。'
-          : '支付已确认，手机矩阵、云模板和 Skill 权益已开通。';
+          ? '支付已确认，模型订阅信息正在从服务端刷新；请稍后点击刷新账号。'
+          : '支付已确认，模型订阅已同步。';
         setStatusText(message);
         showToast(message, localSyncPending ? 'info' : 'success');
       } else {
@@ -486,7 +483,7 @@ export const LicensePage: React.FC = () => {
         setPaymentBusy(false);
       }
     }
-  }, [applyAccount, checkLicense, loadSubscription]);
+  }, [applyAccount, loadSubscription]);
 
   const startPayment = async (planKey: string) => {
     if (!accountWritable) {
@@ -1012,7 +1009,7 @@ export const LicensePage: React.FC = () => {
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
                 <div>
                   <h2 className="text-lg font-black text-text">账户与余额</h2>
-                  <p className="mt-1 text-xs leading-5 text-text-muted">充值、消耗记录与 API 密钥由模型服务同步；矩阵套餐可在麓鸣内扫码购买。</p>
+                  <p className="mt-1 text-xs leading-5 text-text-muted">充值、消耗记录、API 密钥和模型订阅均由服务端同步；订阅可在麓鸣内扫码购买。</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <span
@@ -1048,9 +1045,9 @@ export const LicensePage: React.FC = () => {
                 >
                   <div className="flex flex-wrap items-center justify-between gap-4">
                     <div>
-                      <div className="text-sm font-black text-text">矩阵套餐与购买</div>
+                      <div className="text-sm font-black text-text">模型服务订阅与购买</div>
                       <div className="mt-1 text-xs leading-5 text-text-muted">
-                        手机矩阵、获客、飞书流转、云模板和 Skill 共用同一份矩阵授权。
+                        直接购买服务端原生订阅；服务端 USD 数值按 1:1 显示为人民币，不做汇率换算。矩阵授权仍独立管理。
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -1117,7 +1114,7 @@ export const LicensePage: React.FC = () => {
                               <div>
                                 <div className="text-base font-black text-text">{plan.displayName}</div>
                                 <div className="mt-1 text-xs leading-5 text-text-muted">
-                                  {plan.description || `${plan.durationDays} 天矩阵授权`}
+                                  {plan.description || `${plan.durationDays} 天模型服务订阅`}
                                 </div>
                               </div>
                               <div className="shrink-0 text-right">
@@ -1148,7 +1145,7 @@ export const LicensePage: React.FC = () => {
                     <div className="rounded-[8px] border border-border bg-surface-alt/35 px-4 py-3 text-xs leading-5 text-text-muted">
                       {paymentCatalogLoading
                         ? '正在从服务端加载可购买套餐...'
-                        : '在线扫码套餐尚未开放；仍可通过账户中心查看其他模型服务套餐。'}
+                        : '服务端暂未开放可购买订阅，或支付配置尚未通过安全检查。'}
                     </div>
                   )}
 
@@ -1167,12 +1164,12 @@ export const LicensePage: React.FC = () => {
                       <div className="min-w-0">
                         <div className="text-xs font-black text-accent">{paymentStatusText(paymentOrder.status)}</div>
                         <div className="mt-2 text-lg font-black text-text">
-                          {paymentOrder.displayName || paymentOrder.planKey || '矩阵套餐'} · ¥{paymentOrder.amount || '--'}
+                          {paymentOrder.displayName || paymentOrder.planKey || '模型服务订阅'} · ¥{paymentOrder.amount || '--'}
                         </div>
                         <div className="mt-2 break-all text-xs leading-5 text-text-muted">订单号：{paymentOrder.orderId}</div>
                         <div className="mt-1 text-xs leading-5 text-text-muted">有效期：{formatTime(paymentOrder.expiresAt, '以支付页面为准')}</div>
                         <p className="mt-3 text-xs leading-5 text-text-muted">
-                          开通只以服务端验签通知或服务端向支付平台主动查单并严格核对后的结果为准；返回页不会直接发放权益。
+                          开通只以服务端验签通知和原生订阅订单状态为准；返回页不会直接开通订阅，也不会改变矩阵授权。
                         </p>
                         <div className="mt-4 flex flex-wrap gap-2">
                           <button

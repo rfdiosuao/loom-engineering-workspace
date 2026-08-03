@@ -386,6 +386,7 @@
     <string name="skill_runtime_checking">正在检查伴随组件和运行时完整性…</string>
     <string name="skill_runtime_ready">PRoot 5.1.107.89 + Alpine 3.22.5 已就绪 · 默认禁止联网</string>
     <string name="skill_runtime_installing">正在安装并执行离线健康检查…</string>
+    <string name="skill_runtime_downloading">正在下载并校验已签名的 Linux 伴随组件…</string>
     <string name="skill_runtime_missing">尚未安装或初始化可选 Linux 伴随组件</string>
     <string name="skill_runtime_damaged">运行时完整性检查失败，需要重新安装</string>
     <string name="skill_runtime_disabled">Linux 运行时已停用；标准 Agent 能力不受影响</string>
@@ -393,6 +394,9 @@
     <string name="skill_runtime_recheck">重新自检 Linux 运行时</string>
     <string name="skill_runtime_install_success">Linux 运行时已就绪</string>
     <string name="skill_runtime_install_failed">Linux 运行时安装失败：%1$s</string>
+    <string name="skill_runtime_unknown_sources">请允许 Lumi Agent Phone 安装已验证的伴随组件，然后返回这里继续。</string>
+    <string name="skill_runtime_confirm_install">Linux 伴随组件已通过包名、哈希和签名校验，请在 Android 系统界面确认安装。</string>
+    <string name="skill_runtime_install_cancelled">Linux 伴随组件没有完成安装，运行时未发生变更。</string>
     <string name="skill_status_ready">已就绪 · Agent 可调用</string>
     <string name="skill_status_needs_validation">已学习 · 完成验证后可自动复用</string>
     <string name="skill_status_degraded">检测到运行差异，已暂停</string>

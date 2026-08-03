@@ -115,7 +115,7 @@ class WindowsSandboxAcceptanceContractTests(unittest.TestCase):
     def test_checklist_covers_the_required_novice_click_paths_and_limits(self) -> None:
         source = self._read(CHECKLIST)
         for marker in (
-            "2.4.5",
+            "2.4.6",
             "Codex Desktop",
             "Codex CLI",
             "ChatGPT Desktop",
@@ -144,7 +144,7 @@ class WindowsSandboxAcceptanceContractTests(unittest.TestCase):
             candidate = os.path.join(root, "candidate")
             output = os.path.join(root, "evidence")
             os.makedirs(candidate)
-            installer = os.path.join(candidate, "麓鸣_2.4.5_x64-setup.exe")
+            installer = os.path.join(candidate, "麓鸣_2.4.6_x64-setup.exe")
             payload = b"test installer placeholder"
             with open(installer, "wb") as handle:
                 handle.write(payload)
@@ -172,7 +172,7 @@ class WindowsSandboxAcceptanceContractTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
-            tree = ET.parse(os.path.join(output, "Luming-2.4.5-Acceptance.wsb"))
+            tree = ET.parse(os.path.join(output, "Luming-2.4.6-Acceptance.wsb"))
             mappings = {
                 item.findtext("SandboxFolder"): item.findtext("ReadOnly")
                 for item in tree.findall("./MappedFolders/MappedFolder")
@@ -194,7 +194,7 @@ class WindowsSandboxAcceptanceContractTests(unittest.TestCase):
                 bootstrap_config = json.load(handle)
             self.assertEqual(bootstrap_config["candidateRoot"], "C:\\LumingCandidate")
             self.assertEqual(bootstrap_config["evidenceRoot"], "C:\\LumingEvidence")
-            self.assertEqual(bootstrap_config["installerName"], "麓鸣_2.4.5_x64-setup.exe")
+            self.assertEqual(bootstrap_config["installerName"], "麓鸣_2.4.6_x64-setup.exe")
             self.assertEqual(
                 bootstrap_config["expectedSha256"],
                 hashlib.sha256(payload).hexdigest().upper(),

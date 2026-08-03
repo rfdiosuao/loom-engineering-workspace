@@ -1,5 +1,6 @@
 package com.apk.claw.android.ui.skill
 
+import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -12,6 +13,9 @@ import androidx.lifecycle.lifecycleScope
 import com.apk.claw.android.R
 import com.apk.claw.android.base.BaseActivity
 import com.apk.claw.android.runtime.LinuxRuntimeCompanionClient
+import com.apk.claw.android.runtime.LinuxRuntimeCompanionInstaller
+import com.apk.claw.android.runtime.LinuxRuntimeInstallAction
+import com.apk.claw.android.runtime.LinuxRuntimeInstallPolicy
 import com.apk.claw.android.skill.LinuxSkillRuntimeState
 import com.apk.claw.android.skill.SkillCardModel
 import com.apk.claw.android.skill.SkillCenterCatalog
@@ -30,6 +34,7 @@ class SkillCenterActivity : BaseActivity() {
     private lateinit var summary: TextView
     private lateinit var skillList: LinearLayout
     private var currentRuntimeState = LinuxSkillRuntimeState.MISSING
+    private var pendingInstallStep = PendingInstallStep.NONE
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,11 +48,19 @@ class SkillCenterActivity : BaseActivity() {
         summary = findViewById(R.id.tvSkillSummary)
         skillList = findViewById(R.id.skillList)
         runtimeAction.setOnClickListener { installAndVerifyRuntime() }
+        pendingInstallStep = savedInstanceState?.getString(STATE_PENDING_INSTALL)
+            ?.let { value -> runCatching { PendingInstallStep.valueOf(value) }.getOrNull() }
+            ?: PendingInstallStep.NONE
     }
 
     override fun onResume() {
         super.onResume()
-        refresh()
+        if (pendingInstallStep == PendingInstallStep.NONE) refresh() else resumeCompanionInstall()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(STATE_PENDING_INSTALL, pendingInstallStep.name)
+        super.onSaveInstanceState(outState)
     }
 
     private fun refresh() {
@@ -127,7 +140,7 @@ class SkillCenterActivity : BaseActivity() {
         if (card.kind == SkillKind.LINUX) {
             container.addView(Button(this).apply {
                 text = getString(R.string.skill_test_action)
-                isEnabled = card.callable
+                styleSkillAction(card.callable)
                 setOnClickListener { testLinuxSkill(card.id) }
             })
         } else {
@@ -137,30 +150,143 @@ class SkillCenterActivity : BaseActivity() {
                 } else {
                     getString(R.string.skill_delete_action)
                 }
-                isEnabled = !card.callable
+                styleSkillAction(!card.callable)
                 setOnClickListener { confirmDelete(card.id, card.title) }
             })
         }
         return container
     }
 
+    private fun Button.styleSkillAction(enabled: Boolean) {
+        isEnabled = enabled
+        backgroundTintList = ColorStateList.valueOf(
+            getColor(
+                if (enabled) R.color.colorBrandPrimary else R.color.colorContainerHighest
+            )
+        )
+        setTextColor(
+            getColor(
+                if (enabled) R.color.colorBrandOnPrimary else R.color.colorTextDisabled
+            )
+        )
+    }
+
     private fun installAndVerifyRuntime() {
         runtimeAction.isEnabled = false
         runtimeStatus.text = getString(R.string.skill_runtime_installing)
         lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                LinuxRuntimeCompanionClient.install(this@SkillCenterActivity)
+            val distribution = LinuxRuntimeCompanionInstaller.configuredDistribution()
+            val companionInstalled = withContext(Dispatchers.IO) {
+                LinuxRuntimeCompanionInstaller.isCompanionInstalled(
+                    this@SkillCenterActivity,
+                    distribution
+                )
             }
-            Toast.makeText(
-                this@SkillCenterActivity,
-                if (result.success) getString(R.string.skill_runtime_install_success) else getString(
-                    R.string.skill_runtime_install_failed,
-                    result.code
-                ),
-                Toast.LENGTH_LONG
-            ).show()
-            refresh()
+            val decision = LinuxRuntimeInstallPolicy.decide(
+                currentRuntimeState,
+                companionInstalled,
+                distribution
+            )
+            when (decision.action) {
+                LinuxRuntimeInstallAction.DOWNLOAD_COMPANION -> {
+                    runtimeStatus.text = getString(R.string.skill_runtime_downloading)
+                    val downloaded = withContext(Dispatchers.IO) {
+                        LinuxRuntimeCompanionInstaller.downloadAndVerify(
+                            this@SkillCenterActivity,
+                            requireNotNull(distribution)
+                        )
+                    }
+                    if (!downloaded.success) {
+                        showRuntimeFailure(downloaded.code)
+                        return@launch
+                    }
+                    handleInstallPrompt(LinuxRuntimeCompanionInstaller.promptInstall(this@SkillCenterActivity))
+                }
+                LinuxRuntimeInstallAction.INITIALIZE_RUNTIME -> initializeRuntime()
+                LinuxRuntimeInstallAction.RECHECK_RUNTIME -> {
+                    val result = withContext(Dispatchers.IO) {
+                        LinuxRuntimeCompanionClient.status(this@SkillCenterActivity)
+                    }
+                    if (result.success) showRuntimeSuccess() else showRuntimeFailure(result.code)
+                }
+                LinuxRuntimeInstallAction.BLOCKED -> showRuntimeFailure(decision.code)
+            }
         }
+    }
+
+    private fun resumeCompanionInstall() {
+        val previousStep = pendingInstallStep
+        pendingInstallStep = PendingInstallStep.NONE
+        lifecycleScope.launch {
+            val installed = withContext(Dispatchers.IO) {
+                LinuxRuntimeCompanionInstaller.isCompanionInstalled(this@SkillCenterActivity)
+            }
+            if (installed) {
+                initializeRuntime()
+                return@launch
+            }
+            if (previousStep == PendingInstallStep.UNKNOWN_SOURCES) {
+                val result = LinuxRuntimeCompanionInstaller.promptInstall(this@SkillCenterActivity)
+                if (result.code == "unknown_sources_permission_required") {
+                    showRuntimeFailure("unknown_sources_permission_denied")
+                } else {
+                    handleInstallPrompt(result)
+                }
+            } else {
+                Toast.makeText(
+                    this@SkillCenterActivity,
+                    getString(R.string.skill_runtime_install_cancelled),
+                    Toast.LENGTH_LONG
+                ).show()
+                refresh()
+            }
+        }
+    }
+
+    private suspend fun initializeRuntime() {
+        runtimeStatus.text = getString(R.string.skill_runtime_installing)
+        val result = withContext(Dispatchers.IO) {
+            LinuxRuntimeCompanionClient.install(this@SkillCenterActivity)
+        }
+        if (result.success) showRuntimeSuccess() else showRuntimeFailure(result.code)
+    }
+
+    private fun handleInstallPrompt(result: com.apk.claw.android.runtime.LinuxCompanionInstallResult) {
+        if (!result.success) {
+            showRuntimeFailure(result.code)
+            return
+        }
+        pendingInstallStep = when (result.code) {
+            "unknown_sources_permission_required" -> PendingInstallStep.UNKNOWN_SOURCES
+            "package_installer_launched" -> PendingInstallStep.PACKAGE_INSTALLER
+            else -> PendingInstallStep.NONE
+        }
+        Toast.makeText(
+            this,
+            getString(
+                if (pendingInstallStep == PendingInstallStep.UNKNOWN_SOURCES) {
+                    R.string.skill_runtime_unknown_sources
+                } else {
+                    R.string.skill_runtime_confirm_install
+                }
+            ),
+            Toast.LENGTH_LONG
+        ).show()
+        if (pendingInstallStep == PendingInstallStep.NONE) refresh()
+    }
+
+    private fun showRuntimeSuccess() {
+        Toast.makeText(this, getString(R.string.skill_runtime_install_success), Toast.LENGTH_LONG).show()
+        refresh()
+    }
+
+    private fun showRuntimeFailure(code: String) {
+        Toast.makeText(
+            this,
+            getString(R.string.skill_runtime_install_failed, code),
+            Toast.LENGTH_LONG
+        ).show()
+        refresh()
     }
 
     private fun testLinuxSkill(skillId: String) {
@@ -213,4 +339,14 @@ class SkillCenterActivity : BaseActivity() {
     )
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private enum class PendingInstallStep {
+        NONE,
+        UNKNOWN_SOURCES,
+        PACKAGE_INSTALLER
+    }
+
+    private companion object {
+        const val STATE_PENDING_INSTALL = "pending_linux_companion_install"
+    }
 }

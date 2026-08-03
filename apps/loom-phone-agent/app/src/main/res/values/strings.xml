@@ -386,6 +386,7 @@
     <string name="skill_runtime_checking">Checking companion and runtime integrity…</string>
     <string name="skill_runtime_ready">PRoot 5.1.107.89 + Alpine 3.22.5 is ready · network denied by default</string>
     <string name="skill_runtime_installing">Installing and running the offline health check…</string>
+    <string name="skill_runtime_downloading">Downloading and verifying the signed Linux companion…</string>
     <string name="skill_runtime_missing">Optional Linux companion is not installed or initialized</string>
     <string name="skill_runtime_damaged">Runtime integrity check failed; reinstall is required</string>
     <string name="skill_runtime_disabled">Linux runtime is disabled; standard Agent capabilities remain available</string>
@@ -393,6 +394,9 @@
     <string name="skill_runtime_recheck">Recheck Linux runtime</string>
     <string name="skill_runtime_install_success">Linux runtime is ready</string>
     <string name="skill_runtime_install_failed">Linux runtime setup failed: %1$s</string>
+    <string name="skill_runtime_unknown_sources">Allow Lumi Agent Phone to install this verified companion, then return here.</string>
+    <string name="skill_runtime_confirm_install">The Linux companion passed package, hash and signature checks. Confirm installation in the Android system window.</string>
+    <string name="skill_runtime_install_cancelled">Linux companion installation was not completed. No runtime changes were made.</string>
     <string name="skill_status_ready">Ready · Agent can call it</string>
     <string name="skill_status_needs_validation">Learned · validation required before automatic reuse</string>
     <string name="skill_status_degraded">Paused after runtime mismatch</string>

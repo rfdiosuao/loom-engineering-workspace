@@ -350,16 +350,18 @@ test('account and subscription controls refresh, navigate, sync, open mocked pay
   await expect(appMain(page).getByRole('heading', { name: '登录模型账户' })).toBeVisible();
 });
 
-test('native matrix checkout renders qrcode and grants shared rights only after verified paid status', async ({ audit, page }) => {
+test('native model subscription checkout renders qrcode and never grants matrix rights', async ({ audit, page }) => {
   const paymentPlan = {
-    planKey: 'matrix-year-audit',
-    displayName: '矩阵年付测试套餐',
-    description: '手机矩阵、获客、飞书、云模板和 Skill 共用授权',
-    durationDays: 365,
-    amountMinor: 29900,
-    amount: '299.00',
+    planKey: 'newapi-plan-basic-audit',
+    displayName: '基础模型订阅',
+    description: '服务端原生模型套餐',
+    durationDays: 30,
+    amountMinor: 5000,
+    amount: '50.00',
     currency: 'CNY',
-    benefits: ['不限手机数量', '共享模板中心', 'Skill 复用'],
+    sourceCurrency: 'USD',
+    pricingRule: 'nominal_1_to_1',
+    benefits: ['模型调用额度', '服务端原生订阅'],
   };
   const pendingOrder = {
     orderId: 'pay_order_audit_001',
@@ -387,7 +389,7 @@ test('native matrix checkout renders qrcode and grants shared rights only after 
   await audit.registerRoute('GET', '/api/account/payments/plans', {
     value: {
       plans: [paymentPlan],
-      payment: { provider: 'zpay', configured: true, channels: ['alipay', 'wxpay'] },
+      payment: { provider: 'newapi-epay', configured: true, channels: ['alipay', 'wxpay'] },
     },
   });
   await audit.registerRoute('POST', '/api/account/payments/order', { value: { order: pendingOrder } });
@@ -398,7 +400,8 @@ test('native matrix checkout renders qrcode and grants shared rights only after 
   const main = appMain(page);
   await expect(main.locator('[data-native-payment-catalog]')).toBeVisible();
   await expect(main.getByText(paymentPlan.displayName, { exact: true })).toBeVisible();
-  await expect(main.getByText('手机矩阵、获客、飞书流转、云模板和 Skill 共用同一份矩阵授权。')).toBeVisible();
+  await expect(main.getByText('直接购买服务端原生订阅；服务端 USD 数值按 1:1 显示为人民币，不做汇率换算。矩阵授权仍独立管理。')).toBeVisible();
+  await expect(main.getByText('¥50.00', { exact: true })).toBeVisible();
 
   const beforeCreate = await markCalls(audit);
   await main.getByRole('button', { name: '支付宝扫码购买' }).click();
@@ -444,7 +447,7 @@ test('native matrix checkout renders qrcode and grants shared rights only after 
     value: {
       order: paidOrder,
       account: AUDIT_ACCOUNT_WITH_CHOICES,
-      entitlementSyncPending: false,
+      subscriptionSyncPending: false,
     },
   });
   const beforePaidQuery = await markCalls(audit);
@@ -452,8 +455,11 @@ test('native matrix checkout renders qrcode and grants shared rights only after 
   await expectProxyIntent(audit, beforePaidQuery, {
     method: 'POST', path: '/api/account/payments/order/status', body: { orderId: paidOrder.orderId, reconcile: true },
   });
-  await expectToast(page, '支付已确认，手机矩阵、云模板和 Skill 权益已开通。');
-  await expect(main.getByText('支付成功，权益已同步', { exact: true })).toBeVisible();
+  await expectToast(page, '支付已确认，模型订阅已同步。');
+  await expect(main.getByText('支付成功，模型订阅已同步', { exact: true })).toBeVisible();
+  await audit.sync();
+  expect(proxyIntents(callsAfter(audit, beforePaidQuery)))
+    .not.toContainEqual(expect.objectContaining({ path: '/api/license/authorized' }));
 });
 
 test('checkout reuses the same idempotency key after an uncertain create result', async ({ audit, page }) => {

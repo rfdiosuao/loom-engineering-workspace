@@ -35,6 +35,24 @@ val oemAppName = providers.gradleProperty("OEM_APP_NAME").orNull?.trim().orEmpty
 val oemFilePrefix = providers.gradleProperty("OEM_FILE_PREFIX").orNull?.trim().orEmpty()
     .ifEmpty { "AgentPhone" }
 val oemResDir = providers.gradleProperty("OEM_RES_DIR").orNull?.trim().orEmpty()
+val linuxCompanionUrl = (
+    providers.gradleProperty("LUMI_LINUX_COMPANION_URL").orNull
+        ?: System.getenv("LUMI_LINUX_COMPANION_URL")
+        ?: "https://api.heang.top/api/openclaw/downloads/linux-runtime.apk"
+).trim()
+val linuxCompanionSha256 = (
+    providers.gradleProperty("LUMI_LINUX_COMPANION_SHA256").orNull
+        ?: System.getenv("LUMI_LINUX_COMPANION_SHA256")
+        ?: "3E301AEBFE8F1E6E9F5736D0FAE9577967281180DAE938B1CB03D65E04208DD6"
+).trim().uppercase()
+val linuxCompanionSignerSha256 = (
+    providers.gradleProperty("LUMI_LINUX_COMPANION_SIGNER_SHA256").orNull
+        ?: System.getenv("LUMI_LINUX_COMPANION_SIGNER_SHA256")
+        ?: "F6194A531BDD82F020080D21567E88864A1D8AC4BC27904FDF5DF46151426B6D"
+).trim().uppercase()
+
+fun quotedBuildConfig(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
 fun releaseBuildRequested(): Boolean {
     return gradle.startParameter.taskNames.any { taskName ->
@@ -86,13 +104,17 @@ android {
         applicationId = oemApplicationId
         minSdk = if (android7Compat) 24 else 28
         targetSdk = 36
-        versionCode = 935
-        versionName = if (android7Compat) "6.66-stability-android7" else "6.66-stability"
+        versionCode = 936
+        versionName = if (android7Compat) "6.67-stability-android7" else "6.67-stability"
         manifestPlaceholders["oemAppLabel"] = oemAppName
         manifestPlaceholders["oemAppIcon"] =
             if (oemResDir.isNotEmpty()) "@mipmap/ic_launcher" else "@drawable/ic_lumi_agent_launcher"
         buildConfigField("String", "VERSION_INFO", getVersionGit())
         buildConfigField("boolean", "ANDROID7_COMPAT", android7Compat.toString())
+        buildConfigField("String", "LUMI_LINUX_COMPANION_URL", quotedBuildConfig(linuxCompanionUrl))
+        buildConfigField("String", "LUMI_LINUX_COMPANION_SHA256", quotedBuildConfig(linuxCompanionSha256))
+        buildConfigField("String", "LUMI_LINUX_COMPANION_SIGNER_SHA256", quotedBuildConfig(linuxCompanionSignerSha256))
+        buildConfigField("long", "LUMI_LINUX_COMPANION_MIN_VERSION", "1L")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

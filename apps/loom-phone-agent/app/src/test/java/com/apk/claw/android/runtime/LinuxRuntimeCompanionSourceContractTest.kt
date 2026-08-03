@@ -45,4 +45,35 @@ class LinuxRuntimeCompanionSourceContractTest {
         assertTrue(File("../linux-runtime/src/main/assets/runtime/arm64-v8a/proot").exists())
         assertTrue(File("../linux-runtime/src/main/assets/runtime/arm64-v8a/rootfs.tgz").exists())
     }
+
+    @Test
+    fun `main app securely installs a missing companion instead of retrying a missing provider`() {
+        val gradle = File("../app/build.gradle.kts").readText()
+        val manifest = File("../app/src/main/AndroidManifest.xml").readText()
+        val activity = File("../app/src/main/java/com/apk/claw/android/ui/skill/SkillCenterActivity.kt").readText()
+        val installer = File("../app/src/main/java/com/apk/claw/android/runtime/LinuxRuntimeCompanionInstaller.kt").readText()
+
+        assertTrue(gradle.contains("LUMI_LINUX_COMPANION_URL"))
+        assertTrue(gradle.contains("LUMI_LINUX_COMPANION_SHA256"))
+        assertTrue(gradle.contains("LUMI_LINUX_COMPANION_SIGNER_SHA256"))
+        assertTrue(manifest.contains("android.permission.REQUEST_INSTALL_PACKAGES"))
+        assertTrue(manifest.contains("androidx.core.content.FileProvider"))
+        assertTrue(activity.contains("LinuxRuntimeInstallPolicy.decide"))
+        assertTrue(activity.contains("LinuxRuntimeCompanionInstaller"))
+        assertTrue(installer.contains("GET_SIGNING_CERTIFICATES"))
+        assertTrue(installer.contains("COMPANION_PACKAGE"))
+        assertTrue(installer.contains("SHA-256"))
+        assertTrue(installer.contains("Intent.ACTION_VIEW"))
+        assertFalse(installer.contains("setPackageInstallerEnabled"))
+    }
+
+    @Test
+    fun `callable Skill action is visually distinct from the disabled state`() {
+        val activity = File("../app/src/main/java/com/apk/claw/android/ui/skill/SkillCenterActivity.kt").readText()
+
+        assertTrue(activity.contains("styleSkillAction"))
+        assertTrue(activity.contains("ColorStateList.valueOf"))
+        assertTrue(activity.contains("R.color.colorBrandPrimary"))
+        assertTrue(activity.contains("R.color.colorTextDisabled"))
+    }
 }

@@ -126,6 +126,10 @@ required = (
     "OPENCLAW_LICENSE_ENTITLEMENT_SERVICE_BASE",
     "OPENCLAW_BIND_DB",
     "OPENCLAW_BIND_TICKET_SECRET",
+    "OPENCLAW_SUBSCRIPTION_CHECKOUT_SECRET",
+    "OPENCLAW_SUBSCRIPTION_PAYMENT_FORM_HOSTS",
+    "OPENCLAW_LINUX_COMPANION_APK_PATH",
+    "OPENCLAW_LINUX_COMPANION_APK_SHA256",
     "OPENCLAW_ENTITLEMENT_KEY_ID",
 )
 missing = [name for name in required if not values.get(name, "").strip()]
@@ -136,6 +140,28 @@ if len(values["OPENCLAW_LICENSE_ENTITLEMENT_SERVICE_TOKEN"].encode("utf-8")) < 3
     raise SystemExit("bridge entitlement service token is too short")
 if len(values["OPENCLAW_BIND_TICKET_SECRET"].encode("utf-8")) < 32:
     raise SystemExit("bridge bind-ticket secret is too short")
+if len(values["OPENCLAW_SUBSCRIPTION_CHECKOUT_SECRET"].encode("utf-8")) < 32:
+    raise SystemExit("bridge subscription checkout secret is too short")
+payment_hosts = {
+    host.strip().lower()
+    for host in values["OPENCLAW_SUBSCRIPTION_PAYMENT_FORM_HOSTS"].split(",")
+    if host.strip()
+}
+if not payment_hosts or any("/" in host or ":" in host for host in payment_hosts):
+    raise SystemExit("bridge subscription payment form hosts must be exact hostnames")
+companion_path = Path(values["OPENCLAW_LINUX_COMPANION_APK_PATH"])
+if not companion_path.is_absolute() or not companion_path.is_file():
+    raise SystemExit("configured Linux companion APK is unavailable")
+expected_companion_hash = values["OPENCLAW_LINUX_COMPANION_APK_SHA256"].strip().upper()
+if len(expected_companion_hash) != 64 or any(c not in "0123456789ABCDEF" for c in expected_companion_hash):
+    raise SystemExit("configured Linux companion APK SHA-256 is invalid")
+import hashlib
+digest = hashlib.sha256()
+with companion_path.open("rb") as handle:
+    while chunk := handle.read(1024 * 1024):
+        digest.update(chunk)
+if digest.hexdigest().upper() != expected_companion_hash:
+    raise SystemExit("configured Linux companion APK SHA-256 does not match")
 if values["OPENCLAW_ENTITLEMENT_KEY_ID"] != "openclaw-ed25519-v1":
     raise SystemExit("bridge entitlement key id does not match the client trust anchor")
 service_url = urlparse(values["OPENCLAW_LICENSE_ENTITLEMENT_SERVICE_BASE"])

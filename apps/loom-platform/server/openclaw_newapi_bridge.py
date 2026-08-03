@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import decimal
 import http.cookiejar
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import os
@@ -57,6 +59,28 @@ BIND_DB_PATH = os.environ.get(
 )
 BIND_TICKET_TTL_SEC = int(os.environ.get("OPENCLAW_BIND_TICKET_TTL_SEC", "600"))
 BIND_TICKET_SECRET = os.environ.get("OPENCLAW_BIND_TICKET_SECRET", "").strip()
+SUBSCRIPTION_CHECKOUT_SECRET = (
+    os.environ.get("OPENCLAW_SUBSCRIPTION_CHECKOUT_SECRET", "").strip()
+    or BIND_TICKET_SECRET
+    or secrets.token_hex(32)
+)
+SUBSCRIPTION_CHECKOUT_TTL_SEC = max(
+    300,
+    min(int(os.environ.get("OPENCLAW_SUBSCRIPTION_CHECKOUT_TTL_SEC", "1800")), 3600),
+)
+SUBSCRIPTION_PAYMENT_FORM_HOSTS = frozenset(
+    host.strip().lower()
+    for host in os.environ.get("OPENCLAW_SUBSCRIPTION_PAYMENT_FORM_HOSTS", "zpayz.cn").split(",")
+    if host.strip()
+)
+LINUX_COMPANION_APK_PATH = os.environ.get(
+    "OPENCLAW_LINUX_COMPANION_APK_PATH",
+    "/opt/openclaw-newapi-bridge/downloads/LumiLinuxRuntime.apk",
+).strip()
+LINUX_COMPANION_APK_SHA256 = os.environ.get(
+    "OPENCLAW_LINUX_COMPANION_APK_SHA256",
+    "",
+).strip().upper()
 EMAIL_CODE_TTL_SEC = int(os.environ.get("OPENCLAW_EMAIL_CODE_TTL_SEC", "600"))
 EMAIL_CODE_RATE_WINDOW_SEC = int(os.environ.get("OPENCLAW_EMAIL_CODE_RATE_WINDOW_SEC", "900"))
 EMAIL_CODE_RATE_LIMIT = int(os.environ.get("OPENCLAW_EMAIL_CODE_RATE_LIMIT", "5"))
@@ -1863,6 +1887,26 @@ def _bind_connection() -> sqlite3.Connection:
             details_json text not null,
             created_at integer not null
         );
+        create table if not exists subscription_checkout_requests (
+            account_id text not null,
+            request_id text not null,
+            plan_id integer not null,
+            payment_method text not null,
+            status text not null,
+            order_id text not null default '',
+            order_json text not null default '{}',
+            checkout_token_hash text not null default '',
+            checkout_payload text not null default '{}',
+            created_at integer not null,
+            expires_at integer not null,
+            primary key(account_id, request_id)
+        );
+        create unique index if not exists subscription_checkout_order_idx
+            on subscription_checkout_requests(order_id)
+            where order_id <> '';
+        create unique index if not exists subscription_checkout_token_idx
+            on subscription_checkout_requests(checkout_token_hash)
+            where checkout_token_hash <> '';
         """
     )
     try:
@@ -3237,6 +3281,27 @@ def _payment_bridge_error(error: BridgeUpstreamError) -> tuple[int, dict[str, An
     }
 
 
+def linux_companion_artifact() -> tuple[str, int, str] | None:
+    expected = str(LINUX_COMPANION_APK_SHA256 or "").strip().upper()
+    path = str(LINUX_COMPANION_APK_PATH or "").strip()
+    if not path or not os.path.isabs(path) or not expected or len(expected) != 64:
+        return None
+    try:
+        size = os.path.getsize(path)
+        if size <= 0 or size > 32 * 1024 * 1024:
+            return None
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        actual = digest.hexdigest().upper()
+    except OSError:
+        return None
+    if not hmac.compare_digest(actual, expected):
+        return None
+    return path, size, actual
+
+
 def _payment_owner(authorization: str) -> tuple[str, tuple[int, dict[str, Any]] | None]:
     owner = api_token_owner(authorization)
     if owner:
@@ -3268,6 +3333,258 @@ def _payment_client_ip(handler: Any) -> str:
     return str(peer)
 
 
+def _subscription_access_headers(account_id: str) -> dict[str, str]:
+    user = _newapi_fetchone(
+        "select id, access_token, status, deleted_at from users where id = ? limit 1",
+        (account_id,),
+    )
+    if not user or int(user.get("status") or 0) != 1 or user.get("deleted_at"):
+        raise BridgeUpstreamError(
+            "模型服务账号不可用，请重新登录。",
+            status_code=401,
+            code="subscription_account_unavailable",
+        )
+    access_token = str(user.get("access_token") or "").strip()
+    if not access_token:
+        generated = secrets.token_hex(16)
+        _newapi_execute(
+            "update users set access_token = ? where id = ? and (access_token is null or access_token = '')",
+            (generated, account_id),
+        )
+        refreshed = _newapi_fetchone(
+            "select access_token from users where id = ? limit 1",
+            (account_id,),
+        )
+        access_token = str((refreshed or {}).get("access_token") or "").strip()
+    if len(access_token) < 16:
+        raise BridgeUpstreamError(
+            "模型服务账号令牌初始化失败，请稍后重试。",
+            status_code=503,
+            code="subscription_access_token_unavailable",
+        )
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "New-Api-User": str(account_id),
+        "Accept": "application/json",
+    }
+
+
+def _subscription_request(
+    account_id: str,
+    path: str,
+    *,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return request_json(
+        urllib.request.build_opener(),
+        path,
+        method=method,
+        body=body,
+        headers=_subscription_access_headers(account_id),
+        timeout=20,
+    )
+
+
+def _money(value: Any) -> decimal.Decimal:
+    try:
+        amount = decimal.Decimal(str(value)).quantize(
+            decimal.Decimal("0.01"),
+            rounding=decimal.ROUND_HALF_UP,
+        )
+    except (decimal.InvalidOperation, TypeError, ValueError) as error:
+        raise BridgeUpstreamError(
+            "服务端套餐金额无效。",
+            status_code=502,
+            code="subscription_amount_invalid",
+        ) from error
+    if amount <= 0 or amount > decimal.Decimal("1000000"):
+        raise BridgeUpstreamError(
+            "服务端套餐金额超出允许范围。",
+            status_code=502,
+            code="subscription_amount_invalid",
+        )
+    return amount
+
+
+def _duration_days(plan: dict[str, Any]) -> int:
+    value = max(1, int(plan.get("duration_value") or 1))
+    unit = str(plan.get("duration_unit") or "day").strip().lower()
+    return {
+        "hour": 1,
+        "day": value,
+        "week": value * 7,
+        "month": value * 30,
+        "year": value * 365,
+    }.get(unit, value)
+
+
+def _normalize_subscription_plan(raw: dict[str, Any]) -> dict[str, Any] | None:
+    plan = raw.get("plan") if isinstance(raw.get("plan"), dict) else raw
+    if not isinstance(plan, dict) or not bool(plan.get("enabled", True)):
+        return None
+    try:
+        plan_id = int(plan.get("id"))
+    except (TypeError, ValueError):
+        return None
+    if plan_id <= 0:
+        return None
+    amount = _money(plan.get("price_amount"))
+    duration_days = _duration_days(plan)
+    subtitle = str(plan.get("subtitle") or "").strip()
+    benefits = [subtitle] if subtitle else []
+    benefits.append(f"订阅周期约 {duration_days} 天")
+    quota_reset = str(plan.get("quota_reset_period") or "never").strip().lower()
+    if quota_reset and quota_reset != "never":
+        benefits.append(f"额度按 {quota_reset} 周期重置")
+    return {
+        "planKey": f"newapi-subscription-{plan_id}",
+        "displayName": str(plan.get("title") or f"套餐 {plan_id}").strip(),
+        "description": subtitle,
+        "durationDays": duration_days,
+        "amountMinor": int(amount * 100),
+        "amount": format(amount, ".2f"),
+        "currency": "CNY",
+        "sourceCurrency": str(plan.get("currency") or "USD").upper(),
+        "pricingRule": "nominal_1_to_1",
+        "benefits": benefits,
+        "features": ["model.subscription"],
+    }
+
+
+def _payment_channels(payload: dict[str, Any]) -> list[str]:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    methods = data.get("pay_methods") if isinstance(data, dict) else []
+    channels: list[str] = []
+    for item in methods if isinstance(methods, list) else []:
+        value = item.get("type") if isinstance(item, dict) else item
+        channel = str(value or "").strip().lower()
+        if channel in {"alipay", "wxpay"} and channel not in channels:
+            channels.append(channel)
+    return channels
+
+
+def _plan_id_from_key(plan_key: str) -> int | None:
+    prefix = "newapi-subscription-"
+    if not plan_key.startswith(prefix):
+        return None
+    try:
+        value = int(plan_key[len(prefix):])
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _checkout_token(account_id: str, request_id: str, order_id: str) -> str:
+    message = f"{account_id}\n{request_id}\n{order_id}".encode("utf-8")
+    digest = hmac.new(
+        SUBSCRIPTION_CHECKOUT_SECRET.encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).hexdigest()
+    return f"scp_{digest}"
+
+
+def _checkout_url(token: str) -> str:
+    parsed = urllib.parse.urlparse(PUBLIC_API_BASE)
+    public_origin = (
+        f"{parsed.scheme}://{parsed.netloc}"
+        if parsed.scheme and parsed.netloc
+        else PUBLIC_API_BASE.rstrip("/").removesuffix("/v1")
+    )
+    return (
+        f"{public_origin.rstrip('/')}/api/openclaw/subscriptions/checkout"
+        f"?token={urllib.parse.quote(token, safe='')}"
+    )
+
+
+def _iso_time(timestamp: Any) -> str | None:
+    try:
+        value = int(timestamp or 0)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _native_order(account_id: str, order_id: str) -> dict[str, Any] | None:
+    return _newapi_fetchone(
+        """
+        select o.user_id, o.plan_id, o.money, o.trade_no, o.payment_method,
+               o.payment_provider, o.status, o.create_time, o.complete_time,
+               p.title
+        from subscription_orders o
+        join subscription_plans p on p.id = o.plan_id
+        where o.trade_no = ? and o.user_id = ?
+        limit 1
+        """,
+        (order_id, account_id),
+    )
+
+
+def _public_order(
+    row: dict[str, Any],
+    *,
+    checkout_token: str = "",
+    expires_at: int = 0,
+) -> dict[str, Any]:
+    native_status = str(row.get("status") or "").strip().lower()
+    status = {
+        "success": "paid",
+        "paid": "paid",
+        "completed": "paid",
+        "pending": "pending",
+        "expired": "expired",
+        "failed": "failed",
+        "cancelled": "failed",
+        "canceled": "failed",
+    }.get(native_status, "pending")
+    amount = _money(row.get("money"))
+    plan_id = int(row.get("plan_id") or 0)
+    order_id = str(row.get("trade_no") or "").strip()
+    checkout = _checkout_url(checkout_token) if checkout_token else ""
+    return {
+        "orderId": order_id,
+        "outTradeNo": order_id,
+        "planKey": f"newapi-subscription-{plan_id}",
+        "displayName": str(row.get("title") or f"套餐 {plan_id}"),
+        "paymentType": str(row.get("payment_method") or ""),
+        "amountMinor": int(amount * 100),
+        "amount": format(amount, ".2f"),
+        "currency": "CNY",
+        "status": status,
+        "qrcode": checkout,
+        "payUrl": checkout,
+        "expiresAt": _iso_time(expires_at),
+        "paidAt": _iso_time(row.get("complete_time")),
+        "createdAt": _iso_time(row.get("create_time")),
+        "updatedAt": _iso_time(row.get("complete_time") or row.get("create_time")),
+    }
+
+
+def _existing_checkout_order(
+    row: sqlite3.Row,
+    account_id: str,
+    request_id: str,
+) -> dict[str, Any] | None:
+    order_id = str(row["order_id"] or "").strip()
+    if not order_id:
+        return None
+    native = _native_order(account_id, order_id)
+    if not native:
+        return None
+    token = _checkout_token(account_id, request_id, order_id)
+    expected_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(expected_hash, str(row["checkout_token_hash"] or "")):
+        return None
+    return _public_order(
+        native,
+        checkout_token=token,
+        expires_at=int(row["expires_at"] or 0),
+    )
+
+
 def handle_payment_plans(
     body: dict[str, Any], authorization: str = ""
 ) -> tuple[int, dict[str, Any]]:
@@ -3276,18 +3593,40 @@ def handle_payment_plans(
     if denied:
         return denied
     try:
-        payload = _license_service_json(
-            "/api/service/payments/plans", {"accountId": account_id}
-        )
+        payload = _subscription_request(account_id, "/api/subscription/plans")
+        topup = _subscription_request(account_id, "/api/user/topup/info")
     except BridgeUpstreamError as error:
         return _payment_bridge_error(error)
+    raw_plans = payload.get("data") if isinstance(payload.get("data"), list) else []
+    plans = []
+    try:
+        for raw in raw_plans:
+            normalized = _normalize_subscription_plan(raw) if isinstance(raw, dict) else None
+            if normalized:
+                plans.append(normalized)
+    except BridgeUpstreamError as error:
+        return _payment_bridge_error(error)
+    topup_data = topup.get("data") if isinstance(topup.get("data"), dict) else topup
+    channels = _payment_channels(topup)
+    configured = bool(
+        isinstance(topup_data, dict)
+        and topup_data.get("enable_online_topup") is True
+        and topup_data.get("payment_compliance_confirmed") is True
+        and channels
+    )
     return 200, {
         "success": True,
         "data": {
-            "plans": payload.get("plans") if isinstance(payload.get("plans"), list) else [],
-            "payment": payload.get("payment")
-            if isinstance(payload.get("payment"), dict)
-            else {},
+            "plans": plans,
+            "payment": {
+                "provider": "newapi-epay",
+                "configured": configured,
+                "reconciliationConfigured": True,
+                "channels": channels,
+                "displayCurrency": "CNY",
+                "sourceCurrency": "USD",
+                "pricingRule": "nominal_1_to_1",
+            },
         },
     }
 
@@ -3298,31 +3637,176 @@ def handle_payment_order_create(
     account_id, denied = _payment_owner(authorization)
     if denied:
         return denied
-    try:
-        normalized_client_ip = str(ipaddress.ip_address(str(client_ip or "").strip()))
-    except ValueError:
-        normalized_client_ip = ""
-    request = {
-        "accountId": account_id,
-        "planKey": str(body.get("planKey") or "").strip(),
-        "paymentType": str(body.get("paymentType") or "").strip(),
-        "requestId": str(body.get("requestId") or "").strip(),
-        "clientIp": normalized_client_ip,
-    }
-    try:
-        payload = _license_service_json(
-            "/api/service/payments/orders/create", request
-        )
-    except BridgeUpstreamError as error:
-        return _payment_bridge_error(error)
-    order = payload.get("order")
-    if not isinstance(order, dict):
-        return 502, {
+    del client_ip
+    plan_key = str(body.get("planKey") or "").strip()
+    plan_id = _plan_id_from_key(plan_key)
+    payment_method = str(body.get("paymentType") or "").strip().lower()
+    request_id = str(body.get("requestId") or "").strip()
+    if plan_id is None or payment_method not in {"alipay", "wxpay"} or not (6 <= len(request_id) <= 128):
+        return 400, {
             "success": False,
-            "error": "支付服务响应缺少订单。",
-            "code": "payment_service_invalid_response",
+            "error": "套餐、支付方式或请求标识无效。",
+            "code": "payment_request_invalid",
         }
-    return 200, {"success": True, "data": {"order": order}}
+    now = int(time.time())
+    expires_at = now + SUBSCRIPTION_CHECKOUT_TTL_SEC
+    connection = _bind_connection()
+    try:
+        connection.execute("begin immediate")
+        existing = connection.execute(
+            "select * from subscription_checkout_requests where account_id = ? and request_id = ?",
+            (account_id, request_id),
+        ).fetchone()
+        if existing:
+            connection.commit()
+            if int(existing["plan_id"]) != plan_id or str(existing["payment_method"]) != payment_method:
+                return 409, {
+                    "success": False,
+                    "error": "同一支付请求标识不能用于不同套餐或支付方式。",
+                    "code": "payment_request_conflict",
+                }
+            order = _existing_checkout_order(existing, account_id, request_id)
+            if order:
+                return 200, {"success": True, "data": {"order": order}}
+            return 409, {
+                "success": False,
+                "error": "该订单正在创建或结果待确认，请勿重复付款。",
+                "code": "payment_creation_in_progress",
+            }
+        connection.execute(
+            """
+            insert into subscription_checkout_requests(
+                account_id, request_id, plan_id, payment_method, status,
+                created_at, expires_at
+            ) values(?, ?, ?, ?, 'creating', ?, ?)
+            """,
+            (account_id, request_id, plan_id, payment_method, now, expires_at),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    plan = _newapi_fetchone(
+        "select id, title, price_amount, currency, enabled from subscription_plans where id = ? limit 1",
+        (plan_id,),
+    )
+    if not plan or not bool(plan.get("enabled")):
+        connection = _bind_connection()
+        try:
+            connection.execute(
+                "delete from subscription_checkout_requests where account_id = ? and request_id = ? and status = 'creating'",
+                (account_id, request_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return 404, {
+            "success": False,
+            "error": "套餐不存在或已经下架。",
+            "code": "payment_plan_unavailable",
+        }
+
+    try:
+        expected_amount = _money(plan.get("price_amount"))
+        payload = _subscription_request(
+            account_id,
+            "/api/subscription/epay/pay",
+            method="POST",
+            body={"plan_id": plan_id, "payment_method": payment_method},
+        )
+        action = str(payload.get("url") or "").strip()
+        fields = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        parsed_action = urllib.parse.urlparse(action)
+        if (
+            parsed_action.scheme != "https"
+            or not parsed_action.hostname
+            or parsed_action.hostname.lower() not in SUBSCRIPTION_PAYMENT_FORM_HOSTS
+        ):
+            raise BridgeUpstreamError(
+                "支付服务返回了未授权的收银台地址。",
+                status_code=502,
+                code="payment_checkout_host_invalid",
+            )
+        if not fields or any(isinstance(value, (dict, list)) for value in fields.values()):
+            raise BridgeUpstreamError(
+                "支付服务返回的收银台参数无效。",
+                status_code=502,
+                code="payment_checkout_payload_invalid",
+            )
+        order_id = str(fields.get("out_trade_no") or "").strip()
+        provider_amount = _money(fields.get("money"))
+        if (
+            not (6 <= len(order_id) <= 128)
+            or provider_amount != expected_amount
+            or str(fields.get("type") or "").strip().lower() != payment_method
+            or not str(fields.get("sign") or "").strip()
+        ):
+            raise BridgeUpstreamError(
+                "支付服务返回的订单关键信息校验失败。",
+                status_code=502,
+                code="payment_order_validation_failed",
+            )
+        native = _native_order(account_id, order_id)
+        if (
+            not native
+            or int(native.get("plan_id") or 0) != plan_id
+            or _money(native.get("money")) != expected_amount
+            or str(native.get("payment_method") or "").lower() != payment_method
+            or str(native.get("payment_provider") or "").lower() != "epay"
+        ):
+            raise BridgeUpstreamError(
+                "服务端订单落库校验失败，请勿重复付款。",
+                status_code=502,
+                code="payment_order_persistence_mismatch",
+            )
+        checkout_token = _checkout_token(account_id, request_id, order_id)
+        checkout_hash = hashlib.sha256(checkout_token.encode("utf-8")).hexdigest()
+        checkout_payload = json.dumps(
+            {"action": action, "fields": {str(key): str(value) for key, value in fields.items()}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        order = _public_order(native, checkout_token=checkout_token, expires_at=expires_at)
+        stored_order = dict(order)
+        stored_order["qrcode"] = ""
+        stored_order["payUrl"] = ""
+        connection = _bind_connection()
+        try:
+            connection.execute(
+                """
+                update subscription_checkout_requests
+                set status = 'pending', order_id = ?, order_json = ?,
+                    checkout_token_hash = ?, checkout_payload = ?
+                where account_id = ? and request_id = ? and status = 'creating'
+                """,
+                (
+                    order_id,
+                    json.dumps(stored_order, ensure_ascii=False, separators=(",", ":")),
+                    checkout_hash,
+                    checkout_payload,
+                    account_id,
+                    request_id,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return 200, {"success": True, "data": {"order": order}}
+    except BridgeUpstreamError as error:
+        connection = _bind_connection()
+        try:
+            connection.execute(
+                """
+                update subscription_checkout_requests
+                set status = 'creation_uncertain'
+                where account_id = ? and request_id = ? and status = 'creating'
+                """,
+                (account_id, request_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return _payment_bridge_error(error)
 
 
 def handle_payment_order_status(
@@ -3331,25 +3815,101 @@ def handle_payment_order_status(
     account_id, denied = _payment_owner(authorization)
     if denied:
         return denied
-    request = {
-        "accountId": account_id,
-        "orderId": str(body.get("orderId") or "").strip(),
-        "reconcile": body.get("reconcile") is True,
-    }
-    try:
-        payload = _license_service_json(
-            "/api/service/payments/orders/status", request
-        )
-    except BridgeUpstreamError as error:
-        return _payment_bridge_error(error)
-    order = payload.get("order")
-    if not isinstance(order, dict):
-        return 502, {
+    order_id = str(body.get("orderId") or "").strip()
+    if not order_id:
+        return 400, {
             "success": False,
-            "error": "支付服务响应缺少订单。",
-            "code": "payment_service_invalid_response",
+            "error": "订单号不能为空。",
+            "code": "payment_order_required",
         }
+    native = _native_order(account_id, order_id)
+    if not native:
+        return 404, {
+            "success": False,
+            "error": "订单不存在。",
+            "code": "payment_order_not_found",
+        }
+    connection = _bind_connection()
+    try:
+        checkout = connection.execute(
+            """
+            select request_id, checkout_token_hash, expires_at
+            from subscription_checkout_requests
+            where account_id = ? and order_id = ?
+            limit 1
+            """,
+            (account_id, order_id),
+        ).fetchone()
+    finally:
+        connection.close()
+    token = ""
+    expires_at = 0
+    if checkout:
+        candidate = _checkout_token(account_id, str(checkout["request_id"]), order_id)
+        candidate_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+        if hmac.compare_digest(candidate_hash, str(checkout["checkout_token_hash"] or "")):
+            token = candidate
+        expires_at = int(checkout["expires_at"] or 0)
+    order = _public_order(native, checkout_token=token, expires_at=expires_at)
     return 200, {"success": True, "data": {"order": order}}
+
+
+def handle_subscription_checkout(token: str) -> tuple[int, str, str]:
+    supplied = str(token or "").strip()
+    if not supplied.startswith("scp_") or len(supplied) != 68:
+        return 404, "<!doctype html><meta charset='utf-8'><p>支付链接无效。</p>", ""
+    token_hash = hashlib.sha256(supplied.encode("utf-8")).hexdigest()
+    connection = _bind_connection()
+    try:
+        row = connection.execute(
+            """
+            select account_id, request_id, order_id, checkout_token_hash,
+                   checkout_payload, expires_at
+            from subscription_checkout_requests
+            where checkout_token_hash = ?
+            limit 1
+            """,
+            (token_hash,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if not row or not hmac.compare_digest(token_hash, str(row["checkout_token_hash"] or "")):
+        return 404, "<!doctype html><meta charset='utf-8'><p>支付链接无效。</p>", ""
+    expected = _checkout_token(
+        str(row["account_id"]),
+        str(row["request_id"]),
+        str(row["order_id"]),
+    )
+    if not hmac.compare_digest(expected, supplied):
+        return 404, "<!doctype html><meta charset='utf-8'><p>支付链接无效。</p>", ""
+    if int(row["expires_at"] or 0) <= int(time.time()):
+        return 410, "<!doctype html><meta charset='utf-8'><p>支付链接已过期，请返回麓鸣重新创建订单。</p>", ""
+    native = _native_order(str(row["account_id"]), str(row["order_id"]))
+    if not native or str(native.get("status") or "").lower() != "pending":
+        return 409, "<!doctype html><meta charset='utf-8'><p>订单已完成或不可继续支付。</p>", ""
+    try:
+        payload = json.loads(str(row["checkout_payload"] or "{}"))
+    except json.JSONDecodeError:
+        payload = {}
+    action = str(payload.get("action") or "").strip() if isinstance(payload, dict) else ""
+    fields = payload.get("fields") if isinstance(payload, dict) and isinstance(payload.get("fields"), dict) else {}
+    parsed = urllib.parse.urlparse(action)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.hostname.lower() not in SUBSCRIPTION_PAYMENT_FORM_HOSTS
+    ):
+        return 503, "<!doctype html><meta charset='utf-8'><p>收银台配置无效，请返回麓鸣重试。</p>", ""
+    inputs = "".join(
+        f'<input type="hidden" name="{html.escape(str(key), quote=True)}" value="{html.escape(str(value), quote=True)}">'
+        for key, value in fields.items()
+    )
+    safe_action = html.escape(action, quote=True)
+    page = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>麓鸣安全支付</title><style>body{{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#071923;color:#eef}}main{{text-align:center;padding:28px}}button{{padding:12px 24px;border:0;border-radius:10px;background:#33d6b0;font-weight:700}}</style></head>
+<body><main><p>正在进入服务端订阅收银台…</p><form id="checkout" method="post" action="{safe_action}">{inputs}<button type="submit">继续支付</button></form></main><script>document.getElementById('checkout').submit();</script></body></html>"""
+    return 200, page, f"{parsed.scheme}://{parsed.netloc}"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3366,20 +3926,47 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _send_html(self, status: int, html: str) -> None:
+    def _send_html(self, status: int, html: str, form_origin: str = "") -> None:
         raw = html.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'self'")
+        form_action = "'self'"
+        parsed_form_origin = urllib.parse.urlparse(form_origin)
+        if parsed_form_origin.scheme == "https" and parsed_form_origin.hostname:
+            form_action = f"'self' {parsed_form_origin.scheme}://{parsed_form_origin.netloc}"
+        self.send_header("Content-Security-Policy", f"default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action {form_action}; frame-ancestors 'self'")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
+    def _send_linux_companion(self) -> None:
+        artifact = linux_companion_artifact()
+        if not artifact:
+            self._send(404, {
+                "success": False,
+                "error": "linux companion artifact unavailable",
+                "code": "linux_companion_unavailable",
+            })
+            return
+        path, size, digest = artifact
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.android.package-archive")
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("Content-Disposition", 'attachment; filename="LumiLinuxRuntime.apk"')
+        self.send_header("ETag", f'"sha256-{digest}"')
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        with open(path, "rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                self.wfile.write(chunk)
+
     def do_GET(self) -> None:
-        path = urllib.parse.urlparse(self.path).path
+        parsed_request = urllib.parse.urlparse(self.path)
+        path = parsed_request.path
         if path == "/health":
             self._send(200, {"success": True, "service": "openclaw-newapi-bridge"})
             return
@@ -3401,6 +3988,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in ("/api/openclaw/bind/page", "/openclaw-bind"):
             self._send_html(200, BIND_PAGE_HTML)
+            return
+        if path == "/api/openclaw/subscriptions/checkout":
+            token = urllib.parse.parse_qs(parsed_request.query).get("token", [""])[0]
+            status, page, form_origin = handle_subscription_checkout(token)
+            self._send_html(status, page, form_origin)
+            return
+        if path == "/api/openclaw/downloads/linux-runtime.apk":
+            self._send_linux_companion()
             return
         self._send(404, {"success": False, "error": "not found"})
 

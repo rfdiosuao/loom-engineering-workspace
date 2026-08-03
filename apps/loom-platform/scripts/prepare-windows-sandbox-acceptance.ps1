@@ -109,7 +109,7 @@ if (-not (Test-Path -LiteralPath $outputPath)) {
 }
 $outputPath = Resolve-ExistingDirectory -Path $outputPath -Label "Output"
 
-$wsbPath = Join-Path $outputPath "Luming-2.4.5-Acceptance.wsb"
+$wsbPath = Join-Path $outputPath "Luming-2.4.6-Acceptance.wsb"
 $sessionPath = Join-Path $outputPath "sandbox-preparation.json"
 $bootstrapConfigPath = Join-Path $outputPath "sandbox-bootstrap-config.json"
 foreach ($target in @($wsbPath, $sessionPath, $bootstrapConfigPath)) {

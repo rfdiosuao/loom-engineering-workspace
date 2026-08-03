@@ -27,6 +27,10 @@ class BridgeDeployScriptContractTests(unittest.TestCase):
             "OPENCLAW_LICENSE_ENTITLEMENT_SERVICE_BASE",
             "OPENCLAW_BIND_DB",
             "OPENCLAW_BIND_TICKET_SECRET",
+            "OPENCLAW_SUBSCRIPTION_CHECKOUT_SECRET",
+            "OPENCLAW_SUBSCRIPTION_PAYMENT_FORM_HOSTS",
+            "OPENCLAW_LINUX_COMPANION_APK_PATH",
+            "OPENCLAW_LINUX_COMPANION_APK_SHA256",
             "OPENCLAW_ENTITLEMENT_KEY_ID",
         ):
             self.assertIn(key, self.source)
