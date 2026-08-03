@@ -1691,7 +1691,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
                 "source": ACCOUNT_SOURCE,
                 "memberId": "newapi:42",
                 "memberName": "user@example.invalid",
-                "memberToken": "sk-managed-subscription-not-real",
+                "memberToken": "managed-subscription-test-token",
                 "newApi": {
                     "baseUrl": "https://api.heang.top",
                     "userId": "42",
