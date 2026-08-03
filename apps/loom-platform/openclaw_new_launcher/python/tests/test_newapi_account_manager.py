@@ -1707,7 +1707,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
             )
             self.assertEqual(
                 manager.requests[0]["headers"]["Authorization"],
-                "Bearer sk-managed-subscription-not-real",
+                "Bearer managed-subscription-test-token",
             )
             self.assertEqual(snapshot["balance"], "8800")
             self.assertEqual(snapshot["usage"]["usedQuota"], "1200")
