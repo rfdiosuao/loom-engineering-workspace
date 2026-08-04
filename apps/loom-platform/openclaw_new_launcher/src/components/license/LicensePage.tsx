@@ -242,6 +242,7 @@ function paymentStatusText(status?: string): string {
 export const LicensePage: React.FC = () => {
   const cachedAccount = useRef<AccountSnapshot | null>(loadCachedAccount());
   const subscriptionRequestVersion = useRef(0);
+  const paymentCatalogRequestVersion = useRef(0);
   const paymentRequestVersion = useRef(0);
   const paymentRestoreIdentity = useRef('');
   const hasCachedAccount = accountCacheUsable(cachedAccount.current);
@@ -276,6 +277,9 @@ export const LicensePage: React.FC = () => {
   const loggedIn = Boolean(account?.loggedIn);
   const accountWritable = loggedIn && !usingCachedAccount;
   const subscriptionIsCached = Boolean(subscription?.offline || subscription?.stale);
+  const paymentWritable = loggedIn
+    && paymentCatalog?.payment.configured === true
+    && Boolean(paymentCatalog.payment.channels?.length);
   const totalModels = modelTotal(account);
   const modelHint = useMemo(() => {
     const selected = account?.selectedModels?.text;
@@ -310,6 +314,7 @@ export const LicensePage: React.FC = () => {
     const nextIdentity = accountIdentity(next);
     if (previousIdentity !== nextIdentity) {
       useAgentStore.getState().reset();
+      paymentCatalogRequestVersion.current += 1;
       paymentRequestVersion.current += 1;
       paymentRestoreIdentity.current = '';
       setPaymentCatalog(null);
@@ -401,14 +406,14 @@ export const LicensePage: React.FC = () => {
   }, []);
 
   const loadPaymentPlans = useCallback(async (quiet = true) => {
-    const requestVersion = ++paymentRequestVersion.current;
+    const requestVersion = ++paymentCatalogRequestVersion.current;
     const identity = accountIdentity(cachedAccount.current);
     if (!cachedAccount.current?.loggedIn || !identity) return;
     setPaymentCatalogLoading(true);
     try {
       const response = await accountApi.paymentPlans();
       if (
-        requestVersion !== paymentRequestVersion.current
+        requestVersion !== paymentCatalogRequestVersion.current
         || identity !== accountIdentity(cachedAccount.current)
       ) return;
       setPaymentCatalog(response);
@@ -419,7 +424,7 @@ export const LicensePage: React.FC = () => {
       }
     } catch (error) {
       if (
-        requestVersion !== paymentRequestVersion.current
+        requestVersion !== paymentCatalogRequestVersion.current
         || identity !== accountIdentity(cachedAccount.current)
       ) return;
       setPaymentCatalog(null);
@@ -429,7 +434,7 @@ export const LicensePage: React.FC = () => {
         showToast(message || '套餐加载失败', 'error');
       }
     } finally {
-      if (requestVersion === paymentRequestVersion.current) {
+      if (requestVersion === paymentCatalogRequestVersion.current) {
         setPaymentCatalogLoading(false);
       }
     }
@@ -489,8 +494,8 @@ export const LicensePage: React.FC = () => {
   }, [applyAccount, loadSubscription]);
 
   const startPayment = async (planKey: string) => {
-    if (!accountWritable) {
-      const message = '请先完成账号在线验证，再创建支付订单。';
+    if (!paymentWritable || !paymentCatalog?.plans.some((plan) => plan.planKey === planKey)) {
+      const message = '支付服务尚未完成在线验证，请刷新套餐后重试。';
       setStatusText(message);
       showToast(message, 'info');
       return;
@@ -554,7 +559,8 @@ export const LicensePage: React.FC = () => {
   };
 
   useEffect(() => {
-    if (!accountWritable || !activeAccountIdentity) {
+    if (!loggedIn || !activeAccountIdentity) {
+      paymentCatalogRequestVersion.current += 1;
       paymentRequestVersion.current += 1;
       setPaymentCatalog(null);
       setPaymentOrder(null);
@@ -563,10 +569,10 @@ export const LicensePage: React.FC = () => {
       return;
     }
     void loadPaymentPlans(true);
-  }, [accountWritable, activeAccountIdentity, loadPaymentPlans]);
+  }, [loggedIn, activeAccountIdentity, loadPaymentPlans]);
 
   useEffect(() => {
-    if (!accountWritable || !activeAccountIdentity) {
+    if (!loggedIn || !activeAccountIdentity) {
       paymentRestoreIdentity.current = '';
       return;
     }
@@ -578,7 +584,7 @@ export const LicensePage: React.FC = () => {
     } else if (resumable) {
       setStatusText('检测到上次未完成的下单请求；再次选择同一套餐即可安全恢复。');
     }
-  }, [accountWritable, activeAccountIdentity, verifyPaymentOrder]);
+  }, [loggedIn, activeAccountIdentity, verifyPaymentOrder]);
 
   useEffect(() => {
     if (!paymentOrder?.orderId || paymentOrder.status !== 'pending') return;
@@ -760,6 +766,7 @@ export const LicensePage: React.FC = () => {
   const logout = async () => {
     subscriptionRequestVersion.current += 1;
     paymentRequestVersion.current += 1;
+    paymentCatalogRequestVersion.current += 1;
     clearPaymentResume(activeAccountIdentity);
     setBusy(true);
     setStatusText('正在退出模型账号...');
@@ -1059,7 +1066,7 @@ export const LicensePage: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => void loadPaymentPlans(false)}
-                        disabled={paymentCatalogLoading || !accountWritable}
+                        disabled={paymentCatalogLoading || !loggedIn}
                         className="h-9 rounded-[8px] border border-border bg-surface-alt px-3 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
                       >
                         {paymentCatalogLoading ? '加载中...' : '刷新套餐'}
@@ -1139,7 +1146,7 @@ export const LicensePage: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => void startPayment(plan.planKey)}
-                              disabled={Boolean(creatingPaymentPlanKey) || paymentStatusBusy || !accountWritable}
+                              disabled={Boolean(creatingPaymentPlanKey) || paymentStatusBusy || !paymentWritable}
                               className="mt-4 h-10 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-55"
                             >
                               {isCreatingThisPlan ? '正在创建订单...' : `${paymentChannel === 'wxpay' ? '微信' : '支付宝'}扫码购买`}
@@ -1153,7 +1160,8 @@ export const LicensePage: React.FC = () => {
                     <div className="rounded-[8px] border border-border bg-surface-alt/35 px-4 py-3 text-xs leading-5 text-text-muted">
                       {paymentCatalogLoading
                         ? '正在从服务端加载可购买套餐...'
-                        : '服务端暂未开放可购买订阅，或支付配置尚未通过安全检查。'}
+                        : paymentCatalog?.payment.message
+                          || '服务端暂未开放可购买订阅，或支付配置尚未通过安全检查。'}
                     </div>
                   )}
 

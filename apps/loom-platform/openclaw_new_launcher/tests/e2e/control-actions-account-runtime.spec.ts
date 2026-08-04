@@ -598,6 +598,15 @@ test('checkout restores a pending order after application reload without creatin
 });
 
 test('account service outage marks cached values as read-only and localizes the default plan', async ({ audit, page }, testInfo) => {
+  const paymentPlan = {
+    planKey: 'newapi-plan-cache-recovery',
+    displayName: '基础模型订阅',
+    description: '服务端在线支付套餐',
+    durationDays: 30,
+    amountMinor: 5000,
+    amount: '50.00',
+    currency: 'CNY',
+  };
   const cachedAccount = {
     ...AUDIT_ACCOUNT_WITH_CHOICES,
     plan: 'default',
@@ -623,6 +632,15 @@ test('account service outage marks cached values as read-only and localizes the 
   await audit.registerRoute('POST', '/api/account/sync', {
     error: 'HTTP_404: model account resource not found',
   });
+  await audit.registerRoute('GET', '/api/account/subscription', {
+    value: { subscription: AUDIT_SUBSCRIPTION },
+  });
+  await audit.registerRoute('GET', '/api/account/payments/plans', {
+    value: {
+      plans: [paymentPlan],
+      payment: { provider: 'newapi-epay', configured: true, channels: ['alipay'] },
+    },
+  });
   await expect(page.locator('[data-loom-splash]')).toBeHidden({ timeout: 12_000 });
 
   await navigateTo(audit, 'license');
@@ -636,5 +654,25 @@ test('account service outage marks cached values as read-only and localizes the 
   await expect(main.getByRole('button', { name: '同步模型' })).toBeDisabled();
   await expect(main.getByRole('button', { name: '绑定当前账号' })).toBeDisabled();
   await expect(main.getByRole('button', { name: '重试在线验证' }).first()).toBeVisible();
+  await expect(main.getByText(paymentPlan.displayName, { exact: true })).toBeVisible();
+  await expect(main.getByRole('button', { name: '支付宝扫码购买' })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath('account-safe-cache-outage.png'), fullPage: false });
+});
+
+test('payment catalog shows the server readiness reason instead of a generic blocker', async ({ audit, page }) => {
+  await audit.registerRoute('GET', '/api/account/payments/plans', {
+    value: {
+      plans: [],
+      payment: {
+        provider: 'zpay',
+        configured: false,
+        reconciliationConfigured: false,
+        channels: [],
+        reasonCode: 'online_topup_disabled',
+        message: '服务端在线充值尚未启用。',
+      },
+    },
+  });
+  await navigateTo(audit, 'license');
+  await expect(appMain(page).getByText('服务端在线充值尚未启用。', { exact: true })).toBeVisible();
 });

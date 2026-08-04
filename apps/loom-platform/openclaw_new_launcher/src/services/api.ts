@@ -908,6 +908,8 @@ export interface AccountPaymentCatalog {
     configured?: boolean;
     reconciliationConfigured?: boolean;
     channels?: Array<'alipay' | 'wxpay' | string>;
+    reasonCode?: string;
+    message?: string;
   };
 }
 

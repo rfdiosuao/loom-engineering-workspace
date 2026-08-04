@@ -1492,6 +1492,7 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual("CNY", plan["currency"])
         self.assertEqual("USD", plan["sourceCurrency"])
         self.assertEqual("nominal_1_to_1", plan["pricingRule"])
+        self.assertEqual("ready", plans["data"]["payment"]["reasonCode"])
         status, created = self.bridge.handle_payment_order_create(
             {
                 "accountId": "attacker",
@@ -1553,6 +1554,21 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(200, status, queried)
         self.assertEqual("pending", queried["data"]["order"]["status"])
 
+        connection = self.bridge._bind_connection()
+        try:
+            connection.execute(
+                "update subscription_checkout_requests set expires_at = ? where order_id = ?",
+                (int(time.time()) - 1, trade_no),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        status, queried = self.bridge.handle_payment_order_status(
+            {"orderId": trade_no}, token
+        )
+        self.assertEqual(200, status, queried)
+        self.assertEqual("expired", queried["data"]["order"]["status"])
+
         connection = sqlite3.connect(self.bridge.DB_PATH)
         try:
             connection.execute(
@@ -1575,6 +1591,30 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(401, status)
         self.assertEqual("account_token_required", denied["code"])
         self.assertEqual(before, len(calls))
+
+    def test_payment_plans_explain_why_zpay_checkout_is_disabled(self):
+        def upstream(_opener, path, *, method="GET", body=None, headers=None, timeout=20):
+            del method, body, headers, timeout
+            if path == "/api/subscription/plans":
+                return {"success": True, "data": []}
+            if path == "/api/user/topup/info":
+                return {
+                    "success": True,
+                    "data": {
+                        "enable_online_topup": False,
+                        "payment_compliance_confirmed": False,
+                        "pay_methods": [],
+                    },
+                }
+            raise AssertionError(f"unexpected upstream path: {path}")
+
+        self.bridge.request_json = upstream
+        status, payload = self.bridge.handle_payment_plans({}, "Bearer sk-test-secret-value")
+        self.assertEqual(200, status, payload)
+        payment = payload["data"]["payment"]
+        self.assertFalse(payment["configured"])
+        self.assertEqual("online_topup_disabled", payment["reasonCode"])
+        self.assertEqual("服务端在线充值尚未启用。", payment["message"])
 
     def test_subscription_payment_request_id_cannot_be_reused_for_other_terms(self):
         connection = self.bridge._bind_connection()

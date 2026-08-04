@@ -3540,6 +3540,8 @@ def _public_order(
         "cancelled": "failed",
         "canceled": "failed",
     }.get(native_status, "pending")
+    if status == "pending" and expires_at and expires_at <= int(time.time()):
+        status = "expired"
     amount = _money(row.get("money"))
     plan_id = int(row.get("plan_id") or 0)
     order_id = str(row.get("trade_no") or "").strip()
@@ -3608,12 +3610,31 @@ def handle_payment_plans(
         return _payment_bridge_error(error)
     topup_data = topup.get("data") if isinstance(topup.get("data"), dict) else topup
     channels = _payment_channels(topup)
-    configured = bool(
+    online_topup_enabled = bool(
         isinstance(topup_data, dict)
         and topup_data.get("enable_online_topup") is True
+    )
+    compliance_confirmed = bool(
+        isinstance(topup_data, dict)
         and topup_data.get("payment_compliance_confirmed") is True
+    )
+    configured = bool(
+        online_topup_enabled
+        and compliance_confirmed
         and channels
     )
+    if not online_topup_enabled:
+        reason_code = "online_topup_disabled"
+        payment_message = "服务端在线充值尚未启用。"
+    elif not compliance_confirmed:
+        reason_code = "payment_compliance_unconfirmed"
+        payment_message = "服务端支付配置尚未完成确认。"
+    elif not channels:
+        reason_code = "payment_channels_unavailable"
+        payment_message = "服务端尚未启用可用的收款渠道。"
+    else:
+        reason_code = "ready"
+        payment_message = "ZPay 收款服务已就绪。"
     return 200, {
         "success": True,
         "data": {
@@ -3623,6 +3644,8 @@ def handle_payment_plans(
                 "configured": configured,
                 "reconciliationConfigured": True,
                 "channels": channels,
+                "reasonCode": reason_code,
+                "message": payment_message,
                 "displayCurrency": "CNY",
                 "sourceCurrency": "USD",
                 "pricingRule": "nominal_1_to_1",
