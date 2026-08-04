@@ -447,6 +447,7 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("withdrew health confirmation", handoff)
         self.assertIn("ReparsePoint", handoff)
         self.assertIn("update-success.json", handoff)
+
         self.assertIn("update-failed.json", handoff)
         self.assertIn("acknowledge_update_health", source)
         self.assertNotIn('command.arg("-ManagedProcessIds")', source)
@@ -461,8 +462,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn('format!("{UPDATE_FILE_PREFIX}-")', source)
         self.assertIn("strip_prefix(&expected_prefix)", source)
         self.assertIn('strip_suffix("-setup.exe")', source)
-        self.assertIn('command.arg("-Version").arg(&target_version)', source)
-        self.assertIn('command.arg("-ReadyPath").arg(&ready_path)', source)
+        self.assertIn('command.arg("-Version").arg(args.target_version)', source)
+        self.assertIn('command.arg("-ReadyPath").arg(args.ready_path)', source)
         self.assertIn(
             "command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)",
             source,
@@ -487,6 +488,16 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("-PassThru", handoff)
         self.assertIn("$setupProcess.WaitForExit()", handoff)
         self.assertIn("$setupProcess.ExitCode", handoff)
+
+    def test_tauri_retries_zero_exit_handoff_through_encoded_command(self) -> None:
+        with open(TAURI_LIB, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        prepare = source.split("async fn prepare_update_install", 1)[1].split("Ok(recovery_root", 1)[0]
+        self.assertIn("spawn_update_handoff", prepare)
+        self.assertIn("spawn_update_handoff_encoded", prepare)
+        self.assertIn("status.success()", prepare)
+        self.assertIn("update-handoff-launch.log", prepare)
 
     def test_installer_hooks_never_kill_processes_by_global_image_name(self) -> None:
         with open(INSTALLER_HOOKS, "r", encoding="utf-8") as handle:

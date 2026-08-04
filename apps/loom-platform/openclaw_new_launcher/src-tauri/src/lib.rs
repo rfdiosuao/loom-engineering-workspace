@@ -93,6 +93,131 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+
+#[cfg(windows)]
+struct UpdateHandoffArgs<'a> {
+    powershell: &'a std::path::Path,
+    script: &'a std::path::Path,
+    installer: &'a std::path::Path,
+    install_root: &'a std::path::Path,
+    app_exe: &'a std::path::Path,
+    recovery_root: &'a std::path::Path,
+    marker_path: &'a std::path::Path,
+    ready_path: &'a std::path::Path,
+    target_version: &'a str,
+    test_mode: bool,
+    launch_log: &'a std::path::Path,
+}
+
+#[cfg(windows)]
+fn update_handoff_stdio(
+    command: &mut Command,
+    launch_log: &std::path::Path,
+) -> Result<(), String> {
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(launch_log)
+        .map_err(|error| format!("无法创建升级启动日志: {error}"))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|error| format!("无法复制升级启动日志句柄: {error}"))?;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr));
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn append_update_handoff_arguments(command: &mut Command, args: &UpdateHandoffArgs<'_>) {
+    command.arg("-Installer").arg(args.installer);
+    command.arg("-InstallRoot").arg(args.install_root);
+    command.arg("-AppExe").arg(args.app_exe);
+    command.arg("-RecoveryRoot").arg(args.recovery_root);
+    command.arg("-MarkerPath").arg(args.marker_path);
+    command.arg("-ReadyPath").arg(args.ready_path);
+    command.arg("-ParentPid").arg(std::process::id().to_string());
+    command.arg("-Version").arg(args.target_version);
+    command.arg("-BrandId").arg(BRAND_ID);
+    command.arg("-BrandDisplayName").arg(BRAND_DISPLAY_NAME);
+    if args.test_mode {
+        command.arg("-TestMode");
+    }
+}
+
+#[cfg(windows)]
+fn spawn_update_handoff(args: &UpdateHandoffArgs<'_>) -> Result<std::process::Child, String> {
+    let mut command = Command::new(args.powershell);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    command.arg(args.script);
+    append_update_handoff_arguments(&mut command, args);
+    update_handoff_stdio(&mut command, args.launch_log)?;
+    command
+        .spawn()
+        .map_err(|error| format!("无法启动升级交接进程: {error}"))
+}
+
+#[cfg(windows)]
+fn powershell_quote(value: &std::path::Path) -> String {
+    format!("'{}'", value.to_string_lossy().replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn powershell_text_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn spawn_update_handoff_encoded(
+    args: &UpdateHandoffArgs<'_>,
+) -> Result<std::process::Child, String> {
+    use base64::Engine;
+
+    let mut invocation = format!(
+        "& {} -Installer {} -InstallRoot {} -AppExe {} -RecoveryRoot {} -MarkerPath {} -ReadyPath {} -ParentPid {} -Version {} -BrandId {} -BrandDisplayName {}",
+        powershell_quote(args.script),
+        powershell_quote(args.installer),
+        powershell_quote(args.install_root),
+        powershell_quote(args.app_exe),
+        powershell_quote(args.recovery_root),
+        powershell_quote(args.marker_path),
+        powershell_quote(args.ready_path),
+        std::process::id(),
+        powershell_text_quote(args.target_version),
+        powershell_text_quote(BRAND_ID),
+        powershell_text_quote(BRAND_DISPLAY_NAME),
+    );
+    if args.test_mode {
+        invocation.push_str(" -TestMode");
+    }
+    invocation.push_str("; if (-not $?) { exit 1 }");
+    let encoded_bytes = invocation
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(encoded_bytes);
+    let mut command = Command::new(args.powershell);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        &encoded,
+    ]);
+    update_handoff_stdio(&mut command, args.launch_log)?;
+    command
+        .spawn()
+        .map_err(|error| format!("无法通过兼容模式启动升级交接进程: {error}"))
+}
 const PRIMARY_PAYLOAD_DIR: &str = "LOOMFiles";
 const LEGACY_PAYLOAD_DIR: &str = "OpenClawFiles";
 const PORTABLE_PAYLOAD_DIRS: [&str; 2] = [PRIMARY_PAYLOAD_DIR, LEGACY_PAYLOAD_DIR];
@@ -1301,6 +1426,7 @@ async fn prepare_update_install(
         let marker_path = update_state_root.join("update-pending.json");
         let script_path = recovery_root.join("update-handoff.ps1");
         let ready_path = recovery_root.join("handoff-ready.json");
+        let launch_log_path = recovery_root.join("update-handoff-launch.log");
         let script = include_str!("../installer/update-handoff.ps1");
         std::fs::write(&script_path, script.as_bytes())
             .map_err(|e| format!("无法写入升级交接脚本: {e}"))?;
@@ -1313,66 +1439,66 @@ async fn prepare_update_install(
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
-        let mut command = Command::new(powershell);
-        command.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ]);
-        command.arg(&script_path);
-        command.arg("-Installer").arg(&installer);
-        command.arg("-InstallRoot").arg(&install_root);
-        command.arg("-AppExe").arg(&app_exe);
-        command.arg("-RecoveryRoot").arg(&recovery_root);
-        command.arg("-MarkerPath").arg(&marker_path);
-        command.arg("-ReadyPath").arg(&ready_path);
-        command
-            .arg("-ParentPid")
-            .arg(std::process::id().to_string());
-        command.arg("-Version").arg(&target_version);
-        command.arg("-BrandId").arg(BRAND_ID);
-        command.arg("-BrandDisplayName").arg(BRAND_DISPLAY_NAME);
         // Test mode is a debug-build contract only. A machine-level environment
         // variable must never disable shutdown in a production updater.
         let test_mode = update_test_mode_enabled();
-        if test_mode {
-            command.arg("-TestMode");
-        }
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        let mut handoff_process = command
-            .spawn()
-            .map_err(|e| format!("无法启动升级交接进程: {e}"))?;
+        let handoff_args = UpdateHandoffArgs {
+            powershell: &powershell,
+            script: &script_path,
+            installer: &installer,
+            install_root: &install_root,
+            app_exe: &app_exe,
+            recovery_root: &recovery_root,
+            marker_path: &marker_path,
+            ready_path: &ready_path,
+            target_version: &target_version,
+            test_mode,
+            launch_log: &launch_log_path,
+        };
+        let mut handoff_process = spawn_update_handoff(&handoff_args)?;
 
         if !test_mode {
-            let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut compatibility_retry_used = false;
             loop {
                 if ready_path.is_file() {
                     break;
                 }
                 match handoff_process.try_wait() {
                     Ok(Some(status)) => {
+                        if status.success() && !compatibility_retry_used {
+                            compatibility_retry_used = true;
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&launch_log_path)
+                                .and_then(|mut log| {
+                                    writeln!(log, "primary -File handoff exited before ready; retrying with -EncodedCommand")
+                                });
+                            handoff_process = spawn_update_handoff_encoded(&handoff_args)?;
+                            ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+                            continue;
+                        }
                         return Err(format!(
-                            "升级交接进程提前退出（{status}），当前版本未关闭。请导出诊断日志后重试。"
+                            "升级交接进程提前退出（{status}），当前版本未关闭。启动日志: {}",
+                            launch_log_path.to_string_lossy()
                         ));
                     }
                     Ok(None) => {}
                     Err(error) => {
                         return Err(format!(
-                            "无法确认升级交接进程状态: {error}。当前版本未关闭。"
+                            "无法确认升级交接进程状态: {error}。当前版本未关闭。启动日志: {}",
+                            launch_log_path.to_string_lossy()
                         ));
                     }
                 }
                 if std::time::Instant::now() >= ready_deadline {
                     let _ = handoff_process.kill();
                     return Err(
-                        "升级交接进程未在 5 秒内就绪，当前版本未关闭。请检查安全软件或 PowerShell 策略。"
-                            .to_string(),
+                        format!(
+                            "升级交接进程未在 5 秒内就绪，当前版本未关闭。启动日志: {}",
+                            launch_log_path.to_string_lossy()
+                        ),
                     );
                 }
                 std::thread::sleep(Duration::from_millis(50));

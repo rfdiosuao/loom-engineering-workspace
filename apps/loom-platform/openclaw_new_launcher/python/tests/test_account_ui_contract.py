@@ -278,7 +278,7 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("resp.subscription?.offline || resp.subscription?.stale", subscription_block)
         self.assertNotIn("showToast('订阅信息已更新', 'success')", subscription_block)
 
-    def test_account_page_has_compact_hierarchy_and_explains_disabled_authorization_input(self) -> None:
+    def test_account_page_has_compact_hierarchy_and_explains_online_authorization_input(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
@@ -287,7 +287,7 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertNotIn('px-8 py-7', logged_in)
         self.assertIn('data-entitlement-helper', logged_in)
         self.assertIn('aria-describedby="commercial-entitlement-help"', logged_in)
-        self.assertIn('当前为只读快照', logged_in)
+        self.assertIn('授权码将直接提交给在线授权服务验证', logged_in)
         self.assertNotIn('<InfoPanel label="购买入口"', logged_in)
         self.assertNotIn('accent />', logged_in)
 
@@ -414,6 +414,27 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn('<MetricTile label="可用余额"', logged_in)
         self.assertIn('<MetricTile label="当前套餐"', logged_in)
         self.assertIn('<InfoRow label="默认文本模型"', logged_in)
+
+    def test_cached_logged_in_account_can_enter_and_submit_entitlement_code(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        redeem = source.split("const handleRedeemEntitlement =", 1)[1].split("const logout =", 1)[0]
+        entitlement = source.split("<div data-account-entitlement", 1)[1].split("<div className=\"border-y", 1)[0]
+        self.assertIn("if (!loggedIn)", redeem)
+        self.assertNotIn("if (!accountWritable)", redeem)
+        self.assertIn("disabled={!loggedIn}", entitlement)
+        self.assertIn("disabled={busy || !loggedIn || !entitlementCode.trim()}", entitlement)
+
+    def test_account_quota_is_displayed_as_cny_balance_not_raw_internal_units(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("const NEW_API_QUOTA_PER_CNY = 500_000", source)
+        self.assertIn("formatQuotaBalance", source)
+        self.assertIn('label="可用余额" value={formatQuotaBalance(', source)
+        self.assertIn('label="累计消费" value={formatQuotaBalance(', source)
+        self.assertNotIn('label="累计消耗"', source)
 
     def test_account_identity_does_not_repeat_the_plan_summary(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:

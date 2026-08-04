@@ -20,6 +20,7 @@ import { APP_DISPLAY_NAME } from '../../version';
 
 const DEFAULT_BASE_URL = 'https://api.heang.top';
 const DEFAULT_ACCOUNT_CENTER_URL = `${DEFAULT_BASE_URL}/wallet`;
+const NEW_API_QUOTA_PER_CNY = 500_000;
 
 type AuthMode = 'email' | 'password';
 type RuntimeSyncResult = { target?: string; ok?: boolean; error?: string };
@@ -48,6 +49,13 @@ function failedSyncResults(results?: RuntimeSyncResult[]): RuntimeSyncResult[] {
 function displayValue(value: unknown, fallback = '服务暂未返回'): string {
   if (value === undefined || value === null || value === '') return fallback;
   return String(value);
+}
+
+function formatQuotaBalance(value: unknown, fallbackValue: unknown = '服务暂未返回'): string {
+  const candidate = value === undefined || value === null || value === '' ? fallbackValue : value;
+  const quota = typeof candidate === 'number' ? candidate : Number(String(candidate).trim());
+  if (!Number.isFinite(quota)) return String(fallbackValue || '服务暂未返回');
+  return `¥${(quota / NEW_API_QUOTA_PER_CNY).toFixed(2)}`;
 }
 
 function planDisplayName(value: unknown): string {
@@ -733,8 +741,8 @@ export const LicensePage: React.FC = () => {
   };
 
   const handleRedeemEntitlement = async () => {
-    if (!accountWritable) {
-      const message = '当前显示上次安全快照，请先重试在线验证后再绑定商业授权。';
+    if (!loggedIn) {
+      const message = '请先登录模型账号，再绑定商业授权。';
       setStatusText(message);
       showToast(message, 'info');
       return;
@@ -887,7 +895,7 @@ export const LicensePage: React.FC = () => {
           >
             <div>
               <span className="font-black">当前显示上次安全快照，账号待在线验证。</span>
-              <span className="ml-2">余额、套餐和授权状态可能已变化；写入操作已暂停。</span>
+              <span className="ml-2">余额和套餐状态仅供参考；授权码仍可提交在线验证。</span>
             </div>
             <button
               type="button"
@@ -957,7 +965,7 @@ export const LicensePage: React.FC = () => {
                     aria-label="商业矩阵授权码"
                     aria-describedby="commercial-entitlement-help"
                     value={entitlementCode}
-                    disabled={!accountWritable}
+                    disabled={!loggedIn}
                     onChange={(event) => setEntitlementCode(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') void handleRedeemEntitlement();
@@ -974,14 +982,14 @@ export const LicensePage: React.FC = () => {
                   className="mt-2 text-xs leading-5 text-text-muted"
                   data-entitlement-helper
                 >
-                  {accountWritable
-                    ? '授权码仅提交给授权服务验证；麓鸣不会回显或写入日志。'
-                    : '当前为只读快照。请先完成在线验证，再输入授权码。'}
+                  {loggedIn
+                    ? '授权码将直接提交给在线授权服务验证；麓鸣不会回显或写入日志。'
+                    : '请先登录模型账号，再输入授权码。'}
                 </p>
                 <button
                   type="button"
                   onClick={handleRedeemEntitlement}
-                  disabled={busy || !accountWritable || !entitlementCode.trim()}
+                  disabled={busy || !loggedIn || !entitlementCode.trim()}
                   className="mt-3 h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
                 >
                   {busy ? '正在绑定...' : '绑定当前账号'}
@@ -1044,8 +1052,8 @@ export const LicensePage: React.FC = () => {
               </div>
               <div className="loom-account-subscription-body space-y-6 px-6 py-6">
                 <div className="loom-account-metric-grid grid gap-4">
-                  <MetricTile label="可用余额" value={displayValue(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} />
-                  <MetricTile label="累计消耗" value={displayValue(subscription?.usage?.usedQuota, usageValue(account, ['usedQuota', 'used', 'quotaUsed']))} />
+                  <MetricTile label="可用余额" value={formatQuotaBalance(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} />
+                  <MetricTile label="累计消费" value={formatQuotaBalance(subscription?.usage?.usedQuota, usageValue(account, ['usedQuota', 'used', 'quotaUsed']))} />
                   <MetricTile label="请求次数" value={displayValue(subscription?.usage?.requestCount, usageValue(account, ['requestCount', 'requests']))} />
                   <MetricTile label="我的邀请码" value={displayValue(subscription?.inviteCode || subscription?.invitationCode || subscription?.referralCode, usageValue(account, ['inviteCode', 'invitationCode', 'referralCode'], '服务暂未返回'))} />
                   <MetricTile label="当前套餐" value={planDisplayName(subscription?.plan || account?.plan)} />
@@ -1333,7 +1341,7 @@ export const LicensePage: React.FC = () => {
             <div className="mt-8 grid grid-cols-2 gap-4">
               <GhostTile label="账号" value={accountStateText} />
               <GhostTile label="模型" value={totalModels ? `${totalModels} 个` : '待同步'} />
-              <GhostTile label="余额" value={displayValue(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} />
+              <GhostTile label="余额" value={formatQuotaBalance(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} />
               <GhostTile label="来源" value="api.heang.top" />
             </div>
             <div className="mt-7 rounded-[22px] border border-border/70 bg-surface-alt/45 p-6">
