@@ -1,7 +1,7 @@
 # LOOM Engineering Workspace 全项目代码审查
 
-审查日期：2026-08-06  
-审查基线：`main` / `afaaa8ca93f75ae9b421cb8539658413869bdb22`  
+审查日期：2026-08-06
+审查基线：`main` / `afaaa8ca93f75ae9b421cb8539658413869bdb22`
 仓库：`rfdiosuao/loom-engineering-workspace`
 
 ## 结论
@@ -213,4 +213,3 @@ Bridge 仅监听 `127.0.0.1` 且响应 CORS 限制为 Tauri 来源，因此风�
 4. 强制模型凭据只走 HTTPS；补全 Storyboard Bridge 鉴权。
 5. 修复代理头信任和构建依赖告警。
 6. 清理旧 UI 事实源和发布文档，随后跑完整 CI、Android release 构建和安装器烟测。
-
