@@ -751,7 +751,9 @@ class MatrixRouteContractTests(unittest.TestCase):
                     "target": {"deviceIds": device_ids},
                 },
             )
-            job = _wait_for_job(client, submitted.json()["jobId"], timeout=5.0)
+            # This case launches nine short-lived interpreter processes. Windows
+            # CI can take longer than five seconds to create them under load.
+            job = _wait_for_job(client, submitted.json()["jobId"], timeout=15.0)
 
         self.assertEqual(job["status"], "succeeded")
         self.assertEqual(job["result"]["concurrency"], 8)
