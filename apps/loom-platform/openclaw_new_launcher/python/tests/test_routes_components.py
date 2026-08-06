@@ -456,6 +456,67 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertNotIn("重新登录", payload["error"])
         self.assertNotIn("自动创建", payload["error"])
 
+    def test_model_config_apply_uses_cached_catalog_during_transient_refresh_outage(self) -> None:
+        calls: list[str] = []
+
+        class FakeAccountManager:
+            def current(self):
+                return {"source": ACCOUNT_SOURCE, "memberToken": "valid-token"}
+
+            def ensure_launcher_token(self, *, force_refresh=False):
+                calls.append(f"ensure:{force_refresh}")
+                raise NewApiAccountError("http_503: upstream unavailable", status_code=503)
+
+        class FakeWireService:
+            def sync_agent_model_config(self, component_id, *, model="", validate_remote=False):
+                calls.append(f"write:{model}:{validate_remote}")
+                return {
+                    "componentId": component_id,
+                    "model": model,
+                    "configured": True,
+                    "remoteVerified": True,
+                    "transactionId": "tx-cached-catalog",
+                    "transactionState": "committed",
+                }
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_newapi_account_mgr=lambda: FakeAccountManager(),
+            get_wire_svc=lambda: FakeWireService(),
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+        client = TestClient(app)
+
+        with patch(
+            "api.routes_components._model_config_status",
+            return_value={
+                "installed": True,
+                "componentStatus": "ready",
+                "availableModels": ["deepseek-v3.2"],
+            },
+        ):
+            response = client.post(
+                "/api/components/model-config/apply",
+                json={
+                    "componentId": "codex-desktop",
+                    "model": "deepseek-v3.2",
+                    "confirmed": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            calls,
+            ["ensure:True", "write:deepseek-v3.2:True"],
+        )
+        self.assertEqual(response.json()["status"]["transactionId"], "tx-cached-catalog")
+
     def test_model_config_apply_explains_remote_probe_failure_without_claiming_success(self) -> None:
         class FakeWireService:
             def sync_agent_model_config(self, _component_id, *, model="", validate_remote=False):

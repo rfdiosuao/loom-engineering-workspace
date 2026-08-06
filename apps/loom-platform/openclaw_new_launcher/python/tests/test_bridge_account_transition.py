@@ -16,6 +16,93 @@ from core.job_ownership import AccountRuntimeIdentity, account_job_binding
 
 
 class BridgeAccountTransitionTests(unittest.TestCase):
+    def test_logout_uses_account_session_identity_when_entitlement_anchor_changed(
+        self,
+    ) -> None:
+        import bridge
+
+        install_id = "install-a"
+        identity = AccountRuntimeIdentity(
+            account_id="account-a",
+            owner_binding=account_job_binding("account-a", install_id),
+            logged_in=True,
+        )
+
+        class FakeJobs:
+            def cancel_matching(self, _predicate, *, wait_for_workers=True):
+                self.wait_for_workers = wait_for_workers
+                return []
+
+            def list(self, limit=30):
+                del limit
+                return []
+
+        class FakeMatrix:
+            def __init__(self, _paths, **_kwargs) -> None:
+                pass
+
+            def emergency_stop(self, *, all_tasks=False):
+                return {
+                    "cancelled": all_tasks,
+                    "executionMayContinue": False,
+                }
+
+        current_ctx = SimpleNamespace(
+            get_newapi_account_mgr=lambda: SimpleNamespace(
+                public_session=lambda: {
+                    "loggedIn": True,
+                    "memberId": "newapi:account-a",
+                },
+            ),
+            get_entitlement_mgr=lambda: SimpleNamespace(
+                current_state=lambda _feature: {
+                    "accountId": "account-b",
+                    "lease": {"installId": install_id},
+                },
+            ),
+            paths=SimpleNamespace(base_path=install_id),
+        )
+        with (
+            patch.object(bridge, "_build_fastapi_context", return_value=current_ctx),
+            patch.object(bridge, "_get_job_mgr", return_value=FakeJobs()),
+            patch.object(
+                bridge,
+                "_shutdown_agent_service",
+                return_value={
+                    "stopped": True,
+                    "drained": True,
+                    "executionMayContinue": False,
+                },
+            ) as shutdown_agent,
+            patch("core.phone_matrix.MatrixControlPlane", FakeMatrix),
+            patch(
+                "api.routes_phone.stop_phone_event_syncs_for_account",
+                return_value={"ok": True, "executionMayContinue": False},
+            ),
+            patch(
+                "api.routes_phone.stop_phone_daemon",
+                return_value={
+                    "ok": True,
+                    "running": False,
+                    "stopped": True,
+                    "executionMayContinue": False,
+                },
+            ) as stop_daemon,
+            patch(
+                "api.routes_phone.cleanup_phone_usb_for_account",
+                return_value={
+                    "failedDeviceIds": [],
+                    "executionMayContinue": False,
+                },
+            ),
+        ):
+            result = bridge._account_logout_cleanup(identity)
+
+        self.assertFalse(result["identityChanged"])
+        self.assertTrue(result["ok"])
+        shutdown_agent.assert_called_once_with()
+        stop_daemon.assert_called_once_with(base_root=bridge.paths.base_path)
+
     def test_agent_service_cannot_be_recreated_during_account_transition(
         self,
     ) -> None:

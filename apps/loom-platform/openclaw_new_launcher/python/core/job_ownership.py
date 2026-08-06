@@ -94,13 +94,13 @@ def capture_account_runtime_identity(
         or public_session.get("accountId")
         or ""
     ).strip()
-    current_account_id, current_binding = current_account_job_identity(ctx)
-    if not account_id and current_account_id:
-        account_id = current_account_id
     if not account_id:
         member_id = str(public_session.get("memberId") or "").strip()
         if member_id.startswith("newapi:"):
             account_id = member_id.partition(":")[2].strip()
+    current_account_id, current_binding = current_account_job_identity(ctx)
+    if not account_id and current_account_id:
+        account_id = current_account_id
     if account_id and current_account_id == account_id and current_binding:
         owner_binding = current_binding
     else:

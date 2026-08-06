@@ -421,6 +421,27 @@ def register_component_routes(app, ctx) -> None:
                         "timeout",
                     ))
                 )
+                cached_models = [
+                    str(item).strip()
+                    for item in current.get("availableModels", [])
+                    if str(item).strip()
+                ]
+                cached_model = next(
+                    (
+                        item
+                        for item in cached_models
+                        if model and item.casefold() == model.casefold()
+                    ),
+                    "",
+                )
+                use_cached_catalog = bool(upstream_unavailable and cached_model)
+                if use_cached_catalog:
+                    model = cached_model
+                    if callable(append_log):
+                        append_log(
+                            "[ModelConfig] transient catalog refresh failure; "
+                            f"validating cached model remotely: {model}\n"
+                        )
                 if rate_limited:
                     response_error = "模型目录刷新受到限流，原配置未修改。请稍后重试。"
                     response_code = "model_catalog_rate_limited"
@@ -441,12 +462,13 @@ def register_component_routes(app, ctx) -> None:
                     response_code = "api_key_unavailable"
                     response_action = "retry_model_config"
                     response_status = 400
-                return ctx.fastapi_json({
-                    "error": response_error,
-                    "code": response_code,
-                    "action": response_action,
-                    "status": current,
-                }, response_status)
+                if not use_cached_catalog:
+                    return ctx.fastapi_json({
+                        "error": response_error,
+                        "code": response_code,
+                        "action": response_action,
+                        "status": current,
+                    }, response_status)
         try:
             wire_service = ctx.get_wire_svc()
             status = await run_in_threadpool(

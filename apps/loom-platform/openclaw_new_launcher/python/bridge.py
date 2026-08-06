@@ -322,7 +322,27 @@ def _account_logout_cleanup(identity: object = None) -> dict:
         "errors": [],
     }
     account_context = _build_fastapi_context()
-    current_identity = capture_account_runtime_identity(account_context)
+    current_session: object = None
+    account_manager_getter = getattr(
+        account_context,
+        "get_newapi_account_mgr",
+        None,
+    )
+    if callable(account_manager_getter):
+        try:
+            account_manager = account_manager_getter()
+            public_session = getattr(account_manager, "public_session", None)
+            if callable(public_session):
+                current_session = public_session()
+        except Exception as exc:
+            append_log(
+                "[Account] current session identity unavailable during cleanup: "
+                f"{type(exc).__name__}\n"
+            )
+    current_identity = capture_account_runtime_identity(
+        account_context,
+        current_session,
+    )
     captured_identity = (
         coerce_account_runtime_identity(identity)
         if identity is not None
