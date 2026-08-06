@@ -190,7 +190,7 @@ public class QBotWebSocketManager {
             @Override
             public void onSuccess(AccessTokenResponse response) {
                 String authHeader = apiClient.getAuthorizationHeader();
-                XLog.d(TAG, "使用 Authorization: " + (authHeader != null ? authHeader.substring(0, Math.min(authHeader.length(), 20)) + "..." : "null"));
+                XLog.d(TAG, "Authorization 已配置: " + (authHeader != null));
 
                 String gatewayUrl = QBotConstants.API_BASE_URL + QBotConstants.GET_GATEWAY_URL;
                 Request request = new Request.Builder()

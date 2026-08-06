@@ -50,6 +50,12 @@ class Handler(ResponseMixin, BaseHTTPRequestHandler):
     server_version = "OpenClawLicense/1.0"
     facade: Any = None
 
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(
+            int(getattr(self.facade, "REQUEST_TIMEOUT_SECONDS", 30))
+        )
+
     def admin_context(self, *, allow_legacy: bool = True) -> dict[str, Any] | None:
         context = getattr(self, "_admin_context", None)
         if context is not None:
@@ -76,6 +82,10 @@ class Handler(ResponseMixin, BaseHTTPRequestHandler):
         return self.facade.context_account_id(context)
 
     def request_ip(self) -> str:
+        peer_ip = self.client_address[0] if self.client_address else ""
+        trusted_proxies = set(getattr(self.facade, "TRUSTED_PROXY_IPS", ()))
+        if peer_ip not in trusted_proxies:
+            return peer_ip
         cf_ip = self.headers.get("CF-Connecting-IP", "").strip()
         if cf_ip:
             return cf_ip
@@ -87,7 +97,7 @@ class Handler(ResponseMixin, BaseHTTPRequestHandler):
             parts = [part.strip() for part in forwarded.split(",") if part.strip()]
             if parts:
                 return parts[-1]
-        return self.client_address[0] if self.client_address else ""
+        return peer_ip
 
     def require_admin(
         self, role: str | None = None, *, allow_legacy: bool = True
@@ -142,6 +152,18 @@ class Handler(ResponseMixin, BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                self.send_json(400, {"ok": False, "error": "Invalid Content-Length"})
+                return
+            max_bytes = int(getattr(self.facade, "MAX_REQUEST_BODY_BYTES", 1048576))
+            if length < 0:
+                self.send_json(400, {"ok": False, "error": "Invalid Content-Length"})
+                return
+            if length > max_bytes:
+                self.send_json(413, {"ok": False, "error": "Request body too large"})
+                return
             dispatch(self, "POST")
         finally:
             self.facade._finish_audit_transaction()

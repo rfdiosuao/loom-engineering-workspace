@@ -3,6 +3,7 @@ set -euo pipefail
 
 REMOTE_DIR="${LICENSE_REMOTE_DIR:-/opt/openclaw-license}"
 SERVICE_NAME="${LICENSE_SERVICE_NAME:-openclaw-license}"
+SERVICE_USER="${LICENSE_SERVICE_USER:-openclaw-license}"
 SERVER_UPLOAD="${LICENSE_SERVER_UPLOAD:-/tmp/openclaw-license-server.py}"
 ADMIN_HTML_UPLOAD="${LICENSE_ADMIN_HTML_UPLOAD:-/tmp/openclaw-license-admin_console.html}"
 RELAY_ENV_FILE="${LICENSE_RELAY_ENV_FILE:-$REMOTE_DIR/openclaw-license.env}"
@@ -15,6 +16,10 @@ echo "======================================"
 echo ""
 
 cd "$REMOTE_DIR"
+
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+  useradd --system --home-dir "$REMOTE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
+fi
 
 ts="$(date -u +%Y%m%d%H%M%S)"
 
@@ -80,6 +85,7 @@ PY
 else
   echo "relay_token=not configured; relay endpoints will remain fail-closed"
 fi
+chown -R "$SERVICE_USER:$SERVICE_USER" "$REMOTE_DIR"
 systemctl daemon-reload
 echo ""
 

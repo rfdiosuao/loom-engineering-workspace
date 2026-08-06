@@ -144,14 +144,14 @@ public class QBotApiClient {
                 try {
                     if (response.isSuccessful()) {
                         String responseBody = response.body().string();
-                        XLog.d(TAG, "access_token 响应: " + responseBody);
+                        XLog.d(TAG, "access_token 响应成功");
                         AccessTokenResponse tokenResponse = gson.fromJson(responseBody, AccessTokenResponse.class);
                         String token = tokenResponse != null ? tokenResponse.getAccess_token() : null;
                         if (token == null || token.isEmpty()) {
-                            XLog.e(TAG, "access_token 为空, body=" + responseBody);
+                            XLog.e(TAG, "access_token 为空");
                             executeCallback(() -> {
                                 if (callback != null) {
-                                    callback.onFailure(new QBotException("获取 access_token 失败: 返回的 token 为空, body=" + responseBody));
+                                    callback.onFailure(new QBotException("获取 access_token 失败: 返回的 token 为空"));
                                 }
                             });
                             return;

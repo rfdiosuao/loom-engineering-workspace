@@ -42,10 +42,10 @@ class ConfigServer(
         return try {
             when {
                 (uri == "/" || uri == "/index.html") && method == Method.GET -> serveHtml()
-                uri == "/api/channels" && method == Method.GET -> handleGetChannels()
-                uri == "/api/channels" && method == Method.POST -> handlePostChannels(session)
-                uri == "/api/llm" && method == Method.GET -> handleGetLlm()
-                uri == "/api/llm" && method == Method.POST -> handlePostLlm(session)
+                uri == "/api/channels" && method == Method.GET -> withPhoneToken(session) { handleGetChannels() }
+                uri == "/api/channels" && method == Method.POST -> withPhoneToken(session) { handlePostChannels(session) }
+                uri == "/api/llm" && method == Method.GET -> withPhoneToken(session) { handleGetLlm() }
+                uri == "/api/llm" && method == Method.POST -> withPhoneToken(session) { handlePostLlm(session) }
                 // ==================== Lumi Secure Channel (Token + HMAC required) ====================
                 uri == "/api/lumi/security/identity-challenge" && method == Method.POST ->
                     LumiSecurityController.handleIdentityChallenge(session, configuredPort)
@@ -267,10 +267,10 @@ class ConfigServer(
                     WorkflowApiController.handleDisableTemplate(session)
                 // ==================== Debug (仅 DEBUG 构建) ====================
                 uri == "/debug.html" && method == Method.GET && BuildConfig.DEBUG -> serveDebugHtml()
-                uri == "/api/debug/tools" && method == Method.GET && BuildConfig.DEBUG -> handleGetTools()
-                uri == "/api/debug/execute" && method == Method.POST && BuildConfig.DEBUG -> handleExecuteTool(session)
-                uri == "/api/debug/screen-full" && method == Method.GET && BuildConfig.DEBUG -> handleGetScreenFull()
-                uri.startsWith("/api/debug/file") && method == Method.GET && BuildConfig.DEBUG -> handleServeFile(session)
+                uri == "/api/debug/tools" && method == Method.GET && BuildConfig.DEBUG -> withPhoneToken(session) { handleGetTools() }
+                uri == "/api/debug/execute" && method == Method.POST && BuildConfig.DEBUG -> withPhoneToken(session) { handleExecuteTool(session) }
+                uri == "/api/debug/screen-full" && method == Method.GET && BuildConfig.DEBUG -> withPhoneToken(session) { handleGetScreenFull() }
+                uri.startsWith("/api/debug/file") && method == Method.GET && BuildConfig.DEBUG -> withPhoneToken(session) { handleServeFile(session) }
                 else -> corsResponse(
                     newFixedLengthResponse(
                         Response.Status.NOT_FOUND, MIME_JSON,
@@ -301,6 +301,19 @@ class ConfigServer(
         val authError = LumiSecurityController.authorize(session)
         if (authError != null) return corsResponse(authError)
         return handler(session)
+    }
+
+    private fun withPhoneToken(session: IHTTPSession, handler: () -> Response): Response {
+        if (!TokenValidator.validate(session)) {
+            return corsResponse(
+                newFixedLengthResponse(
+                    Response.Status.UNAUTHORIZED,
+                    MIME_JSON,
+                    """{"code":-1,"message":"phone credential required"}"""
+                )
+            )
+        }
+        return handler()
     }
 
     private fun handleLumiJson(session: IHTTPSession, handler: (IHTTPSession) -> Response): Response {
@@ -363,13 +376,13 @@ class ConfigServer(
     private fun handleGetChannels(): Response {
         val data = JsonObject().apply {
             addProperty("dingtalkAppKey", KVUtils.getDingtalkAppKey())
-            addProperty("dingtalkAppSecret", KVUtils.getDingtalkAppSecret())
+            addProperty("dingtalkAppSecret", maskSecret(KVUtils.getDingtalkAppSecret()))
             addProperty("feishuAppId", KVUtils.getFeishuAppId())
-            addProperty("feishuAppSecret", KVUtils.getFeishuAppSecret())
+            addProperty("feishuAppSecret", maskSecret(KVUtils.getFeishuAppSecret()))
             addProperty("qqAppId", KVUtils.getQqAppId())
-            addProperty("qqAppSecret", KVUtils.getQqAppSecret())
-            addProperty("discordBotToken", KVUtils.getDiscordBotToken())
-            addProperty("telegramBotToken", KVUtils.getTelegramBotToken())
+            addProperty("qqAppSecret", maskSecret(KVUtils.getQqAppSecret()))
+            addProperty("discordBotToken", maskSecret(KVUtils.getDiscordBotToken()))
+            addProperty("telegramBotToken", maskSecret(KVUtils.getTelegramBotToken()))
         }
         val result = JsonObject().apply {
             addProperty("code", 0)
@@ -670,9 +683,9 @@ class ConfigServer(
             )
         )
         // 安全校验：只允许访问 cache 目录下的文件
-        val cacheDir = context.cacheDir.absolutePath
-        val file = java.io.File(path)
-        if (!file.exists() || !file.absolutePath.startsWith(cacheDir)) {
+        val cacheDir = context.cacheDir.canonicalFile
+        val file = java.io.File(path).canonicalFile
+        if (!file.isFile || !file.toPath().startsWith(cacheDir.toPath())) {
             return corsResponse(
                 newFixedLengthResponse(
                     Response.Status.NOT_FOUND, MIME_JSON,

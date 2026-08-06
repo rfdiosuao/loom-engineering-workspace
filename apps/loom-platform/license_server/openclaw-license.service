@@ -15,7 +15,12 @@ Environment=LICENSE_LOGO_FILE=/opt/openclaw-license/logo.ico
 ExecStart=/opt/openclaw-license/venv/bin/python /opt/openclaw-license/server.py serve
 Restart=always
 RestartSec=3
-User=root
+User=openclaw-license
+Group=openclaw-license
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/openclaw-license
 
 [Install]
 WantedBy=multi-user.target

@@ -30,6 +30,7 @@ def _app(
     *,
     model_text: str = "ok",
     protected: bool = False,
+    authenticated: bool = True,
     model_error: ModelGatewayError | None = None,
 ) -> FastAPI:
     app = FastAPI()
@@ -60,7 +61,7 @@ def _app(
     )
 
     ctx = SimpleNamespace(
-        auth_error=lambda _request: None,
+        auth_error=lambda _request: None if authenticated else fastapi_json({"error": "Unauthorized"}, 401),
         body=body,
         fastapi_json=fastapi_json,
         protected_error=lambda _path: fastapi_json({"error": "未授权"}, 403) if protected else None,
@@ -75,6 +76,12 @@ def _app(
 
 
 class StoryboardRouteTests(unittest.TestCase):
+    def test_generate_requires_authentication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = TestClient(_app(tmp, authenticated=False))
+            resp = client.post("/api/storyboard/generate", json={"stage": "script", "project": {}})
+            self.assertEqual(resp.status_code, 401)
+
     def test_get_param_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             client = TestClient(_app(tmp))

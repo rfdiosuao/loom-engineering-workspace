@@ -65,6 +65,8 @@ def register_storyboard_routes(app, ctx) -> None:
 
     @app.post("/api/storyboard/generate")
     async def generate(request: Request):
+        if error := ctx.auth_error(request):
+            return error
         if error := ctx.protected_error(request.url.path):
             return error
         body = await ctx.body(request)

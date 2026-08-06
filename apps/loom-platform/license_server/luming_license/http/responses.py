@@ -11,6 +11,9 @@ class ResponseMixin:
 
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
+        max_bytes = int(getattr(self.facade, "MAX_REQUEST_BODY_BYTES", 1048576))
+        if length < 0 or length > max_bytes:
+            raise ValueError("request body size is invalid")
         data = self.rfile.read(length)
         return self.facade.json.loads(data.decode("utf-8-sig"))
 
