@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import overviewHero from '../../assets/overview-hero-openclaw-4k.webp';
 import {
   Activity,
   ArrowRight,
@@ -323,8 +324,14 @@ export const DashboardPage: React.FC = () => {
         ) : null}
 
         <section className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.55fr)]">
-          <div className="relative min-h-[300px] overflow-hidden rounded-[22px] border border-white/10 bg-surface-deeper px-6 py-7 text-white shadow-elevation-medium sm:px-8 sm:py-8">
+          <div data-dashboard-matrix-hero className="relative min-h-[300px] overflow-hidden rounded-[22px] border border-white/10 bg-surface-deeper px-6 py-7 text-white shadow-elevation-medium sm:px-8 sm:py-8">
             <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+              <img
+                src={overviewHero}
+                alt=""
+                className="absolute inset-0 h-full w-full object-cover opacity-35"
+              />
+              <div className="absolute inset-0 bg-gradient-to-r from-surface-deeper via-surface-deeper/90 to-surface-deeper/35" />
               <div className="absolute -right-20 -top-36 h-[420px] w-[420px] rounded-full border border-accent/15" />
               <div className="absolute -right-2 -top-16 h-[280px] w-[280px] rounded-full border border-accent/25" />
               <div className="absolute right-20 top-14 h-28 w-28 rounded-full bg-accent/20 blur-2xl" />
@@ -346,6 +353,7 @@ export const DashboardPage: React.FC = () => {
               <div className="mt-7 flex flex-wrap gap-3">
                 <button
                   type="button"
+                  aria-label="开始配置"
                   onClick={() => journeyReady ? setCurrentPage('agent') : void verifyConnection()}
                   disabled={!journeyReady && !canCheckNow}
                   className="inline-flex h-11 items-center gap-2 rounded-xl bg-terminal-text px-5 text-sm font-black text-terminal-bg transition hover:-translate-y-0.5 hover:bg-accent-hover disabled:translate-y-0 disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
@@ -355,11 +363,12 @@ export const DashboardPage: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  aria-label="查看可做的事"
                   onClick={() => setCurrentPage('workbench')}
                   className="inline-flex h-11 items-center gap-2 rounded-xl border border-white/15 bg-white/[0.06] px-5 text-sm font-bold text-white transition hover:border-white/30 hover:bg-white/10"
                 >
                   <Phone className="h-4 w-4" aria-hidden="true" />
-                  打开手机矩阵
+                  让 AI 带着手机干活
                 </button>
               </div>
             </div>
