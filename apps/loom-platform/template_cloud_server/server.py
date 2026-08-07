@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import re
+import tempfile
+import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,9 +20,11 @@ SENSITIVE_KEY_MARKERS = ("token", "secret", "password", "credential", "api_key",
 class TemplateStore:
     def __init__(self, path: str):
         self.path = path
+        self._lock = threading.RLock()
 
     def list_templates(self) -> Json:
-        state = self._read()
+        with self._lock:
+            state = self._read()
         templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
         templates.sort(key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
         return {
@@ -35,29 +39,30 @@ class TemplateStore:
         }
 
     def upsert(self, payload: Json) -> Json:
-        state = self._read()
-        templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
-        template_id = template_id_from(payload.get("templateId") or payload.get("id") or payload.get("name"))
-        existing = next((item for item in templates if item.get("templateId") == template_id), None)
-        version = int(existing.get("version", 0)) + 1 if existing else int(payload.get("version") or 1)
-        upload_count = int(existing.get("uploadCount", 0)) + 1 if existing else 1
-        now = now_iso()
-        template = redact_json(
-            {
-                **payload,
-                "schema": "loom.acquisition_template.v1",
-                "templateId": template_id,
-                "version": version,
-                "uploadCount": upload_count,
-                "createdAt": existing.get("createdAt") if existing else payload.get("createdAt") or now,
-                "updatedAt": now,
-            }
-        )
-        state["templates"] = [item for item in templates if item.get("templateId") != template_id]
-        state["templates"].append(template)
-        state["updatedAt"] = now
-        self._write(state)
-        return template
+        with self._lock:
+            state = self._read()
+            templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
+            template_id = template_id_from(payload.get("templateId") or payload.get("id") or payload.get("name"))
+            existing = next((item for item in templates if item.get("templateId") == template_id), None)
+            version = int(existing.get("version", 0)) + 1 if existing else int(payload.get("version") or 1)
+            upload_count = int(existing.get("uploadCount", 0)) + 1 if existing else 1
+            now = now_iso()
+            template = redact_json(
+                {
+                    **payload,
+                    "schema": "loom.acquisition_template.v1",
+                    "templateId": template_id,
+                    "version": version,
+                    "uploadCount": upload_count,
+                    "createdAt": existing.get("createdAt") if existing else payload.get("createdAt") or now,
+                    "updatedAt": now,
+                }
+            )
+            state["templates"] = [item for item in templates if item.get("templateId") != template_id]
+            state["templates"].append(template)
+            state["updatedAt"] = now
+            self._write(state)
+            return template
 
     def _read(self) -> Json:
         if not os.path.exists(self.path):
@@ -69,16 +74,26 @@ class TemplateStore:
                 raise ValueError("state must be an object")
             data.setdefault("templates", [])
             return data
-        except (OSError, json.JSONDecodeError, ValueError):
-            return {"schema": "loom.template_cloud.v1", "updatedAt": "", "templates": []}
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            raise RuntimeError(f"template store is unreadable: {self.path}") from error
 
     def _write(self, state: Json) -> None:
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = f"{self.path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(redact_json(state), handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-        os.replace(tmp, self.path)
+        directory = os.path.dirname(self.path) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=directory, prefix=".templates-", suffix=".tmp", delete=False
+            ) as handle:
+                tmp = handle.name
+                json.dump(redact_json(state), handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
 
 
 def create_response(store: TemplateStore, payload: Json, *, public_base: str) -> Json:

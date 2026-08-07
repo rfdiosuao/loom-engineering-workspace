@@ -4,11 +4,38 @@ import json
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from template_cloud_server.server import TemplateStore, can_write_template, create_response, decode_payload, require_bearer
 
 
 class TemplateCloudServerTests(unittest.TestCase):
+    def test_concurrent_upserts_are_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TemplateStore(os.path.join(temp_dir, "templates.json"))
+
+            def upload(index: int) -> None:
+                store.upsert({"templateId": f"template-{index}", "name": f"Template {index}"})
+
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                list(executor.map(upload, range(100)))
+
+            saved = store.list_templates()["templates"]
+            self.assertEqual(100, len(saved))
+            self.assertEqual(100, len({item["templateId"] for item in saved}))
+
+    def test_corrupt_store_is_not_silently_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "templates.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("{not-json")
+            store = TemplateStore(path)
+
+            with self.assertRaisesRegex(RuntimeError, "template store is unreadable"):
+                store.upsert({"templateId": "safe", "name": "Safe"})
+            with open(path, "r", encoding="utf-8") as handle:
+                self.assertEqual("{not-json", handle.read())
+
     def test_create_response_saves_template_and_increments_version(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TemplateStore(os.path.join(temp_dir, "templates.json"))

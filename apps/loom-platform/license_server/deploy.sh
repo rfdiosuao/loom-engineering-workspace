@@ -3,6 +3,7 @@ set -euo pipefail
 
 REMOTE_DIR="${LICENSE_REMOTE_DIR:-/opt/openclaw-license}"
 SERVICE_NAME="${LICENSE_SERVICE_NAME:-openclaw-license}"
+SERVICE_USER="${LICENSE_SERVICE_USER:-openclaw-license}"
 SERVER_UPLOAD="${LICENSE_SERVER_UPLOAD:-/tmp/openclaw-license-server.py}"
 PACKAGE_UPLOAD="${LICENSE_PACKAGE_UPLOAD:-/tmp/openclaw-license-luming_license}"
 DEPLOY_ENV_HELPER="${LICENSE_DEPLOY_ENV_HELPER:-$PACKAGE_UPLOAD/deploy_env.py}" # luming_license/deploy_env.py
@@ -48,6 +49,16 @@ fi
 echo "======================================"
 echo "OpenClaw license server guarded deploy"
 echo "======================================"
+
+service_user_ready=0
+if id "$SERVICE_USER" >/dev/null 2>&1; then
+  service_user_ready=1
+elif command -v useradd >/dev/null 2>&1; then
+  useradd --system --home-dir "$REMOTE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
+  service_user_ready=1
+else
+  echo "useradd unavailable; preserving existing ownership in this environment"
+fi
 
 cd "$REMOTE_DIR"
 ts="$(date -u +%Y%m%d%H%M%S)"
@@ -199,6 +210,9 @@ if [ -f "$next/admin_console.html" ]; then
   fi
   mv "$next/admin_console.html" "$REMOTE_DIR/admin_console.html"
   admin_switched=1
+fi
+if [ "$service_user_ready" -eq 1 ]; then
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$REMOTE_DIR"
 fi
 systemctl start "$SERVICE_NAME"
 systemctl is-active --quiet "$SERVICE_NAME"

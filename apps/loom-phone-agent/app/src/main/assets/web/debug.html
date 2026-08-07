@@ -71,10 +71,16 @@
 <script>
 let tools = [];
 let selectedTool = null;
+const phoneToken = window.prompt('Phone connection credential') || '';
+
+function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}), 'X-AGENT-PHONE-TOKEN': phoneToken };
+  return fetch(url, { ...options, headers });
+}
 
 async function loadTools() {
   try {
-    const res = await fetch('/api/debug/tools');
+    const res = await apiFetch('/api/debug/tools');
     const json = await res.json();
     if (json.code === 0) {
       tools = json.data;
@@ -167,7 +173,7 @@ async function executeTool() {
 
   const startTime = Date.now();
   try {
-    const res = await fetch('/api/debug/execute', {
+    const res = await apiFetch('/api/debug/execute', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tool: selectedTool.name, params })
@@ -186,7 +192,7 @@ async function executeTool() {
   }
 }
 
-function showResult(data, elapsed) {
+async function showResult(data, elapsed) {
   const panel = document.getElementById('resultPanel');
   const status = document.getElementById('resultStatus');
   const time = document.getElementById('resultTime');
@@ -217,8 +223,11 @@ function showResult(data, elapsed) {
   // 如果是图片文件路径，展示图片
   if (data.success && data.data && /\.(png|jpg|jpeg|webp)$/i.test(data.data.trim())) {
     const filePath = data.data.trim();
-    img.src = '/api/debug/file?path=' + encodeURIComponent(filePath);
-    img.style.display = 'block';
+    const fileResponse = await apiFetch('/api/debug/file?path=' + encodeURIComponent(filePath));
+    if (fileResponse.ok) {
+      img.src = URL.createObjectURL(await fileResponse.blob());
+      img.style.display = 'block';
+    }
   }
 
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });

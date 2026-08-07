@@ -52,6 +52,9 @@ class Settings:
     publish_relay_max_attempts: int
     account_redeem_service_token: str
     max_bulk_code_hashes: int
+    max_request_body_bytes: int
+    request_timeout_seconds: int
+    trusted_proxy_ips: frozenset[str]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -64,6 +67,11 @@ class Settings:
         gateway_models = tuple(
             item.strip()
             for item in os.environ.get("MEMBER_GATEWAY_MODELS", "").replace("\uFF0C", ",").split(",")
+            if item.strip()
+        )
+        trusted_proxy_ips = frozenset(
+            item.strip()
+            for item in os.environ.get("LICENSE_TRUSTED_PROXY_IPS", "").split(",")
             if item.strip()
         )
         public_url = os.environ.get("LICENSE_PUBLIC_URL", "https://license.heang.top/").strip()
@@ -103,6 +111,9 @@ class Settings:
                 "LICENSE_ACCOUNT_REDEEM_SERVICE_TOKEN", ""
             ).strip(),
             max_bulk_code_hashes=bounded_int_env("LICENSE_MAX_BULK_CODE_HASHES", 1000, 1, 5000),
+            max_request_body_bytes=bounded_int_env("LICENSE_MAX_REQUEST_BODY_BYTES", 1048576, 1024, 16777216),
+            request_timeout_seconds=bounded_int_env("LICENSE_REQUEST_TIMEOUT_SECONDS", 30, 5, 300),
+            trusted_proxy_ips=trusted_proxy_ips,
         )
 
 

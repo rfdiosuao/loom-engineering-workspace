@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "麓鸣",
   "mainBinaryName": "LOOM",
-  "version": "2.4.10",
+  "version": "2.4.11",
   "identifier": "top.heang.loom",
   "build": {
     "frontendDist": "../dist",
