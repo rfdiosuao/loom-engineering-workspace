@@ -1,0 +1,18 @@
+{
+  "schema": "loom.matrix.dispatch.v2",
+  "campaignId": "campaign_consumer_gap_001",
+  "concurrency": 9,
+  "mode": "safe",
+  "profile": "standard",
+  "deviceAssignments": [
+    {
+      "assignmentId": "assignment_consumer_gap_001",
+      "deviceId": "device_consumer_gap_001",
+      "prompt": "This remains a valid published v2 input while the consumer adapter is pending.",
+      "templateId": "consumer_gap_template",
+      "input": {},
+      "timeoutSec": 29,
+      "retryBudget": 1
+    }
+  ]
+}

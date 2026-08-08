@@ -1,0 +1,9 @@
+{
+  "schema": "loom.agent.session.v1",
+  "sessionId": "session_invalid_date_001",
+  "title": "Invalid date-time canary",
+  "status": "active",
+  "runtimeProfileId": "default",
+  "createdAt": "not-a-date",
+  "updatedAt": "2026-08-08T10:00:00+08:00"
+}

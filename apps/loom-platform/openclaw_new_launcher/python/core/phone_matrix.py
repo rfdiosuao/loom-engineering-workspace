@@ -41,10 +41,29 @@ MATRIX_RUNTIME_DEDUPE_WINDOW_MS = 15_000
 MATRIX_PRESENCE_UNSTABLE_MS = 7_500
 MATRIX_PRESENCE_OFFLINE_MS = 15_000
 MATRIX_DISPATCH_SCHEMA = "loom.matrix.dispatch.v2"
+MATRIX_DISPATCH_SCHEMA_V3 = "loom.matrix.dispatch.v3"
+MATRIX_DISPATCH_SCHEMAS = frozenset({MATRIX_DISPATCH_SCHEMA, MATRIX_DISPATCH_SCHEMA_V3})
 MATRIX_CANONICAL_MAX_CONCURRENCY = 8
 MATRIX_CANONICAL_MAX_RETRY_BUDGET = 10
 MATRIX_LEASE_TTL_SECONDS = 30
 MATRIX_CONTROL_COMMAND_LIMIT = 500
+
+_MATRIX_V3_SHARED_TEMPLATE_REFERENCE_FIELDS = frozenset({"templateId", "version"})
+_MATRIX_V3_SHARED_TEMPLATE_RESOLVED_FIELDS = frozenset(
+    {
+        "templateId",
+        "version",
+        "name",
+        "industry",
+        "platforms",
+        "targetCustomer",
+        "keywords",
+        "leadRules",
+        "replyStyle",
+        "safetyPolicy",
+        "feishuMapping",
+    }
+)
 
 _CANONICAL_TEMPLATE_EXECUTION = {
     "screen_read_v1": ("read-screen", "Read the current screen and return a structured result."),
@@ -552,14 +571,17 @@ class MatrixControlPlane:
             "deviceAssignments",
         }
         extra_request_keys = sorted(set(raw) - allowed_request_keys)
-        if raw.get("schema") != MATRIX_DISPATCH_SCHEMA or extra_request_keys:
+        request_schema = raw.get("schema")
+        if request_schema not in MATRIX_DISPATCH_SCHEMAS or extra_request_keys:
             detail = f": {', '.join(extra_request_keys)}" if extra_request_keys else ""
             raise MatrixTargetError(
                 "matrix_invalid_dispatch",
-                f"Canonical Matrix dispatch requires the exact {MATRIX_DISPATCH_SCHEMA} schema{detail}",
+                "Canonical Matrix dispatch requires a supported versioned schema"
+                f"{detail}",
             )
 
-        campaign_id = _canonical_id(raw.get("campaignId"), field="campaignId")
+        canonical_id = _canonical_required_id if request_schema == MATRIX_DISPATCH_SCHEMA_V3 else _canonical_id
+        campaign_id = canonical_id(raw.get("campaignId"), field="campaignId")
         concurrency = _canonical_int(
             raw.get("concurrency"),
             field="concurrency",
@@ -600,8 +622,14 @@ class MatrixControlPlane:
                     "matrix_invalid_dispatch",
                     f"deviceAssignments[{index}] has unsupported fields: {', '.join(extra_assignment_keys)}",
                 )
-            assignment_id = _canonical_id(raw_assignment.get("assignmentId"), field=f"deviceAssignments[{index}].assignmentId")
-            device_id = _canonical_id(raw_assignment.get("deviceId"), field=f"deviceAssignments[{index}].deviceId")
+            assignment_id = canonical_id(
+                raw_assignment.get("assignmentId"),
+                field=f"deviceAssignments[{index}].assignmentId",
+            )
+            device_id = canonical_id(
+                raw_assignment.get("deviceId"),
+                field=f"deviceAssignments[{index}].deviceId",
+            )
             if assignment_id in assignment_ids:
                 raise MatrixTargetError("matrix_invalid_dispatch", f"Duplicate assignmentId: {assignment_id}")
             if device_id in device_ids:
@@ -632,6 +660,14 @@ class MatrixControlPlane:
                     f"deviceAssignments[{index}] requires prompt or templateId",
                 )
             shared_reference = input_value.get("sharedTemplate")
+            if (
+                request_schema == MATRIX_DISPATCH_SCHEMA_V3
+                and "sharedTemplate" in input_value
+            ):
+                _validate_matrix_v3_shared_template(
+                    shared_reference,
+                    field=f"deviceAssignments[{index}].input.sharedTemplate",
+                )
             if shared_reference is not None and not isinstance(shared_reference, dict):
                 raise MatrixTargetError(
                     "matrix_invalid_dispatch",
@@ -763,7 +799,7 @@ class MatrixControlPlane:
 
         title_seed = str(device_tasks[0].get("prompt") or device_tasks[0].get("templateId") or campaign_id)
         campaign = {
-            "requestSchema": MATRIX_DISPATCH_SCHEMA,
+            "requestSchema": request_schema,
             "campaignId": campaign_id,
             "title": _clip(title_seed, 120),
             "status": "queued",
@@ -860,9 +896,10 @@ class MatrixControlPlane:
             }
             for item in failed
         ]
-        if campaign.get("requestSchema") == MATRIX_DISPATCH_SCHEMA:
+        request_schema = str(campaign.get("requestSchema") or "")
+        if request_schema in MATRIX_DISPATCH_SCHEMAS:
             retry_payload: Json = {
-                "schema": MATRIX_DISPATCH_SCHEMA,
+                "schema": request_schema,
                 "campaignId": f"retry_{uuid.uuid4().hex[:16]}",
                 "concurrency": max(
                     1,
@@ -3470,6 +3507,57 @@ def _canonical_optional_text(value: Any, *, field: str, maximum: int) -> str:
 
 def _canonical_id(value: Any, *, field: str) -> str:
     return _canonical_optional_text(value, field=field, maximum=200)
+
+
+def _canonical_required_id(value: Any, *, field: str) -> str:
+    result = _canonical_id(value, field=field)
+    if not result:
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be a non-empty string")
+    return result
+
+
+def _validate_matrix_v3_shared_template(value: Any, *, field: str) -> None:
+    if value is None:
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be an object")
+    if not isinstance(value, dict):
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be an object")
+
+    fields = frozenset(value)
+    if fields not in {
+        _MATRIX_V3_SHARED_TEMPLATE_REFERENCE_FIELDS,
+        _MATRIX_V3_SHARED_TEMPLATE_RESOLVED_FIELDS,
+    }:
+        raise MatrixTargetError(
+            "matrix_invalid_dispatch",
+            f"{field} must be an exact reference or resolved template DTO",
+        )
+    if not _canonical_optional_text(
+        value.get("templateId"),
+        field=f"{field}.templateId",
+        maximum=80,
+    ):
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.templateId must be a non-empty string")
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.version must be an integer of at least 1")
+    if fields == _MATRIX_V3_SHARED_TEMPLATE_REFERENCE_FIELDS:
+        return
+
+    for name in ("name", "industry", "targetCustomer", "replyStyle"):
+        item = value.get(name)
+        if not isinstance(item, str) or not item:
+            raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.{name} must be a non-empty string")
+    for name, require_item in (("platforms", True), ("keywords", False), ("leadRules", False)):
+        items = value.get(name)
+        if (
+            not isinstance(items, list)
+            or (require_item and not items)
+            or any(not isinstance(item, str) for item in items)
+        ):
+            raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.{name} must be a string array")
+    for name in ("safetyPolicy", "feishuMapping"):
+        if not isinstance(value.get(name), dict):
+            raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.{name} must be an object")
 
 
 def _canonical_int(value: Any, *, field: str, minimum: int, maximum: int) -> int:

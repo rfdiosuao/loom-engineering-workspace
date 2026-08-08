@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -987,6 +988,193 @@ class MatrixControlPlaneTests(unittest.TestCase):
         devices = {item["deviceId"]: item for item in status["devices"]}
         self.assertEqual(devices["phone-a"]["currentTaskId"], "")
         self.assertEqual(devices["phone-b"]["currentTaskId"], "")
+
+    def test_canonical_v3_dispatch_uses_v3_adapter_and_preserves_request_schema(self) -> None:
+        from core.paths import AppPaths
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            task = matrix.dispatch(
+                {
+                    "schema": "loom.matrix.dispatch.v3",
+                    "campaignId": "campaign_v3",
+                    "concurrency": 1,
+                    "mode": "safe",
+                    "profile": "standard",
+                    "deviceAssignments": [
+                        {
+                            "assignmentId": "assignment_v3",
+                            "deviceId": "phone-a",
+                            "prompt": "Inspect the assigned phone.",
+                            "templateId": "screen_read_v1",
+                            "input": {"candidateId": "candidate_v3"},
+                            "timeoutSec": 30,
+                            "retryBudget": 10,
+                        }
+                    ],
+                }
+            )
+
+        self.assertEqual(task["requestSchema"], "loom.matrix.dispatch.v3")
+        self.assertEqual(task["missions"][0]["deviceTasks"][0]["retryBudget"], 10)
+
+    def test_canonical_v3_dispatch_materializes_complete_shared_template_dto(self) -> None:
+        from core.acquisition_templates import AcquisitionTemplateLibrary
+        from core.paths import AppPaths
+
+        env = {"LOOM_TEMPLATE_DISABLE_DEFAULT_CLOUD": "1"}
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, env, clear=False):
+            paths = AppPaths(base_path=temp_dir)
+            AcquisitionTemplateLibrary(paths).save_from_acquisition(
+                {
+                    "templateId": "beauty-v3",
+                    "name": "Beauty v3 template",
+                    "industry": "beauty",
+                    "platforms": ["xiaohongshu"],
+                    "targetCustomer": "local customers",
+                    "keywords": ["skin care"],
+                    "leadRules": ["asks price"],
+                    "replyStyle": "confirm needs first",
+                    "safetyPolicy": {"outbound": False},
+                    "feishuMapping": {"table": "leads"},
+                }
+            )
+            matrix = matrix_for_test(paths)
+            matrix.register_device({"deviceId": "phone-a", "online": True})
+            task = matrix.dispatch(
+                {
+                    "schema": "loom.matrix.dispatch.v3",
+                    "campaignId": "campaign_shared_v3",
+                    "concurrency": 1,
+                    "mode": "safe",
+                    "profile": "fast",
+                    "deviceAssignments": [
+                        {
+                            "assignmentId": "assignment_shared_v3",
+                            "deviceId": "phone-a",
+                            "templateId": "beauty-v3",
+                            "input": {
+                                "sharedTemplate": {
+                                    "templateId": "beauty-v3",
+                                    "version": 1,
+                                }
+                            },
+                            "timeoutSec": 180,
+                            "retryBudget": 0,
+                        }
+                    ],
+                }
+            )
+
+        shared_template = task["missions"][0]["deviceTasks"][0]["input"]["sharedTemplate"]
+        self.assertEqual(
+            set(shared_template),
+            {
+                "templateId",
+                "version",
+                "name",
+                "industry",
+                "platforms",
+                "targetCustomer",
+                "keywords",
+                "leadRules",
+                "replyStyle",
+                "safetyPolicy",
+                "feishuMapping",
+            },
+        )
+
+    def test_canonical_v3_dispatch_rejects_v3_specific_invalid_shapes(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixTargetError
+
+        base = {
+            "schema": "loom.matrix.dispatch.v3",
+            "campaignId": "campaign_v3_negative",
+            "concurrency": 1,
+            "mode": "safe",
+            "profile": "fast",
+            "deviceAssignments": [
+                {
+                    "assignmentId": "assignment_v3_negative",
+                    "deviceId": "phone-a",
+                    "prompt": "Inspect the assigned phone.",
+                    "templateId": "screen_read_v1",
+                    "input": {},
+                    "timeoutSec": 30,
+                    "retryBudget": 0,
+                }
+            ],
+        }
+
+        def remove(path: tuple[str | int, ...]) -> dict:
+            case = copy.deepcopy(base)
+            target = case
+            for part in path[:-1]:
+                target = target[part]
+            del target[path[-1]]
+            return case
+
+        cases = {
+            "missing-campaign-id": remove(("campaignId",)),
+            "blank-campaign-id": {**copy.deepcopy(base), "campaignId": "   "},
+            "nul-campaign-id": {**copy.deepcopy(base), "campaignId": "bad\x00id"},
+            "long-campaign-id": {**copy.deepcopy(base), "campaignId": "c" * 201},
+            "missing-assignment-id": remove(("deviceAssignments", 0, "assignmentId")),
+            "missing-device-id": remove(("deviceAssignments", 0, "deviceId")),
+            "retry-over-maximum": copy.deepcopy(base),
+            "shared-missing-version": copy.deepcopy(base),
+            "shared-explicit-null": copy.deepcopy(base),
+            "shared-extra-field": copy.deepcopy(base),
+            "shared-invalid-version-type": copy.deepcopy(base),
+            "shared-partial-resolved": copy.deepcopy(base),
+        }
+        for field in ("assignmentId", "deviceId"):
+            for label, value in (
+                ("blank", "   "),
+                ("nul", "bad\x00id"),
+                ("long", "i" * 201),
+            ):
+                case = copy.deepcopy(base)
+                case["deviceAssignments"][0][field] = value
+                cases[f"{label}-{field}"] = case
+        for field in ("prompt", "templateId"):
+            for label, value in (("blank", "   "), ("nul", "bad\x00text")):
+                case = copy.deepcopy(base)
+                case["deviceAssignments"][0][field] = value
+                cases[f"{label}-{field}"] = case
+        cases["retry-over-maximum"]["deviceAssignments"][0]["retryBudget"] = 11
+        cases["shared-missing-version"]["deviceAssignments"][0]["input"] = {
+            "sharedTemplate": {"templateId": "screen_read_v1"}
+        }
+        cases["shared-explicit-null"]["deviceAssignments"][0]["input"] = {
+            "sharedTemplate": None
+        }
+        cases["shared-extra-field"]["deviceAssignments"][0]["input"] = {
+            "sharedTemplate": {
+                "templateId": "screen_read_v1",
+                "version": 1,
+                "unknown": True,
+            }
+        }
+        cases["shared-invalid-version-type"]["deviceAssignments"][0]["input"] = {
+            "sharedTemplate": {"templateId": "screen_read_v1", "version": "1"}
+        }
+        cases["shared-partial-resolved"]["deviceAssignments"][0]["input"] = {
+            "sharedTemplate": {
+                "templateId": "screen_read_v1",
+                "version": 1,
+                "name": "partial",
+            }
+        }
+
+        for case_name, request in cases.items():
+            with self.subTest(case_name=case_name), tempfile.TemporaryDirectory() as temp_dir:
+                matrix = matrix_for_test(AppPaths(base_path=temp_dir))
+                matrix.register_device({"deviceId": "phone-a", "online": True})
+                with self.assertRaises(MatrixTargetError):
+                    matrix.dispatch(request)
 
     def test_canonical_dispatch_accepts_external_agent_template_with_explicit_prompt(self) -> None:
         from core.paths import AppPaths

@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.matrix.dispatch.v3",
+  "title": "LOOM Matrix Dispatch v3",
+  "type": "object",
+  "required": [
+    "schema",
+    "campaignId",
+    "concurrency",
+    "deviceAssignments"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.matrix.dispatch.v3"
+    },
+    "campaignId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^(?=.*\\S)[^\\u0000]{1,200}$"
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "mode": {
+      "enum": [
+        "observe",
+        "safe",
+        "full"
+      ]
+    },
+    "profile": {
+      "enum": [
+        "fast",
+        "standard",
+        "deep"
+      ]
+    },
+    "deviceAssignments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/assignment"
+      }
+    }
+  },
+  "$defs": {
+    "assignment": {
+      "type": "object",
+      "required": [
+        "assignmentId",
+        "deviceId",
+        "input",
+        "timeoutSec",
+        "retryBudget"
+      ],
+      "properties": {
+        "assignmentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^(?=.*\\S)[^\\u0000]{1,200}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^(?=.*\\S)[^\\u0000]{1,200}$"
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "pattern": "^(?=.*\\S)[^\\u0000]{1,2000}$"
+        },
+        "templateId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^(?=.*\\S)[^\\u0000]{1,80}$"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "sharedTemplate": {
+              "$ref": "#/$defs/sharedTemplate"
+            }
+          },
+          "patternProperties": {
+            "^(?!sharedTemplate$)": {
+              "$ref": "#/$defs/jsonValue"
+            }
+          },
+          "additionalProperties": false
+        },
+        "timeoutSec": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 1200
+        },
+        "retryBudget": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "prompt"
+          ],
+          "not": {
+            "required": [
+              "templateId"
+            ]
+          }
+        },
+        {
+          "required": [
+            "templateId"
+          ],
+          "not": {
+            "required": [
+              "prompt"
+            ]
+          }
+        },
+        {
+          "required": [
+            "prompt",
+            "templateId"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "jsonValue": {
+      "anyOf": [
+        {
+          "type": [
+            "null",
+            "boolean",
+            "number",
+            "string"
+          ]
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "patternProperties": {
+            "^": {
+              "$ref": "#/$defs/jsonValue"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "jsonObject": {
+      "type": "object",
+      "patternProperties": {
+        "^": {
+          "$ref": "#/$defs/jsonValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sharedTemplate": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sharedTemplateReference"
+        },
+        {
+          "$ref": "#/$defs/sharedTemplateResolved"
+        }
+      ]
+    },
+    "sharedTemplateId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^(?=.*\\S)[^\\u0000]{1,80}$"
+    },
+    "sharedTemplateVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sharedTemplateReference": {
+      "type": "object",
+      "required": [
+        "templateId",
+        "version"
+      ],
+      "properties": {
+        "templateId": {
+          "$ref": "#/$defs/sharedTemplateId"
+        },
+        "version": {
+          "$ref": "#/$defs/sharedTemplateVersion"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sharedTemplateResolved": {
+      "type": "object",
+      "required": [
+        "templateId",
+        "version",
+        "name",
+        "industry",
+        "platforms",
+        "targetCustomer",
+        "keywords",
+        "leadRules",
+        "replyStyle",
+        "safetyPolicy",
+        "feishuMapping"
+      ],
+      "properties": {
+        "templateId": {
+          "$ref": "#/$defs/sharedTemplateId"
+        },
+        "version": {
+          "$ref": "#/$defs/sharedTemplateVersion"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "industry": {
+          "type": "string",
+          "minLength": 1
+        },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "targetCustomer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "keywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "leadRules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "replyStyle": {
+          "type": "string",
+          "minLength": 1
+        },
+        "safetyPolicy": {
+          "$ref": "#/$defs/jsonObject"
+        },
+        "feishuMapping": {
+          "$ref": "#/$defs/jsonObject"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

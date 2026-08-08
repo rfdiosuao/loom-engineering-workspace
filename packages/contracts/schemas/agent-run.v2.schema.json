@@ -1,18 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "loom.agent.run.v1",
-  "title": "LOOM Agent Run v1",
+  "$id": "loom.agent.run.v2",
+  "title": "LOOM Agent Run v2",
   "type": "object",
   "required": [
     "schema",
     "runId",
     "sessionId",
     "status",
+    "executionState",
     "campaignIds"
   ],
   "properties": {
     "schema": {
-      "const": "loom.agent.run.v1"
+      "const": "loom.agent.run.v2"
     },
     "runId": {
       "type": "string",
