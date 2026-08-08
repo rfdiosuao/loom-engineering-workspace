@@ -85,6 +85,10 @@ jobs:
         working-directory: apps/loom-platform/openclaw_new_launcher
         run: npm ci
 
+      - name: Verify release version contract
+        working-directory: apps/loom-platform/openclaw_new_launcher
+        run: node --test --test-concurrency=1 scripts/tests/release-version-contract.test.mjs
+
       - name: Verify source text
         working-directory: apps/loom-platform
         run: powershell -ExecutionPolicy Bypass -File scripts\verify-source-text.ps1
@@ -409,10 +413,12 @@ jobs:
           $version = node -p "require('./openclaw_new_launcher/package.json').version"
           $notesPath = Join-Path $PWD "openclaw_new_launcher\docs\RELEASE_NOTES_$version.md"
           $bodyPath = Join-Path $PWD "ci_artifacts\RELEASE_BODY.md"
-          $body = if (Test-Path -LiteralPath $notesPath -PathType Leaf) {
-            (Get-Content -LiteralPath $notesPath -Raw).Trim()
-          } else {
-            "# LOOM $version 更新说明`n`n本次版本包含稳定性、兼容性与使用体验改进。"
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
+            throw "Product release notes are missing: $notesPath"
+          }
+          $body = (Get-Content -LiteralPath $notesPath -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            throw "Product release notes are empty: $notesPath"
           }
           [IO.File]::WriteAllText($bodyPath, "$body`n", [Text.UTF8Encoding]::new($false))
 

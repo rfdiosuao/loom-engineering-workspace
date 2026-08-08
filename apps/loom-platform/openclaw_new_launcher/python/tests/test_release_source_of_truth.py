@@ -397,12 +397,51 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
             rf'(?s)\[\[package\]\]\s*name\s*=\s*"app"\s*version\s*=\s*"{escaped_version}"',
         )
 
-    def test_release_body_uses_the_versioned_product_notes_when_available(self) -> None:
+    def test_release_body_requires_nonempty_versioned_product_notes(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
+        notes_step_name = "- name: Prepare product release notes"
 
-        self.assertIn('RELEASE_NOTES_$version.md', release)
-        self.assertIn('Get-Content -LiteralPath $notesPath -Raw', release)
+        self.assertIn(notes_step_name, release)
+        notes_step = release.split(notes_step_name, 1)[1].split("- name:", 1)[0]
+        self.assertIn("working-directory: apps/loom-platform", notes_step)
+        self.assertIn(
+            '$notesPath = Join-Path $PWD "openclaw_new_launcher\\docs\\RELEASE_NOTES_$version.md"',
+            notes_step,
+        )
+        self.assertIn(
+            "if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {",
+            notes_step,
+        )
+        self.assertIn('throw "Product release notes are missing: $notesPath"', notes_step)
+        self.assertIn('$body = (Get-Content -LiteralPath $notesPath -Raw).Trim()', notes_step)
+        self.assertIn("if ([string]::IsNullOrWhiteSpace($body)) {", notes_step)
+        self.assertIn('throw "Product release notes are empty: $notesPath"', notes_step)
+        self.assertEqual(notes_step.count("$body ="), 1)
+        self.assertNotIn("else {", notes_step)
+        self.assertNotIn("# LOOM $version 更新说明", release)
+        self.assertNotIn("本次版本包含稳定性、兼容性与使用体验改进。", release)
         self.assertIn('body_path: apps/loom-platform/ci_artifacts/RELEASE_BODY.md', release)
+
+    def test_release_runs_version_contract_after_install_and_before_build_or_publish(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+        install_step = "- name: Install frontend dependencies"
+        contract_step = "- name: Verify release version contract"
+        first_build_step = "- name: Build and verify bundled Skill library"
+        publish_step = "- name: Publish GitHub Release"
+
+        self.assertIn(contract_step, release)
+        contract_block = release.split(contract_step, 1)[1].split("- name:", 1)[0]
+        self.assertIn(
+            "working-directory: apps/loom-platform/openclaw_new_launcher",
+            contract_block,
+        )
+        self.assertIn(
+            "run: node --test --test-concurrency=1 scripts/tests/release-version-contract.test.mjs",
+            contract_block,
+        )
+        self.assertLess(release.index(install_step), release.index(contract_step))
+        self.assertLess(release.index(contract_step), release.index(first_build_step))
+        self.assertLess(release.index(contract_step), release.index(publish_step))
 
 
 if __name__ == "__main__":
