@@ -52,6 +52,8 @@ LEGACY_API_BASE = "https://api.heang.top/v1"
 DEFAULT_ACCOUNT_CENTER_PATH = "/wallet"
 ACCOUNT_SOURCE = "newapi_account"
 LEGACY_ACCOUNT_SOURCE = "heang_account"
+LEGACY_PRODUCT_DIRECTORY_NAMES = ("Luming AI Matrix Acquisition Workbench",)
+MAX_LEGACY_SESSION_BYTES = 1024 * 1024
 SESSION_GRACE_DAYS = 14
 DEFAULT_TEXT_MODEL = "glm-5.2-coding"
 DEFAULT_PHONE_MODEL = "qwen3.7-plus"
@@ -2753,6 +2755,7 @@ class NewApiAccountManager:
             return self._current_session_locked()
 
     def _current_session_locked(self) -> dict[str, Any] | None:
+        self._migrate_legacy_product_session_if_missing()
         session = read_json(self.session_path, None)
         if isinstance(session, dict) and session.get("source") == ACCOUNT_SOURCE:
             current = self._unprotected_session(session)
@@ -2770,6 +2773,66 @@ class NewApiAccountManager:
                 self._write_session(current)
             return current
         return None
+
+    def _migrate_legacy_product_session_if_missing(self) -> None:
+        if os.path.exists(self.session_path):
+            return
+        install_parent = os.path.dirname(os.path.abspath(self.paths.base_path))
+        target_key = os.path.normcase(os.path.realpath(self.session_path))
+        for directory_name in LEGACY_PRODUCT_DIRECTORY_NAMES:
+            candidate = AppPaths(
+                os.path.join(install_parent, directory_name)
+            ).member_session_file
+            if os.path.normcase(os.path.realpath(candidate)) == target_key:
+                continue
+            if os.path.islink(candidate) or not os.path.isfile(candidate):
+                continue
+            try:
+                size = os.path.getsize(candidate)
+                if size <= 0 or size > MAX_LEGACY_SESSION_BYTES:
+                    continue
+                with open(candidate, "rb") as source_file:
+                    raw = source_file.read(MAX_LEGACY_SESSION_BYTES + 1)
+                if len(raw) != size or len(raw) > MAX_LEGACY_SESSION_BYTES:
+                    continue
+                protected = json.loads(raw.decode("utf-8"))
+                if (
+                    not isinstance(protected, dict)
+                    or protected.get("source") != ACCOUNT_SOURCE
+                ):
+                    continue
+                session = self._unprotected_session(protected)
+                if not _account_session_identity(session):
+                    continue
+
+                os.makedirs(os.path.dirname(self.session_path), exist_ok=True)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_BINARY"):
+                    flags |= os.O_BINARY
+                try:
+                    file_descriptor = os.open(self.session_path, flags, 0o600)
+                except FileExistsError:
+                    return
+                try:
+                    with os.fdopen(file_descriptor, "wb") as target_file:
+                        target_file.write(raw)
+                        target_file.flush()
+                        os.fsync(target_file.fileno())
+                except Exception:
+                    try:
+                        os.remove(self.session_path)
+                    except OSError:
+                        pass
+                    raise
+                self.append_log(
+                    "[Account] migrated the protected account session from the prior product directory.\n"
+                )
+                return
+            except Exception as error:
+                self.append_log(
+                    "[Account] legacy product session migration skipped: "
+                    f"{_redact_secret_text(error)}\n"
+                )
 
     def _assert_current_session_identity(self, expected_identity: str) -> None:
         stored = read_json(self.session_path, None)

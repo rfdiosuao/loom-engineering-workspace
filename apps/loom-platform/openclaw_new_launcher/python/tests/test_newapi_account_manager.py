@@ -37,6 +37,45 @@ from core.storage import read_json
 
 
 class NewApiAccountManagerTests(unittest.TestCase):
+    def test_current_migrates_session_from_exact_legacy_product_sibling_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            legacy_root = os.path.join(
+                temp_dir,
+                "Luming AI Matrix Acquisition Workbench",
+            )
+            current_root = os.path.join(temp_dir, "麓鸣")
+            legacy_manager = NewApiAccountManager(AppPaths(legacy_root))
+            legacy_manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:legacy",
+                "memberToken": "sk-legacy-session-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "legacy"},
+            })
+            manager = NewApiAccountManager(AppPaths(current_root))
+
+            self.assertFalse(os.path.exists(manager.session_path))
+            migrated = manager.current()
+
+            self.assertIsNotNone(migrated)
+            self.assertEqual("newapi:legacy", migrated["memberId"])
+            self.assertTrue(os.path.isfile(manager.session_path))
+            self.assertTrue(os.path.isfile(legacy_manager.session_path))
+
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:current",
+                "memberToken": "sk-current-session-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "current"},
+            })
+            legacy_manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:changed-legacy",
+                "memberToken": "sk-changed-legacy-session-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "changed-legacy"},
+            })
+
+            self.assertEqual("newapi:current", manager.current()["memberId"])
+
     def test_payment_requests_use_current_session_token_and_never_send_account_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = PaymentFakeManager(AppPaths(temp_dir))

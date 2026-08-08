@@ -270,6 +270,7 @@ export const LicensePage: React.FC = () => {
   const [password, setPassword] = useState('');
   const [entitlementCode, setEntitlementCode] = useState('');
   const [paymentCatalog, setPaymentCatalog] = useState<AccountPaymentCatalog | null>(null);
+  const [paymentCatalogError, setPaymentCatalogError] = useState('');
   const [paymentCatalogLoading, setPaymentCatalogLoading] = useState(false);
   const [paymentChannel, setPaymentChannel] = useState<'alipay' | 'wxpay'>('alipay');
   const [paymentOrder, setPaymentOrder] = useState<AccountPaymentOrder | null>(null);
@@ -326,6 +327,7 @@ export const LicensePage: React.FC = () => {
       paymentRequestVersion.current += 1;
       paymentRestoreIdentity.current = '';
       setPaymentCatalog(null);
+      setPaymentCatalogError('');
       setPaymentOrder(null);
       setCreatingPaymentPlanKey('');
       setPaymentStatusBusy(false);
@@ -341,9 +343,18 @@ export const LicensePage: React.FC = () => {
   const refresh = useCallback(async (options: { background?: boolean } = {}) => {
     if (!options.background) setLoading(true);
     try {
-      const resp = cachedAccount.current?.loggedIn
-        ? await accountApi.sync()
-        : await accountApi.current();
+      let resp;
+      if (cachedAccount.current?.loggedIn) {
+        const local = await accountApi.current();
+        if (!local.account?.loggedIn) {
+          applyAccount(local.account || null, { persist: true });
+          setStatusText('');
+          return;
+        }
+        resp = await accountApi.sync();
+      } else {
+        resp = await accountApi.current();
+      }
       applyAccount(resp.account || null, { persist: true });
       setStatusText('');
     } catch (error) {
@@ -418,6 +429,7 @@ export const LicensePage: React.FC = () => {
     const identity = accountIdentity(cachedAccount.current);
     if (!cachedAccount.current?.loggedIn || !identity) return;
     setPaymentCatalogLoading(true);
+    setPaymentCatalogError('');
     try {
       const response = await accountApi.paymentPlans();
       if (
@@ -436,8 +448,9 @@ export const LicensePage: React.FC = () => {
         || identity !== accountIdentity(cachedAccount.current)
       ) return;
       setPaymentCatalog(null);
+      const message = errorMessage(error);
+      setPaymentCatalogError(message || '套餐加载失败');
       if (!quiet) {
-        const message = errorMessage(error);
         setStatusText(message);
         showToast(message || '套餐加载失败', 'error');
       }
@@ -571,6 +584,7 @@ export const LicensePage: React.FC = () => {
       paymentCatalogRequestVersion.current += 1;
       paymentRequestVersion.current += 1;
       setPaymentCatalog(null);
+      setPaymentCatalogError('');
       setPaymentOrder(null);
       setCreatingPaymentPlanKey('');
       setPaymentStatusBusy(false);
@@ -1168,7 +1182,8 @@ export const LicensePage: React.FC = () => {
                     <div className="rounded-[8px] border border-border bg-surface-alt/35 px-4 py-3 text-xs leading-5 text-text-muted">
                       {paymentCatalogLoading
                         ? '正在从服务端加载可购买套餐...'
-                        : paymentCatalog?.payment.message
+                        : paymentCatalogError
+                          || paymentCatalog?.payment.message
                           || '服务端暂未开放可购买订阅，或支付配置尚未通过安全检查。'}
                     </div>
                   )}

@@ -659,6 +659,41 @@ test('account service outage marks cached values as read-only and localizes the 
   await page.screenshot({ path: testInfo.outputPath('account-safe-cache-outage.png'), fullPage: false });
 });
 
+test('startup discards a cached login when the local account session is gone', async ({ audit, page }) => {
+  await page.evaluate((account) => {
+    window.localStorage.setItem('loom.startup.account.v1', JSON.stringify({
+      schema: 'loom.startup-cache.v1',
+      savedAt: Date.now(),
+      data: account,
+    }));
+  }, AUDIT_ACCOUNT_WITH_CHOICES);
+  await audit.registerRoute('GET', '/api/account/current', {
+    value: { account: AUDIT_LOGGED_OUT_ACCOUNT },
+  });
+  await audit.registerRoute('POST', '/api/account/sync', {
+    error: '尚未登录模型账号',
+  });
+  await audit.registerRoute('GET', '/api/account/payments/plans', {
+    error: '尚未登录模型账号',
+  });
+  await expect(page.locator('[data-loom-splash]')).toBeHidden({ timeout: 12_000 });
+
+  await navigateTo(audit, 'license');
+  const main = appMain(page);
+  await expect(main.getByRole('heading', { name: '登录模型账户' })).toBeVisible();
+  await expect(main.locator('[data-account-cache-warning]')).toHaveCount(0);
+  await expect(main.getByText('基础套餐', { exact: true })).toHaveCount(0);
+  await audit.sync();
+  const accountCalls = proxyIntents(audit.callLogs)
+    .filter(({ path }) => path.startsWith('/api/account/'));
+  expect(accountCalls).toContainEqual(expect.objectContaining({
+    method: 'GET', path: '/api/account/current',
+  }));
+  expect(accountCalls).not.toContainEqual(expect.objectContaining({
+    method: 'POST', path: '/api/account/sync',
+  }));
+});
+
 test('payment catalog shows the server readiness reason instead of a generic blocker', async ({ audit, page }) => {
   await audit.registerRoute('GET', '/api/account/payments/plans', {
     value: {
@@ -675,4 +710,16 @@ test('payment catalog shows the server readiness reason instead of a generic blo
   });
   await navigateTo(audit, 'license');
   await expect(appMain(page).getByText('服务端在线充值尚未启用。', { exact: true })).toBeVisible();
+});
+
+test('payment catalog shows the request error instead of claiming that purchasing is closed', async ({ audit, page }) => {
+  await audit.registerRoute('GET', '/api/account/payments/plans', {
+    error: '尚未登录模型账号',
+  });
+
+  await navigateTo(audit, 'license');
+  const main = appMain(page);
+  await expect(main.getByText('尚未登录模型账号', { exact: true })).toBeVisible();
+  await expect(main.getByText('服务端暂未开放可购买订阅，或支付配置尚未通过安全检查。', { exact: true }))
+    .toHaveCount(0);
 });

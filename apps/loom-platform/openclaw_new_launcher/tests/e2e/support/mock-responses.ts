@@ -88,6 +88,16 @@ export function createBaselineSeed(): TauriMockSeed {
     commands: {
       get_bridge_port: { value: 18_791 },
       get_portable_base_path: { value: 'C:\\LOOM\\playwright-audit' },
+      get_distribution_setup_snapshot: {
+        value: {
+          revision: 0,
+          runId: 0,
+          status: 'idle',
+          layers: [],
+          progress: null,
+          error: null,
+        },
+      },
       'plugin:event|listen': { value: 1 },
       'plugin:event|unlisten': { value: null },
       'plugin:window|close': { value: null },
