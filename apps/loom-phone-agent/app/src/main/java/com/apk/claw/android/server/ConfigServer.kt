@@ -436,7 +436,7 @@ class ConfigServer(
         if (json.has("dingtalkAppSecret")) {
             val value = json.get("dingtalkAppSecret").asString
             // 如果是脱敏值则跳过
-            if (!isMaskedValue(value)) {
+            if (!isMaskedValue(value, KVUtils.getDingtalkAppSecret())) {
                 KVUtils.setDingtalkAppSecret(value)
                 reinitDingtalk = true
             }
@@ -450,7 +450,7 @@ class ConfigServer(
         }
         if (json.has("feishuAppSecret")) {
             val value = json.get("feishuAppSecret").asString
-            if (!isMaskedValue(value)) {
+            if (!isMaskedValue(value, KVUtils.getFeishuAppSecret())) {
                 KVUtils.setFeishuAppSecret(value)
                 reinitFeishu = true
             }
@@ -464,7 +464,7 @@ class ConfigServer(
         }
         if (json.has("qqAppSecret")) {
             val value = json.get("qqAppSecret").asString
-            if (!isMaskedValue(value)) {
+            if (!isMaskedValue(value, KVUtils.getQqAppSecret())) {
                 KVUtils.setQqAppSecret(value)
                 reinitQQ = true
             }
@@ -473,7 +473,7 @@ class ConfigServer(
         // Discord 配置
         if (json.has("discordBotToken")) {
             val value = json.get("discordBotToken").asString
-            if (!isMaskedValue(value)) {
+            if (!isMaskedValue(value, KVUtils.getDiscordBotToken())) {
                 KVUtils.setDiscordBotToken(value)
                 reinitDiscord = true
             }
@@ -482,7 +482,7 @@ class ConfigServer(
         // Telegram 配置
         if (json.has("telegramBotToken")) {
             val value = json.get("telegramBotToken").asString
-            if (!isMaskedValue(value)) {
+            if (!isMaskedValue(value, KVUtils.getTelegramBotToken())) {
                 KVUtils.setTelegramBotToken(value)
                 reinitTelegram = true
             }
@@ -551,7 +551,7 @@ class ConfigServer(
 
         if (json.has("llmApiKey")) {
             val value = json.get("llmApiKey").asString
-            if (!isMaskedValue(value)) {
+            if (!isMaskedValue(value, KVUtils.getLlmApiKey())) {
                 KVUtils.setLlmApiKey(value)
             }
         }
@@ -723,10 +723,10 @@ class ConfigServer(
     }
 
     /**
-     * 判断是否为主/备用脱敏 marker，兼容历史上包含 * 的脱敏值。
+     * 只有提交值精确等于当前已存 secret 的脱敏结果时，才视为 UI 回传的 marker。
      */
-    private fun isMaskedValue(value: String): Boolean {
-        return value.contains("*") || value == SECRET_REDACTED_FALLBACK
+    private fun isMaskedValue(value: String, currentSecret: String): Boolean {
+        return value == maskSecret(currentSecret)
     }
 
     private fun corsResponse(response: Response): Response {

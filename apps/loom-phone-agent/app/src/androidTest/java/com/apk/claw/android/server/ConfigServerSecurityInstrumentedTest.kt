@@ -114,52 +114,64 @@ class ConfigServerSecurityInstrumentedTest {
     }
 
     @Test
-    fun current_apk_posting_primary_or_fallback_marker_preserves_stored_llm_and_channel_secrets() {
-        listOf(
+    fun current_apk_post_preserves_only_the_exact_mask_of_each_current_secret() {
+        val currentSecrets = listOf(
             "ordinary-secret" to "********",
-            "***" to "########",
-        ).forEach { (secret, expectedMarker) ->
-            KVUtils.setDingtalkAppSecret(secret)
-            KVUtils.setLlmApiKey(secret)
+            "********" to "########",
+            "########" to "********",
+            "*abcd" to "********",
+        )
+        val postedValues = listOf("*abcd", "***", "********", "########")
 
+        currentSecrets.forEach { (currentSecret, expectedMarker) ->
+            KVUtils.setDingtalkAppSecret(currentSecret)
+            KVUtils.setLlmApiKey(currentSecret)
             val channels = body(
                 server.serve(session(NanoHTTPD.Method.GET, "/api/channels", ACTIVE_TOKEN)),
             )
             val channelMarker = com.google.gson.JsonParser.parseString(channels)
                 .asJsonObject["data"].asJsonObject["dingtalkAppSecret"].asString
-            assertEquals(expectedMarker, channelMarker)
-
             val llm = body(
                 server.serve(session(NanoHTTPD.Method.GET, "/api/llm", ACTIVE_TOKEN)),
             )
             val llmMarker = com.google.gson.JsonParser.parseString(llm)
                 .asJsonObject["data"].asJsonObject["llmApiKeyMasked"].asString
+            assertEquals(expectedMarker, channelMarker)
             assertEquals(expectedMarker, llmMarker)
+            assertNotEquals(currentSecret, channelMarker)
+            assertNotEquals(currentSecret, llmMarker)
+            assertFalse(channelMarker.contains(currentSecret))
+            assertFalse(llmMarker.contains(currentSecret))
 
-            assertEquals(
-                NanoHTTPD.Response.Status.OK,
-                server.serve(
-                    session(
-                        NanoHTTPD.Method.POST,
-                        "/api/channels",
-                        ACTIVE_TOKEN,
-                        rawBody = """{"dingtalkAppSecret":"$channelMarker"}""",
-                    ),
-                ).status,
-            )
-            assertEquals(
-                NanoHTTPD.Response.Status.OK,
-                server.serve(
-                    session(
-                        NanoHTTPD.Method.POST,
-                        "/api/llm",
-                        ACTIVE_TOKEN,
-                        rawBody = """{"llmApiKey":"$llmMarker"}""",
-                    ),
-                ).status,
-            )
-            assertEquals(secret, KVUtils.getDingtalkAppSecret())
-            assertEquals(secret, KVUtils.getLlmApiKey())
+            postedValues.forEach { postedValue ->
+                KVUtils.setDingtalkAppSecret(currentSecret)
+                KVUtils.setLlmApiKey(currentSecret)
+                assertEquals(
+                    NanoHTTPD.Response.Status.OK,
+                    server.serve(
+                        session(
+                            NanoHTTPD.Method.POST,
+                            "/api/channels",
+                            ACTIVE_TOKEN,
+                            rawBody = """{"dingtalkAppSecret":"$postedValue"}""",
+                        ),
+                    ).status,
+                )
+                assertEquals(
+                    NanoHTTPD.Response.Status.OK,
+                    server.serve(
+                        session(
+                            NanoHTTPD.Method.POST,
+                            "/api/llm",
+                            ACTIVE_TOKEN,
+                            rawBody = """{"llmApiKey":"$postedValue"}""",
+                        ),
+                    ).status,
+                )
+                val expectedStored = if (postedValue == expectedMarker) currentSecret else postedValue
+                assertEquals(expectedStored, KVUtils.getDingtalkAppSecret())
+                assertEquals(expectedStored, KVUtils.getLlmApiKey())
+            }
         }
     }
 
