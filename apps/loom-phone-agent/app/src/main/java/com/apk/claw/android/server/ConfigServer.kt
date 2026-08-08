@@ -27,6 +27,8 @@ class ConfigServer(
         const val PORT = 9527
         private const val MIME_HTML = "text/html"
         private const val MIME_JSON = "application/json"
+        private const val SECRET_REDACTED = "********"
+        private const val SECRET_REDACTED_FALLBACK = "########"
     }
 
     private val gson = Gson()
@@ -713,19 +715,18 @@ class ConfigServer(
     }
 
     /**
-     * 脱敏：只显示后4位，前面用 * 替代
+     * 脱敏：返回固定 marker；当主 marker 会包含完整原文时切换到不相交的备用 marker。
      */
     private fun maskSecret(secret: String): String {
         if (secret.isEmpty()) return ""
-        if (secret.length <= 4) return secret
-        return "*".repeat(secret.length - 4) + secret.takeLast(4)
+        return if (SECRET_REDACTED.contains(secret)) SECRET_REDACTED_FALLBACK else SECRET_REDACTED
     }
 
     /**
-     * 判断是否为脱敏后的值（包含 *）
+     * 判断是否为主/备用脱敏 marker，兼容历史上包含 * 的脱敏值。
      */
     private fun isMaskedValue(value: String): Boolean {
-        return value.contains("*")
+        return value.contains("*") || value == SECRET_REDACTED_FALLBACK
     }
 
     private fun corsResponse(response: Response): Response {
