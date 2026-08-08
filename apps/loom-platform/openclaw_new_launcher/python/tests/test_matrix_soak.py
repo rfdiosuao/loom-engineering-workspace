@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import os
 import inspect
 import json
@@ -1011,17 +1013,28 @@ class MatrixLifecycleSoakTests(unittest.TestCase):
         expected_commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=launcher_root, text=True, encoding="utf-8"
         ).strip()
-        self.assertEqual(report["commit"], expected_commit + "+dirty")
-        self.assertEqual(report["sourceIdentity"]["headCommit"], expected_commit)
-        self.assertIs(report["sourceIdentity"]["dirty"], True)
-        import hashlib
-        digest = hashlib.sha256()
         source_paths = (
             launcher_root / "python" / "core" / "matrix_soak.py",
             launcher_root / "scripts" / "loom-matrix-soak.py",
             launcher_root / "python" / "tests" / "test_matrix_soak.py",
             launcher_root / "docs" / "runbooks" / "agent-reliability-release-gates.md",
         )
+        relative_source_paths = [path.relative_to(launcher_root).as_posix() for path in source_paths]
+        source_status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", *relative_source_paths],
+            cwd=launcher_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+        )
+        expected_dirty = bool(source_status.stdout.strip())
+        expected_report_commit = f"{expected_commit}+dirty" if expected_dirty else expected_commit
+        self.assertEqual(report["commit"], expected_report_commit)
+        self.assertEqual(report["sourceIdentity"]["headCommit"], expected_commit)
+        self.assertEqual(report["sourceIdentity"]["dirty"], expected_dirty)
+        digest = hashlib.sha256()
         for path in source_paths:
             digest.update(path.relative_to(launcher_root).as_posix().encode("utf-8"))
             digest.update(b"\0")
@@ -1029,6 +1042,8 @@ class MatrixLifecycleSoakTests(unittest.TestCase):
             digest.update(b"\0")
         self.assertEqual(report["sourceIdentity"]["fingerprint"], "sha256:" + digest.hexdigest())
         self.assertEqual(report["fixture"]["virtual"], True)
+        self.assertEqual(report["fixture"]["safe"], True)
+        self.assertEqual(report["fixture"]["sideEffectFree"], True)
         self.assertEqual(report["resourceGrowth"]["thresholds"], {
             "rssMb": 50.0,
             "handles": 100.0,
@@ -1039,6 +1054,72 @@ class MatrixLifecycleSoakTests(unittest.TestCase):
         self.assertEqual(report["realDeviceGate"]["executed"], False)
         self.assertIn("2-device/20-round", report["realDeviceGate"]["notExecuted"])
         self.assertIn("10-device/7200-second", report["realDeviceGate"]["notExecuted"])
+
+    def test_source_identity_detects_clean_and_dirty_real_git_worktree(self) -> None:
+        launcher_root = Path(__file__).resolve().parents[2]
+        script = launcher_root / "scripts" / "loom-matrix-soak.py"
+        spec = importlib.util.spec_from_file_location("loom_matrix_soak_identity_test", script)
+        self.assertIsNotNone(spec)
+        assert spec is not None and spec.loader is not None
+        cli_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli_module)
+
+        relative_paths = (
+            Path("python/core/matrix_soak.py"),
+            Path("scripts/loom-matrix-soak.py"),
+            Path("python/tests/test_matrix_soak.py"),
+            Path("docs/runbooks/agent-reliability-release-gates.md"),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir)
+            source_paths = tuple(repository / relative for relative in relative_paths)
+            for index, path in enumerate(source_paths):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"source-{index}\n", encoding="utf-8")
+
+            def git(*arguments: str) -> str:
+                completed = subprocess.run(
+                    ["git", *arguments],
+                    cwd=repository,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                return completed.stdout.strip()
+
+            def expected_fingerprint() -> str:
+                digest = hashlib.sha256()
+                for path, relative in zip(source_paths, relative_paths):
+                    digest.update(relative.as_posix().encode("utf-8"))
+                    digest.update(b"\0")
+                    digest.update(path.read_bytes())
+                    digest.update(b"\0")
+                return "sha256:" + digest.hexdigest()
+
+            git("init", "--quiet")
+            git("config", "user.email", "wr06-test@example.invalid")
+            git("config", "user.name", "WR06 Test")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "baseline")
+            head_commit = git("rev-parse", "HEAD")
+
+            cli_module.ROOT = repository
+            cli_module.SOURCE_PATHS = source_paths
+            clean_identity = cli_module._current_source_identity()
+            self.assertEqual(clean_identity["commit"], head_commit)
+            self.assertEqual(clean_identity["headCommit"], head_commit)
+            self.assertIs(clean_identity["dirty"], False)
+            self.assertEqual(clean_identity["fingerprint"], expected_fingerprint())
+
+            source_paths[0].write_text("source-dirty\n", encoding="utf-8")
+            dirty_identity = cli_module._current_source_identity()
+            self.assertEqual(dirty_identity["commit"], head_commit + "+dirty")
+            self.assertEqual(dirty_identity["headCommit"], head_commit)
+            self.assertIs(dirty_identity["dirty"], True)
+            self.assertEqual(dirty_identity["fingerprint"], expected_fingerprint())
 
 
 if __name__ == "__main__":
