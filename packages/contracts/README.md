@@ -8,7 +8,7 @@ Published schema IDs are immutable compatibility boundaries. Optional fields may
 
 `packages/contracts/schemas` is the canonical source for the Platform test snapshots. The validator rejects duplicate canonical `$id` values and byte-level drift in `apps/loom-platform/openclaw_new_launcher/python/tests/contract_schemas`.
 
-`loom.matrix.dispatch.v2` retains its published acceptance set. `loom.matrix.dispatch.v3` expresses the current consumer bounds (concurrency 1..8, 1..100 assignments, prompt up to 2000 characters, template ID up to 80 characters, and timeout 30..1200 seconds). `consumer-compatibility.v1.json` records that a v2-to-consumer adapter is still required; the contract package does not silently redefine v2.
+`loom.matrix.dispatch.v2` keeps its published schema bytes, identity, and contract-layer readability unchanged. The manifest status `supported` means the named compatibility fixture is handled by the bounded consumer adapter: positive concurrency is clamped to 8 and timeout to 30..1200 seconds without changing the v2 schema identity. Schema-valid v2 requests outside the manifest limits for assignments, prompt, template ID, or retry budget remain unsupported and are rejected rather than truncated. `loom.matrix.dispatch.v3` expresses those current consumer bounds directly (concurrency 1..8, 1..100 assignments, prompt up to 2000 characters, template ID up to 80 characters, retry budget up to 10, and timeout 30..1200 seconds).
 
 `mobile-agent-runtime.schema.json` is the clean-room PoC contract shared by Desktop and LumiAgent for Provider schema discovery, scoped Workspace/Memory, lazy Skill metadata, typed native capabilities, backend fallback, and redacted traces. It deliberately excludes credential values and arbitrary shell commands.
 

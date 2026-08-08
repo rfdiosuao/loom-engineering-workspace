@@ -582,11 +582,21 @@ class MatrixControlPlane:
 
         canonical_id = _canonical_required_id if request_schema == MATRIX_DISPATCH_SCHEMA_V3 else _canonical_id
         campaign_id = canonical_id(raw.get("campaignId"), field="campaignId")
-        concurrency = _canonical_int(
-            raw.get("concurrency"),
-            field="concurrency",
-            minimum=1,
-            maximum=MATRIX_CANONICAL_MAX_CONCURRENCY,
+        concurrency = (
+            _canonical_v2_adapted_int(
+                raw.get("concurrency"),
+                field="concurrency",
+                schema_minimum=1,
+                consumer_minimum=1,
+                consumer_maximum=MATRIX_CANONICAL_MAX_CONCURRENCY,
+            )
+            if request_schema == MATRIX_DISPATCH_SCHEMA
+            else _canonical_int(
+                raw.get("concurrency"),
+                field="concurrency",
+                minimum=1,
+                maximum=MATRIX_CANONICAL_MAX_CONCURRENCY,
+            )
         )
         mode = _canonical_choice(raw.get("mode"), field="mode", default="safe", values={"observe", "safe", "full"})
         profile = _canonical_choice(
@@ -714,11 +724,21 @@ class MatrixControlPlane:
                         "matrix_unsupported_assignment",
                         f"Unsupported canonical templateId: {template_id}",
                     )
-            timeout_sec = _canonical_int(
-                raw_assignment.get("timeoutSec"),
-                field=f"deviceAssignments[{index}].timeoutSec",
-                minimum=30,
-                maximum=1200,
+            timeout_sec = (
+                _canonical_v2_adapted_int(
+                    raw_assignment.get("timeoutSec"),
+                    field=f"deviceAssignments[{index}].timeoutSec",
+                    schema_minimum=1,
+                    consumer_minimum=30,
+                    consumer_maximum=1200,
+                )
+                if request_schema == MATRIX_DISPATCH_SCHEMA
+                else _canonical_int(
+                    raw_assignment.get("timeoutSec"),
+                    field=f"deviceAssignments[{index}].timeoutSec",
+                    minimum=30,
+                    maximum=1200,
+                )
             )
             retry_budget = _canonical_int(
                 raw_assignment.get("retryBudget"),
@@ -3568,6 +3588,24 @@ def _canonical_int(value: Any, *, field: str, minimum: int, maximum: int) -> int
     if value > maximum:
         raise MatrixTargetError("matrix_unsupported_assignment", f"{field} exceeds the supported maximum of {maximum}")
     return value
+
+
+def _canonical_v2_adapted_int(
+    value: Any,
+    *,
+    field: str,
+    schema_minimum: int,
+    consumer_minimum: int,
+    consumer_maximum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be an integer")
+    if value < schema_minimum:
+        raise MatrixTargetError(
+            "matrix_invalid_dispatch",
+            f"{field} must be at least {schema_minimum}",
+        )
+    return max(consumer_minimum, min(value, consumer_maximum))
 
 
 def _canonical_choice(value: Any, *, field: str, default: str, values: set[str]) -> str:

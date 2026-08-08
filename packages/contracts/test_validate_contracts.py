@@ -86,7 +86,7 @@ class ContractEvolutionTests(unittest.TestCase):
         self.assertNotIn("modelSource", root_messages)
         self.assertFalse(any(error.validator == "required" for error in private_errors))
 
-    def test_matrix_v2_keeps_published_acceptance_and_tracks_consumer_adapter_gap(self) -> None:
+    def test_matrix_v2_schema_accepts_published_inputs_and_tracks_bounded_adapter(self) -> None:
         schema = _load(CONTRACT_ROOT / "schemas" / "matrix-dispatch.v2.schema.json")
         fixture = _load(
             CONTRACT_ROOT / "fixtures" / "compat" / "matrix-dispatch.v2.consumer-gap.json"
@@ -126,7 +126,7 @@ class ContractEvolutionTests(unittest.TestCase):
             for item in compatibility["contracts"]
             if item["schemaId"] == "loom.matrix.dispatch.v2"
         )
-        self.assertEqual(entry["status"], "adapter-required")
+        self.assertEqual(entry["status"], "supported")
         self.assertEqual(entry["replacementSchemaId"], "loom.matrix.dispatch.v3")
         self.assertEqual(
             entry["limits"],
@@ -134,6 +134,7 @@ class ContractEvolutionTests(unittest.TestCase):
                 "concurrency": {"maximum": 8},
                 "deviceAssignments": {"maximumItems": 100},
                 "prompt": {"maximumLength": 2000},
+                "retryBudget": {"maximum": 10},
                 "templateId": {"maximumLength": 80},
                 "timeoutSec": {"minimum": 30, "maximum": 1200},
             },

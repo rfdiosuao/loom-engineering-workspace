@@ -575,7 +575,9 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertEqual(len(before_recovery), 1)
 
                 recovered = service.send_message(session["sessionId"], body)
-                persisted_path = recovered["run"]["request"]["attachments"][0]["path"]
+                persisted_run = service.repository.get_run(recovered["run"]["runId"])
+                self.assertNotIn("request", recovered["run"])
+                persisted_path = persisted_run["request"]["attachments"][0]["path"]
                 self.assertTrue(os.path.isfile(persisted_path))
                 after_recovery = [
                     os.path.join(directory, filename)
@@ -666,10 +668,12 @@ class AgentServiceTests(unittest.TestCase):
                     "scopeMode": "auto",
                 })
                 completed = _wait_for_status(service, sent["run"]["runId"], "completed")
+                persisted = service.repository.get_run(sent["run"]["runId"])
             finally:
                 service.shutdown()
 
-        request = completed["request"]
+        self.assertNotIn("request", completed)
+        request = persisted["request"]
         self.assertEqual(request["scopeMode"], "auto")
         self.assertEqual(request["targets"], {"deviceIds": ["phone-progress"]})
         self.assertEqual(request["requestScope"]["status"], "resolved")
@@ -735,10 +739,12 @@ class AgentServiceTests(unittest.TestCase):
                 completed = _wait_for_status(service, sent["run"]["runId"], "completed")
                 detail = service.session_detail(session["sessionId"])
                 trace = service.get_trace(sent["run"]["runId"])
+                persisted = service.repository.get_run(sent["run"]["runId"])
             finally:
                 service.shutdown()
 
-        self.assertEqual(completed["request"]["requestScope"]["status"], "ambiguous")
+        self.assertNotIn("request", completed)
+        self.assertEqual(persisted["request"]["requestScope"]["status"], "ambiguous")
         self.assertEqual(runtime.requests, [])
         self.assertEqual(matrix.dispatches, [])
         self.assertEqual(trace["approvals"], [])
@@ -770,12 +776,16 @@ class AgentServiceTests(unittest.TestCase):
                     "scopeMode": "auto",
                 })
                 second = _wait_for_status(service, selected["run"]["runId"], "completed")
+                first_persisted = service.repository.get_run(ambiguous["run"]["runId"])
+                second_persisted = service.repository.get_run(selected["run"]["runId"])
             finally:
                 service.shutdown()
 
-        self.assertEqual(first["request"]["requestScope"]["status"], "ambiguous")
-        self.assertEqual(second["request"]["requestScope"]["status"], "resolved")
-        self.assertEqual(second["request"]["targets"], {"deviceIds": ["phone-2"]})
+        self.assertNotIn("request", first)
+        self.assertNotIn("request", second)
+        self.assertEqual(first_persisted["request"]["requestScope"]["status"], "ambiguous")
+        self.assertEqual(second_persisted["request"]["requestScope"]["status"], "resolved")
+        self.assertEqual(second_persisted["request"]["targets"], {"deviceIds": ["phone-2"]})
         self.assertEqual(runtime.requests[0]["requestScope"]["targets"], {"deviceIds": ["phone-2"]})
 
     def test_invalid_manual_scope_is_rejected_before_run_creation(self) -> None:
@@ -879,10 +889,12 @@ class AgentServiceTests(unittest.TestCase):
                 )
                 self.assertTrue(runtime.started.wait(1.0))
                 service.update_session(session["sessionId"], {"modelId": "glm-5"})
+                persisted = service.repository.get_run(sent["run"]["runId"])
 
                 self.assertEqual(sent["run"]["modelId"], "qwen3.7-plus")
                 self.assertEqual(sent["run"]["modelSource"], "session")
-                self.assertEqual(sent["run"]["request"]["modelId"], "qwen3.7-plus")
+                self.assertNotIn("request", sent["run"])
+                self.assertEqual(persisted["request"]["modelId"], "qwen3.7-plus")
                 self.assertEqual(runtime.requests[0]["modelId"], "qwen3.7-plus")
             finally:
                 runtime.release.set()
@@ -1176,7 +1188,11 @@ class AgentServiceTests(unittest.TestCase):
 
                 paused = service.pause_run(sent["run"]["runId"])
                 self.assertEqual(paused["status"], "running")
-                self.assertEqual(paused["controlState"], "pause_requested")
+                self.assertNotIn("controlState", paused)
+                self.assertEqual(
+                    service.repository.get_run(sent["run"]["runId"])["controlState"],
+                    "pause_requested",
+                )
                 self.assertTrue(runtime.cancel_seen.wait(1.0))
                 queued_resume = service.resume_run(sent["run"]["runId"])
                 self.assertEqual(queued_resume["status"], "running")
@@ -1583,11 +1599,14 @@ class AgentServiceTests(unittest.TestCase):
             service = AgentService(paths, runtime=runtime, capabilities=_registry())
             try:
                 uncertain = service.get_run("run-uncertain")
+                uncertain_persisted = service.repository.get_run("run-uncertain")
                 self.assertEqual(uncertain["status"], "failed")
                 self.assertEqual(uncertain["error"]["code"], "agent_restart_inflight_unknown")
                 self.assertFalse(uncertain["error"]["recoverable"])
-                self.assertTrue(uncertain["error"]["outcomeIndeterminate"])
-                self.assertTrue(uncertain["error"]["executionMayContinue"])
+                self.assertNotIn("outcomeIndeterminate", uncertain["error"])
+                self.assertNotIn("executionMayContinue", uncertain["error"])
+                self.assertTrue(uncertain_persisted["error"]["outcomeIndeterminate"])
+                self.assertTrue(uncertain_persisted["error"]["executionMayContinue"])
                 self.assertEqual(_wait_for_status(service, "run-queued", "completed")["status"], "completed")
                 self.assertEqual(len(runtime.requests), 1)
                 self.assertEqual(runtime.requests[0]["runtimeProfileId"], "loom-native")
@@ -1670,11 +1689,14 @@ class AgentServiceTests(unittest.TestCase):
                     {"clientMessageId": "worker-crash-client", "text": "执行手机任务"},
                 )
                 failed = _wait_for_status(service, sent["run"]["runId"], "failed")
+                failed_persisted = service.repository.get_run(sent["run"]["runId"])
 
                 self.assertEqual(failed["error"]["code"], "agent_service_inflight_unknown")
                 self.assertFalse(failed["error"]["recoverable"])
-                self.assertTrue(failed["error"]["outcomeIndeterminate"])
-                self.assertTrue(failed["error"]["executionMayContinue"])
+                self.assertNotIn("outcomeIndeterminate", failed["error"])
+                self.assertNotIn("executionMayContinue", failed["error"])
+                self.assertTrue(failed_persisted["error"]["outcomeIndeterminate"])
+                self.assertTrue(failed_persisted["error"]["executionMayContinue"])
                 checkpoint = json.loads(failed["checkpoint"])
                 self.assertIsNone(checkpoint["inFlightToolCall"])
                 self.assertEqual(checkpoint["completedToolCallIds"], ["tool-crashed"])
@@ -1897,13 +1919,15 @@ class AgentServiceTests(unittest.TestCase):
                 })
                 _wait_for_status(service, sent["run"]["runId"], "completed")
                 events = service.events_after(session_id=session["sessionId"], after_seq=0)
+                persisted = service.repository.get_run(sent["run"]["runId"])
             finally:
                 service.shutdown()
 
         requested = next(event for event in events if event["type"] == "runtime.requested")
         self.assertEqual(session["runtimeProfileId"], "loom-native")
         self.assertEqual(updated["runtimeProfileId"], "loom-native")
-        self.assertEqual(sent["run"]["request"]["runtimeProfileId"], "loom-native")
+        self.assertNotIn("request", sent["run"])
+        self.assertEqual(persisted["request"]["runtimeProfileId"], "loom-native")
         self.assertEqual(runtime.requests[0]["runtimeProfileId"], "loom-native")
         self.assertEqual(requested["data"]["promptSnapshot"]["runtimeProfileId"], "loom-native")
 
@@ -2070,8 +2094,10 @@ class AgentServiceTests(unittest.TestCase):
 
                 persisted = service.get_run(sent["run"]["runId"])
                 self.assertEqual(persisted["status"], "waiting_approval")
+                persisted_private = service.repository.get_run(sent["run"]["runId"])
+                self.assertNotIn("matrixTerminalIntents", persisted)
                 self.assertEqual(
-                    [item["campaignId"] for item in persisted["matrixTerminalIntents"]],
+                    [item["campaignId"] for item in persisted_private["matrixTerminalIntents"]],
                     ["campaign-progress"],
                 )
                 second_approval = service.get_trace(persisted["runId"])["approvals"][-1]
@@ -2079,16 +2105,18 @@ class AgentServiceTests(unittest.TestCase):
                     second_approval["approvalId"],
                     {"decision": "approved"},
                 )["run"]
+                completed_private = service.repository.get_run(sent["run"]["runId"])
 
                 self.assertEqual(completed["status"], "completed")
-                checkpoint = json.loads(completed["checkpoint"])
+                checkpoint = json.loads(completed_private["checkpoint"])
                 matrix_result = next(
                     item
                     for item in checkpoint["toolResults"]
                     if item["toolCallId"] == "dispatch-before-approval-window"
                 )
                 self.assertEqual(matrix_result["status"], "completed")
-                self.assertEqual(completed.get("matrixTerminalIntents"), [])
+                self.assertNotIn("matrixTerminalIntents", completed)
+                self.assertEqual(completed_private.get("matrixTerminalIntents"), [])
             finally:
                 service.shutdown()
 
@@ -2629,12 +2657,15 @@ class AgentServiceTests(unittest.TestCase):
                 )
 
                 outcome = service.cancel_run("run-incomplete-cancel")
+                persisted = service.repository.get_run("run-incomplete-cancel")
 
                 self.assertNotEqual(outcome["status"], "cancelled")
                 self.assertEqual(outcome["error"]["code"], "agent_matrix_cancel_incomplete")
                 self.assertFalse(outcome["error"]["recoverable"])
-                self.assertTrue(outcome["error"]["outcomeIndeterminate"])
-                self.assertTrue(outcome["error"]["executionMayContinue"])
+                self.assertNotIn("outcomeIndeterminate", outcome["error"])
+                self.assertNotIn("executionMayContinue", outcome["error"])
+                self.assertTrue(persisted["error"]["outcomeIndeterminate"])
+                self.assertTrue(persisted["error"]["executionMayContinue"])
                 self.assertIn("campaign-progress", service._campaign_links)
             finally:
                 service.shutdown()
@@ -2775,7 +2806,11 @@ class AgentServiceTests(unittest.TestCase):
                 self.assertTrue(runtime.cancel_seen.wait(0.5))
                 run = service.get_run(sent["run"]["runId"])
                 self.assertEqual(run["status"], "running")
-                self.assertEqual(run["controlState"], "pause_requested")
+                self.assertNotIn("controlState", run)
+                self.assertEqual(
+                    service.repository.get_run(sent["run"]["runId"])["controlState"],
+                    "pause_requested",
+                )
                 self.assertFalse(incomplete["drained"])
                 self.assertEqual(incomplete["unfinishedRuns"], 1)
                 self.assertTrue(incomplete["executionMayContinue"])

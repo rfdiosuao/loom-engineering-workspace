@@ -2263,9 +2263,10 @@ def _build_phone_task_plan(ctx, body: dict, *, device_id: str = "") -> dict:
     task_body = dict(body or {})
     if device_id:
         task_body["deviceId"] = _normalize_device_id(device_id)
+    request_schema = str(task_body.get("schema") or "")
     canonical_assignment_id = str(task_body.get("assignmentId") or "")
     canonical_assignment = (
-        task_body.get("schema") == "loom.matrix.dispatch.v2"
+        request_schema in {"loom.matrix.dispatch.v2", "loom.matrix.dispatch.v3"}
         and bool(canonical_assignment_id)
     )
     raw_prompt = task_body.get("prompt") or ""
@@ -2337,6 +2338,8 @@ def _build_phone_task_plan(ctx, body: dict, *, device_id: str = "") -> dict:
     }
     if device_id:
         evidence_body["deviceId"] = _normalize_device_id(device_id)
+    if canonical_assignment:
+        evidence_body["schema"] = request_schema
     if explicit_action_body:
         evidence_body["actionBody"] = explicit_action_body
 

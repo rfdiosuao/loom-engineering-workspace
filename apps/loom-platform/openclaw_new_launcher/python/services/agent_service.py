@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import os
@@ -89,6 +90,183 @@ _USER_TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+
+_PUBLIC_AGENT_FIELDS = {
+    "loom.agent.approval.v1": (
+        "schema",
+        "approvalId",
+        "sessionId",
+        "runId",
+        "toolCallId",
+        "capability",
+        "inputHash",
+        "actionSummary",
+        "targets",
+        "inputSummary",
+        "risk",
+        "riskReason",
+        "status",
+        "requestedAt",
+        "expiresAt",
+        "decision",
+        "decidedBy",
+        "decidedAt",
+        "consumedAt",
+    ),
+    "loom.agent.session.v1": (
+        "schema",
+        "sessionId",
+        "title",
+        "status",
+        "runtimeProfileId",
+        "modelId",
+        "createdAt",
+        "updatedAt",
+        "lastMessagePreview",
+        "activeRunId",
+    ),
+    "loom.agent.message.v1": (
+        "schema",
+        "messageId",
+        "sessionId",
+        "role",
+        "status",
+        "blocks",
+        "createdAt",
+        "completedAt",
+    ),
+    "loom.agent.run.v1": (
+        "schema",
+        "runId",
+        "sessionId",
+        "status",
+        "executionState",
+        "checkpoint",
+        "campaignIds",
+        "modelId",
+        "modelSource",
+        "startedAt",
+        "completedAt",
+        "error",
+    ),
+    "loom.agent.run.v2": (
+        "schema",
+        "runId",
+        "sessionId",
+        "status",
+        "executionState",
+        "checkpoint",
+        "campaignIds",
+        "modelId",
+        "modelSource",
+        "startedAt",
+        "completedAt",
+        "error",
+    ),
+}
+_PUBLIC_RUN_EXECUTION_STATE_FIELDS = ("phase", "retryable", "degraded")
+_PUBLIC_RUN_ERROR_FIELDS = ("code", "message", "recoverable")
+_PUBLIC_TRACE_NODE_FIELDS = (
+    "traceId",
+    "parentTraceId",
+    "runId",
+    "kind",
+    "name",
+    "status",
+    "startedAt",
+    "durationMs",
+    "inputSummary",
+    "outputSummary",
+    "error",
+)
+_PRIVATE_AGENT_KEYS = frozenset({"ownerAccountId", "request"})
+
+
+def _public_agent_contract(record: Mapping[str, Any]) -> Json:
+    schema_id = str(record.get("schema") or "")
+    if not schema_id:
+        if record.get("approvalId"):
+            schema_id = "loom.agent.approval.v1"
+        elif record.get("messageId"):
+            schema_id = "loom.agent.message.v1"
+        elif record.get("runId"):
+            schema_id = "loom.agent.run.v1"
+        elif record.get("sessionId"):
+            schema_id = "loom.agent.session.v1"
+    fields = _PUBLIC_AGENT_FIELDS.get(schema_id)
+    if fields is None:
+        raise ValueError(f"unsupported public agent contract schema: {schema_id or '<missing>'}")
+    public = {
+        field: copy.deepcopy(record[field])
+        for field in fields
+        if field in record and record[field] is not None
+    }
+    public.setdefault("schema", schema_id)
+    if schema_id in {"loom.agent.run.v1", "loom.agent.run.v2"}:
+        public.setdefault("campaignIds", [])
+    if public.get("checkpoint") == "":
+        public.pop("checkpoint", None)
+    if schema_id == "loom.agent.message.v1" and isinstance(public.get("blocks"), list):
+        public["blocks"] = [
+            {
+                field: copy.deepcopy(block[field])
+                for field in ("type", "data")
+                if isinstance(block, Mapping) and field in block
+            }
+            if isinstance(block, Mapping)
+            else copy.deepcopy(block)
+            for block in public["blocks"]
+        ]
+    if schema_id == "loom.agent.approval.v1":
+        for field in ("targets", "inputSummary"):
+            if field in public:
+                public[field] = _public_trace_summary(public[field])
+    if schema_id in {"loom.agent.run.v1", "loom.agent.run.v2"}:
+        for field, allowed_fields in (
+            ("executionState", _PUBLIC_RUN_EXECUTION_STATE_FIELDS),
+            ("error", _PUBLIC_RUN_ERROR_FIELDS),
+        ):
+            value = public.get(field)
+            if isinstance(value, Mapping):
+                public[field] = {
+                    nested_field: copy.deepcopy(value[nested_field])
+                    for nested_field in allowed_fields
+                    if nested_field in value and value[nested_field] is not None
+                }
+    return public
+
+
+def _public_approval_outcome(outcome: Mapping[str, Any]) -> Json:
+    public_outcome = copy.deepcopy(dict(outcome))
+    if isinstance(outcome.get("approval"), Mapping):
+        public_outcome["approval"] = _public_agent_contract(outcome["approval"])
+    if isinstance(outcome.get("run"), Mapping):
+        public_outcome["run"] = _public_agent_contract(outcome["run"])
+    return public_outcome
+
+
+def _public_trace_summary(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _public_trace_summary(nested)
+            for key, nested in value.items()
+            if str(key) not in _PRIVATE_AGENT_KEYS
+        }
+    if isinstance(value, list):
+        return [_public_trace_summary(nested) for nested in value]
+    return copy.deepcopy(value)
+
+
+def _public_trace_node(node: Mapping[str, Any]) -> Json:
+    return {
+        field: (
+            _public_trace_summary(node[field])
+            if field in {"inputSummary", "outputSummary", "error"}
+            else copy.deepcopy(node[field])
+        )
+        for field in _PUBLIC_TRACE_NODE_FIELDS
+        if field in node and node[field] is not None
+    }
 
 
 def _native_runtime_profile_id(_value: Any = None) -> str:
@@ -354,7 +532,15 @@ class AgentService:
 
     def list_sessions(self, *, query: str | None = None, cursor: str | None = None, limit: int = 50) -> Json:
         self._require_current_account()
-        return self.repository.list_sessions(query=query, cursor=cursor, limit=limit)
+        page = self.repository.list_sessions(query=query, cursor=cursor, limit=limit)
+        return {
+            "sessions": [
+                _public_agent_contract(session)
+                for session in page.get("sessions", [])
+                if isinstance(session, Mapping)
+            ],
+            **({"nextCursor": page["nextCursor"]} if page.get("nextCursor") else {}),
+        }
 
     def create_session(self, body: Mapping[str, Any] | None = None) -> Json:
         self._require_execution_access()
@@ -362,10 +548,12 @@ class AgentService:
         model_id = str(data.get("modelId") or "").strip()
         if model_id:
             self._ensure_model_available(model_id)
-        return self.repository.create_session(
-            title=str(data.get("title") or "New conversation"),
-            runtime_profile_id=_native_runtime_profile_id(data.get("runtimeProfileId")),
-            model_id=model_id,
+        return _public_agent_contract(
+            self.repository.create_session(
+                title=str(data.get("title") or "New conversation"),
+                runtime_profile_id=_native_runtime_profile_id(data.get("runtimeProfileId")),
+                model_id=model_id,
+            )
         )
 
     def update_session(self, session_id: str, body: Mapping[str, Any] | None = None) -> Json:
@@ -377,15 +565,23 @@ class AgentService:
                 self._ensure_model_available(model_id)
             data["modelId"] = model_id
         data["runtimeProfileId"] = NATIVE_RUNTIME_PROFILE_ID
-        return self.repository.update_session(session_id, data)
+        return _public_agent_contract(self.repository.update_session(session_id, data))
 
     def session_detail(self, session_id: str, *, cursor: str | None = None, limit: int = 100) -> Json:
         self._require_current_account()
         page = self.repository.page_messages(session_id, cursor=cursor, limit=limit)
         return {
-            "session": self.repository.get_session(session_id),
-            "messages": page.get("messages", []),
-            "runs": self.repository.list_runs(session_id),
+            "session": _public_agent_contract(self.repository.get_session(session_id)),
+            "messages": [
+                _public_agent_contract(message)
+                for message in page.get("messages", [])
+                if isinstance(message, Mapping)
+            ],
+            "runs": [
+                _public_agent_contract(run)
+                for run in self.repository.list_runs(session_id)
+                if isinstance(run, Mapping)
+            ],
             **({"nextCursor": page["nextCursor"]} if page.get("nextCursor") else {}),
         }
 
@@ -405,7 +601,10 @@ class AgentService:
         session = self.repository.get_session(session_id)
         existing = self.repository.find_message_run(session_id, client_message_id)
         if existing is not None:
-            return {"message": existing["message"], "run": existing["run"]}
+            return {
+                "message": _public_agent_contract(existing["message"]),
+                "run": _public_agent_contract(existing["run"]),
+            }
         model_id, model_source = self._resolve_run_model(session)
         supplied_scope = request.get("scope") if isinstance(request.get("scope"), Mapping) else None
         legacy_targets = request.get("targets") if isinstance(request.get("targets"), Mapping) else {}
@@ -547,7 +746,10 @@ class AgentService:
                     data={"status": "queued"},
                 )
                 self._submit_run(session_id, str(result["run"]["runId"]), persisted_request)
-        return {"message": result["message"], "run": result["run"]}
+        return {
+            "message": _public_agent_contract(result["message"]),
+            "run": _public_agent_contract(result["run"]),
+        }
 
     def _normalize_user_attachments(
         self,
@@ -843,7 +1045,7 @@ class AgentService:
 
     def get_run(self, run_id: str) -> Json:
         self._require_current_account()
-        return self.repository.get_run(run_id)
+        return _public_agent_contract(self.repository.get_run(run_id))
 
     def get_trace(self, run_id: str) -> Json:
         self._require_current_account()
@@ -856,16 +1058,25 @@ class AgentService:
             if event.get("entityId") == run_id or event.get("data", {}).get("runId") == run_id
         ]
         trace = self._trace_nodes(run_id, relevant_events)
+        public_trace = [
+            _public_trace_node(node)
+            for node in trace
+            if isinstance(node, Mapping)
+        ]
         return {
-            "run": run,
-            "trace": trace,
-            "nodes": trace,
-            "approvals": self.repository.list_approvals(session_id, run_id=run_id),
+            "run": _public_agent_contract(run),
+            "trace": public_trace,
+            "nodes": copy.deepcopy(public_trace),
+            "approvals": [
+                _public_agent_contract(approval)
+                for approval in self.repository.list_approvals(session_id, run_id=run_id)
+                if isinstance(approval, Mapping)
+            ],
         }
 
     def pause_run(self, run_id: str) -> Json:
         self._require_execution_access()
-        return self.orchestrator.pause_run(run_id)
+        return _public_agent_contract(self.orchestrator.pause_run(run_id))
 
     def resume_run(self, run_id: str) -> Json:
         self._require_execution_access()
@@ -879,14 +1090,14 @@ class AgentService:
                 run.get("status") != "paused"
                 and not pause_requested
             ) or run_id in self._resume_requests:
-                return run
+                return _public_agent_contract(run)
             self._resume_requests.add(run_id)
             try:
                 self._submit_run(str(run["sessionId"]), run_id, self._request_from_run(run), resume=True)
             except Exception:
                 self._resume_requests.discard(run_id)
                 raise
-        return self.repository.get_run(run_id)
+        return _public_agent_contract(self.repository.get_run(run_id))
 
     def cancel_run(self, run_id: str) -> Json:
         self._require_execution_access()
@@ -931,8 +1142,8 @@ class AgentService:
                     entity_id=run_id,
                     data={"runId": run_id, "campaignIds": campaign_ids, "incomplete": incomplete},
                 )
-                return updated
-        return self.orchestrator.cancel_run(run_id)
+                return _public_agent_contract(updated)
+        return _public_agent_contract(self.orchestrator.cancel_run(run_id))
 
     def resolve_approval(self, approval_id: str, body: Mapping[str, Any]) -> Json:
         self._require_execution_access()
@@ -947,13 +1158,16 @@ class AgentService:
                 with self._lock:
                     self._matrix_confirmation_tokens.setdefault(input_hash, []).append(approval_id)
         try:
-            return self.orchestrator.resolve_approval(
+            outcome = self.orchestrator.resolve_approval(
                 str(approval["sessionId"]),
                 approval_id,
                 decision=decision,
                 decided_by=str(body.get("operator") or body.get("decidedBy") or "local-user"),
                 request=self._request_from_run(self.repository.get_run(str(approval["runId"]))),
             )
+            if not isinstance(outcome, Mapping):
+                return outcome
+            return _public_approval_outcome(outcome)
         finally:
             if confirmation_token is not None:
                 input_hash, token_approval_id = confirmation_token
@@ -1001,7 +1215,7 @@ class AgentService:
             )
             if outcome.get("approval", {}).get("status") != "approved":
                 release_confirmation()
-                return outcome
+                return _public_approval_outcome(outcome)
             self._submit_run(
                 str(approval["sessionId"]),
                 str(approval["runId"]),
@@ -1010,7 +1224,7 @@ class AgentService:
                 on_complete=release_confirmation,
                 queue_if_busy=True,
             )
-            return outcome
+            return _public_approval_outcome(outcome)
         except Exception:
             release_confirmation()
             raise

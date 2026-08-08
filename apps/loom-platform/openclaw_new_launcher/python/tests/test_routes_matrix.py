@@ -943,6 +943,126 @@ class MatrixRouteContractTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--daemon") + 1], "auto")
         self.assertEqual(argv[argv.index("--device-id") + 1], "phone-a")
 
+    def test_versioned_route_to_phone_preserves_exact_payload_and_legacy_stays_unversioned(self) -> None:
+        def captured_result(_ctx, **plan):
+            captured_plans.append(plan)
+            return {
+                "success": True,
+                "stdout": json.dumps({"ok": True}),
+                "stderr": "",
+                "metrics": {},
+            }
+
+        def argument(args: list[str], flag: str):
+            return args[args.index(flag) + 1] if flag in args else None
+
+        for schema_id in ("loom.matrix.dispatch.v2", "loom.matrix.dispatch.v3"):
+            with self.subTest(schema=schema_id), tempfile.TemporaryDirectory() as temp_dir:
+                captured_plans: list[dict] = []
+                _app, client = _client(temp_dir)
+                client.post(
+                    "/api/matrix/device/register",
+                    json={"deviceId": "phone-route", "online": True},
+                )
+                assignment = {
+                    "assignmentId": f"assignment-{schema_id.rsplit('.', 1)[-1]}",
+                    "deviceId": "phone-route",
+                    "prompt": "Preserve this exact prompt.",
+                    "templateId": "screen_read_v1",
+                    "input": {"candidateId": "candidate-route", "rank": 7},
+                    "timeoutSec": 45,
+                    "retryBudget": 2,
+                }
+                body = {
+                    "schema": schema_id,
+                    "campaignId": f"campaign-{schema_id.rsplit('.', 1)[-1]}",
+                    "concurrency": 1,
+                    "mode": "safe",
+                    "profile": "standard",
+                    "deviceAssignments": [assignment],
+                }
+                with patch(
+                    "api.routes_matrix._submit_phone_job",
+                    side_effect=captured_result,
+                ):
+                    submitted = client.post("/api/matrix/dispatch", json=body)
+                    self.assertEqual(submitted.status_code, 202)
+                    job = _wait_for_job(client, submitted.json()["jobId"])
+
+                self.assertEqual(job["status"], "succeeded")
+                self.assertEqual(len(captured_plans), 1)
+                plan = captured_plans[0]
+                args = plan["args"]
+                evidence = plan["evidence_body"]
+                self.assertIs(plan["exact_timeout"], True)
+                observed = {
+                    "schema": evidence.get("schema"),
+                    "campaignId": argument(args, "--campaign-id"),
+                    "assignmentId": argument(args, "--assignment-id"),
+                    "deviceId": argument(args, "--device-id"),
+                    "prompt": argument(args, "--prompt"),
+                    "templateId": argument(args, "--assignment-template-id"),
+                    "input": (
+                        json.loads(argument(args, "--input-json"))
+                        if argument(args, "--input-json") is not None
+                        else None
+                    ),
+                    "timeoutSec": (
+                        int(argument(args, "--timeout-sec"))
+                        if argument(args, "--timeout-sec") is not None
+                        else None
+                    ),
+                    "retryBudget": (
+                        int(argument(args, "--retry-budget"))
+                        if argument(args, "--retry-budget") is not None
+                        else None
+                    ),
+                }
+                self.assertEqual(
+                    observed,
+                    {
+                        "schema": schema_id,
+                        "campaignId": body["campaignId"],
+                        "assignmentId": assignment["assignmentId"],
+                        "deviceId": assignment["deviceId"],
+                        "prompt": assignment["prompt"],
+                        "templateId": assignment["templateId"],
+                        "input": assignment["input"],
+                        "timeoutSec": assignment["timeoutSec"],
+                        "retryBudget": assignment["retryBudget"],
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            captured_plans = []
+            _app, client = _client(temp_dir)
+            client.post(
+                "/api/matrix/device/register",
+                json={"deviceId": "phone-legacy", "online": True},
+            )
+            with patch(
+                "api.routes_matrix._submit_phone_job",
+                side_effect=captured_result,
+            ):
+                submitted = client.post(
+                    "/api/matrix/dispatch",
+                    json={
+                        "prompt": "Keep the legacy route unchanged.",
+                        "mode": "safe",
+                        "target": {"deviceIds": ["phone-legacy"]},
+                    },
+                )
+                self.assertEqual(submitted.status_code, 202)
+                job = _wait_for_job(client, submitted.json()["jobId"])
+
+            self.assertEqual(job["status"], "succeeded")
+            self.assertNotIn("requestSchema", submitted.json()["task"])
+            self.assertNotIn("schema", captured_plans[0]["evidence_body"])
+            self.assertEqual(
+                argument(captured_plans[0]["args"], "--prompt"),
+                "Keep the legacy route unchanged.",
+            )
+
     def test_matrix_dispatch_streams_device_script_output_before_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _write_script(

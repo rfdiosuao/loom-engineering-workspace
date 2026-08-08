@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -989,6 +990,112 @@ class MatrixControlPlaneTests(unittest.TestCase):
         self.assertEqual(devices["phone-a"]["currentTaskId"], "")
         self.assertEqual(devices["phone-b"]["currentTaskId"], "")
 
+    def test_published_v2_consumer_gap_uses_safe_adapter_and_preserves_retry_schema(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixTargetError
+        from jsonschema import Draft202012Validator
+
+        fixture_path = (
+            Path(PYTHON_DIR).parents[3]
+            / "packages"
+            / "contracts"
+            / "fixtures"
+            / "compat"
+            / "matrix-dispatch.v2.consumer-gap.json"
+        )
+        published_v2 = json.loads(fixture_path.read_text(encoding="utf-8"))
+        schema = json.loads(
+            (
+                fixture_path.parents[2]
+                / "schemas"
+                / "matrix-dispatch.v2.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(list(Draft202012Validator(schema).iter_errors(published_v2)), [])
+
+        for source_timeout, adapted_timeout in ((29, 30), (1201, 1200)):
+            with self.subTest(timeoutSec=source_timeout), tempfile.TemporaryDirectory() as temp_dir:
+                request = copy.deepcopy(published_v2)
+                request["campaignId"] = f"{request['campaignId']}_{source_timeout}"
+                request["deviceAssignments"][0]["timeoutSec"] = source_timeout
+                matrix = matrix_for_test(AppPaths(base_path=temp_dir))
+                matrix.register_device(
+                    {
+                        "deviceId": request["deviceAssignments"][0]["deviceId"],
+                        "online": True,
+                    }
+                )
+
+                try:
+                    task = matrix.dispatch(request)
+                except MatrixTargetError as exc:
+                    self.fail(
+                        "published schema-valid loom.matrix.dispatch.v2 input must be "
+                        f"adapted safely, got {exc.code}: {exc.message}"
+                    )
+
+                assignment = task["missions"][0]["deviceTasks"][0]
+                self.assertEqual(task["requestSchema"], "loom.matrix.dispatch.v2")
+                self.assertEqual(task["concurrency"], 8)
+                self.assertEqual(assignment["timeoutSec"], adapted_timeout)
+                self.assertEqual(assignment["retryBudget"], 1)
+                matrix.record_result(
+                    assignment["deviceTaskId"],
+                    ok=False,
+                    duration_ms=1,
+                    failure_reason="exercise v2 retry identity",
+                )
+
+                retried = matrix.retry_failed(task["campaignId"], {})
+
+                self.assertTrue(retried["retried"])
+                self.assertEqual(retried["dispatchBody"]["schema"], "loom.matrix.dispatch.v2")
+                self.assertEqual(retried["dispatchBody"]["deviceAssignments"][0]["retryBudget"], 1)
+                self.assertEqual(retried["task"]["requestSchema"], "loom.matrix.dispatch.v2")
+                self.assertEqual(
+                    retried["task"]["missions"][0]["deviceTasks"][0]["timeoutSec"],
+                    adapted_timeout,
+                )
+                self.assertEqual(
+                    retried["task"]["missions"][0]["deviceTasks"][0]["retryBudget"],
+                    1,
+                )
+
+    def test_v3_keeps_strict_bounds_for_the_published_v2_consumer_gap_shape(self) -> None:
+        from core.paths import AppPaths
+        from core.phone_matrix import MatrixTargetError
+
+        fixture_path = (
+            Path(PYTHON_DIR).parents[3]
+            / "packages"
+            / "contracts"
+            / "fixtures"
+            / "compat"
+            / "matrix-dispatch.v2.consumer-gap.json"
+        )
+        published_v2 = json.loads(fixture_path.read_text(encoding="utf-8"))
+        for case_name, concurrency, timeout_sec in (
+            ("concurrency-high", 9, 30),
+            ("timeout-low", 8, 29),
+            ("timeout-high", 8, 1201),
+        ):
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as temp_dir:
+                request = copy.deepcopy(published_v2)
+                request["schema"] = "loom.matrix.dispatch.v3"
+                request["campaignId"] = f"{request['campaignId']}_{case_name}"
+                request["concurrency"] = concurrency
+                request["deviceAssignments"][0]["timeoutSec"] = timeout_sec
+                matrix = matrix_for_test(AppPaths(base_path=temp_dir))
+                matrix.register_device(
+                    {
+                        "deviceId": request["deviceAssignments"][0]["deviceId"],
+                        "online": True,
+                    }
+                )
+
+                with self.assertRaises(MatrixTargetError):
+                    matrix.dispatch(request)
+
     def test_canonical_v3_dispatch_uses_v3_adapter_and_preserves_request_schema(self) -> None:
         from core.paths import AppPaths
 
@@ -1344,38 +1451,37 @@ class MatrixControlPlaneTests(unittest.TestCase):
         self.assertEqual(status["devices"][0]["currentTaskId"], "")
         self.assertEqual(events["events"], [])
 
-    def test_canonical_dispatch_rejects_timeout_that_executor_would_clamp(self) -> None:
+    def test_canonical_v2_dispatch_adapts_timeout_to_executor_minimum(self) -> None:
         from core.paths import AppPaths
-        from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
             matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
 
-            with self.assertRaises(MatrixTargetError) as raised:
-                matrix.dispatch(
-                    {
-                        "schema": "loom.matrix.dispatch.v2",
-                        "campaignId": "campaign_short_timeout",
-                        "concurrency": 1,
-                        "deviceAssignments": [
-                            {
-                                "assignmentId": "assignment_short_timeout",
-                                "deviceId": "phone-a",
-                                "prompt": "Read phone A.",
-                                "input": {},
-                                "timeoutSec": 29,
-                                "retryBudget": 0,
-                            }
-                        ],
-                    }
-                )
+            task = matrix.dispatch(
+                {
+                    "schema": "loom.matrix.dispatch.v2",
+                    "campaignId": "campaign_short_timeout",
+                    "concurrency": 1,
+                    "deviceAssignments": [
+                        {
+                            "assignmentId": "assignment_short_timeout",
+                            "deviceId": "phone-a",
+                            "prompt": "Read phone A.",
+                            "input": {},
+                            "timeoutSec": 29,
+                            "retryBudget": 0,
+                        }
+                    ],
+                }
+            )
 
             status = matrix.status()
 
-        self.assertEqual(raised.exception.code, "matrix_invalid_dispatch")
-        self.assertEqual(status["campaigns"], [])
-        self.assertEqual(status["devices"][0]["currentTaskId"], "")
+        self.assertEqual(task["requestSchema"], "loom.matrix.dispatch.v2")
+        self.assertEqual(task["missions"][0]["deviceTasks"][0]["timeoutSec"], 30)
+        self.assertEqual(status["campaigns"][0]["requestSchema"], "loom.matrix.dispatch.v2")
+        self.assertEqual(status["campaigns"][0]["missions"][0]["deviceTasks"][0]["timeoutSec"], 30)
 
     def test_dispatch_rejects_offline_target_without_creating_campaign(self) -> None:
         from core.paths import AppPaths

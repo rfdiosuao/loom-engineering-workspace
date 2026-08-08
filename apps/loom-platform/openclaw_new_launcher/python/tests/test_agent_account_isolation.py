@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 
 PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PYTHON_DIR not in sys.path:
@@ -105,6 +108,248 @@ def _service(root: str, account_id: str, *, authorized: bool = True, runtime=Non
         account_manager=_Account(account_id, authorized=authorized),
         capabilities=_registry(),
     )
+
+
+def _canonical_contract_errors(payload: dict) -> list[str]:
+    schema_files = {
+        "loom.agent.approval.v1": "agent-approval.v1.schema.json",
+        "loom.agent.session.v1": "agent-session.v1.schema.json",
+        "loom.agent.message.v1": "agent-message.v1.schema.json",
+        "loom.agent.run.v1": "agent-run.v1.schema.json",
+        "loom.agent.run.v2": "agent-run.v2.schema.json",
+    }
+    schema_id = str(payload.get("schema") or "")
+    schema_name = schema_files.get(schema_id)
+    if schema_name is None:
+        return [f"unsupported public schema: {schema_id or '<missing>'}"]
+    contract_root = Path(PYTHON_DIR).parents[3] / "packages" / "contracts"
+    schema = json.loads(
+        (contract_root / "schemas" / schema_name).read_text(encoding="utf-8")
+    )
+    return [
+        f"{schema_id} at /{'/'.join(str(part) for part in error.path)}: {error.message}"
+        for error in Draft202012Validator(
+            schema,
+            format_checker=FormatChecker(),
+        ).iter_errors(payload)
+    ]
+
+
+def _public_contract_violations(label: str, payload: dict) -> list[str]:
+    violations = []
+    for private_key in ("ownerAccountId", "request"):
+        if private_key in payload:
+            violations.append(f"{label}: leaked private field {private_key}")
+    if payload.get("checkpoint") == "":
+        violations.append(f"{label}: leaked empty checkpoint")
+    violations.extend(
+        f"{label}: {error}" for error in _canonical_contract_errors(payload)
+    )
+    return violations
+
+
+def _private_contract_paths(value, path: tuple[str, ...] = ()) -> list[str]:
+    paths = []
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            next_path = (*path, str(key))
+            if key in {"ownerAccountId", "request"}:
+                paths.append("/" + "/".join(next_path))
+            paths.extend(_private_contract_paths(nested, next_path))
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            paths.extend(_private_contract_paths(nested, (*path, str(index))))
+    return paths
+
+
+def test_agent_service_public_round_trip_projects_v1_and_keeps_private_persistence() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        service = _service(root, "account-contract")
+        try:
+            session = service.create_session({"title": "Public contract round trip"})
+            sent = service.send_message(
+                session["sessionId"],
+                {
+                    "clientMessageId": "public-contract-v1",
+                    "text": "Inspect public contract boundaries",
+                },
+            )
+            idempotent = service.send_message(
+                session["sessionId"],
+                {
+                    "clientMessageId": "public-contract-v1",
+                    "text": "Inspect public contract boundaries",
+                },
+            )
+            fetched = service.get_run(sent["run"]["runId"])
+            trace_outcome = service.get_trace(sent["run"]["runId"])
+            persisted_session = service.repository.get_session(session["sessionId"])
+            persisted_run = service.repository.get_run(sent["run"]["runId"])
+        finally:
+            service.shutdown()
+
+    assert persisted_session["ownerAccountId"] == "account-contract"
+    assert persisted_run["ownerAccountId"] == "account-contract"
+    assert persisted_run["request"]["prompt"] == "Inspect public contract boundaries"
+    assert trace_outcome["trace"]
+    assert trace_outcome["nodes"]
+    assert _private_contract_paths(trace_outcome["trace"]) == []
+    assert _private_contract_paths(trace_outcome["nodes"]) == []
+    assert _private_contract_paths(trace_outcome) == []
+    violations = []
+    for label, payload in (
+        ("create_session", session),
+        ("send_message.message", sent["message"]),
+        ("send_message.run", sent["run"]),
+        ("send_message.idempotent.message", idempotent["message"]),
+        ("send_message.idempotent.run", idempotent["run"]),
+        ("get_run", fetched),
+    ):
+        violations.extend(_public_contract_violations(label, payload))
+    assert violations == []
+
+
+def test_agent_service_public_reader_accepts_private_v2_persistence_without_leaking_it() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        service = _service(root, "account-contract-v2")
+        try:
+            session = service.create_session({"title": "Persisted v2 reader"})
+            persisted = service.repository.create_run(
+                {
+                    "schema": "loom.agent.run.v2",
+                    "runId": "run-persisted-v2",
+                    "sessionId": session["sessionId"],
+                    "status": "completed",
+                    "executionState": {
+                        "phase": "terminal",
+                        "retryable": False,
+                        "degraded": False,
+                    },
+                    "checkpoint": "",
+                    "campaignIds": [],
+                    "request": {"prompt": "private persisted v2 request"},
+                }
+            )
+            public = service.get_run("run-persisted-v2")
+        finally:
+            service.shutdown()
+
+    assert persisted["ownerAccountId"] == "account-contract-v2"
+    assert persisted["request"]["prompt"] == "private persisted v2 request"
+    assert public["schema"] == "loom.agent.run.v2"
+    assert _public_contract_violations("get_run.v2", public) == []
+
+
+def test_agent_service_trace_run_controls_and_approval_project_public_contracts() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        service = _service(root, "account-public-controls")
+        try:
+            session = service.create_session({"title": "Public control contracts"})
+            session_id = session["sessionId"]
+
+            def private_run(run_id: str, status: str) -> dict:
+                return service.repository.create_run(
+                    {
+                        "schema": "loom.agent.run.v1",
+                        "runId": run_id,
+                        "sessionId": session_id,
+                        "status": status,
+                        "executionState": {
+                            "phase": "terminal" if status == "completed" else "planning",
+                            "retryable": False,
+                            "degraded": False,
+                        },
+                        "checkpoint": "",
+                        "campaignIds": [],
+                        "request": {"prompt": f"private request for {run_id}"},
+                        "controlState": "private-control-state",
+                    }
+                )
+
+            trace_run = private_run("run-public-trace", "waiting_approval")
+            approval = service.repository.create_approval(
+                {
+                    "schema": "loom.agent.approval.v1",
+                    "approvalId": "approval-public-trace",
+                    "sessionId": session_id,
+                    "runId": trace_run["runId"],
+                    "toolCallId": "tool-public-trace",
+                    "capability": "loom.test.public-contract",
+                    "inputHash": "sha256:" + ("a" * 64),
+                    "actionSummary": "Exercise public approval projection",
+                    "targets": {
+                        "kind": "contract-test",
+                        "nested": {
+                            "ownerAccountId": "must-not-leak",
+                            "request": {"prompt": "must-not-leak"},
+                        },
+                    },
+                    "inputSummary": {
+                        "args": [
+                            {"ownerAccountId": "must-not-leak"},
+                            {"request": {"prompt": "must-not-leak"}},
+                            {"safe": True},
+                        ]
+                    },
+                    "risk": "outbound",
+                    "riskReason": "Contract boundary test",
+                    "status": "pending",
+                    "requestedAt": "2026-08-08T10:00:00Z",
+                    "expiresAt": "2026-08-08T11:00:00Z",
+                }
+            )
+            service.repository.append_event(
+                session_id,
+                {
+                    "schema": "loom.realtime.event.v1",
+                    "eventId": "event-public-trace",
+                    "timestamp": "2026-08-08T10:00:01Z",
+                    "topic": "agent.run",
+                    "entityId": trace_run["runId"],
+                    "type": "run.started",
+                    "data": {
+                        "runId": trace_run["runId"],
+                        "message": {"ownerAccountId": "must-not-leak"},
+                    },
+                },
+            )
+            trace = service.get_trace(trace_run["runId"])
+
+            pause_run = private_run("run-public-pause", "running")
+            paused = service.pause_run(pause_run["runId"])
+            resume_run = private_run("run-public-resume", "completed")
+            resumed = service.resume_run(resume_run["runId"])
+            cancel_run = private_run("run-public-cancel", "running")
+            cancelled = service.cancel_run(cancel_run["runId"])
+            resolved = service.resolve_approval(
+                approval["approvalId"],
+                {"decision": "rejected", "operator": "contract-test"},
+            )
+
+            persisted_trace_run = service.repository.get_run(trace_run["runId"])
+            persisted_approval = service.repository.get_approval(approval["approvalId"])
+        finally:
+            service.shutdown()
+
+    assert persisted_trace_run["ownerAccountId"] == "account-public-controls"
+    assert persisted_trace_run["request"]["prompt"] == "private request for run-public-trace"
+    assert persisted_approval["ownerAccountId"] == "account-public-controls"
+    assert trace["trace"]
+    assert trace["nodes"]
+    assert trace["approvals"]
+    assert _private_contract_paths(trace) == []
+    violations = []
+    for label, payload in (
+        ("get_trace.run", trace["run"]),
+        ("get_trace.approval", trace["approvals"][0]),
+        ("pause_run", paused),
+        ("resume_run", resumed),
+        ("cancel_run", cancelled),
+        ("resolve_approval.run", resolved["run"]),
+        ("resolve_approval.approval", resolved["approval"]),
+    ):
+        violations.extend(_public_contract_violations(label, payload))
+    assert violations == []
 
 
 def test_repository_persists_owner_on_session_history_run_trace_and_approval() -> None:
@@ -299,7 +544,9 @@ def test_expired_account_can_read_own_history_but_cannot_execute_or_resume() -> 
             assert expired.list_sessions()["sessions"][0]["sessionId"] == session["sessionId"]
             assert expired.session_detail(session["sessionId"])["session"]["title"] == "History"
             assert expired.get_run("run-paused")["status"] == "paused"
-            assert expired.get_trace("run-paused")["trace"][0]["ownerAccountId"] == "account-a"
+            public_trace = expired.get_trace("run-paused")
+            assert _private_contract_paths(public_trace) == []
+            assert expired.repository.replay_events(session["sessionId"])[0]["ownerAccountId"] == "account-a"
             with pytest.raises(PermissionError, match="AGENT_ENTITLEMENT_REQUIRED"):
                 expired.send_message(
                     session["sessionId"],
