@@ -11,6 +11,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import sun.misc.Unsafe
 
@@ -83,11 +84,51 @@ class ConfigServerSecurityTest {
     }
 
     @Test
-    fun primary_and_fallback_markers_are_recognized_but_plaintext_is_not() {
+    fun only_the_exact_mask_of_the_current_secret_is_preserved() {
         val server = allocateConfigServerWithoutAndroidRuntime()
-        assertTrue(invokeIsMaskedValue(server, "********"))
-        assertTrue(invokeIsMaskedValue(server, "########"))
-        assertFalse(invokeIsMaskedValue(server, "ordinary-secret"))
+        val cases = listOf(
+            Triple("ordinary-secret", "********", true),
+            Triple("ordinary-secret", "########", false),
+            Triple("ordinary-secret", "*abcd", false),
+            Triple("ordinary-secret", "***", false),
+            Triple("********", "########", true),
+            Triple("********", "********", false),
+            Triple("********", "*abcd", false),
+            Triple("********", "***", false),
+            Triple("########", "********", true),
+            Triple("########", "########", false),
+            Triple("########", "*abcd", false),
+            Triple("########", "***", false),
+            Triple("*abcd", "********", true),
+            Triple("*abcd", "########", false),
+            Triple("*abcd", "*abcd", false),
+            Triple("*abcd", "***", false),
+        )
+        cases.forEach { (currentSecret, postedValue, expectedPreserve) ->
+            assertEquals(
+                "current='$currentSecret' posted='$postedValue'",
+                expectedPreserve,
+                invokeIsMaskedValue(server, postedValue, currentSecret),
+            )
+        }
+    }
+
+    @Test
+    fun every_secret_post_field_compares_against_its_corresponding_current_value() {
+        val source = configServerSource()
+        listOf(
+            "KVUtils.getDingtalkAppSecret()",
+            "KVUtils.getFeishuAppSecret()",
+            "KVUtils.getQqAppSecret()",
+            "KVUtils.getDiscordBotToken()",
+            "KVUtils.getTelegramBotToken()",
+            "KVUtils.getLlmApiKey()",
+        ).forEach { currentGetter ->
+            assertTrue(
+                "$currentGetter is not bound to contextual marker validation",
+                source.contains("if (!isMaskedValue(value, $currentGetter))"),
+            )
+        }
     }
 
     @Test
@@ -142,10 +183,19 @@ class ConfigServerSecurityTest {
         return method.invoke(server, secret) as String
     }
 
-    private fun invokeIsMaskedValue(server: ConfigServer, value: String): Boolean {
-        val method = ConfigServer::class.java.getDeclaredMethod("isMaskedValue", String::class.java)
+    private fun invokeIsMaskedValue(server: ConfigServer, value: String, currentSecret: String): Boolean {
+        val method = try {
+            ConfigServer::class.java.getDeclaredMethod(
+                "isMaskedValue",
+                String::class.java,
+                String::class.java,
+            )
+        } catch (_: NoSuchMethodException) {
+            fail("isMaskedValue must compare the posted value with the mask of the current stored secret")
+            throw AssertionError("unreachable")
+        }
         method.isAccessible = true
-        return method.invoke(server, value) as Boolean
+        return method.invoke(server, value, currentSecret) as Boolean
     }
 
     private fun allocateConfigServerWithoutAndroidRuntime(): ConfigServer {
