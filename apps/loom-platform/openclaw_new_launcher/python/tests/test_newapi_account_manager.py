@@ -117,6 +117,27 @@ class NewApiAccountManagerTests(unittest.TestCase):
             ))
             self.assertTrue(manager.requests[-1]["body"]["reconcile"])
 
+    def test_payment_plans_normalize_legacy_single_channel_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            class LegacyChannelPaymentManager(PaymentFakeManager):
+                def _request_json(self, *args, **kwargs):
+                    response = super()._request_json(*args, **kwargs)
+                    if str(args[1]).endswith("/payments/plans"):
+                        response["data"]["payment"]["channels"] = "alipay"
+                    return response
+
+            manager = LegacyChannelPaymentManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "42"},
+            })
+
+            catalog = manager.payment_plans()
+
+            self.assertEqual(["alipay"], catalog["payment"]["channels"])
+
     def test_late_payment_response_cannot_cross_an_account_switch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             started = threading.Event()

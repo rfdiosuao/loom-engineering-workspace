@@ -2512,6 +2512,22 @@ class NewApiAccountManager:
                 status_code=502,
                 code="payment_service_invalid_response",
             )
+        raw_channels = payment.get("channels")
+        if isinstance(raw_channels, str):
+            raw_channels = [raw_channels]
+        if not isinstance(raw_channels, list):
+            raise NewApiAccountError(
+                "支付服务返回的支付方式无效，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        channels: list[str] = []
+        for raw_channel in raw_channels:
+            channel = str(raw_channel or "").strip().lower()
+            if channel in {"alipay", "wxpay"} and channel not in channels:
+                channels.append(channel)
+        payment = dict(payment)
+        payment["channels"] = channels
         return {"plans": plans, "payment": payment}
 
     def create_payment_order(

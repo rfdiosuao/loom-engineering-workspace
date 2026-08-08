@@ -20,6 +20,9 @@ TAURI_LIB = os.path.join(ROOT, "src-tauri", "src", "lib.rs")
 INSTALLER_HOOKS = os.path.join(ROOT, "src-tauri", "installer", "upgrade-hooks.nsh")
 HANDOFF_SCRIPT = os.path.join(ROOT, "src-tauri", "installer", "update-handoff.ps1")
 INSTALLER_PROCESS_CLEANUP = os.path.join(ROOT, "src-tauri", "installer", "stop-owned-install-processes.ps1")
+LEGACY_PRODUCT_MIGRATION = os.path.join(
+    ROOT, "src-tauri", "installer", "migrate-legacy-product-data.ps1"
+)
 UPDATE_RELEASE_SCRIPT = os.path.join(ROOT, "scripts", "prepare-desktop-update-release.ps1")
 UPDATE_SIGNER_SCRIPT = os.path.join(ROOT, "scripts", "sign-desktop-update.py")
 UPDATE_BRAND_CONFIG_SCRIPT = os.path.join(
@@ -381,6 +384,75 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertNotIn("update-pending", source)
         self.assertNotIn("$LOCALAPPDATA\\LOOM", source)
         self.assertNotIn("RMDir /r \"$INSTDIR\\data\"", source)
+
+    def test_direct_installer_migrates_legacy_product_data_without_overwrite(self) -> None:
+        self.assertIsNotNone(POWERSHELL_HOST)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            legacy_data = os.path.join(
+                temp_dir, "Luming AI Matrix Acquisition Workbench", "data"
+            )
+            install_root = os.path.join(temp_dir, "麓鸣")
+            os.makedirs(os.path.join(legacy_data, ".openclaw", "launcher"))
+            os.makedirs(os.path.join(install_root, "data", ".openclaw", "launcher"))
+            source_session = os.path.join(
+                legacy_data, ".openclaw", "launcher", "member-session.json"
+            )
+            target_session = os.path.join(
+                install_root, "data", ".openclaw", "launcher", "member-session.json"
+            )
+            source_config = os.path.join(legacy_data, ".openclaw", "openclaw.json")
+            os.makedirs(os.path.dirname(source_config), exist_ok=True)
+            with open(source_session, "w", encoding="utf-8") as handle:
+                handle.write("legacy-session")
+            with open(target_session, "w", encoding="utf-8") as handle:
+                handle.write("current-session")
+            with open(source_config, "w", encoding="utf-8") as handle:
+                handle.write("legacy-config")
+
+            result = subprocess.run(
+                [
+                    POWERSHELL_HOST,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    LEGACY_PRODUCT_MIGRATION,
+                    "-InstallRoot",
+                    install_root,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr or result.stdout)
+            with open(target_session, "r", encoding="utf-8") as handle:
+                self.assertEqual("current-session", handle.read())
+            with open(
+                os.path.join(install_root, "data", ".openclaw", "openclaw.json"),
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                self.assertEqual("legacy-config", handle.read())
+            self.assertTrue(os.path.isfile(source_session))
+            self.assertIn("copied=1", result.stdout)
+            self.assertIn("preserved=1", result.stdout)
+
+    def test_legacy_product_migration_is_exact_scoped_and_reparse_safe(self) -> None:
+        with open(LEGACY_PRODUCT_MIGRATION, "r", encoding="utf-8") as handle:
+            migration = handle.read()
+        with open(INSTALLER_HOOKS, "r", encoding="utf-8") as handle:
+            hooks = handle.read()
+
+        self.assertIn('"Luming AI Matrix Acquisition Workbench"', migration)
+        self.assertIn("[System.IO.Path]::GetFullPath", migration)
+        self.assertIn("ReparsePoint", migration)
+        self.assertIn("[System.IO.FileMode]::CreateNew", migration)
+        self.assertNotIn("Copy-Item", migration)
+        self.assertIn("migrate-legacy-product-data.ps1", hooks)
+        self.assertIn("NSIS_HOOK_POSTINSTALL", hooks)
 
     def test_tauri_update_handoff_stops_bridge_and_uses_external_recovery_backup(self) -> None:
         with open(TAURI_LIB, "r", encoding="utf-8") as handle:
