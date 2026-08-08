@@ -18,77 +18,327 @@ type Progress = {
   count: number;
 };
 
+export type DistributionSetupSnapshot = {
+  revision: number;
+  runId: number;
+  status: 'idle' | 'running' | 'done' | 'error';
+  layers: LayerInfo[];
+  progress: Progress | null;
+  error: string | null;
+};
+
+export type SetupGateViewState = DistributionSetupSnapshot & {
+  active: boolean;
+  done: boolean;
+  retrying: boolean;
+};
+
+type DistributionEventName = 'dist://start' | 'dist://progress' | 'dist://done' | 'dist://error';
+type Unlisten = () => void;
+type DistributionEvent = { payload: DistributionSetupSnapshot };
+
+export type SetupGateLifecycleDependencies = {
+  listen: (
+    event: DistributionEventName,
+    handler: (event: DistributionEvent) => void,
+  ) => Promise<Unlisten>;
+  invoke: <T>(command: string) => Promise<T>;
+  setTimer: (callback: () => void, delayMs: number) => unknown;
+  clearTimer: (handle: unknown) => void;
+  onChange: (state: SetupGateViewState) => void;
+};
+
+export type SetupGateLifecycle = {
+  connect: () => Promise<void>;
+  retry: () => Promise<void>;
+  dispose: () => void;
+  getState: () => SetupGateViewState;
+};
+
+const DISTRIBUTION_EVENTS: DistributionEventName[] = [
+  'dist://start',
+  'dist://progress',
+  'dist://done',
+  'dist://error',
+];
+
+function initialViewState(): SetupGateViewState {
+  return {
+    revision: -1,
+    runId: 0,
+    status: 'idle',
+    layers: [],
+    progress: null,
+    error: null,
+    active: false,
+    done: false,
+    retrying: false,
+  };
+}
+
+function cloneViewState(state: SetupGateViewState): SetupGateViewState {
+  return {
+    ...state,
+    layers: [...state.layers],
+    progress: state.progress ? { ...state.progress } : null,
+  };
+}
+
+export function createSetupGateLifecycle(
+  dependencies: SetupGateLifecycleDependencies,
+): SetupGateLifecycle {
+  let state = initialViewState();
+  let disposed = false;
+  let connectPromise: Promise<void> | null = null;
+  let retryPromise: Promise<void> | null = null;
+  let doneTimer: unknown = null;
+  const unlisteners = new Set<Unlisten>();
+
+  const publish = (next: SetupGateViewState) => {
+    if (disposed) return;
+    state = next;
+    dependencies.onChange(cloneViewState(state));
+  };
+
+  const safeUnlisten = (unlisten: Unlisten) => {
+    try {
+      unlisten();
+    } catch {
+      // Cleanup is best-effort; one bad listener must not leak the others.
+    }
+  };
+
+  const cleanupListeners = () => {
+    for (const unlisten of [...unlisteners]) {
+      unlisteners.delete(unlisten);
+      safeUnlisten(unlisten);
+    }
+  };
+
+  const clearDoneTimer = () => {
+    if (doneTimer === null) return;
+    const timer = doneTimer;
+    doneTimer = null;
+    dependencies.clearTimer(timer);
+  };
+
+  const scheduleDoneTimer = (revision: number, runId: number) => {
+    let timer: unknown = null;
+    timer = dependencies.setTimer(() => {
+      if (
+        disposed
+        || doneTimer !== timer
+        || state.revision !== revision
+        || state.runId !== runId
+        || state.status !== 'done'
+      ) {
+        return;
+      }
+      doneTimer = null;
+      publish({ ...state, active: false });
+    }, 900);
+    doneTimer = timer;
+  };
+
+  const applySnapshot = (snapshot: DistributionSetupSnapshot) => {
+    if (disposed || snapshot.revision <= state.revision) return;
+    clearDoneTimer();
+    const next: SetupGateViewState = {
+      revision: snapshot.revision,
+      runId: snapshot.runId,
+      status: snapshot.status,
+      layers: [...snapshot.layers],
+      progress: snapshot.progress ? { ...snapshot.progress } : null,
+      error: snapshot.error,
+      active: snapshot.status !== 'idle',
+      done: snapshot.status === 'done',
+      retrying: state.retrying,
+    };
+    publish(next);
+    if (snapshot.status === 'done') {
+      scheduleDoneTimer(snapshot.revision, snapshot.runId);
+    }
+  };
+
+  const connect = (): Promise<void> => {
+    if (connectPromise) return connectPromise;
+    if (disposed) return Promise.resolve();
+
+    connectPromise = (async () => {
+      let registrationFailed = false;
+      const failRegistration = () => {
+        if (registrationFailed) return;
+        registrationFailed = true;
+        cleanupListeners();
+      };
+      const registrations = DISTRIBUTION_EVENTS.map((event) => {
+        try {
+          return Promise.resolve(
+            dependencies.listen(event, (message) => applySnapshot(message.payload)),
+          ).then((unlisten) => {
+            if (disposed || registrationFailed) {
+              safeUnlisten(unlisten);
+              return null;
+            }
+            unlisteners.add(unlisten);
+            return unlisten;
+          }, (error) => {
+            failRegistration();
+            throw error;
+          });
+        } catch (error) {
+          failRegistration();
+          return Promise.reject(error);
+        }
+      });
+
+      const settled = await Promise.allSettled(registrations);
+      if (disposed) {
+        cleanupListeners();
+        return;
+      }
+      if (registrationFailed || settled.some((result) => result.status === 'rejected')) {
+        cleanupListeners();
+        return;
+      }
+
+      try {
+        const snapshot = await dependencies.invoke<DistributionSetupSnapshot>(
+          'get_distribution_setup_snapshot',
+        );
+        if (!disposed) applySnapshot(snapshot);
+      } catch {
+        // Live listeners remain authoritative if the one-time reconcile fails.
+      }
+    })();
+
+    return connectPromise;
+  };
+
+  const retry = (): Promise<void> => {
+    if (retryPromise) return retryPromise;
+    if (disposed) return Promise.resolve();
+
+    clearDoneTimer();
+    publish({
+      ...state,
+      status: 'running',
+      active: true,
+      done: false,
+      progress: null,
+      error: null,
+      retrying: true,
+    });
+
+    let invocation: Promise<unknown>;
+    try {
+      invocation = dependencies.invoke<unknown>('retry_distribution_setup');
+    } catch (error) {
+      invocation = Promise.reject(error);
+    }
+
+    const operation = Promise.resolve(invocation)
+      .then(async () => {
+        if (disposed) return;
+        try {
+          const snapshot = await dependencies.invoke<DistributionSetupSnapshot>(
+            'get_distribution_setup_snapshot',
+          );
+          if (!disposed) applySnapshot(snapshot);
+        } catch {
+          // The persisted event snapshot is still reconciled by live listeners.
+        }
+      })
+      .catch((cause) => {
+        if (disposed) return;
+        publish({
+          ...state,
+          status: 'error',
+          active: true,
+          done: false,
+          error: cause instanceof Error
+            ? cause.message
+            : String(cause || '组件补全失败'),
+        });
+      })
+      .finally(() => {
+        retryPromise = null;
+        if (!disposed && state.retrying) {
+          publish({ ...state, retrying: false });
+        }
+      });
+    retryPromise = operation;
+    return operation;
+  };
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    clearDoneTimer();
+    cleanupListeners();
+  };
+
+  return {
+    connect,
+    retry,
+    dispose,
+    getState: () => cloneViewState(state),
+  };
+}
+
 function fmtMB(n: number): string {
   return `${(n / 1048576).toFixed(1)}MB`;
 }
 
 export function SetupGate() {
-  const [active, setActive] = React.useState(false);
-  const [layers, setLayers] = React.useState<LayerInfo[]>([]);
-  const [prog, setProg] = React.useState<Progress | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  const [done, setDone] = React.useState(false);
-  const [retrying, setRetrying] = React.useState(false);
+  const [view, setView] = React.useState<SetupGateViewState>(initialViewState);
+  const lifecycleRef = React.useRef<SetupGateLifecycle | null>(null);
 
   React.useEffect(() => {
     if (typeof window === 'undefined' || !(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
       return;
     }
     let cancelled = false;
-    const unlisteners: Array<() => void> = [];
-    (async () => {
+    let lifecycle: SetupGateLifecycle | null = null;
+    void (async () => {
       try {
-        const { listen } = await import('@tauri-apps/api/event');
-        const subs = await Promise.all([
-          listen('dist://start', (e) => {
-            setActive(true);
-            setDone(false);
-            setError(null);
-            setLayers(((e.payload as { layers?: LayerInfo[] }).layers) || []);
-          }),
-          listen('dist://progress', (e) => setProg(e.payload as Progress)),
-          listen('dist://done', () => {
-            setDone(true);
-            window.setTimeout(() => setActive(false), 900);
-          }),
-          listen('dist://error', (e) => {
-            const message = String((e.payload as { message?: string } | null)?.message || '组件下载失败');
-            setActive(true);
-            setError(message);
-          }),
+        const [{ listen }, { invoke }] = await Promise.all([
+          import('@tauri-apps/api/event'),
+          import('@tauri-apps/api/core'),
         ]);
-        if (cancelled) {
-          subs.forEach((u) => u());
-          return;
-        }
-        unlisteners.push(...subs);
+        if (cancelled) return;
+        lifecycle = createSetupGateLifecycle({
+          listen: (event, handler) => listen<DistributionSetupSnapshot>(event, handler),
+          invoke: <T,>(command: string) => invoke<T>(command),
+          setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+          clearTimer: (handle) => window.clearTimeout(handle as number),
+          onChange: setView,
+        });
+        lifecycleRef.current = lifecycle;
+        await lifecycle.connect();
       } catch {
         // event API unavailable — overlay simply never shows.
       }
     })();
     return () => {
       cancelled = true;
-      unlisteners.forEach((u) => u());
+      lifecycle?.dispose();
+      if (lifecycleRef.current === lifecycle) lifecycleRef.current = null;
     };
   }, []);
 
-  const retrySetup = React.useCallback(async () => {
-    setActive(true);
-    setRetrying(true);
-    setDone(false);
-    setProg(null);
-    setError(null);
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke<string>('retry_distribution_setup');
-      setDone(true);
-      window.setTimeout(() => setActive(false), 900);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause || '组件补全失败'));
-    } finally {
-      setRetrying(false);
-    }
+  const retrySetup = React.useCallback(() => {
+    return lifecycleRef.current?.retry() || Promise.resolve();
   }, []);
+
+  const {
+    active,
+    layers,
+    progress: prog,
+    error,
+    done,
+    retrying,
+  } = view;
 
   if (!active) return null;
 
