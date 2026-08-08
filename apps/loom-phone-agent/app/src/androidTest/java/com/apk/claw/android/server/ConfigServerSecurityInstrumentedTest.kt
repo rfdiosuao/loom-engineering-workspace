@@ -93,6 +93,8 @@ class ConfigServerSecurityInstrumentedTest {
             val llm = body(
                 server.serve(session(NanoHTTPD.Method.GET, "/api/llm", ACTIVE_TOKEN)),
             )
+            assertFalse(channels.contains("\"replaceSecrets\""))
+            assertFalse(llm.contains("\"replaceSecrets\""))
             val channelData = com.google.gson.JsonParser.parseString(channels)
                 .asJsonObject["data"].asJsonObject
             listOf(
@@ -172,6 +174,94 @@ class ConfigServerSecurityInstrumentedTest {
                 assertEquals(expectedStored, KVUtils.getDingtalkAppSecret())
                 assertEquals(expectedStored, KVUtils.getLlmApiKey())
             }
+        }
+    }
+
+    @Test
+    fun current_apk_explicit_replace_secrets_writes_literal_markers_for_all_six_fields() {
+        data class ChannelSecret(
+            val field: String,
+            val set: (String) -> Unit,
+            val get: () -> String,
+        )
+        val channels = listOf(
+            ChannelSecret("dingtalkAppSecret", KVUtils::setDingtalkAppSecret, KVUtils::getDingtalkAppSecret),
+            ChannelSecret("feishuAppSecret", KVUtils::setFeishuAppSecret, KVUtils::getFeishuAppSecret),
+            ChannelSecret("qqAppSecret", KVUtils::setQqAppSecret, KVUtils::getQqAppSecret),
+            ChannelSecret("discordBotToken", KVUtils::setDiscordBotToken, KVUtils::getDiscordBotToken),
+            ChannelSecret("telegramBotToken", KVUtils::setTelegramBotToken, KVUtils::getTelegramBotToken),
+        )
+        listOf("********", "########").forEach { literalMarker ->
+            channels.forEach { secret ->
+                secret.set("ordinary-current")
+                val response = server.serve(
+                    session(
+                        NanoHTTPD.Method.POST,
+                        "/api/channels",
+                        ACTIVE_TOKEN,
+                        rawBody =
+                            """{"replaceSecrets":["${secret.field}"],"${secret.field}":"$literalMarker"}""",
+                    ),
+                )
+                assertEquals(NanoHTTPD.Response.Status.OK, response.status)
+                assertEquals(literalMarker, secret.get())
+            }
+
+            KVUtils.setLlmApiKey("ordinary-current")
+            val llmResponse = server.serve(
+                session(
+                    NanoHTTPD.Method.POST,
+                    "/api/llm",
+                    ACTIVE_TOKEN,
+                    rawBody = """{"replaceSecrets":["llmApiKey"],"llmApiKey":"$literalMarker"}""",
+                ),
+            )
+            assertEquals(NanoHTTPD.Response.Status.OK, llmResponse.status)
+            assertEquals(literalMarker, KVUtils.getLlmApiKey())
+        }
+    }
+
+    @Test
+    fun current_apk_malformed_replace_secrets_is_atomic_and_route_local() {
+        val channelBodies = listOf(
+            """{"dingtalkAppKey":"changed","feishuAppSecret":{}}""",
+            """{"replaceSecrets":"dingtalkAppSecret","dingtalkAppSecret":"new","dingtalkAppKey":"changed"}""",
+            """{"replaceSecrets":[1],"dingtalkAppSecret":"new","dingtalkAppKey":"changed"}""",
+            """{"replaceSecrets":["llmApiKey"],"llmApiKey":"new","dingtalkAppKey":"changed"}""",
+            """{"replaceSecrets":["dingtalkAppSecret"],"dingtalkAppKey":"changed"}""",
+            """{"replaceSecrets":["dingtalkAppSecret"],"dingtalkAppSecret":1,"dingtalkAppKey":"changed"}""",
+            """{"replaceSecrets":["dingtalkAppSecret","dingtalkAppSecret"],"dingtalkAppSecret":"new","dingtalkAppKey":"changed"}""",
+            """{"replaceSecrets":["dingtalkAppSecret"],"dingtalkAppSecret":"new","feishuAppSecret":{},"dingtalkAppKey":"changed"}""",
+        )
+        channelBodies.forEach { rawBody ->
+            KVUtils.setDingtalkAppKey("original-key")
+            KVUtils.setDingtalkAppSecret("original-secret")
+            val response = server.serve(
+                session(NanoHTTPD.Method.POST, "/api/channels", ACTIVE_TOKEN, rawBody = rawBody),
+            )
+            assertEquals(NanoHTTPD.Response.Status.BAD_REQUEST, response.status)
+            assertEquals("original-key", KVUtils.getDingtalkAppKey())
+            assertEquals("original-secret", KVUtils.getDingtalkAppSecret())
+        }
+
+        val llmBodies = listOf(
+            """{"llmApiKey":"changed","llmBaseUrl":{}}""",
+            """{"replaceSecrets":{},"llmApiKey":"new","llmBaseUrl":"changed"}""",
+            """{"replaceSecrets":[1],"llmApiKey":"new","llmBaseUrl":"changed"}""",
+            """{"replaceSecrets":["dingtalkAppSecret"],"dingtalkAppSecret":"new","llmBaseUrl":"changed"}""",
+            """{"replaceSecrets":["llmApiKey"],"llmBaseUrl":"changed"}""",
+            """{"replaceSecrets":["llmApiKey"],"llmApiKey":1,"llmBaseUrl":"changed"}""",
+            """{"replaceSecrets":["llmApiKey","llmApiKey"],"llmApiKey":"new","llmBaseUrl":"changed"}""",
+        )
+        llmBodies.forEach { rawBody ->
+            KVUtils.setLlmApiKey("original-secret")
+            KVUtils.setLlmBaseUrl("original-url")
+            val response = server.serve(
+                session(NanoHTTPD.Method.POST, "/api/llm", ACTIVE_TOKEN, rawBody = rawBody),
+            )
+            assertEquals(NanoHTTPD.Response.Status.BAD_REQUEST, response.status)
+            assertEquals("original-secret", KVUtils.getLlmApiKey())
+            assertEquals("original-url", KVUtils.getLlmBaseUrl())
         }
     }
 
