@@ -298,21 +298,29 @@ def test_agent_service_trace_run_controls_and_approval_project_public_contracts(
                     "expiresAt": "2026-08-08T11:00:00Z",
                 }
             )
-            service.repository.append_event(
-                session_id,
-                {
-                    "schema": "loom.realtime.event.v1",
-                    "eventId": "event-public-trace",
-                    "timestamp": "2026-08-08T10:00:01Z",
-                    "topic": "agent.run",
-                    "entityId": trace_run["runId"],
-                    "type": "run.started",
-                    "data": {
-                        "runId": trace_run["runId"],
-                        "message": {"ownerAccountId": "must-not-leak"},
+            for index, event_type in enumerate(
+                ("tool.requested", "tool.started", "tool.completed"),
+                start=1,
+            ):
+                service.repository.append_event(
+                    session_id,
+                    {
+                        "schema": "loom.realtime.event.v1",
+                        "eventId": f"event-public-trace-{index}",
+                        "timestamp": f"2026-08-08T10:00:0{index}Z",
+                        "topic": "agent.run",
+                        "entityId": trace_run["runId"],
+                        "type": event_type,
+                        "data": {
+                            "runId": trace_run["runId"],
+                            "toolCallId": "tool-public-trace",
+                            "message": {
+                                "ownerAccountId": "must-not-leak",
+                                "request": {"prompt": "must-not-leak"},
+                            },
+                        },
                     },
-                },
-            )
+                )
             trace = service.get_trace(trace_run["runId"])
 
             pause_run = private_run("run-public-pause", "running")
@@ -337,6 +345,9 @@ def test_agent_service_trace_run_controls_and_approval_project_public_contracts(
     assert trace["trace"]
     assert trace["nodes"]
     assert trace["approvals"]
+    assert trace["trace"] == trace["nodes"]
+    aggregated = next(node for node in trace["trace"] if node["kind"] == "tool")
+    assert aggregated["eventCount"] == 3
     assert _private_contract_paths(trace) == []
     violations = []
     for label, payload in (

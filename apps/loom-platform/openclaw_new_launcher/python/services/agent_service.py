@@ -175,6 +175,7 @@ _PUBLIC_TRACE_NODE_FIELDS = (
     "status",
     "startedAt",
     "durationMs",
+    "eventCount",
     "inputSummary",
     "outputSummary",
     "error",
