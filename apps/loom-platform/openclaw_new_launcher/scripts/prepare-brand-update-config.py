@@ -6,9 +6,14 @@ import argparse
 import base64
 import json
 import os
+import sys
 import tempfile
 
 from cryptography.hazmat.primitives import serialization
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 from desktop_update_signing import load_private_key, read_private_key
 

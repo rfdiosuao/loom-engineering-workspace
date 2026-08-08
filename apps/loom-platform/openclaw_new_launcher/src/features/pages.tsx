@@ -15,6 +15,7 @@ function lazyNamed(
 const TerminalPage = lazyNamed(() => import('../components/terminal/TerminalPage'), 'TerminalPage');
 const AgentInstallerPage = lazyNamed(() => import('../components/agents/AgentInstallerPage'), 'AgentInstallerPage');
 const AgentWorkbenchPage = lazyNamed(() => import('../components/agent/AgentWorkbenchPage'), 'AgentWorkbenchPage');
+const SkillCenterPage = lazyNamed(() => import('../components/skills/SkillCenterPage'), 'SkillCenterPage');
 const CreativeMediaPage = lazyNamed(() => import('../components/creative/CreativeMediaPage'), 'CreativeMediaPage');
 const AcquisitionWorkbenchPage = lazyNamed(() => import('../components/acquisition/AcquisitionWorkbenchPage'), 'AcquisitionWorkbenchPage');
 const PhoneDemoPage = lazyNamed(() => import('../components/phone/PhoneDemoPage'), 'PhoneDemoPage');
@@ -33,8 +34,20 @@ const PhoneConnectionPage = () => (
 );
 
 const GuardedMatrixWorkbenchPage = () => (
-  <PhoneMatrixAccessGate>
+  <PhoneMatrixAccessGate surface="workbench">
     <MatrixWorkbenchPage />
+  </PhoneMatrixAccessGate>
+);
+
+const GuardedSkillCenterPage = () => (
+  <PhoneMatrixAccessGate surface="skills">
+    <SkillCenterPage />
+  </PhoneMatrixAccessGate>
+);
+
+const GuardedAcquisitionWorkbenchPage = () => (
+  <PhoneMatrixAccessGate surface="acquisition">
+    <AcquisitionWorkbenchPage />
   </PhoneMatrixAccessGate>
 );
 
@@ -42,8 +55,9 @@ const PAGE_COMPONENTS: Record<string, React.ComponentType> = {
   dashboard: DashboardPage,
   agents: AgentInstallerPage,
   agent: AgentWorkbenchPage,
+  skills: GuardedSkillCenterPage,
   creative: CreativeMediaPage,
-  acquisition: AcquisitionWorkbenchPage,
+  acquisition: GuardedAcquisitionWorkbenchPage,
   phone: PhoneConnectionPage,
   workbench: GuardedMatrixWorkbenchPage,
   capabilities: CapabilityCenterPage,

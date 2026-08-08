@@ -20,6 +20,7 @@ if PYTHON_DIR not in sys.path:
 
 from core.component_installer import ComponentInstallError, ComponentInstaller
 from core import component_installer as component_installer_module
+from core.agent_catalog import AgentCatalog
 from core.component_state import ComponentStateStore
 from core.paths import AppPaths
 from core.release_manifest import ComponentHealthCheck, ReleaseComponent
@@ -197,6 +198,121 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
                     "Codex 流程预检已完成",
                 ],
             )
+
+    def test_managed_npm_agent_installs_in_private_prefix_and_verifies_version(self) -> None:
+        component = AgentCatalog().by_id("pi").to_release_component()
+        commands: list[list[str]] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+
+            def runner(command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                commands.append(list(command))
+                if "install" in command:
+                    os.makedirs(private_prefix, exist_ok=True)
+                    with open(os.path.join(private_prefix, "pi.cmd"), "w", encoding="utf-8") as handle:
+                        handle.write("@echo off\r\n")
+                    return FakeCompletedProcess()
+                if "--version" in command:
+                    return FakeCompletedProcess(stdout="pi 0.80.0\n")
+                return FakeCompletedProcess()
+
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(base_path=temp_dir, state_store=store, installer_runner=runner)
+
+            state = installer.install(component, job_id="job_pi")
+
+            self.assertEqual(state.status, "ready")
+            self.assertEqual(state.version, "0.80.0")
+            install_command = next(command for command in commands if "install" in command)
+            self.assertIn("--prefix", install_command)
+            self.assertIn(private_prefix, install_command)
+            self.assertIn("--ignore-scripts", install_command)
+            self.assertTrue(os.path.isfile(os.path.join(private_prefix, "pi.cmd")))
+
+    def test_managed_npm_agent_failure_restores_private_prefix(self) -> None:
+        component = AgentCatalog().by_id("pi").to_release_component()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+            os.makedirs(private_prefix, exist_ok=True)
+            marker = os.path.join(private_prefix, "existing-agent.txt")
+            with open(marker, "w", encoding="utf-8") as handle:
+                handle.write("preserve")
+
+            def runner(_command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                with open(os.path.join(private_prefix, "partial.txt"), "w", encoding="utf-8") as handle:
+                    handle.write("partial")
+                return FakeCompletedProcess(returncode=1, stderr="registry unavailable")
+
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                installer_runner=runner,
+                retry_sleep=lambda _delay: None,
+            )
+
+            with self.assertRaisesRegex(ComponentInstallError, "install command failed") as raised:
+                installer.install(component, job_id="job_pi_fail")
+
+            self.assertEqual(raised.exception.error_code, "external_install_rolled_back")
+            with open(marker, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "preserve")
+            self.assertFalse(os.path.exists(os.path.join(private_prefix, "partial.txt")))
+            self.assertEqual(store.load()["pi"].error_code, "external_install_rolled_back")
+
+    def test_manual_official_agent_cannot_execute_unverified_remote_installer(self) -> None:
+        component = AgentCatalog().by_id("grok-build").to_release_component()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda *_args: self.fail("manual definition must not run a command"),
+            )
+
+            with self.assertRaises(ComponentInstallError) as raised:
+                installer.install(component)
+
+            self.assertEqual(raised.exception.error_code, "official_manual_install_required")
+
+    def test_manual_official_agent_cannot_fake_managed_uninstall(self) -> None:
+        component = AgentCatalog().by_id("grok-build").to_release_component()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda *_args: self.fail("manual definition must not run an uninstall command"),
+            )
+
+            with self.assertRaises(ComponentInstallError) as raised:
+                installer.uninstall(component)
+
+            self.assertEqual(raised.exception.error_code, "official_manual_uninstall_required")
+
+    def test_managed_npm_uninstall_failure_restores_private_prefix(self) -> None:
+        component = AgentCatalog().by_id("pi").to_release_component()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            private_prefix = os.path.join(temp_dir, "data", ".installer", "npm-global")
+            os.makedirs(private_prefix, exist_ok=True)
+            shim = os.path.join(private_prefix, "pi.cmd")
+            with open(shim, "w", encoding="utf-8") as handle:
+                handle.write("@echo off\r\n")
+
+            def runner(_command: list[str], _cwd: str, _timeout_ms: int) -> FakeCompletedProcess:
+                os.remove(shim)
+                return FakeCompletedProcess(returncode=1, stderr="uninstall interrupted")
+
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            store.mark("pi", "ready", version="0.80.0")
+            installer = ComponentInstaller(base_path=temp_dir, state_store=store, installer_runner=runner)
+
+            with self.assertRaises(ComponentInstallError) as raised:
+                installer.uninstall(component)
+
+            self.assertEqual(raised.exception.error_code, "external_uninstall_rolled_back")
+            self.assertTrue(os.path.isfile(shim))
+            self.assertEqual(store.load()["pi"].status, "uninstall_failed")
 
     def test_download_failure_records_failed_state_and_retry_can_install(self) -> None:
         payload = b"codex retry payload"
@@ -1012,7 +1128,7 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
             self.assertEqual(os.path.normcase(selected or ""), os.path.normcase(cmd_entry))
 
-    def test_windows_npm_entry_keeps_legacy_extensionless_fallback_without_sibling(self) -> None:
+    def test_windows_npm_entry_rejects_extensionless_posix_wrapper_without_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             legacy_entry = os.path.join(temp_dir, "legacy", "claude")
             os.makedirs(os.path.dirname(legacy_entry), exist_ok=True)
@@ -1040,7 +1156,7 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
             selected = installer._first_existing_external_entry(component, refresh=True)
 
-            self.assertEqual(os.path.normcase(selected or ""), os.path.normcase(legacy_entry))
+            self.assertIsNone(selected)
 
     def test_install_probes_the_same_selected_windows_npm_entry_before_ready(self) -> None:
         payload = make_tgz_payload({"package/bin/claude.js": b"console.log('claude')"})
@@ -1221,7 +1337,10 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             )
 
     def test_detect_existing_entry_marks_component_ready(self) -> None:
-        component = make_component()
+        # Generic managed-entry detection must not use the Store-bound Codex
+        # Desktop identity: a loose executable can never prove OpenAI.Codex is
+        # installed. Use a normal managed agent for this generic-path contract.
+        component = make_component(component_id="generic-agent")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             install_dir = os.path.join(temp_dir, "agents", component.component_id)
@@ -1229,7 +1348,13 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             with open(os.path.join(install_dir, "Codex-Installer.exe"), "wb") as handle:
                 handle.write(b"codex")
             store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
-            installer = ComponentInstaller(base_path=temp_dir, state_store=store)
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(
+                    stdout="generic-agent 1.0.0"
+                ),
+            )
 
             state = installer.detect(component, job_id="job_detect")
 
@@ -2821,6 +2946,154 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
 
         self.assertEqual(command, ["explorer.exe", r"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App"])
 
+    def test_codex_desktop_appx_probe_never_queries_chatgpt_package_identity(self) -> None:
+        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda command, _cwd, _timeout: calls.append(command) or FakeCompletedProcess(),
+            )
+
+            installer._codex_desktop_appx_locations()
+
+        command_text = " ".join(calls[0])
+        self.assertIn("OpenAI.Codex", command_text)
+        self.assertNotIn("OpenAI.ChatGPT", command_text)
+
+    def test_chatgpt_store_package_cannot_satisfy_codex_desktop_detection(self) -> None:
+        component = ReleaseComponent(
+            component_id="codex-desktop",
+            name="Codex Desktop",
+            version="Microsoft Store",
+            platform="windows",
+            arch="x64",
+            archive_type="msstore",
+            size=0,
+            sha256="a" * 64,
+            urls=(),
+            install_path="agents/codex-desktop",
+            entry=None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            chatgpt_location = os.path.join(
+                temp_dir,
+                "WindowsApps",
+                "OpenAI.ChatGPT_26.707.3748.0_x64__2p2nqsd0c76g0",
+            )
+            chatgpt_entry = os.path.join(chatgpt_location, "app", "ChatGPT.exe")
+            os.makedirs(os.path.dirname(chatgpt_entry), exist_ok=True)
+            with open(chatgpt_entry, "wb") as handle:
+                handle.write(b"chatgpt only")
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(stdout=chatgpt_location),
+            )
+
+            state = installer.detect(component, job_id="chatgpt-is-not-codex", force_external_probe=True)
+
+        self.assertEqual(state.status, "not_installed")
+
+    def test_store_package_residue_without_entry_is_reported_as_damaged(self) -> None:
+        component = ReleaseComponent(
+            component_id="codex-desktop",
+            name="Codex Desktop",
+            version="Microsoft Store",
+            platform="windows",
+            arch="x64",
+            archive_type="msstore",
+            size=0,
+            sha256="a" * 64,
+            urls=(),
+            install_path="agents/codex-desktop",
+            entry=None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_location = os.path.join(
+                temp_dir,
+                "WindowsApps",
+                "OpenAI.Codex_26.707.3748.0_x64__2p2nqsd0c76g0",
+            )
+            os.makedirs(package_location)
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(stdout=package_location),
+            )
+
+            with self.assertRaises(ComponentInstallError):
+                installer.detect(component, job_id="damaged-store-package", force_external_probe=True)
+
+            failed = store.load()[component.component_id]
+            self.assertEqual(failed.status, "health_failed")
+            self.assertEqual(failed.error_code, "desktop_entry_missing")
+
+    def test_codex_cli_rejects_executable_bundled_inside_codex_desktop(self) -> None:
+        component = ReleaseComponent(
+            component_id="codex-cli",
+            name="Codex CLI",
+            version="0.142.3",
+            platform="windows",
+            arch="x64",
+            archive_type="tgz",
+            size=1,
+            sha256="a" * 64,
+            urls=(),
+            install_path="agents/codex-cli",
+            entry=None,
+            external_paths=(r"%LOCALAPPDATA%\Microsoft\WindowsApps\OpenAI.Codex_26.707.3748.0_x64__2p2nqsd0c76g0\app\resources\codex.exe",),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            desktop_resource = os.path.join(
+                temp_dir,
+                "Microsoft",
+                "WindowsApps",
+                "OpenAI.Codex_26.707.3748.0_x64__2p2nqsd0c76g0",
+                "app",
+                "resources",
+                "codex.exe",
+            )
+            os.makedirs(os.path.dirname(desktop_resource), exist_ok=True)
+            with open(desktop_resource, "wb") as handle:
+                handle.write(b"desktop bundled cli")
+            store = ComponentStateStore(os.path.join(temp_dir, "state.json"))
+            installer = ComponentInstaller(
+                base_path=temp_dir,
+                state_store=store,
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(stdout="codex-cli 0.142.3"),
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOCALAPPDATA": temp_dir,
+                    "APPDATA": temp_dir,
+                    "USERPROFILE": temp_dir,
+                    "ProgramFiles": temp_dir,
+                    "ProgramFiles(x86)": temp_dir,
+                    "PATH": temp_dir,
+                },
+                clear=False,
+            ):
+                state = installer.detect(component, job_id="desktop-resource-is-not-cli")
+
+        self.assertEqual(state.status, "not_installed")
+
+    def test_legacy_16_bit_pe_entry_is_identified_before_launch(self) -> None:
+        detector = getattr(component_installer_module, "detect_pe_architecture", None)
+        self.assertIsNotNone(detector)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            entry = os.path.join(temp_dir, "codex.exe")
+            payload = bytearray(256)
+            payload[0:2] = b"MZ"
+            payload[0x3C:0x40] = (128).to_bytes(4, "little")
+            payload[128:130] = b"NE"
+            with open(entry, "wb") as handle:
+                handle.write(payload)
+
+            self.assertEqual(detector(entry), "legacy_16bit")
+
     def test_codex_install_uses_official_chatgpt_store_product_instead_of_npm_cli(self) -> None:
         payload = b"legacy codex installer placeholder"
         component = ReleaseComponent(
@@ -2906,6 +3179,7 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             installer = ComponentInstaller(
                 base_path=temp_dir,
                 state_store=ComponentStateStore(os.path.join(temp_dir, "state.json")),
+                installer_runner=lambda _command, _cwd, _timeout: FakeCompletedProcess(stdout=""),
             )
             installer._official_codex_entry = lambda refresh=False: None  # type: ignore[attr-defined,method-assign]
 
@@ -3190,6 +3464,28 @@ class ComponentInstallerSimulationTests(unittest.TestCase):
             self.assertEqual(env["ANTHROPIC_API_KEY"], secret)
             self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://api.heang.top")
             self.assertEqual(env["ANTHROPIC_MODEL"], "qwen3.7-plus")
+
+    def test_pi_and_grok_launchers_inject_protected_wire_key_only_at_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            secret = "sk-runtime-only-test-token"
+            WireService(AppPaths(temp_dir)).sync_custom_provider(
+                provider="麓鸣中转站",
+                base_url="https://api.heang.top/v1",
+                api_key=secret,
+                text_model="gpt-4o",
+                targets=(),
+            )
+            build_env = getattr(component_installer_module, "build_agent_launcher_environment", lambda *_args, **_kwargs: {})
+
+            pi_env = build_env(temp_dir, "pi")
+            grok_env = build_env(temp_dir, "grok-build")
+
+            self.assertEqual(pi_env["LOOM_PI_API_KEY"], secret)
+            self.assertEqual(pi_env["PI_CODING_AGENT_DIR"], os.path.join(temp_dir, "data", ".pi", "agent"))
+            self.assertEqual(grok_env["LOOM_GROK_API_KEY"], secret)
+            self.assertEqual(grok_env["GROK_HOME"], os.path.join(temp_dir, "data", ".grok"))
+            self.assertNotIn("OPENAI_API_KEY", pi_env)
+            self.assertNotIn("XAI_API_KEY", grok_env)
 
     def test_codex_launcher_environment_preserves_existing_codex_home_and_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

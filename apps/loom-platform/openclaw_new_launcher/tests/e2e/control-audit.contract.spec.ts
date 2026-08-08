@@ -3,13 +3,14 @@ import { pageControls, shellControls } from './support/control-audit';
 
 const BASELINE_CONTROL_COUNTS: Record<string, number> = {
   dashboard: 2,
-  agents: 15,
+  agents: 20,
   creative: 19,
-  acquisition: 10,
+  acquisition: 14,
   phone: 25,
   workbench: 11,
   agent: 7,
-  license: 6,
+  skills: 6,
+  license: 9,
   agentAccess: 2,
   capabilities: 0,
   settings: 8,
@@ -22,8 +23,8 @@ test.beforeEach(async ({ audit }) => {
   await audit.openAuthorizedShell();
 });
 
-test('locks the global shell and 14-page visible control inventory', async ({ audit, page }) => {
-  await expect(shellControls(page), 'global shell controls').toHaveCount(13);
+test('locks the global shell and 15-page visible control inventory', async ({ audit, page }) => {
+  await expect(shellControls(page), 'global shell controls').toHaveCount(14);
 
   for (const entry of PAGE_REGISTRY) {
     await test.step(entry.key, async () => {

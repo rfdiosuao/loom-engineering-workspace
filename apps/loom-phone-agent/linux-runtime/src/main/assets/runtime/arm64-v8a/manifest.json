@@ -1,0 +1,11 @@
+{
+  "schema": "loom.mobile-linux-runtime.artifacts.v1",
+  "architecture": "arm64-v8a",
+  "files": {
+    "proot": "6ffdff4117c571d07aa7e6f940001f050c97adb920660c984b72d4a537b4f60a",
+    "loader": "44ef39c1e1a18c09f6e4c4b5d6f8bba82d30596598bd155ec162d05c5122ff04",
+    "libandroid-shmem.so": "84475798e07c8174dbbfaec70a827fdb02f19ffa69a589380c13e7507fd0e731",
+    "libtalloc.so.2": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
+    "rootfs.tar.gz": "3fbc6285032ed46821b511292633d7b2a6306a2e254f590e92bdafff56cf2f70"
+  }
+}

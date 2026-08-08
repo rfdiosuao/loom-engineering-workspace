@@ -16,6 +16,8 @@ from fastapi import Request
 from fastapi.responses import FileResponse, Response
 
 from api.safe_payload import redact_secret_text
+from core.account_entitlement import AccountEntitlementError
+from core.job_ownership import current_account_job_identity, public_job_snapshot
 from core.constants import IMAGE_MODEL
 from core.secret_store import protect_secret, unprotect_secret
 from core.storage import read_json, write_json
@@ -243,6 +245,34 @@ def _local_only_phone_snapshot() -> dict:
     }
 
 
+def _authorize_media_phone_snapshot(ctx, snapshot: dict, operation: str) -> dict:
+    device_ids = _phone_snapshot_device_ids(snapshot)
+    if not device_ids:
+        return {}
+    from api.routes_phone import _authorize_phone_entitlement
+
+    return _authorize_phone_entitlement(ctx, device_ids, operation)
+
+
+def _phone_snapshot_device_ids(snapshot: dict | None) -> list[str]:
+    source = snapshot if isinstance(snapshot, dict) else {}
+    devices = source.get("devices") if isinstance(source.get("devices"), list) else []
+    return list(dict.fromkeys([
+        _text(item.get("id") or item.get("deviceId"))
+        for item in devices
+        if isinstance(item, dict) and _text(item.get("id") or item.get("deviceId"))
+    ]))
+
+
+def _media_phone_job_metadata(ctx, snapshot: dict | None) -> dict:
+    from api.routes_phone import _phone_entitlement_job_metadata
+
+    return _phone_entitlement_job_metadata(
+        ctx,
+        _phone_snapshot_device_ids(snapshot),
+    )
+
+
 def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -258,7 +288,12 @@ def _resolve_http_media_target_ids(ctx, groups: list[str], *, all_online: bool) 
     try:
         from core.phone_matrix import MatrixControlPlane
 
-        status = MatrixControlPlane(ctx.paths).status()
+        owner_account_id, owner_binding = current_account_job_identity(ctx)
+        status = MatrixControlPlane(
+            ctx.paths,
+            owner_account_id=owner_account_id,
+            owner_account_binding=owner_binding,
+        ).status()
     except Exception as exc:
         raise MediaTargetError(
             "phone_target_unavailable",
@@ -335,7 +370,81 @@ def _media_generation_phone_snapshot(ctx, body: dict) -> dict:
             "phone_target_unavailable",
             "未找到可用的手机配置",
         )
+    _authorize_media_phone_snapshot(ctx, snapshot, "media.generate.transfer")
     return snapshot
+
+
+def _run_targeted_media_generation(
+    ctx,
+    phone_snapshot: dict | None,
+    operation: str,
+    generate,
+    *,
+    job_id: str = "",
+):
+    device_ids = _phone_snapshot_device_ids(phone_snapshot)
+    if not device_ids:
+        return generate()
+
+    entitlement = _authorize_media_phone_snapshot(
+        ctx,
+        phone_snapshot or {},
+        operation,
+    )
+    job_manager_getter = getattr(ctx, "get_job_mgr", None)
+    job_manager = job_manager_getter() if callable(job_manager_getter) else None
+    is_cancelled = getattr(job_manager, "is_cancelled", None)
+    cancelled = (
+        (lambda: bool(is_cancelled(job_id)))
+        if job_id and callable(is_cancelled)
+        else None
+    )
+    from api.routes_phone import _account_task_slot
+
+    # Provider generation consumes the account concurrency budget, but it must
+    # not monopolize the physical phone lock while an image or video is rendered.
+    with _account_task_slot(
+        ctx,
+        entitlement,
+        operation,
+        cancelled=cancelled,
+        device_ids=[],
+    ):
+        if callable(cancelled) and cancelled():
+            raise AccountEntitlementError(
+                "素材生成任务已取消。",
+                code="task_cancelled",
+                action="retry",
+                details={"operation": operation},
+                status_code=409,
+            )
+        refreshed = _authorize_media_phone_snapshot(
+            ctx,
+            phone_snapshot or {},
+            operation,
+        )
+        previous_account = str(entitlement.get("accountId") or "").strip()
+        current_account = str(refreshed.get("accountId") or "").strip()
+        if (
+            previous_account
+            and current_account
+            and previous_account != current_account
+        ):
+            raise AccountEntitlementError(
+                "排队期间模型账号已切换，素材生成任务已取消。",
+                code="account_changed",
+                action="retry",
+                status_code=409,
+            )
+        return generate()
+
+
+def _media_entitlement_failure(exc: AccountEntitlementError) -> dict:
+    return {
+        "success": False,
+        "error": str(exc),
+        **exc.payload(),
+    }
 
 
 def _uploaded_filenames(payload: object) -> list[str]:
@@ -372,6 +481,8 @@ def _transfer_generated_media_to_phone(
     files: list[dict],
     *,
     phone_snapshot: dict | None = None,
+    cancel_file: str = "",
+    entitlement_authorized: bool = False,
 ) -> dict:
     snapshot = phone_snapshot if isinstance(phone_snapshot, dict) else _selected_phone_snapshot(ctx)
     selected = snapshot.get("device") if isinstance(snapshot.get("device"), dict) else {}
@@ -407,8 +518,24 @@ def _transfer_generated_media_to_phone(
             device=selected,
         )
 
+    device_id = _text(selected.get("id") or selected.get("deviceId"))
+    if (
+        not entitlement_authorized
+        and callable(getattr(ctx, "get_entitlement_mgr", None))
+    ):
+        _authorize_media_phone_snapshot(
+            ctx,
+            {"devices": [selected]},
+            "media.asset.transfer",
+        )
+
     try:
-        from api.routes_phone import _script_path, node_executable, phone_process_env
+        from api.routes_phone import (
+            _run_phone_process_with_matrix_stream,
+            _script_path,
+            node_executable,
+            phone_process_env,
+        )
 
         script_path = _script_path(ctx, "openclaw-media-phone.mjs")
         if not os.path.isfile(script_path):
@@ -428,29 +555,59 @@ def _transfer_generated_media_to_phone(
             node_path,
             script_path,
             "--device-id",
-            _text(selected.get("id") or selected.get("deviceId")),
+            device_id,
         ]
         flag = "--video" if media_kind == "video" else "--image"
         for file_path in paths:
             command.extend([flag, file_path])
+        if cancel_file:
+            command.extend(["--cancel-file", cancel_file])
         command.append("--json")
-        completed = subprocess.run(
-            command,
-            cwd=getattr(ctx.paths, "base_path", None) or None,
-            env=phone_process_env(ctx),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=max(180, len(paths) * 130),
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        raw_output = _text(completed.stdout)
+        timeout_sec = max(180, len(paths) * 130)
+        if cancel_file:
+            completed = _run_phone_process_with_matrix_stream(
+                ctx,
+                command,
+                kind="media.transfer",
+                layer="media-upload",
+                timeout_sec=timeout_sec,
+                device_id=device_id,
+                should_cancel=lambda: os.path.isfile(cancel_file),
+                cooperative_cancel=True,
+                allowed_device_ids=[device_id],
+            )
+            returncode = int(completed.get("returncode") or 0)
+            raw_output = _text(completed.get("stdout"))
+            cancelled = completed.get("cancelled") is True
+        else:
+            completed = subprocess.run(
+                command,
+                cwd=getattr(ctx.paths, "base_path", None) or None,
+                env=phone_process_env(ctx, [device_id]),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_sec,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            returncode = completed.returncode
+            raw_output = _text(completed.stdout)
+            cancelled = False
         try:
             payload = json.loads(raw_output) if raw_output else None
         except json.JSONDecodeError:
             payload = None
         if not isinstance(payload, dict):
+            if cancelled:
+                return _phone_transfer_summary(
+                    "failed",
+                    "phone_upload_cancelled",
+                    "手机素材传送已取消",
+                    attempted=True,
+                    device=selected,
+                    total_count=len(paths),
+                )
             return _phone_transfer_summary(
                 "failed",
                 "phone_upload_invalid_response",
@@ -461,7 +618,7 @@ def _transfer_generated_media_to_phone(
             )
         uploaded_count = _safe_upload_count(payload, len(paths))
         uploaded_files = _uploaded_filenames(payload)
-        if completed.returncode != 0 or payload.get("ok") is not True:
+        if returncode != 0 or payload.get("ok") is not True:
             reason = _text(payload.get("errorCode")) or "phone_upload_failed"
             return _phone_transfer_summary(
                 "failed",
@@ -496,6 +653,8 @@ def _transfer_generated_media_to_phone(
         )
     except subprocess.TimeoutExpired:
         reason = "phone_upload_timeout"
+    except AccountEntitlementError:
+        raise
     except Exception:
         reason = "phone_upload_failed"
     return _phone_transfer_summary(
@@ -515,6 +674,7 @@ def _transfer_generated_media_to_phones(
     files: list[dict],
     *,
     phone_snapshot: dict | None = None,
+    cancel_file: str = "",
 ) -> dict:
     snapshot = phone_snapshot if isinstance(phone_snapshot, dict) else _configured_phone_snapshot(ctx)
     devices = snapshot.get("devices") if isinstance(snapshot.get("devices"), list) else []
@@ -544,11 +704,35 @@ def _transfer_generated_media_to_phones(
             kind,
             files,
             phone_snapshot={"device": device, "reason": ""},
+            cancel_file=cancel_file,
+            entitlement_authorized=True,
         )
 
-    max_workers = min(4, len(devices))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="loom-media-phone") as executor:
-        device_results = list(executor.map(transfer, devices))
+    device_ids = _phone_snapshot_device_ids({"devices": devices})
+    entitlement = _authorize_media_phone_snapshot(
+        ctx,
+        {"devices": devices},
+        "media.asset.transfer",
+    )
+    from api.routes_phone import _account_task_slot
+
+    with _account_task_slot(
+        ctx,
+        entitlement,
+        "media.asset.transfer",
+        cancelled=(
+            (lambda: os.path.isfile(cancel_file))
+            if cancel_file
+            else None
+        ),
+        device_ids=device_ids,
+    ):
+        max_workers = min(4, len(devices))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="loom-media-phone",
+        ) as executor:
+            device_results = list(executor.map(transfer, devices))
 
     succeeded_count = sum(1 for result in device_results if result.get("status") == "succeeded")
     uncertain_count = sum(1 for result in device_results if result.get("status") == "outcome_uncertain")
@@ -607,6 +791,7 @@ def _async_media_job_result(
     *,
     phone_snapshot: dict | None = None,
     compact: bool = True,
+    cancel_file: str = "",
 ) -> dict:
     result = _compact_media_job_result(generated) if compact else dict(generated)
     bound_phone_snapshot = (
@@ -628,6 +813,15 @@ def _async_media_job_result(
             kind,
             files,
             phone_snapshot=bound_phone_snapshot,
+            cancel_file=cancel_file,
+        )
+    except AccountEntitlementError as exc:
+        phone_transfer = _phone_transfer_summary(
+            "failed",
+            exc.code,
+            str(exc),
+            attempted=False,
+            total_count=len(files),
         )
     except Exception:
         phone_transfer = _phone_transfer_summary(
@@ -927,25 +1121,43 @@ def _image_generate_payload(ctx, body: dict) -> dict:
     client = ctx.get_image_client()
     gateway_profile = ctx.get_license_mgr().current_gateway_profile()
     saved_config = _image_config_fallback(ctx)
-    base_url = (
-        str(body.get("baseUrl", "") or "").strip()
-        or str(saved_config.get("baseUrl") or "").strip()
-        or str((gateway_profile or {}).get("imageBaseUrl") or "").strip()
+    explicit_base_url = str(body.get("baseUrl", "") or "").strip()
+    explicit_api_key = str(body.get("apiKey", "") or "").strip()
+    gateway_base_url = (
+        str((gateway_profile or {}).get("imageBaseUrl") or "").strip()
         or str((gateway_profile or {}).get("baseUrl") or "").strip()
     )
-    api_key = (
-        str(body.get("apiKey", "") or "").strip()
-        or str(saved_config.get("apiKey") or "").strip()
-        or str((gateway_profile or {}).get("imageApiKey") or "").strip()
+    gateway_api_key = (
+        str((gateway_profile or {}).get("imageApiKey") or "").strip()
         or str((gateway_profile or {}).get("apiKey") or "").strip()
     )
+    explicit_provider = bool(explicit_base_url or explicit_api_key)
+    managed_provider = not explicit_provider and bool(gateway_base_url and gateway_api_key)
+    if managed_provider:
+        base_url = gateway_base_url
+        api_key = gateway_api_key
+    else:
+        base_url = (
+            explicit_base_url
+            or str(saved_config.get("baseUrl") or "").strip()
+            or gateway_base_url
+        )
+        api_key = (
+            explicit_api_key
+            or str(saved_config.get("apiKey") or "").strip()
+            or gateway_api_key
+        )
     prompt = body.get("prompt", "")
     requested_ratio = _text(body.get("ratio"))
     size = _image_size_for_ratio(requested_ratio) or _text(body.get("size")) or _text(saved_config.get("size")) or "1024x1024"
     ratio = _image_ratio_for_size(size, requested_ratio)
     model = (
         str(body.get("model", "") or "").strip()
-        or str(saved_config.get("model") or "").strip()
+        or (
+            str((gateway_profile or {}).get("imageModel") or "").strip()
+            if managed_provider
+            else str(saved_config.get("model") or "").strip()
+        )
         or str((gateway_profile or {}).get("imageModel") or "").strip()
         or IMAGE_MODEL
     )
@@ -998,7 +1210,26 @@ def _image_generate_payload(ctx, body: dict) -> dict:
                 "source": _text(body.get("source")) or "ui",
                 "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             })
-        return {"images": images_b64, "files": files, "count": len(images_b64), "ratio": ratio, "size": _text(size)}
+        partial = len(results) < count
+        payload = {
+            "images": images_b64,
+            "files": files,
+            "count": len(images_b64),
+            "requestedCount": count,
+            "partial": partial,
+            "ratio": ratio,
+            "size": _text(size),
+        }
+        if partial:
+            payload.update({
+                "success": False,
+                "status": "partial_failure",
+                "errorCode": "image_batch_partial",
+                "message": f"服务商仅返回 {len(results)}/{count} 张图片，麓鸣未自动补发付费请求。",
+                "retryable": False,
+                "regenerationAllowed": False,
+            })
+        return payload
     finally:
         if temp_file and os.path.exists(temp_file):
             try:
@@ -1010,10 +1241,30 @@ def _image_generate_payload(ctx, body: dict) -> dict:
 def _video_generate_payload(ctx, body: dict, on_status=None, *, request_key: str = "") -> dict:
     client = ctx.get_video_client()
     saved_config = _video_config_fallback(ctx)
-    provider_id = _canonical_video_provider(body.get("providerId") or saved_config.get("providerId"))
+    gateway_profile = ctx.get_license_mgr().current_gateway_profile()
+    explicit_provider = any(
+        _text(body.get(key))
+        for key in ("providerId", "apiBase", "apiKey", "dashKey", "model")
+    )
+    gateway_api_key = (
+        str((gateway_profile or {}).get("videoApiKey") or "").strip()
+        or str((gateway_profile or {}).get("apiKey") or "").strip()
+    )
+    gateway_api_base = (
+        str((gateway_profile or {}).get("videoBaseUrl") or "").strip()
+        or str((gateway_profile or {}).get("baseUrl") or "").strip()
+    )
+    managed_provider = not explicit_provider and bool(gateway_api_key and gateway_api_base)
+    provider_id = _canonical_video_provider(
+        body.get("providerId")
+        or (
+            (gateway_profile or {}).get("videoProviderId")
+            if managed_provider
+            else saved_config.get("providerId")
+        )
+    )
     saved_provider_id = _canonical_video_provider(saved_config.get("providerId"))
     same_saved_provider = provider_id == saved_provider_id
-    gateway_profile = ctx.get_license_mgr().current_gateway_profile()
     api_base = str(body.get("apiBase", "") or "").strip()
     model = str(body.get("model", "") or "").strip()
     if provider_id == "pippit":
@@ -1022,12 +1273,17 @@ def _video_generate_payload(ctx, body: dict, on_status=None, *, request_key: str
     else:
         api_base = (
             api_base
+            or (gateway_api_base if managed_provider else "")
             or (str(saved_config.get("apiBase") or "").strip() if same_saved_provider else "")
-            or str((gateway_profile or {}).get("videoBaseUrl") or "").strip()
-            or str((gateway_profile or {}).get("baseUrl") or "").strip()
+            or gateway_api_base
         )
         model = (
             model
+            or (
+                str((gateway_profile or {}).get("videoDraftModel") or "").strip()
+                if managed_provider
+                else ""
+            )
             or (str(saved_config.get("model") or "").strip() if same_saved_provider else "")
             or str((gateway_profile or {}).get("videoDraftModel") or "").strip()
             or str((gateway_profile or {}).get("defaultModel") or "").strip()
@@ -1038,7 +1294,7 @@ def _video_generate_payload(ctx, body: dict, on_status=None, *, request_key: str
         str(body.get("dashKey", "") or "").strip()
         or str(body.get("apiKey", "") or "").strip()
     )
-    dash_key = explicit_key or _video_provider_api_key(saved_config, provider_id)
+    dash_key = explicit_key or (gateway_api_key if managed_provider else "") or _video_provider_api_key(saved_config, provider_id)
     if not dash_key and provider_id != "pippit":
         dash_key = (
             str((gateway_profile or {}).get("videoApiKey") or "").strip()
@@ -1120,23 +1376,30 @@ def _video_generate_payload(ctx, body: dict, on_status=None, *, request_key: str
 def _image_generation_failure(error: Exception) -> dict:
     detail = str(error or "").strip()
     lowered = detail.lower()
-    if "invalid url" in lowered or "http 404" in lowered or "not found" in lowered:
+    status_code = getattr(error, "status_code", None)
+    phase = str(getattr(error, "phase", "") or "")
+    outcome_indeterminate = bool(getattr(error, "outcome_indeterminate", False))
+    if phase == "download":
+        code = "image_download_failed"
+        message = "图片已由服务商生成，但下载失败。麓鸣已停止重新生成以避免重复计费，请稍后从原任务或素材记录恢复。"
+        retryable = False
+    elif status_code == 404 or "invalid url" in lowered or "http 404" in lowered or "not found" in lowered:
         code = "image_provider_endpoint_mismatch"
         message = "图片 Provider、Base URL 与模型接口不匹配，请检查后重试。"
         retryable = False
-    elif "http 401" in lowered or "http 403" in lowered or "unauthorized" in lowered or "authentication" in lowered:
+    elif status_code in {401, 403} or "http 401" in lowered or "http 403" in lowered or "unauthorized" in lowered or "authentication" in lowered:
         code = "image_provider_auth_failed"
         message = "图片服务鉴权失败，请检查 API Key 和账号状态。"
         retryable = False
-    elif "http 429" in lowered or "rate limit" in lowered:
+    elif status_code == 429 or "http 429" in lowered or "rate limit" in lowered:
         code = "image_provider_rate_limited"
         message = "图片服务当前请求过多，请稍后再试。"
         retryable = True
-    elif any(marker in lowered for marker in ("http 502", "http 504", "http 524", "gateway timeout")):
+    elif outcome_indeterminate or any(marker in lowered for marker in ("http 502", "http 504", "http 524", "gateway timeout")):
         code = "image_provider_gateway_timeout"
-        message = "图片服务网关等待超时，结果可能稍后到达。请先查看素材库，未出现结果时再重试。"
-        retryable = True
-    elif "http 503" in lowered or "service busy" in lowered or "unavailable" in lowered:
+        message = "图片服务提交结果暂时无法确认，可能仍在生成。为避免重复计费，LOOM 已禁止直接重提；请先查看素材库或服务商任务记录。"
+        retryable = False
+    elif status_code == 503 or "http 503" in lowered or "service busy" in lowered or "unavailable" in lowered:
         code = "image_provider_unavailable"
         message = "图片服务暂时不可用，请稍后重试。"
         retryable = True
@@ -1146,8 +1409,9 @@ def _image_generation_failure(error: Exception) -> dict:
         retryable = False
     elif "timeout" in lowered or "超时" in detail:
         code = "image_generation_timeout"
-        message = "图片生成等待超时，请稍后重试。"
-        retryable = True
+        message = "图片生成等待超时，提交结果无法确认。为避免重复计费，请先查看素材库或服务商任务记录。"
+        retryable = False
+        outcome_indeterminate = True
     else:
         code = "image_generation_failed"
         message = "图片生成失败，请检查模型配置、参考图和提示词后重试。"
@@ -1157,7 +1421,21 @@ def _image_generation_failure(error: Exception) -> dict:
         "errorCode": code,
         "error": message,
         "retryable": retryable,
+        "outcomeIndeterminate": outcome_indeterminate,
+        "regenerationAllowed": retryable and not outcome_indeterminate,
+        "phase": phase,
     }
+
+
+def _media_failure_http_status(error: Exception) -> int:
+    if isinstance(error, ValueError):
+        return 400
+    status_code = getattr(error, "status_code", None)
+    if status_code in {400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504}:
+        return int(status_code)
+    if status_code and 520 <= int(status_code) <= 524:
+        return 504
+    return 500
 
 
 def _log_image_generation_failure(ctx, job_id: str, error: Exception) -> None:
@@ -1197,7 +1475,24 @@ def _video_generation_failure(error: Exception) -> dict:
         }
     detail = str(error or "").strip()
     lowered = detail.lower()
-    if "重复计费" in detail or ("提交结果" in detail and "不确定" in detail):
+    status_code = getattr(error, "status_code", None)
+    phase = str(getattr(error, "phase", "") or "")
+    task_id = str(getattr(error, "task_id", "") or "")
+    request_key = str(getattr(error, "request_key", "") or "")
+    outcome_indeterminate = bool(getattr(error, "outcome_indeterminate", False))
+    if phase == "download":
+        code = "video_download_failed"
+        message = "视频已由服务商生成，但下载失败。麓鸣已停止重新生成以避免重复计费，请从原任务继续下载。"
+        retryable = False
+    elif outcome_indeterminate:
+        code = "video_submission_uncertain" if phase == "submit" else "video_task_outcome_uncertain"
+        message = (
+            "视频提交结果无法确认，可能仍在服务端生成。为避免重复计费，LOOM 已停止自动重提。"
+            if phase == "submit"
+            else "视频远端任务仍可能在运行，当前查询未完成。LOOM 已保留任务身份并停止重新提交。"
+        )
+        retryable = False
+    elif "重复计费" in detail or ("提交结果" in detail and "不确定" in detail):
         code = "pippit_submission_uncertain"
         message = "小云雀上次提交结果不确定，已停止自动重提。请打开小云雀任务页确认。"
         retryable = False
@@ -1230,6 +1525,11 @@ def _video_generation_failure(error: Exception) -> dict:
         "errorCode": code,
         "error": message,
         "retryable": retryable,
+        "outcomeIndeterminate": outcome_indeterminate,
+        "regenerationAllowed": retryable and not outcome_indeterminate,
+        "phase": phase,
+        **({"taskId": task_id} if task_id else {}),
+        **({"requestKey": request_key} if request_key else {}),
     }
 
 
@@ -1291,21 +1591,43 @@ def register_media_routes(app, ctx) -> None:
             return ctx.fastapi_json({"error": f"手机配置不存在：{', '.join(missing_ids)}"}, 400)
         if not phone_snapshot.get("devices"):
             return ctx.fastapi_json({"error": "未找到可用的手机配置"}, 400)
+        try:
+            _authorize_media_phone_snapshot(
+                ctx,
+                phone_snapshot,
+                "media.asset.transfer",
+            )
+        except AccountEntitlementError as exc:
+            return ctx.fastapi_json(exc.payload(), exc.status_code)
 
         files = [{"path": asset.path, "filename": asset.filename, "mime": asset.mime}]
 
         def target(job_id: str) -> dict:
             device_count = len(phone_snapshot["devices"])
             ctx.get_job_mgr().progress(job_id, f"正在传送到 {device_count} 台手机相册", "neutral", phase="phone-transfer")
+            cancel_file_fn = getattr(ctx.get_job_mgr(), "cancel_file", None)
             return _transfer_generated_media_to_phones(
                 ctx,
                 asset.kind,
                 files,
                 phone_snapshot=phone_snapshot,
+                cancel_file=cancel_file_fn(job_id) if callable(cancel_file_fn) else "",
             )
 
-        job = ctx.get_job_mgr().submit_progress("media.transfer", "传输素材到手机", target)
-        return ctx.fastapi_json({"jobId": job["id"], "job": job})
+        job = ctx.get_job_mgr().submit_progress(
+            "media.transfer",
+            "传输素材到手机",
+            target,
+            initial_progress={
+                "message": "素材传输任务已排队",
+                "phase": "media.transfer.queued",
+                "commandId": "media.transfer",
+                **_media_phone_job_metadata(ctx, phone_snapshot),
+            },
+        )
+        return ctx.fastapi_json(
+            {"jobId": job["id"], "job": public_job_snapshot(job)}
+        )
 
     @app.delete("/api/media/assets/{asset_id}")
     async def media_asset_delete(request: Request, asset_id: str):
@@ -1356,8 +1678,15 @@ def register_media_routes(app, ctx) -> None:
             phone_snapshot = _media_generation_phone_snapshot(ctx, body)
         except MediaTargetError as exc:
             return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
+        except AccountEntitlementError as exc:
+            return ctx.fastapi_json(exc.payload(), exc.status_code)
         try:
-            generated = _image_generate_payload(ctx, body)
+            generated = _run_targeted_media_generation(
+                ctx,
+                phone_snapshot,
+                "media.generate.transfer",
+                lambda: _image_generate_payload(ctx, body),
+            )
             return ctx.fastapi_json(
                 _async_media_job_result(
                     ctx,
@@ -1367,9 +1696,11 @@ def register_media_routes(app, ctx) -> None:
                     compact=False,
                 )
             )
+        except AccountEntitlementError as exc:
+            return ctx.fastapi_json(exc.payload(), exc.status_code)
         except (ImageApiError, ValueError) as exc:
             _log_image_generation_failure(ctx, "sync", exc)
-            return ctx.fastapi_json(_image_generation_failure(exc), 500)
+            return ctx.fastapi_json(_image_generation_failure(exc), _media_failure_http_status(exc))
 
     @app.post("/api/image/generate/submit")
     async def image_generate_submit(request: Request):
@@ -1383,25 +1714,49 @@ def register_media_routes(app, ctx) -> None:
             phone_snapshot = _media_generation_phone_snapshot(ctx, body)
         except MediaTargetError as exc:
             return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
+        except AccountEntitlementError as exc:
+            return ctx.fastapi_json(exc.payload(), exc.status_code)
 
         def target(job_id: str) -> dict:
             ctx.get_job_mgr().progress(job_id, "正在生成图片", "neutral")
             try:
-                generated = _image_generate_payload(ctx, body)
+                generated = _run_targeted_media_generation(
+                    ctx,
+                    phone_snapshot,
+                    "media.generate.transfer",
+                    lambda: _image_generate_payload(ctx, body),
+                    job_id=job_id,
+                )
+            except AccountEntitlementError as exc:
+                return _media_entitlement_failure(exc)
             except (ImageApiError, ValueError) as exc:
                 _log_image_generation_failure(ctx, job_id, exc)
                 return _image_generation_failure(exc)
             if phone_snapshot.get("devices"):
                 ctx.get_job_mgr().progress(job_id, "正在传送到指定手机相册", "neutral", phase="phone-transfer")
+            cancel_file_fn = getattr(ctx.get_job_mgr(), "cancel_file", None)
             return _async_media_job_result(
                 ctx,
                 "image",
                 generated,
                 phone_snapshot=phone_snapshot,
+                cancel_file=cancel_file_fn(job_id) if callable(cancel_file_fn) else "",
             )
 
-        job = ctx.get_job_mgr().submit_progress("image", "图片生成", target)
-        return ctx.fastapi_json({"jobId": job["id"], "job": job})
+        job = ctx.get_job_mgr().submit_progress(
+            "image",
+            "图片生成",
+            target,
+            initial_progress={
+                "message": "图片生成任务已排队",
+                "phase": "media.image.queued",
+                "commandId": "media.image.generate",
+                **_media_phone_job_metadata(ctx, phone_snapshot),
+            },
+        )
+        return ctx.fastapi_json(
+            {"jobId": job["id"], "job": public_job_snapshot(job)}
+        )
 
     @app.post("/api/video/generate")
     async def video_generate(request: Request):
@@ -1415,11 +1770,21 @@ def register_media_routes(app, ctx) -> None:
             phone_snapshot = _media_generation_phone_snapshot(ctx, body)
         except MediaTargetError as exc:
             return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
+        except AccountEntitlementError as exc:
+            return ctx.fastapi_json(exc.payload(), exc.status_code)
         try:
-            generated = _video_generate_payload(
+            generated = _run_targeted_media_generation(
                 ctx,
-                body,
-                request_key=_text(body.get("requestKey")) or f"sync_{uuid.uuid4().hex}",
+                phone_snapshot,
+                "media.generate.transfer",
+                lambda: _video_generate_payload(
+                    ctx,
+                    body,
+                    request_key=(
+                        _text(body.get("requestKey"))
+                        or f"sync_{uuid.uuid4().hex}"
+                    ),
+                ),
             )
             return ctx.fastapi_json(
                 _async_media_job_result(
@@ -1430,12 +1795,18 @@ def register_media_routes(app, ctx) -> None:
                     compact=False,
                 )
             )
+        except AccountEntitlementError as exc:
+            return ctx.fastapi_json(exc.payload(), exc.status_code)
         except (VideoApiError, PippitManualRequired, PippitResumeRequired, ValueError) as exc:
             _log_video_generation_failure(ctx, "sync", exc)
             failure = _video_generation_failure(exc)
             return ctx.fastapi_json(
                 failure,
-                409 if failure.get("manualRequired") or failure.get("resumeRequired") else 500,
+                (
+                    409
+                    if failure.get("manualRequired") or failure.get("resumeRequired")
+                    else _media_failure_http_status(exc)
+                ),
             )
 
     @app.post("/api/video/generate/submit")
@@ -1450,32 +1821,58 @@ def register_media_routes(app, ctx) -> None:
             phone_snapshot = _media_generation_phone_snapshot(ctx, body)
         except MediaTargetError as exc:
             return ctx.fastapi_json({"errorCode": exc.code, "error": str(exc)}, 400)
+        except AccountEntitlementError as exc:
+            return ctx.fastapi_json(exc.payload(), exc.status_code)
 
         def target(job_id: str) -> dict:
             ctx.get_job_mgr().progress(job_id, "正在提交视频任务", "neutral", phase="submitting")
             try:
-                generated = _video_generate_payload(
+                generated = _run_targeted_media_generation(
                     ctx,
-                    body,
-                    on_status=lambda message, tone="neutral": ctx.get_job_mgr().progress(
-                        job_id,
-                        message,
-                        tone,
-                        phase="generating",
+                    phone_snapshot,
+                    "media.generate.transfer",
+                    lambda: _video_generate_payload(
+                        ctx,
+                        body,
+                        on_status=lambda message, tone="neutral": (
+                            ctx.get_job_mgr().progress(
+                                job_id,
+                                message,
+                                tone,
+                                phase="generating",
+                            )
+                        ),
+                        request_key=_text(body.get("requestKey")) or job_id,
                     ),
-                    request_key=_text(body.get("requestKey")) or job_id,
+                    job_id=job_id,
                 )
+            except AccountEntitlementError as exc:
+                return _media_entitlement_failure(exc)
             except (VideoApiError, PippitManualRequired, PippitResumeRequired, ValueError) as exc:
                 _log_video_generation_failure(ctx, job_id, exc)
                 return _video_generation_failure(exc)
             if phone_snapshot.get("devices"):
                 ctx.get_job_mgr().progress(job_id, "正在传送到指定手机相册", "neutral", phase="phone-transfer")
+            cancel_file_fn = getattr(ctx.get_job_mgr(), "cancel_file", None)
             return _async_media_job_result(
                 ctx,
                 "video",
                 generated,
                 phone_snapshot=phone_snapshot,
+                cancel_file=cancel_file_fn(job_id) if callable(cancel_file_fn) else "",
             )
 
-        job = ctx.get_job_mgr().submit_progress("video", "视频生成", target)
-        return ctx.fastapi_json({"jobId": job["id"], "job": job})
+        job = ctx.get_job_mgr().submit_progress(
+            "video",
+            "视频生成",
+            target,
+            initial_progress={
+                "message": "视频生成任务已排队",
+                "phase": "media.video.queued",
+                "commandId": "media.video.generate",
+                **_media_phone_job_metadata(ctx, phone_snapshot),
+            },
+        )
+        return ctx.fastapi_json(
+            {"jobId": job["id"], "job": public_job_snapshot(job)}
+        )

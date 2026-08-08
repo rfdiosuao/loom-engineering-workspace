@@ -22,6 +22,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="com.luming.linuxruntime.permission.EXECUTE" />
+
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="com.luming.linuxruntime" />
+        <provider android:authorities="com.luming.linuxruntime.runtime" />
+    </queries>
 
     <!-- Device features -->
     <uses-feature
@@ -66,6 +73,10 @@
             android:exported="false"
             android:screenOrientation="portrait" />
         <activity
+            android:name=".ui.skill.SkillCenterActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+        <activity
             android:name=".ui.settings.LlmConfigActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
@@ -92,6 +103,11 @@
             android:theme="@style/Theme.Transparent" />
         <activity
             android:name=".media.ScreenCapturePermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.Transparent" />
+        <activity
+            android:name=".server.stream.PhoneStreamPermissionActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:theme="@style/Theme.Transparent" />
@@ -125,6 +141,11 @@
             android:foregroundServiceType="specialUse" />
         <service
             android:name=".service.ScreenRecordService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+        <service
+            android:name=".server.stream.PhoneStreamService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />

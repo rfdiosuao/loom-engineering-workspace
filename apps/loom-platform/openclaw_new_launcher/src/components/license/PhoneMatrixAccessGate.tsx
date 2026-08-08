@@ -3,13 +3,29 @@ import React from 'react';
 import { licenseApi, matrixApi, parseErrorText } from '../../services/api';
 import { useAppStore } from '../../stores/appStore';
 import { showConfirm, showToast } from '../common';
-import { LicensePaywall } from './LicensePaywall';
+import { LicensePaywall, type MatrixEntitlementSurface } from './LicensePaywall';
 
 interface PhoneMatrixAccessGateProps {
   children: React.ReactNode;
+  surface?: MatrixEntitlementSurface;
 }
 
-export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ children }) => {
+const SURFACE_LABELS: Record<MatrixEntitlementSurface, string> = {
+  phone: '手机连接',
+  workbench: '矩阵工作台',
+  skills: 'Skill 中心',
+  acquisition: '矩阵获客',
+};
+
+function surfaceAccessError(error: unknown, surface: MatrixEntitlementSurface): string {
+  const parsed = parseErrorText(error);
+  if (parsed && !/(matrix\.devices|account_entitlement|ENTITLEMENT_REQUIRED|AGENT_ENTITLEMENT)/i.test(parsed)) {
+    return parsed;
+  }
+  return `暂时无法核验${SURFACE_LABELS[surface]}权益，请检查网络和 Bridge 后重试`;
+}
+
+export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ children, surface = 'phone' }) => {
   const licenseGate = useAppStore((state) => state.licenseGate);
   const checkLicense = useAppStore((state) => state.checkLicense);
   const [featureAuthorized, setFeatureAuthorized] = React.useState<boolean | null>(null);
@@ -32,10 +48,10 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
       return granted;
     } catch (error) {
       setFeatureAuthorized(false);
-      setFeatureError(parseErrorText(error) || '无法核验手机矩阵授权，请检查 Bridge 后重试');
+      setFeatureError(surfaceAccessError(error, surface));
       return false;
     }
-  }, []);
+  }, [surface]);
 
   React.useEffect(() => {
     if (!licenseGate.authorized) {
@@ -77,6 +93,8 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
     return (
       <LicensePaywall
         scope="phone-matrix"
+        matrixSurface={surface}
+        accountBindingOnly
         featureDenied={licenseGate.authorized && featureAuthorized === false}
         featureChecking={licenseGate.authorized && featureAuthorized === null}
         gateError={featureError}
@@ -96,7 +114,7 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
           role="status"
           aria-live="polite"
         >
-          <span>本机签名授权有效，授权服务暂时离线；手机矩阵可继续使用。</span>
+          <span>本机签名授权有效，授权服务暂时离线；{SURFACE_LABELS[surface]}可继续使用。</span>
           <button
             type="button"
             onClick={() => void refreshAllAccess()}

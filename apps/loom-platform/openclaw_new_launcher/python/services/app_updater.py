@@ -821,37 +821,42 @@ class LoomAppUpdater:
                 partial_path = final_path + ".part"
                 if os.path.isfile(final_path):
                     cached_size = os.path.getsize(final_path)
-                    cached_hash = self._hash_file(final_path)
-                    if (release.size > 0 and cached_size != release.size) or cached_hash != release.sha256:
+                    # A size mismatch is already conclusive. Avoid hashing a stale
+                    # (potentially hundreds-of-megabytes) installer before removing it.
+                    if release.size > 0 and cached_size != release.size:
                         os.remove(final_path)
                     else:
-                        self._report(
-                            "verifying_signature",
-                            downloaded=cached_size,
-                            total=release.size or cached_size,
-                            version=release.version,
-                            message="正在重新验证已下载的更新包",
-                            callback=progress_callback,
-                        )
-                        signature_ok, signer = self._verify_release_authenticity(final_path, release)
-                        if not signature_ok:
+                        cached_hash = self._hash_file(final_path)
+                        if cached_hash != release.sha256:
                             os.remove(final_path)
-                            raise ValueError(f"{self.brand.display_name} 官方签名验证失败：{signer}")
-                        self.last_installer_path = final_path
-                        self.launcher(final_path)
-                        self._report(
-                            "ready",
-                            downloaded=cached_size,
-                            total=release.size or cached_size,
-                            version=release.version,
-                            message="已下载的更新包验证通过，等待安全交接安装",
-                            callback=progress_callback,
-                        )
-                        return True, release.version, [
-                            f"已验证 SHA256：{cached_hash}",
-                            f"已验证 {signer}",
-                            f"{self.brand.display_name} {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
-                        ]
+                        else:
+                            self._report(
+                                "verifying_signature",
+                                downloaded=cached_size,
+                                total=release.size or cached_size,
+                                version=release.version,
+                                message="正在重新验证已下载的更新包",
+                                callback=progress_callback,
+                            )
+                            signature_ok, signer = self._verify_release_authenticity(final_path, release)
+                            if not signature_ok:
+                                os.remove(final_path)
+                                raise ValueError(f"{self.brand.display_name} 官方签名验证失败：{signer}")
+                            self.last_installer_path = final_path
+                            self.launcher(final_path)
+                            self._report(
+                                "ready",
+                                downloaded=cached_size,
+                                total=release.size or cached_size,
+                                version=release.version,
+                                message="已下载的更新包验证通过，等待安全交接安装",
+                                callback=progress_callback,
+                            )
+                            return True, release.version, [
+                                f"已验证 SHA256：{cached_hash}",
+                                f"已验证 {signer}",
+                                f"{self.brand.display_name} {release.version} 更新包已就绪，将在关闭当前程序后无损升级。",
+                            ]
                 if release.download_parts:
                     try:
                         written, digest = self._download_segmented_release(

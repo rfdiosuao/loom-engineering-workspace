@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-shell';
+import { UserRound } from 'lucide-react';
+import qrcode from 'qrcode-generator';
 import { BusyOverlay, showToast } from '../common';
 import { LoomLogoMark } from '../brand/LoomBrand';
 import {
@@ -7,14 +9,18 @@ import {
   parseErrorText,
   type AccountSnapshot,
   type AccountAuthCapabilities,
+  type AccountPaymentCatalog,
+  type AccountPaymentOrder,
   type AccountSubscriptionSnapshot,
 } from '../../services/api';
 import { accountCacheUsable, loadCachedAccount, saveCachedAccount } from '../../services/startupCache';
+import { useAgentStore } from '../../stores/agentStore';
 import { useAppStore } from '../../stores/appStore';
 import { APP_DISPLAY_NAME } from '../../version';
 
 const DEFAULT_BASE_URL = 'https://api.heang.top';
 const DEFAULT_ACCOUNT_CENTER_URL = `${DEFAULT_BASE_URL}/wallet`;
+const NEW_API_QUOTA_PER_CNY = 500_000;
 
 type AuthMode = 'email' | 'password';
 type RuntimeSyncResult = { target?: string; ok?: boolean; error?: string };
@@ -40,12 +46,37 @@ function failedSyncResults(results?: RuntimeSyncResult[]): RuntimeSyncResult[] {
   return (results || []).filter((item) => item.ok === false);
 }
 
-function displayValue(value: unknown, fallback = '暂无'): string {
+function displayValue(value: unknown, fallback = '服务暂未返回'): string {
   if (value === undefined || value === null || value === '') return fallback;
   return String(value);
 }
 
-function usageValue(account: AccountSnapshot | null, keys: string[], fallback = '暂无'): string {
+function formatQuotaBalance(value: unknown, fallbackValue: unknown = '服务暂未返回'): string {
+  const candidate = value === undefined || value === null || value === '' ? fallbackValue : value;
+  const quota = typeof candidate === 'number' ? candidate : Number(String(candidate).trim());
+  if (!Number.isFinite(quota)) return String(fallbackValue || '服务暂未返回');
+  return `¥${(quota / NEW_API_QUOTA_PER_CNY).toFixed(2)}`;
+}
+
+function planDisplayName(value: unknown): string {
+  const plan = displayValue(value, '').trim();
+  const names: Record<string, string> = {
+    default: '基础套餐',
+    free: '基础套餐',
+    basic: '基础套餐',
+    matrix_basic: '基础套餐',
+    standard: '标准套餐',
+    pro: '专业套餐',
+    professional: '专业套餐',
+    matrix_pro: '专业套餐',
+    enterprise: '企业套餐',
+    matrix_enterprise: '企业套餐',
+    inactive: '未激活',
+  };
+  return names[plan.toLowerCase()] || plan || '服务暂未返回';
+}
+
+function usageValue(account: AccountSnapshot | null, keys: string[], fallback = '服务暂未返回'): string {
   const usage = account?.usage;
   if (!usage || typeof usage !== 'object') return fallback;
   for (const key of keys) {
@@ -55,10 +86,11 @@ function usageValue(account: AccountSnapshot | null, keys: string[], fallback = 
   return fallback;
 }
 
-function formatTime(value?: string): string {
-  if (!value) return '暂无';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+function formatTime(value?: string | number | null, fallback = '暂无'): string {
+  if (value === undefined || value === null || value === '') return fallback;
+  const normalized = typeof value === 'number' && value < 10_000_000_000 ? value * 1000 : value;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleString();
 }
 
@@ -95,9 +127,132 @@ function safeSubscriptionUrl(url: string): string {
   }
 }
 
+function safePaymentPayUrl(url?: string): string {
+  const candidate = String(url || '').trim();
+  if (!candidate || candidate.length > 2048 || isLocalSubscriptionUrl(candidate)) return '';
+  try {
+    const parsed = new URL(candidate);
+    if (
+      parsed.protocol !== 'https:'
+      || parsed.username || parsed.password
+      || parsed.hash
+    ) return '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function accountIdentity(account: AccountSnapshot | null): string {
+  return String(
+    account?.accountEntitlement?.accountId
+    || account?.memberId
+    || account?.account
+    || '',
+  ).trim();
+}
+
+const PAYMENT_RESUME_STORAGE_KEY = 'loom.account.payment.resume.v1';
+const PAYMENT_RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+interface PaymentResumeState {
+  schema: 'loom.payment-resume.v1';
+  accountIdentity: string;
+  planKey: string;
+  paymentType: 'alipay' | 'wxpay';
+  requestId: string;
+  orderId?: string;
+  savedAt: number;
+}
+
+function readPaymentResume(identity: string): PaymentResumeState | null {
+  try {
+    const raw = window.localStorage.getItem(PAYMENT_RESUME_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PaymentResumeState>;
+    const valid = parsed.schema === 'loom.payment-resume.v1'
+      && parsed.accountIdentity === identity
+      && typeof parsed.planKey === 'string'
+      && ['alipay', 'wxpay'].includes(String(parsed.paymentType || ''))
+      && typeof parsed.requestId === 'string'
+      && /^[A-Za-z0-9_-]{16,128}$/.test(parsed.requestId)
+      && typeof parsed.savedAt === 'number'
+      && Date.now() - parsed.savedAt <= PAYMENT_RESUME_MAX_AGE_MS
+      && (!parsed.orderId || /^[A-Za-z0-9_-]{1,160}$/.test(parsed.orderId));
+    if (!valid) {
+      window.localStorage.removeItem(PAYMENT_RESUME_STORAGE_KEY);
+      return null;
+    }
+    return parsed as PaymentResumeState;
+  } catch {
+    return null;
+  }
+}
+
+function writePaymentResume(state: Omit<PaymentResumeState, 'schema' | 'savedAt'>): void {
+  try {
+    window.localStorage.setItem(PAYMENT_RESUME_STORAGE_KEY, JSON.stringify({
+      schema: 'loom.payment-resume.v1',
+      ...state,
+      savedAt: Date.now(),
+    } satisfies PaymentResumeState));
+  } catch {
+    // The server-side idempotency key still protects the current in-memory attempt.
+  }
+}
+
+function clearPaymentResume(identity: string): void {
+  const current = readPaymentResume(identity);
+  if (!current) return;
+  try {
+    window.localStorage.removeItem(PAYMENT_RESUME_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable in hardened WebView profiles.
+  }
+}
+
+function createPaymentRequestId(): string {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.getRandomValues) {
+    throw new Error('当前环境缺少安全随机数，无法安全创建支付订单');
+  }
+  if (typeof cryptoApi.randomUUID === 'function') return cryptoApi.randomUUID();
+  const bytes = new Uint8Array(16);
+  cryptoApi.getRandomValues(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+function createPaymentQrDataUri(value?: string): string {
+  const content = String(value || '').trim();
+  if (!content || content.length > 4096) return '';
+  try {
+    const qr = qrcode(0, 'M');
+    qr.addData(content);
+    qr.make();
+    const dataUrl = qr.createDataURL(5, 2);
+    return dataUrl.startsWith('data:image/gif;base64') ? dataUrl : '';
+  } catch {
+    return '';
+  }
+}
+
+function paymentStatusText(status?: string): string {
+  const values: Record<string, string> = {
+    pending: '等待扫码支付',
+    paid: '支付成功，模型订阅已同步',
+    expired: '订单已过期，请重新下单',
+    creation_uncertain: '订单创建结果待确认，请勿重复付款',
+    failed: '订单失败，请重新下单',
+  };
+  return values[String(status || '')] || String(status || '等待确认');
+}
+
 export const LicensePage: React.FC = () => {
   const cachedAccount = useRef<AccountSnapshot | null>(loadCachedAccount());
   const subscriptionRequestVersion = useRef(0);
+  const paymentCatalogRequestVersion = useRef(0);
+  const paymentRequestVersion = useRef(0);
+  const paymentRestoreIdentity = useRef('');
   const hasCachedAccount = accountCacheUsable(cachedAccount.current);
   const [account, setAccount] = useState<AccountSnapshot | null>(() => cachedAccount.current);
   const [subscription, setSubscription] = useState<AccountSubscriptionSnapshot | null>(() => cachedAccount.current?.subscription || null);
@@ -113,12 +268,27 @@ export const LicensePage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [emailCode, setEmailCode] = useState('');
   const [password, setPassword] = useState('');
+  const [entitlementCode, setEntitlementCode] = useState('');
+  const [paymentCatalog, setPaymentCatalog] = useState<AccountPaymentCatalog | null>(null);
+  const [paymentCatalogError, setPaymentCatalogError] = useState('');
+  const [paymentCatalogLoading, setPaymentCatalogLoading] = useState(false);
+  const [paymentChannel, setPaymentChannel] = useState<'alipay' | 'wxpay'>('alipay');
+  const [paymentOrder, setPaymentOrder] = useState<AccountPaymentOrder | null>(null);
+  const [creatingPaymentPlanKey, setCreatingPaymentPlanKey] = useState('');
+  const [paymentStatusBusy, setPaymentStatusBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(() => !hasCachedAccount);
+  const [usingCachedAccount, setUsingCachedAccount] = useState(hasCachedAccount);
+  const [guestBrowsing, setGuestBrowsing] = useState(false);
   const [statusText, setStatusText] = useState('');
-  const { setCurrentPage } = useAppStore();
+  const { checkLicense, setCurrentPage } = useAppStore();
 
   const loggedIn = Boolean(account?.loggedIn);
+  const accountWritable = loggedIn && !usingCachedAccount;
+  const subscriptionIsCached = Boolean(subscription?.offline || subscription?.stale);
+  const paymentWritable = loggedIn
+    && paymentCatalog?.payment.configured === true
+    && Boolean(paymentCatalog.payment.channels?.length);
   const totalModels = modelTotal(account);
   const modelHint = useMemo(() => {
     const selected = account?.selectedModels?.text;
@@ -127,25 +297,69 @@ export const LicensePage: React.FC = () => {
   }, [account]);
   const purchaseUrl = subscription?.purchaseUrl || account?.purchaseUrl || DEFAULT_ACCOUNT_CENTER_URL;
   const subscriptionUrl = useMemo(() => safeSubscriptionUrl(purchaseUrl), [purchaseUrl]);
-  const accountStateText = loading ? '读取中' : loggedIn ? '已登录' : '未登录';
+  const accountStateText = loading ? '读取中' : usingCachedAccount ? '待在线验证' : loggedIn ? '已登录' : '未登录';
+  const accountEntitlement = account?.accountEntitlement;
+  const entitlementActive = accountEntitlement?.source === 'signed_lease'
+    && accountEntitlement?.features?.includes('matrix.devices') === true;
+  const entitlementExpiresAt = entitlementActive
+    ? formatTime(accountEntitlement?.expiresAt)
+    : '未激活';
+  const activeAccountIdentity = accountIdentity(account);
+  const paymentQrSrc = useMemo(
+    () => createPaymentQrDataUri(paymentOrder?.qrcode),
+    [paymentOrder?.qrcode],
+  );
+  const paymentPayUrl = useMemo(
+    () => safePaymentPayUrl(paymentOrder?.payUrl),
+    [paymentOrder?.payUrl],
+  );
 
-  const applyAccount = useCallback((next: AccountSnapshot | null) => {
+  const applyAccount = useCallback((
+    next: AccountSnapshot | null,
+    options: { cached?: boolean; persist?: boolean } = {},
+  ) => {
     subscriptionRequestVersion.current += 1;
+    const previousIdentity = accountIdentity(cachedAccount.current);
+    const nextIdentity = accountIdentity(next);
+    if (previousIdentity !== nextIdentity) {
+      useAgentStore.getState().reset();
+      paymentCatalogRequestVersion.current += 1;
+      paymentRequestVersion.current += 1;
+      paymentRestoreIdentity.current = '';
+      setPaymentCatalog(null);
+      setPaymentCatalogError('');
+      setPaymentOrder(null);
+      setCreatingPaymentPlanKey('');
+      setPaymentStatusBusy(false);
+    }
     cachedAccount.current = next;
-    saveCachedAccount(next);
+    if (options.persist !== false) saveCachedAccount(next);
     setAccount(next);
     setSubscription(next?.subscription || null);
+    setUsingCachedAccount(Boolean(options.cached || next?.offline || next?.stale));
+    if (next?.loggedIn) setGuestBrowsing(false);
   }, []);
 
   const refresh = useCallback(async (options: { background?: boolean } = {}) => {
     if (!options.background) setLoading(true);
     try {
-      const resp = await accountApi.current();
-      applyAccount(resp.account || null);
+      let resp;
+      if (cachedAccount.current?.loggedIn) {
+        const local = await accountApi.current();
+        if (!local.account?.loggedIn) {
+          applyAccount(local.account || null, { persist: true });
+          setStatusText('');
+          return;
+        }
+        resp = await accountApi.sync();
+      } else {
+        resp = await accountApi.current();
+      }
+      applyAccount(resp.account || null, { persist: true });
       setStatusText('');
     } catch (error) {
       const cached = loadCachedAccount();
-      applyAccount(cached || null);
+      applyAccount(cached || null, { cached: Boolean(cached), persist: false });
       setStatusText(errorMessage(error));
     } finally {
       setLoading(false);
@@ -154,7 +368,7 @@ export const LicensePage: React.FC = () => {
 
   useEffect(() => {
     if (accountCacheUsable(cachedAccount.current)) {
-      applyAccount(cachedAccount.current);
+      applyAccount(cachedAccount.current, { cached: true, persist: false });
       setStatusText('');
       setLoading(false);
       void refresh({ background: true });
@@ -181,7 +395,7 @@ export const LicensePage: React.FC = () => {
     });
   }, []);
 
-  const loadSubscription = async (quiet = false) => {
+  const loadSubscription = useCallback(async (quiet = false) => {
     const requestVersion = ++subscriptionRequestVersion.current;
     if (!quiet) setBusy(true);
     try {
@@ -189,8 +403,14 @@ export const LicensePage: React.FC = () => {
       if (requestVersion !== subscriptionRequestVersion.current) return;
       setSubscription(resp.subscription || null);
       if (!quiet) {
-        setStatusText(resp.subscription?.message || '订阅信息已更新');
-        showToast('订阅信息已更新', 'success');
+        if (resp.subscription?.offline || resp.subscription?.stale) {
+          const message = resp.subscription?.message || '余额与套餐显示上次快照；服务恢复后可重新刷新。';
+          setStatusText(message);
+          showToast(message, 'info');
+        } else {
+          setStatusText('余额与套餐已从服务端更新');
+          showToast('余额与套餐已更新', 'success');
+        }
       }
     } catch (error) {
       if (requestVersion !== subscriptionRequestVersion.current) return;
@@ -202,7 +422,204 @@ export const LicensePage: React.FC = () => {
     } finally {
       if (!quiet && requestVersion === subscriptionRequestVersion.current) setBusy(false);
     }
+  }, []);
+
+  const loadPaymentPlans = useCallback(async (quiet = true) => {
+    const requestVersion = ++paymentCatalogRequestVersion.current;
+    const identity = accountIdentity(cachedAccount.current);
+    if (!cachedAccount.current?.loggedIn || !identity) return;
+    setPaymentCatalogLoading(true);
+    setPaymentCatalogError('');
+    try {
+      const response = await accountApi.paymentPlans();
+      if (
+        requestVersion !== paymentCatalogRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      setPaymentCatalog(response);
+      const availableChannels = response.payment?.channels || [];
+      if (!availableChannels.includes(paymentChannel)) {
+        if (availableChannels.includes('alipay')) setPaymentChannel('alipay');
+        else if (availableChannels.includes('wxpay')) setPaymentChannel('wxpay');
+      }
+    } catch (error) {
+      if (
+        requestVersion !== paymentCatalogRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      setPaymentCatalog(null);
+      const message = errorMessage(error);
+      setPaymentCatalogError(message || '套餐加载失败');
+      if (!quiet) {
+        setStatusText(message);
+        showToast(message || '套餐加载失败', 'error');
+      }
+    } finally {
+      if (requestVersion === paymentCatalogRequestVersion.current) {
+        setPaymentCatalogLoading(false);
+      }
+    }
+  }, [paymentChannel]);
+
+  const verifyPaymentOrder = useCallback(async (
+    orderId: string,
+    quiet = false,
+    reconcile = false,
+  ) => {
+    const requestVersion = ++paymentRequestVersion.current;
+    const identity = accountIdentity(cachedAccount.current);
+    if (!identity || !orderId) return;
+    if (!quiet) setPaymentStatusBusy(true);
+    try {
+      const response = await accountApi.paymentOrderStatus({ orderId, reconcile });
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      setPaymentOrder(response.order);
+      if (response.order.status === 'paid') {
+        clearPaymentResume(identity);
+        if (response.account) applyAccount(response.account);
+        const refreshResults = await Promise.allSettled([loadSubscription(true)]);
+        const localSyncPending = response.subscriptionSyncPending
+          || refreshResults.some((result) => result.status === 'rejected');
+        const message = localSyncPending
+          ? '支付已确认，模型订阅信息正在从服务端刷新；请稍后点击刷新账号。'
+          : '支付已确认，模型订阅已同步。';
+        setStatusText(message);
+        showToast(message, localSyncPending ? 'info' : 'success');
+      } else {
+        if (['expired', 'failed'].includes(response.order.status)) {
+          clearPaymentResume(identity);
+        }
+        if (quiet) return;
+        const message = paymentStatusText(response.order.status);
+        setStatusText(message);
+        showToast(message, response.order.status === 'pending' ? 'info' : 'error');
+      }
+    } catch (error) {
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      if (!quiet) {
+        const message = errorMessage(error);
+        setStatusText(message);
+        showToast(message || '订单状态查询失败', 'error');
+      }
+    } finally {
+      if (!quiet && requestVersion === paymentRequestVersion.current) {
+        setPaymentStatusBusy(false);
+      }
+    }
+  }, [applyAccount, loadSubscription]);
+
+  const startPayment = async (planKey: string) => {
+    if (!paymentWritable || !paymentCatalog?.plans.some((plan) => plan.planKey === planKey)) {
+      const message = '支付服务尚未完成在线验证，请刷新套餐后重试。';
+      setStatusText(message);
+      showToast(message, 'info');
+      return;
+    }
+    const requestVersion = ++paymentRequestVersion.current;
+    const identity = accountIdentity(cachedAccount.current);
+    const previousAttempt = readPaymentResume(identity);
+    const requestId = previousAttempt?.planKey === planKey
+      && previousAttempt.paymentType === paymentChannel
+      ? previousAttempt.requestId
+      : createPaymentRequestId();
+    writePaymentResume({
+      accountIdentity: identity,
+      planKey,
+      paymentType: paymentChannel,
+      requestId,
+      orderId: previousAttempt?.planKey === planKey
+        && previousAttempt.paymentType === paymentChannel
+        ? previousAttempt.orderId
+        : undefined,
+    });
+    setCreatingPaymentPlanKey(planKey);
+    setPaymentOrder(null);
+    try {
+      const response = await accountApi.createPaymentOrder({
+        planKey,
+        paymentType: paymentChannel,
+        requestId,
+      });
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      setPaymentOrder(response.order);
+      writePaymentResume({
+        accountIdentity: identity,
+        planKey,
+        paymentType: paymentChannel,
+        requestId,
+        orderId: response.order.orderId,
+      });
+      if (['paid', 'expired', 'failed'].includes(response.order.status)) {
+        clearPaymentResume(identity);
+      }
+      const message = response.order.status === 'creation_uncertain'
+        ? '订单创建结果待确认，请勿重复付款。'
+        : '订单已创建，请使用手机扫码支付。';
+      setStatusText(message);
+      showToast(message, response.order.status === 'creation_uncertain' ? 'info' : 'success');
+    } catch (error) {
+      if (
+        requestVersion !== paymentRequestVersion.current
+        || identity !== accountIdentity(cachedAccount.current)
+      ) return;
+      const message = errorMessage(error);
+      setStatusText(message);
+      showToast(message || '订单创建失败', 'error');
+    } finally {
+      if (requestVersion === paymentRequestVersion.current) setCreatingPaymentPlanKey('');
+    }
   };
+
+  useEffect(() => {
+    if (!loggedIn || !activeAccountIdentity) {
+      paymentCatalogRequestVersion.current += 1;
+      paymentRequestVersion.current += 1;
+      setPaymentCatalog(null);
+      setPaymentCatalogError('');
+      setPaymentOrder(null);
+      setCreatingPaymentPlanKey('');
+      setPaymentStatusBusy(false);
+      return;
+    }
+    void loadPaymentPlans(true);
+  }, [loggedIn, activeAccountIdentity, loadPaymentPlans]);
+
+  useEffect(() => {
+    if (!loggedIn || !activeAccountIdentity) {
+      paymentRestoreIdentity.current = '';
+      return;
+    }
+    if (paymentRestoreIdentity.current === activeAccountIdentity) return;
+    paymentRestoreIdentity.current = activeAccountIdentity;
+    const resumable = readPaymentResume(activeAccountIdentity);
+    if (resumable?.orderId) {
+      void verifyPaymentOrder(resumable.orderId, true);
+    } else if (resumable) {
+      setStatusText('检测到上次未完成的下单请求；再次选择同一套餐即可安全恢复。');
+    }
+  }, [loggedIn, activeAccountIdentity, verifyPaymentOrder]);
+
+  useEffect(() => {
+    if (!paymentOrder?.orderId || paymentOrder.status !== 'pending') return;
+    let checking = false;
+    const timer = window.setInterval(() => {
+      if (checking) return;
+      checking = true;
+      void verifyPaymentOrder(paymentOrder.orderId, true).finally(() => {
+        checking = false;
+      });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [paymentOrder?.orderId, paymentOrder?.status, verifyPaymentOrder]);
 
   const sendEmailCode = async () => {
     if (!authCapabilities.inlineEmailCode) {
@@ -314,6 +731,12 @@ export const LicensePage: React.FC = () => {
   };
 
   const syncModels = async () => {
+    if (!accountWritable) {
+      const message = '当前显示上次安全快照，请先重试在线验证后再同步模型。';
+      setStatusText(message);
+      showToast(message, 'info');
+      return;
+    }
     setBusy(true);
     setStatusText('正在同步模型...');
     try {
@@ -331,14 +754,51 @@ export const LicensePage: React.FC = () => {
     }
   };
 
+  const handleRedeemEntitlement = async () => {
+    if (!loggedIn) {
+      const message = '请先登录模型账号，再绑定商业授权。';
+      setStatusText(message);
+      showToast(message, 'info');
+      return;
+    }
+    const code = entitlementCode.trim();
+    if (!code) {
+      showToast('请输入商业矩阵授权码', 'error');
+      return;
+    }
+    setBusy(true);
+    setStatusText('正在绑定商业矩阵授权...');
+    try {
+      const resp = await accountApi.redeemEntitlement({ code });
+      applyAccount(resp.account || null);
+      await checkLicense();
+      setEntitlementCode('');
+      const message = '商业矩阵授权已绑定当前账号';
+      setStatusText(message);
+      showToast(message, 'success');
+    } catch (error) {
+      const message = errorMessage(error);
+      setStatusText(message);
+      showToast(message || '商业矩阵授权绑定失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const logout = async () => {
     subscriptionRequestVersion.current += 1;
+    paymentRequestVersion.current += 1;
+    paymentCatalogRequestVersion.current += 1;
+    clearPaymentResume(activeAccountIdentity);
     setBusy(true);
     setStatusText('正在退出模型账号...');
     try {
       await accountApi.logout();
       applyAccount(null);
       setSubscription(null);
+      setPaymentCatalog(null);
+      setPaymentOrder(null);
+      setEntitlementCode('');
       setStatusText('已退出账号');
       showToast('已退出模型账号', 'info');
     } catch (error) {
@@ -390,8 +850,8 @@ export const LicensePage: React.FC = () => {
   };
 
   const continueAsGuest = () => {
-    showToast('已关闭模型账号登录页。模型同步需要先登录账号。', 'info');
-    setCurrentPage('dashboard');
+    setGuestBrowsing(true);
+    showToast('已进入只读访客模式；登录后才会读取或修改账户数据。', 'info');
   };
 
   const busyTitle = '正在处理账号请求';
@@ -409,12 +869,15 @@ export const LicensePage: React.FC = () => {
           detail={`${APP_DISPLAY_NAME} 正在连接模型服务。`}
         />
 
-        <header className="shrink-0 border-b border-border bg-surface px-8 py-7">
-          <div className="text-sm font-black text-accent">模型账户</div>
-          <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
+        <header
+          className="shrink-0 border-b border-border bg-surface px-6 py-4 xl:px-8"
+          data-account-compact-header
+        >
+          <div className="text-xs font-black text-accent">模型服务账户</div>
+          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h1 className="text-[30px] font-black leading-tight text-text">账户与用量</h1>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-text-muted">
+              <h1 className="text-[24px] font-black leading-tight text-text">账户与用量</h1>
+              <p className="mt-1 max-w-2xl text-xs leading-5 text-text-muted">
                 模型、余额、套餐和用量均以服务端账户数据为准。
               </p>
             </div>
@@ -425,7 +888,7 @@ export const LicensePage: React.FC = () => {
                 disabled={loading || busy}
                 className="h-10 rounded-[8px] border border-border bg-surface-alt px-4 text-sm font-black text-text transition hover:border-accent/50 disabled:opacity-55"
               >
-                刷新账号
+                {usingCachedAccount ? '重试在线验证' : '刷新账号'}
               </button>
               <button
                 type="button"
@@ -438,14 +901,41 @@ export const LicensePage: React.FC = () => {
           </div>
         </header>
 
+        {usingCachedAccount ? (
+          <div
+            data-account-cache-warning
+            role="status"
+            className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-status-warning bg-status-warning-soft px-6 py-3 text-sm text-status-warning-ink xl:px-8"
+          >
+            <div>
+              <span className="font-black">当前显示上次安全快照，账号待在线验证。</span>
+              <span className="ml-2">余额和套餐状态仅供参考；授权码仍可提交在线验证。</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              disabled={loading || busy}
+              className="h-8 rounded-[8px] border border-status-warning px-3 text-xs font-black disabled:opacity-55"
+            >
+              重试在线验证
+            </button>
+          </div>
+        ) : null}
+
         <main className="loom-account-main min-h-0 flex-1 overflow-y-auto px-6 py-6 xl:px-8">
           <div className="loom-account-layout mx-auto grid w-full max-w-[1320px] gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
             <section className="loom-account-sidebar space-y-5">
               <div className="border-y border-border/70 py-5">
                 <div className="flex items-start gap-4">
-                  <LoomLogoMark className="h-12 w-12 rounded-[8px] border border-border bg-surface-alt" />
+                  <span
+                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[8px] border border-border bg-surface-alt text-accent"
+                    aria-hidden="true"
+                    data-account-avatar
+                  >
+                    <UserRound className="h-6 w-6" />
+                  </span>
                   <div className="min-w-0">
-                    <div className="text-xs font-black text-accent">已登录</div>
+                    <div className="text-xs font-black text-accent">模型服务账户 · 已登录</div>
                     <div className="mt-1 truncate text-xl font-black text-text" title={account?.account || ''}>
                       {account?.account || '模型账户'}
                     </div>
@@ -456,6 +946,70 @@ export const LicensePage: React.FC = () => {
                 </div>
               </div>
 
+              <div data-account-entitlement className="border-y border-border/70 py-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-black text-text">商业矩阵授权</div>
+                    <div className="mt-1 text-xs leading-5 text-text-muted">授权绑定当前账号，可在已登录设备上使用。</div>
+                  </div>
+                  <span className={[
+                    'shrink-0 rounded-full px-3 py-1 text-xs font-black',
+                    entitlementActive ? 'bg-accent/12 text-accent' : 'bg-surface-alt text-text-muted',
+                  ].join(' ')}>
+                    {entitlementActive ? '已激活' : '未激活'}
+                  </span>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-border/70 py-4">
+                  <div>
+                    <div className="text-xs font-bold text-text-subtle">手机数上限</div>
+                    <div className="mt-1 text-sm font-black text-text">
+                      {entitlementActive ? '不限' : '0 台'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-text-subtle">到期时间</div>
+                    <div className="mt-1 break-words text-sm font-black text-text">{entitlementExpiresAt}</div>
+                  </div>
+                </div>
+
+                <label className="mt-4 block">
+                  <span className="mb-2 block text-xs font-bold text-text-subtle">授权码</span>
+                  <input
+                    aria-label="商业矩阵授权码"
+                    aria-describedby="commercial-entitlement-help"
+                    value={entitlementCode}
+                    disabled={!loggedIn}
+                    onChange={(event) => setEntitlementCode(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void handleRedeemEntitlement();
+                    }}
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="h-11 w-full rounded-[8px] border border-border bg-surface-alt px-3 text-sm text-text outline-none transition placeholder:text-text-subtle focus:border-accent focus:ring-2 focus:ring-accent/20"
+                    placeholder="请输入商业矩阵授权码"
+                  />
+                </label>
+                <p
+                  id="commercial-entitlement-help"
+                  className="mt-2 text-xs leading-5 text-text-muted"
+                  data-entitlement-helper
+                >
+                  {loggedIn
+                    ? '授权码将直接提交给在线授权服务验证；麓鸣不会回显或写入日志。'
+                    : '请先登录模型账号，再输入授权码。'}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleRedeemEntitlement}
+                  disabled={busy || !loggedIn || !entitlementCode.trim()}
+                  className="mt-3 h-11 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
+                >
+                  {busy ? '正在绑定...' : '绑定当前账号'}
+                </button>
+              </div>
+
               <div className="border-y border-border/70 py-5">
                 <div className="text-sm font-black text-text">当前模型</div>
                 <InfoRow label="默认文本模型" value={modelHint} />
@@ -464,7 +1018,7 @@ export const LicensePage: React.FC = () => {
                   <button
                     type="button"
                     onClick={syncModels}
-                    disabled={busy}
+                    disabled={busy || !accountWritable}
                     className="h-11 rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:opacity-55"
                   >
                     同步模型
@@ -486,47 +1040,202 @@ export const LicensePage: React.FC = () => {
               data-subscription-external-fallback
               className="loom-account-subscription border-y border-border/70"
             >
-              <div className="flex items-center justify-between border-b border-border px-5 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
                 <div>
                   <h2 className="text-lg font-black text-text">账户与余额</h2>
-                  <p className="mt-1 text-xs leading-5 text-text-muted">充值、消耗记录与 API 密钥由模型服务同步；购买与支付在浏览器完成。</p>
+                  <p className="mt-1 text-xs leading-5 text-text-muted">充值、消耗记录、API 密钥和模型订阅均由服务端同步；订阅可在麓鸣内扫码购买。</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => loadSubscription(false)}
-                  disabled={busy}
-                  className="h-9 rounded-[8px] border border-border bg-surface-alt px-4 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
-                >
-                  刷新余额
-                </button>
+                <div className="flex items-center gap-3">
+                  <span
+                    className={subscriptionIsCached
+                      ? 'rounded-full bg-status-warning-soft px-3 py-1 text-xs font-black text-status-warning-ink'
+                      : 'rounded-full bg-accent/10 px-3 py-1 text-xs font-black text-accent'}
+                    data-subscription-provenance
+                  >
+                    {subscriptionIsCached ? '上次快照' : '在线数据'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => loadSubscription(false)}
+                    disabled={busy}
+                    className="h-9 rounded-[8px] border border-border bg-surface-alt px-4 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
+                  >
+                    刷新余额
+                  </button>
+                </div>
               </div>
               <div className="loom-account-subscription-body space-y-6 px-6 py-6">
                 <div className="loom-account-metric-grid grid gap-4">
-                  <MetricTile label="可用余额" value={displayValue(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} accent />
-                  <MetricTile label="累计消耗" value={displayValue(subscription?.usage?.usedQuota, usageValue(account, ['usedQuota', 'used', 'quotaUsed']))} />
+                  <MetricTile label="可用余额" value={formatQuotaBalance(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} />
+                  <MetricTile label="累计消费" value={formatQuotaBalance(subscription?.usage?.usedQuota, usageValue(account, ['usedQuota', 'used', 'quotaUsed']))} />
                   <MetricTile label="请求次数" value={displayValue(subscription?.usage?.requestCount, usageValue(account, ['requestCount', 'requests']))} />
-                  <MetricTile label="我的邀请码" value={displayValue(subscription?.inviteCode || subscription?.invitationCode || subscription?.referralCode, usageValue(account, ['inviteCode', 'invitationCode', 'referralCode'], '登录后查看'))} />
-                  <MetricTile label="当前套餐" value={displayValue(subscription?.plan, account?.plan || '暂无')} />
+                  <MetricTile label="我的邀请码" value={displayValue(subscription?.inviteCode || subscription?.invitationCode || subscription?.referralCode, usageValue(account, ['inviteCode', 'invitationCode', 'referralCode'], '服务暂未返回'))} />
+                  <MetricTile label="当前套餐" value={planDisplayName(subscription?.plan || account?.plan)} />
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border/70 pt-5">
-                  <div>
-                    <div className="text-sm font-black text-text">套餐与购买</div>
-                    <div className="mt-1 text-xs leading-5 text-text-muted">套餐详情与支付流程由服务端账户中心提供。</div>
+                <div
+                  data-native-payment-catalog
+                  className="space-y-5 border-t border-border/70 pt-5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-black text-text">模型服务订阅与购买</div>
+                      <div className="mt-1 text-xs leading-5 text-text-muted">
+                        直接购买服务端原生订阅；服务端 USD 数值按 1:1 显示为人民币，不做汇率换算。矩阵授权仍独立管理。
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void loadPaymentPlans(false)}
+                        disabled={paymentCatalogLoading || !loggedIn}
+                        className="h-9 rounded-[8px] border border-border bg-surface-alt px-3 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
+                      >
+                        {paymentCatalogLoading ? '加载中...' : '刷新套餐'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleOpenSubscription}
+                        disabled={!subscriptionUrl}
+                        className="h-9 rounded-[8px] border border-border bg-surface-alt px-3 text-xs font-black text-text transition hover:border-accent/50 disabled:opacity-55"
+                      >
+                        打开账户中心
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleOpenSubscription}
-                    disabled={!subscriptionUrl}
-                    className="h-10 rounded-[8px] bg-accent px-4 text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-55"
-                  >
-                    打开账户中心
-                  </button>
-                </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <InfoPanel label="到期时间" value={formatTime(subscription?.expiresAt)} />
-                  <InfoPanel label="购买入口" value={subscriptionUrl ? '浏览器打开' : '地址不可用'} />
+                  {paymentCatalog?.payment.configured && paymentCatalog.plans.length ? (
+                    <>
+                      <div data-payment-channel className="flex flex-wrap items-center gap-2">
+                        <span className="mr-1 text-xs font-bold text-text-subtle">支付方式</span>
+                        {paymentCatalog.payment.channels?.includes('alipay') ? (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentChannel('alipay')}
+                            className={[
+                              'h-9 rounded-[8px] border px-4 text-xs font-black transition',
+                              paymentChannel === 'alipay'
+                                ? 'border-accent bg-accent/10 text-accent'
+                                : 'border-border bg-surface-alt text-text-muted',
+                            ].join(' ')}
+                          >
+                            支付宝
+                          </button>
+                        ) : null}
+                        {paymentCatalog.payment.channels?.includes('wxpay') ? (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentChannel('wxpay')}
+                            className={[
+                              'h-9 rounded-[8px] border px-4 text-xs font-black transition',
+                              paymentChannel === 'wxpay'
+                                ? 'border-accent bg-accent/10 text-accent'
+                                : 'border-border bg-surface-alt text-text-muted',
+                            ].join(' ')}
+                          >
+                            微信支付
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <div className="grid gap-3 lg:grid-cols-2">
+                        {paymentCatalog.plans.map((plan) => {
+                          const isCreatingThisPlan = creatingPaymentPlanKey === plan.planKey;
+                          return (
+                          <article
+                            key={plan.planKey}
+                            className="rounded-[10px] border border-border bg-surface-alt/40 p-4"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="text-base font-black text-text">{plan.displayName}</div>
+                                <div className="mt-1 text-xs leading-5 text-text-muted">
+                                  {plan.description || `${plan.durationDays} 天模型服务订阅`}
+                                </div>
+                              </div>
+                              <div className="shrink-0 text-right">
+                                <div className="text-xl font-black text-accent">¥{plan.amount}</div>
+                                <div className="text-[11px] font-bold text-text-subtle">{plan.currency}</div>
+                              </div>
+                            </div>
+                            {plan.benefits?.length ? (
+                              <ul className="mt-3 space-y-1 text-xs leading-5 text-text-muted">
+                                {plan.benefits.map((benefit) => (
+                                  <li key={benefit}>· {benefit}</li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => void startPayment(plan.planKey)}
+                              disabled={Boolean(creatingPaymentPlanKey) || paymentStatusBusy || !paymentWritable}
+                              className="mt-4 h-10 w-full rounded-[8px] bg-accent text-sm font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-55"
+                            >
+                              {isCreatingThisPlan ? '正在创建订单...' : `${paymentChannel === 'wxpay' ? '微信' : '支付宝'}扫码购买`}
+                            </button>
+                          </article>
+                          );
+                        })}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="rounded-[8px] border border-border bg-surface-alt/35 px-4 py-3 text-xs leading-5 text-text-muted">
+                      {paymentCatalogLoading
+                        ? '正在从服务端加载可购买套餐...'
+                        : paymentCatalogError
+                          || paymentCatalog?.payment.message
+                          || '服务端暂未开放可购买订阅，或支付配置尚未通过安全检查。'}
+                    </div>
+                  )}
+
+                  {paymentOrder ? (
+                    <div className="grid gap-5 rounded-[12px] border border-accent/35 bg-accent/5 p-5 md:grid-cols-[180px_minmax(0,1fr)]">
+                      <div
+                        data-payment-qr
+                        className="flex min-h-[180px] items-center justify-center rounded-[8px] border border-border bg-white p-3"
+                      >
+                        {paymentQrSrc ? (
+                          <img src={paymentQrSrc} alt="麓鸣套餐支付二维码" className="h-[156px] w-[156px]" />
+                        ) : (
+                          <div className="px-3 text-center text-xs leading-5 text-slate-600">支付二维码暂不可用，请查询订单或打开直达支付。</div>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-black text-accent">{paymentStatusText(paymentOrder.status)}</div>
+                        <div className="mt-2 text-lg font-black text-text">
+                          {paymentOrder.displayName || paymentOrder.planKey || '模型服务订阅'} · ¥{paymentOrder.amount || '--'}
+                        </div>
+                        <div className="mt-2 break-all text-xs leading-5 text-text-muted">订单号：{paymentOrder.orderId}</div>
+                        <div className="mt-1 text-xs leading-5 text-text-muted">有效期：{formatTime(paymentOrder.expiresAt, '以支付页面为准')}</div>
+                        <p className="mt-3 text-xs leading-5 text-text-muted">
+                          开通只以服务端验签通知和原生订阅订单状态为准；返回页不会直接开通订阅，也不会改变矩阵授权。
+                        </p>
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void verifyPaymentOrder(paymentOrder.orderId, false, true)}
+                            disabled={paymentStatusBusy || Boolean(creatingPaymentPlanKey)}
+                            className="h-9 rounded-[8px] bg-accent px-4 text-xs font-black text-accent-ink disabled:opacity-55"
+                          >
+                            {paymentStatusBusy ? '查询中...' : '我已付款，查询状态'}
+                          </button>
+                          {paymentPayUrl ? (
+                            <button
+                              type="button"
+                              onClick={() => void openExternalUrl(paymentPayUrl)}
+                              className="h-9 rounded-[8px] border border-border bg-surface px-4 text-xs font-black text-text"
+                            >
+                              打开直达支付
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="max-w-xl">
+                    <InfoPanel label="套餐到期时间" value={formatTime(subscription?.expiresAt, '服务暂未返回')} />
+                  </div>
                 </div>
               </div>
             </section>
@@ -537,6 +1246,92 @@ export const LicensePage: React.FC = () => {
               {statusText}
             </div>
           ) : null}
+        </main>
+      </div>
+    );
+  }
+
+  if (guestBrowsing) {
+    return (
+      <div
+        data-account-subscription-page
+        data-account-guest-read-only
+        className="loom-white-page flex h-full flex-col overflow-hidden bg-app-bg text-text"
+      >
+        <header className="shrink-0 border-b border-border bg-surface px-6 py-4 xl:px-8">
+          <div className="text-xs font-black text-accent">模型服务账户</div>
+          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h1 className="text-[24px] font-black leading-tight text-text">账户与用量</h1>
+              <p className="mt-1 max-w-2xl text-xs leading-5 text-text-muted">
+                只读访客模式不会读取、缓存或修改账户数据。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setGuestBrowsing(false)}
+              className="h-10 rounded-[8px] bg-accent px-4 text-sm font-black text-accent-ink transition hover:bg-accent-hover"
+            >
+              登录模型账户
+            </button>
+          </div>
+        </header>
+
+        <main className="min-h-0 flex-1 overflow-y-auto px-6 py-6 xl:px-8">
+          <div className="mx-auto w-full max-w-[1120px]">
+            <section
+              role="status"
+              className="border border-info bg-info-soft px-5 py-4 text-info-ink"
+            >
+              <div className="text-sm font-black">当前为只读访客模式</div>
+              <p className="mt-1 text-xs font-semibold leading-5">
+                为避免把旧缓存当成在线数据，这里不显示缓存或模拟的余额、套餐和授权状态。登录并完成在线验证后才会展示服务端权威数据。
+              </p>
+            </section>
+
+            <section className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-label="访客账户状态">
+              <MetricTile label="模型账户" value="未登录" />
+              <MetricTile label="可用余额" value="未读取" />
+              <MetricTile label="当前套餐" value="未读取" />
+              <MetricTile label="商业矩阵授权" value="未验证" />
+            </section>
+
+            <section className="mt-6 border-y border-border bg-surface px-5 py-5">
+              <h2 className="text-lg font-black text-text">可用访客操作</h2>
+              <p className="mt-1 text-xs leading-5 text-text-muted">
+                访客可以了解账户入口，但不能绑定授权码、同步模型、创建支付订单或修改订阅。
+              </p>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={() => setGuestBrowsing(false)}
+                  className="h-10 rounded-[8px] bg-accent px-4 text-sm font-black text-accent-ink transition hover:bg-accent-hover"
+                >
+                  登录模型账户
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenRegistration}
+                  className="h-10 rounded-[8px] border border-border bg-surface-alt px-4 text-sm font-black text-text transition hover:border-accent/50"
+                >
+                  网页注册
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenSubscription}
+                  className="h-10 rounded-[8px] border border-border bg-surface-alt px-4 text-sm font-black text-text transition hover:border-accent/50"
+                >
+                  打开账户中心
+                </button>
+              </div>
+            </section>
+
+            {statusText ? (
+              <div className="mt-5 border border-border bg-surface-alt px-4 py-3 text-sm leading-6 text-text-muted">
+                {statusText}
+              </div>
+            ) : null}
+          </div>
         </main>
       </div>
     );
@@ -561,11 +1356,11 @@ export const LicensePage: React.FC = () => {
             <div className="mt-8 grid grid-cols-2 gap-4">
               <GhostTile label="账号" value={accountStateText} />
               <GhostTile label="模型" value={totalModels ? `${totalModels} 个` : '待同步'} />
-              <GhostTile label="余额" value={displayValue(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} />
+              <GhostTile label="余额" value={formatQuotaBalance(subscription?.balance, usageValue(account, ['quota', 'remainQuota', 'remainingQuota']))} />
               <GhostTile label="来源" value="api.heang.top" />
             </div>
             <div className="mt-7 rounded-[22px] border border-border/70 bg-surface-alt/45 p-6">
-              <div className="text-sm font-black text-text">演示版能力</div>
+              <div className="text-sm font-black text-text">登录后可用</div>
               <div className="mt-4 grid grid-cols-3 gap-3">
                 <SoftPill>安装器</SoftPill>
                 <SoftPill>手机控制</SoftPill>
@@ -577,7 +1372,7 @@ export const LicensePage: React.FC = () => {
           <aside className="rounded-[22px] border border-border/70 bg-surface-alt/35 p-5">
             <div className="text-sm font-black text-text">当前状态</div>
             <InfoRow label="账号" value={account?.account || '访客'} />
-            <InfoRow label="订阅" value={displayValue(subscription?.plan, account?.plan || '暂无')} />
+            <InfoRow label="订阅" value={planDisplayName(subscription?.plan || account?.plan)} />
             <InfoRow label="最近同步" value={formatTime(account?.lastOnlineAt)} />
           </aside>
         </div>
@@ -619,7 +1414,6 @@ export const LicensePage: React.FC = () => {
                 <ModeButton
                   active={authMode === 'email'}
                   onClick={() => setAuthMode('email')}
-                  disabled={!authCapabilities.inlineEmailCode}
                   title={authCapabilities.emailReason}
                 >验证码登录</ModeButton>
                 <ModeButton active={authMode === 'password'} onClick={() => setAuthMode('password')}>密码登录</ModeButton>
@@ -803,8 +1597,8 @@ const GhostTile: React.FC<{ label: string; value: string }> = ({ label, value })
   </div>
 );
 
-const MetricTile: React.FC<{ label: string; value: string; accent?: boolean }> = ({ label, value, accent }) => (
-  <div className={['min-w-0 rounded-[8px] border bg-surface-alt/40 p-4', accent ? 'border-accent/45' : 'border-border'].join(' ')}>
+const MetricTile: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <div className="min-w-0 rounded-[8px] border border-border bg-surface-alt/40 p-4">
     <div className="text-xs font-bold text-text-subtle">{label}</div>
     <div className="mt-2 truncate text-[22px] font-black text-text" title={value}>{value}</div>
   </div>

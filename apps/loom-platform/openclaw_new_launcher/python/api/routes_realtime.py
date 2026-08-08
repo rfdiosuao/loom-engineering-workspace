@@ -12,7 +12,7 @@ from fastapi import Request, Response
 from core.stream_tickets import StreamTicketGrant, StreamTicketIssuer
 
 
-_ALLOWED_TOPICS = {"agent", "matrix"}
+_ALLOWED_TOPICS = {"agent", "matrix", "phone_stream"}
 _STREAM_URLS = {
     "agent": "/api/agent/events/stream",
     "matrix": "/api/matrix/events/stream",

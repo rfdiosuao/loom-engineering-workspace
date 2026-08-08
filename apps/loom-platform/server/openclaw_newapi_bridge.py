@@ -10,22 +10,34 @@ OpenAI-compatible gateway.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import decimal
 import http.cookiejar
 import hashlib
 import hmac
+import html
+import ipaddress
 import json
 import os
 import secrets
 import sqlite3
 import smtplib
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import bcrypt
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 try:
     import psycopg2
@@ -41,8 +53,34 @@ NEWAPI_BASE = os.environ.get("OPENCLAW_NEWAPI_BASE", "http://127.0.0.1:3000").rs
 PUBLIC_API_BASE = os.environ.get("OPENCLAW_PUBLIC_API_BASE", "https://api.heang.top/v1").rstrip("/")
 DB_PATH = os.environ.get("OPENCLAW_NEWAPI_DB", "/mnt/data/new-api/one-api.db")
 PG_DSN = os.environ.get("OPENCLAW_NEWAPI_PG_DSN", "").strip()
-BIND_DB_PATH = os.environ.get("OPENCLAW_BIND_DB", "/tmp/openclaw-bind-tickets.db")
+BIND_DB_PATH = os.environ.get(
+    "OPENCLAW_BIND_DB",
+    "/mnt/data/openclaw/openclaw-bridge-state.db",
+)
 BIND_TICKET_TTL_SEC = int(os.environ.get("OPENCLAW_BIND_TICKET_TTL_SEC", "600"))
+BIND_TICKET_SECRET = os.environ.get("OPENCLAW_BIND_TICKET_SECRET", "").strip()
+SUBSCRIPTION_CHECKOUT_SECRET = (
+    os.environ.get("OPENCLAW_SUBSCRIPTION_CHECKOUT_SECRET", "").strip()
+    or BIND_TICKET_SECRET
+    or secrets.token_hex(32)
+)
+SUBSCRIPTION_CHECKOUT_TTL_SEC = max(
+    300,
+    min(int(os.environ.get("OPENCLAW_SUBSCRIPTION_CHECKOUT_TTL_SEC", "1800")), 3600),
+)
+SUBSCRIPTION_PAYMENT_FORM_HOSTS = frozenset(
+    host.strip().lower()
+    for host in os.environ.get("OPENCLAW_SUBSCRIPTION_PAYMENT_FORM_HOSTS", "zpayz.cn").split(",")
+    if host.strip()
+)
+LINUX_COMPANION_APK_PATH = os.environ.get(
+    "OPENCLAW_LINUX_COMPANION_APK_PATH",
+    "/opt/openclaw-newapi-bridge/downloads/LumiLinuxRuntime.apk",
+).strip()
+LINUX_COMPANION_APK_SHA256 = os.environ.get(
+    "OPENCLAW_LINUX_COMPANION_APK_SHA256",
+    "",
+).strip().upper()
 EMAIL_CODE_TTL_SEC = int(os.environ.get("OPENCLAW_EMAIL_CODE_TTL_SEC", "600"))
 EMAIL_CODE_RATE_WINDOW_SEC = int(os.environ.get("OPENCLAW_EMAIL_CODE_RATE_WINDOW_SEC", "900"))
 EMAIL_CODE_RATE_LIMIT = int(os.environ.get("OPENCLAW_EMAIL_CODE_RATE_LIMIT", "5"))
@@ -61,12 +99,140 @@ TEXT_MODEL_PRIORITY = (
     "MiniMax-M2.5",
 )
 DUMMY_PASSWORD_HASH = b"$2b$12$r8bkOL9d2uvfwYy6HLOTfetYMOqQwrlwXkXL774PW/7LFPTy90hju"
+ENTITLEMENT_LEASE_TTL_SEC = int(os.environ.get("OPENCLAW_ENTITLEMENT_LEASE_TTL_SEC", "3600"))
+ENTITLEMENT_OFFLINE_GRACE_SEC = int(os.environ.get("OPENCLAW_ENTITLEMENT_OFFLINE_GRACE_SEC", str(72 * 3600)))
+ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC = max(
+    5,
+    min(
+        int(
+            os.environ.get(
+                "OPENCLAW_ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC",
+                "30",
+            )
+        ),
+        60,
+    ),
+)
+ENTITLEMENT_KEY_ID = os.environ.get("OPENCLAW_ENTITLEMENT_KEY_ID", "openclaw-ed25519-v1")
+TRUSTED_ENTITLEMENT_KEY_ID = "openclaw-ed25519-v1"
+TRUSTED_ENTITLEMENT_PUBLIC_KEY_B64 = "njEIf3io24DAXRYVp37p2gIT5u2KZaWoGvBPD0JlTZ4="
+ENTITLEMENT_LEASE_SCHEMA = "loom.entitlement_lease.v1"
+PHONE_SEAT_LEASE_SCHEMA = "loom.phone_seat_lease.v1"
+MAX_ENTITLEMENT_LEASE_WINDOW_SEC = 8 * 24 * 3600
+ENTITLEMENT_PRIVATE_KEY_B64 = (
+    os.environ.get("OPENCLAW_ENTITLEMENT_PRIVATE_KEY_B64")
+    or os.environ.get("LICENSE_PRIVATE_KEY_B64")
+    or ""
+).strip()
+ENTITLEMENT_PRIVATE_KEY_FILE = (
+    os.environ.get("OPENCLAW_ENTITLEMENT_PRIVATE_KEY_FILE")
+    or os.environ.get("LICENSE_PRIVATE_KEY_FILE")
+    or ""
+).strip()
+LICENSE_ENTITLEMENT_SERVICE_BASE = os.environ.get(
+    "OPENCLAW_LICENSE_ENTITLEMENT_SERVICE_BASE",
+    "https://license.heang.top",
+).strip().rstrip("/")
+LICENSE_ENTITLEMENT_SERVICE_TOKEN = os.environ.get(
+    "OPENCLAW_LICENSE_ENTITLEMENT_SERVICE_TOKEN",
+    "",
+).strip()
+SAFETY_ENTITLEMENT_OPERATIONS = {
+    "diagnostics",
+    "matrix.cancel",
+    "matrix.device.release",
+    "matrix.diagnostics",
+    "matrix.emergency_stop",
+    "matrix.task.cancel",
+    "matrix.task.pause",
+    "matrix.task.stop",
+}
+_ENTITLEMENT_AUTHORIZATION_REFRESHED_AT: dict[str, float] = {}
+_ENTITLEMENT_AUTHORIZATION_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+_ENTITLEMENT_AUTHORIZATION_REFRESH_LOCKS_GUARD = threading.Lock()
+ACTIVATED_PHONE_DEVICE_LIMIT = 1000
+ENTITLEMENT_GROUP_POLICIES: dict[str, dict[str, Any]] = {
+    "default": {
+        "plan": "inactive",
+        "features": [],
+        "limits": {"devices": 0, "concurrentTasks": 0},
+    },
+    "free": {
+        "plan": "inactive",
+        "features": [],
+        "limits": {"devices": 0, "concurrentTasks": 0},
+    },
+    "standard": {
+        "plan": "standard",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 3, "concurrentTasks": 2},
+    },
+    "pro": {
+        "plan": "pro",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 5, "concurrentTasks": 3},
+    },
+    "vip": {
+        "plan": "vip",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 5, "concurrentTasks": 3},
+    },
+    "svip": {
+        "plan": "svip",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 10, "concurrentTasks": 5},
+    },
+    "enterprise": {
+        "plan": "enterprise",
+        "features": [
+            "matrix.devices",
+            "matrix.tasks",
+            "matrix.parallel_tasks",
+            "matrix.diagnostics",
+            "legacy.license.migration",
+        ],
+        "limits": {"devices": 50, "concurrentTasks": 20},
+    },
+}
 
 
 class BridgeUpstreamError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        code: str = "",
+        details: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.code = str(code or "").strip()
+        self.details = dict(details or {})
 
 
 def default_text_model(models: list[str]) -> str:
@@ -198,6 +364,8 @@ def request_json(
         raise BridgeUpstreamError(
             str(payload.get("message") or payload.get("error") or f"HTTP {error.code}"),
             status_code=error.code,
+            code=str(payload.get("code") or ""),
+            details=payload.get("details") if isinstance(payload.get("details"), dict) else None,
         ) from error
     except urllib.error.URLError as error:
         raise BridgeUpstreamError("upstream service unavailable", status_code=502) from error
@@ -238,6 +406,459 @@ def upstream_error_response(error: BridgeUpstreamError, *, authentication: bool 
     else:
         public_status = 502
     return public_status, {"success": False, "error": str(error)}
+
+
+def canonical_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def entitlement_session_binding(session_token: str) -> str:
+    return hashlib.sha256(
+        b"loom-entitlement-session-v1\0" + str(session_token).encode("utf-8")
+    ).hexdigest()
+
+
+def entitlement_policy_for_group(group: str) -> dict[str, Any]:
+    normalized = str(group or "default").strip().lower() or "default"
+    if normalized not in ENTITLEMENT_GROUP_POLICIES:
+        if "svip" in normalized:
+            normalized = "svip"
+        elif "vip" in normalized:
+            normalized = "vip"
+        elif "enterprise" in normalized or "company" in normalized:
+            normalized = "enterprise"
+        elif "pro" in normalized:
+            normalized = "pro"
+        elif "standard" in normalized:
+            normalized = "standard"
+        else:
+            normalized = "default"
+    policy = ENTITLEMENT_GROUP_POLICIES[normalized]
+    return {
+        "group": str(group or "default").strip() or "default",
+        "plan": policy["plan"],
+        "source": "plan_defaults",
+        "features": list(policy["features"]),
+        "limits": dict(policy["limits"]),
+    }
+
+
+def inactive_entitlement_policy(group: str = "default") -> dict[str, Any]:
+    return {
+        "group": str(group or "default").strip() or "default",
+        "plan": "inactive",
+        "source": "authorization_required",
+        "features": [],
+        "limits": {
+            "devices": 0,
+            "concurrentTasks": 0,
+            "unlimitedDevices": False,
+        },
+    }
+
+
+def _strict_positive_int(value: Any, default: int, maximum: int) -> int:
+    if type(value) is not int:
+        return default
+    return max(1, min(value, maximum))
+
+
+def _entitlement_expiry_epoch(value: Any) -> int:
+    if type(value) is int:
+        return max(0, value)
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        if len(text) == 10:
+            parsed = datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return int((parsed + timedelta(days=1)).timestamp()) - 1
+        normalized = text.replace("Z", "+00:00") if text.endswith("Z") else text
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
+    except (OverflowError, TypeError, ValueError):
+        return 0
+
+
+def _invalid_entitlement_service_response(message: str) -> BridgeUpstreamError:
+    return BridgeUpstreamError(
+        message,
+        status_code=502,
+        code="ENTITLEMENT_SERVICE_INVALID_RESPONSE",
+    )
+
+
+def normalize_authorization_entitlement(
+    payload: Any,
+    *,
+    strict_service: bool = False,
+) -> dict[str, Any]:
+    data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+    if strict_service:
+        if not isinstance(data, dict) or not isinstance(data.get("entitlement"), dict):
+            raise _invalid_entitlement_service_response(
+                "授权服务没有返回有效权益。",
+            )
+        entitlement = data["entitlement"]
+    else:
+        entitlement = (
+            data.get("entitlement")
+            if isinstance(data, dict) and isinstance(data.get("entitlement"), dict)
+            else data
+        )
+    if not isinstance(entitlement, dict):
+        if strict_service:
+            raise _invalid_entitlement_service_response(
+                "授权服务没有返回有效权益。",
+            )
+        raise BridgeUpstreamError("授权服务没有返回有效权益。", status_code=502)
+
+    raw_limits = entitlement.get("limits") if isinstance(entitlement.get("limits"), dict) else {}
+    if strict_service:
+        raw_features = entitlement.get("features")
+        expires_value = entitlement.get("expiresAt")
+        valid = (
+            entitlement.get("source") == "authorization_code"
+            and isinstance(entitlement.get("plan"), str)
+            and bool(str(entitlement.get("plan") or "").strip())
+            and isinstance(raw_features, list)
+            and bool(raw_features)
+            and all(isinstance(feature, str) and feature.strip() for feature in raw_features)
+            and isinstance(entitlement.get("limits"), dict)
+            and type(raw_limits.get("devices")) is int
+            and int(raw_limits["devices"]) > 0
+            and type(raw_limits.get("concurrentTasks")) is int
+            and int(raw_limits["concurrentTasks"]) > 0
+            and raw_limits.get("unlimitedDevices") is True
+            and "expiresAt" in entitlement
+            and _entitlement_expiry_epoch(expires_value) > 0
+            and isinstance(entitlement.get("codeLabel"), str)
+            and bool(str(entitlement.get("codeLabel") or "").strip())
+        )
+        if not valid:
+            raise _invalid_entitlement_service_response(
+                "授权服务返回的权益字段不完整或类型无效。",
+            )
+
+    plan = str(entitlement.get("plan") or "standard").strip().lower() or "standard"
+    defaults = entitlement_policy_for_group(plan)
+    allowed_features = {
+        feature
+        for policy in ENTITLEMENT_GROUP_POLICIES.values()
+        for feature in policy.get("features", [])
+    }
+    raw_features = entitlement.get("features")
+    features = (
+        [
+            str(feature).strip()
+            for feature in raw_features
+            if str(feature).strip() in allowed_features
+        ]
+        if isinstance(raw_features, list)
+        else list(defaults["features"])
+    )
+    if "matrix.devices" not in features:
+        features.append("matrix.devices")
+    if "matrix.tasks" not in features:
+        features.append("matrix.tasks")
+    if "matrix.diagnostics" not in features:
+        features.append("matrix.diagnostics")
+
+    default_limits = defaults["limits"]
+    devices = ACTIVATED_PHONE_DEVICE_LIMIT
+    concurrent_tasks = _strict_positive_int(
+        raw_limits.get("concurrentTasks"),
+        int(default_limits.get("concurrentTasks") or 1),
+        100,
+    )
+    concurrent_tasks = min(concurrent_tasks, devices)
+    expires_at = _entitlement_expiry_epoch(
+        entitlement.get("expiresAt") or entitlement.get("expires")
+    )
+    if expires_at and expires_at <= int(time.time()):
+        raise BridgeUpstreamError(
+            "授权码已过期。",
+            status_code=403,
+            code="LICENSE_EXPIRED",
+        )
+    return {
+        "group": "",
+        "plan": plan,
+        "source": "authorization_code",
+        "features": sorted(set(features)),
+        "limits": {
+            "devices": devices,
+            "concurrentTasks": concurrent_tasks,
+            "unlimitedDevices": True,
+        },
+        "expiresAt": expires_at,
+        "codeLabel": str(
+            entitlement.get("codeLabel")
+            or entitlement.get("activationCodeLabel")
+            or ""
+        ).strip()[:80],
+    }
+
+
+def _license_service_json(path: str, body: dict[str, Any]) -> dict[str, Any]:
+    if not LICENSE_ENTITLEMENT_SERVICE_TOKEN:
+        raise BridgeUpstreamError(
+            "授权兑换服务尚未配置。",
+            status_code=503,
+        )
+    parsed_base = urllib.parse.urlparse(LICENSE_ENTITLEMENT_SERVICE_BASE)
+    if parsed_base.scheme != "https" or not parsed_base.hostname:
+        raise BridgeUpstreamError(
+            "授权服务必须使用 HTTPS。",
+            status_code=503,
+            code="ENTITLEMENT_SERVICE_INSECURE",
+        )
+    request = urllib.request.Request(
+        f"{LICENSE_ENTITLEMENT_SERVICE_BASE}{path}",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {LICENSE_ENTITLEMENT_SERVICE_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "LOOM-Entitlement-Bridge/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        try:
+            payload = json.loads(error.read().decode("utf-8"))
+            message = str(payload.get("message") or payload.get("error") or "").strip()
+            code = str(payload.get("code") or "").strip()
+            details = payload.get("details") if isinstance(payload.get("details"), dict) else None
+        except Exception:
+            message = ""
+            code = ""
+            details = None
+        raise BridgeUpstreamError(
+            message or f"授权服务返回 HTTP {error.code}",
+            status_code=error.code,
+            code=code,
+            details=details,
+        ) from error
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise _invalid_entitlement_service_response(
+            "授权服务响应不是有效 JSON。",
+        ) from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise BridgeUpstreamError(
+            "暂时无法连接授权服务，请稍后重试。",
+            status_code=503,
+        ) from error
+    if not isinstance(payload, dict):
+        raise BridgeUpstreamError("授权服务响应格式无效。", status_code=502)
+    if payload.get("ok") is False or payload.get("success") is False:
+        raise BridgeUpstreamError(
+            str(payload.get("message") or payload.get("error") or "授权兑换失败。"),
+            status_code=int(payload.get("status") or 400),
+            code=str(payload.get("code") or ""),
+            details=payload.get("details") if isinstance(payload.get("details"), dict) else None,
+        )
+    if payload.get("ok") is not True and payload.get("success") is not True:
+        raise _invalid_entitlement_service_response(
+            "授权服务响应缺少明确成功标记。",
+        )
+    return payload
+
+
+def redeem_authorization_code_with_license_server(
+    code: str,
+    *,
+    account_id: str,
+) -> dict[str, Any]:
+    payload = _license_service_json(
+        "/api/service/account-entitlements/redeem",
+        {"code": code, "accountId": account_id},
+    )
+    return normalize_authorization_entitlement(payload, strict_service=True)
+
+
+def current_authorization_entitlement_from_license_server(
+    account_id: str,
+) -> dict[str, Any] | None:
+    payload = _license_service_json(
+        "/api/service/account-entitlements/current",
+        {"accountId": account_id},
+    )
+    return normalize_authorization_entitlement(payload, strict_service=True)
+
+
+def migrate_legacy_authorization_with_license_server(
+    legacy_license: dict[str, Any],
+    *,
+    account_id: str,
+) -> dict[str, Any]:
+    payload = _license_service_json(
+        "/api/service/account-entitlements/migrate-legacy",
+        {
+            "legacyLicense": legacy_license,
+            "accountId": account_id,
+        },
+    )
+    return normalize_authorization_entitlement(payload, strict_service=True)
+
+
+def _authorization_refresh_lock(account_id: str) -> threading.Lock:
+    account = str(account_id)
+    with _ENTITLEMENT_AUTHORIZATION_REFRESH_LOCKS_GUARD:
+        return _ENTITLEMENT_AUTHORIZATION_REFRESH_LOCKS.setdefault(
+            account,
+            threading.Lock(),
+        )
+
+
+def refresh_account_entitlement_authorization(account_id: str) -> None:
+    if not LICENSE_ENTITLEMENT_SERVICE_TOKEN:
+        return
+    account = str(account_id)
+    refresh_lock = _authorization_refresh_lock(account)
+    with refresh_lock:
+        now = time.monotonic()
+        last_refreshed = _ENTITLEMENT_AUTHORIZATION_REFRESHED_AT.get(account, 0.0)
+        if (
+            last_refreshed
+            and now - last_refreshed
+            < float(ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC)
+        ):
+            return
+        try:
+            entitlement = current_authorization_entitlement_from_license_server(
+                account
+            )
+        except BridgeUpstreamError as error:
+            if error.code in {
+                "ACCOUNT_ENTITLEMENT_NOT_FOUND",
+                "ACCOUNT_ENTITLEMENT_REVOKED",
+                "LICENSE_DISABLED",
+                "LICENSE_EXPIRED",
+                "LICENSE_INVALID",
+            }:
+                persist_account_entitlement_grant(
+                    account,
+                    None,
+                    action=f"operation_refresh_{error.code.lower()}",
+                )
+            _ENTITLEMENT_AUTHORIZATION_REFRESHED_AT[account] = time.monotonic()
+            return
+        persist_account_entitlement_grant(
+            account,
+            entitlement,
+            action="operation_refresh",
+        )
+        _ENTITLEMENT_AUTHORIZATION_REFRESHED_AT[account] = time.monotonic()
+
+
+def entitlement_error(
+    code: str,
+    message: str,
+    action: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "code": code,
+        "message": message,
+        "error": message,
+        "action": action,
+        "details": details or {},
+    }
+
+
+def _private_key_from_bytes(raw: bytes) -> Ed25519PrivateKey:
+    # A raw Ed25519 private key is arbitrary binary data. Its first or last
+    # byte may legitimately look like ASCII whitespace, so never strip a
+    # correctly sized raw key before parsing it.
+    if len(raw) == 32:
+        return Ed25519PrivateKey.from_private_bytes(raw)
+    stripped = raw.strip()
+    if b"-----BEGIN" in stripped:
+        loaded = serialization.load_pem_private_key(stripped, password=None)
+    else:
+        try:
+            decoded = base64.b64decode(stripped, validate=True)
+        except (ValueError, binascii.Error):
+            decoded = b""
+        if len(decoded) == 32:
+            return Ed25519PrivateKey.from_private_bytes(decoded)
+        loaded = serialization.load_der_private_key(stripped, password=None)
+    if not isinstance(loaded, Ed25519PrivateKey):
+        raise ValueError("entitlement signing key must be Ed25519")
+    return loaded
+
+
+def _validate_entitlement_signing_identity(
+    private_key: Ed25519PrivateKey,
+) -> None:
+    if ENTITLEMENT_KEY_ID != TRUSTED_ENTITLEMENT_KEY_ID:
+        raise RuntimeError(
+            "entitlement key id does not match the LOOM client trust anchor"
+        )
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    actual_public_key = base64.b64encode(public_key).decode("ascii")
+    if not hmac.compare_digest(
+        actual_public_key,
+        TRUSTED_ENTITLEMENT_PUBLIC_KEY_B64,
+    ):
+        raise RuntimeError(
+            "entitlement signing key does not match the LOOM client trust anchor"
+        )
+
+
+def entitlement_private_key() -> Ed25519PrivateKey:
+    if ENTITLEMENT_PRIVATE_KEY_B64:
+        private_key = _private_key_from_bytes(
+            base64.b64decode(ENTITLEMENT_PRIVATE_KEY_B64)
+        )
+    elif ENTITLEMENT_PRIVATE_KEY_FILE:
+        with open(ENTITLEMENT_PRIVATE_KEY_FILE, "rb") as handle:
+            private_key = _private_key_from_bytes(handle.read())
+    else:
+        raise RuntimeError("entitlement signing key is not configured")
+    _validate_entitlement_signing_identity(private_key)
+    return private_key
+
+
+def entitlement_public_key_b64() -> str:
+    public_key = entitlement_private_key().public_key()
+    raw = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return base64.b64encode(raw).decode("ascii")
+
+
+def entitlement_key_payload() -> dict[str, Any]:
+    return {"keyId": ENTITLEMENT_KEY_ID, "publicKey": entitlement_public_key_b64()}
+
+
+def sign_entitlement_payload(payload: dict[str, Any]) -> str:
+    signed = dict(payload)
+    signed.pop("signature", None)
+    signature = entitlement_private_key().sign(canonical_json(signed).encode("utf-8"))
+    return base64.b64encode(signature).decode("ascii")
+
+
+def lease_identity_from_body(body: dict[str, Any]) -> tuple[str, str]:
+    install_id = str(body.get("installId") or body.get("install_id") or "").strip()
+    device_id = str(
+        body.get("hostDeviceId")
+        or body.get("deviceId")
+        or body.get("device_id")
+        or ""
+    ).strip()
+    return install_id, device_id
 
 
 def _newapi_fetchall(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -448,6 +1069,64 @@ def api_token_owner(authorization: str) -> dict[str, Any] | None:
     return row
 
 
+def handle_account_subscription(authorization: str) -> tuple[int, dict[str, Any]]:
+    owner = api_token_owner(authorization)
+    if not owner:
+        return 401, {
+            "success": False,
+            "error": "valid API token is required",
+            "code": "subscription_auth_required",
+        }
+    user_id = str(owner.get("user_id") or "").strip()
+    user = _newapi_fetchone(
+        """
+        select id, "group", quota, used_quota, request_count, aff_code
+        from users
+        where id = ? and deleted_at is null
+        """,
+        (user_id,),
+    )
+    if not user:
+        return 404, {
+            "success": False,
+            "error": "account not found",
+            "code": "subscription_account_not_found",
+        }
+    group = str(owner.get("user_group") or user.get("group") or "default").strip() or "default"
+    entitlement = effective_entitlement_policy(user_id, group)
+    entitlement_active = entitlement.get("source") == "authorization_code"
+    plan = str(entitlement.get("plan") or group) if entitlement_active else group
+    expires_at = entitlement.get("expiresAt") if entitlement_active else None
+    invite_code = str(
+        user.get("aff_code")
+        or user.get("invite_code")
+        or user.get("invitation_code")
+        or ""
+    ).strip()
+    parsed_public_base = urllib.parse.urlparse(PUBLIC_API_BASE)
+    public_origin = (
+        f"{parsed_public_base.scheme}://{parsed_public_base.netloc}"
+        if parsed_public_base.scheme and parsed_public_base.netloc
+        else PUBLIC_API_BASE.rstrip("/").removesuffix("/v1")
+    )
+    return 200, {
+        "success": True,
+        "data": {
+            "subscription": {
+                "plan": plan,
+                "balance": user.get("quota"),
+                "expiresAt": expires_at,
+                "inviteCode": invite_code,
+                "purchaseUrl": f"{public_origin.rstrip('/')}/wallet",
+            },
+            "usage": {
+                "usedQuota": user.get("used_quota"),
+                "requestCount": user.get("request_count"),
+            },
+        },
+    }
+
+
 def create_token(opener: urllib.request.OpenerDirector, user_id: str, group: str) -> dict[str, Any] | None:
     token_name = f"OpenClaw Launcher {int(time.time())}-{secrets.token_hex(3)}"
     headers = {"New-Api-User": user_id}
@@ -549,6 +1228,7 @@ def handle_launcher_token(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     username = str(body.get("username") or body.get("email") or "").strip()
     password = str(body.get("password") or "")
     preferred_name = str(body.get("tokenName") or "").strip()
+    install_id, device_id = lease_identity_from_body(body)
     if not username or not password:
         return 400, {"success": False, "error": "username and password are required"}
     if not reserve_auth_attempt(username, "password"):
@@ -572,12 +1252,16 @@ def handle_launcher_token(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         account=str(user.get("email") or user.get("username") or username),
         group=str(user.get("group") or "default"),
         preferred_name=preferred_name,
+        install_id=install_id,
+        device_id=device_id,
     )
 
 
 def handle_ensure_launcher_token(
-    _body: dict[str, Any],
+    body: dict[str, Any],
     authorization: str = "",
+    *,
+    entitlement_source_verified: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     owner = api_token_owner(authorization)
     if not owner:
@@ -595,7 +1279,15 @@ def handle_ensure_launcher_token(
         return 401, {"success": False, "error": "API token owner is unavailable"}
     account = str(owner.get("email") or owner.get("username") or user_id)
     group = str(owner.get("user_group") or "default")
-    return build_launcher_payload(user_id=user_id, account=account, group=group)
+    install_id, device_id = lease_identity_from_body(body)
+    return build_launcher_payload(
+        user_id=user_id,
+        account=account,
+        group=group,
+        install_id=install_id,
+        device_id=device_id,
+        entitlement_source_verified=entitlement_source_verified,
+    )
 
 
 def build_launcher_payload(
@@ -605,6 +1297,9 @@ def build_launcher_payload(
     group: str = "default",
     preferred_name: str = "",
     session_cookie: str = "",
+    install_id: str = "",
+    device_id: str = "",
+    entitlement_source_verified: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     token = select_token(user_id, preferred_name, group)
     expected_group = str(group or "default").strip()
@@ -621,38 +1316,59 @@ def build_launcher_payload(
     models = fetch_models(key)
     if not models:
         return 503, {"success": False, "error": "model catalog is temporarily unavailable"}
-    return 200, {
+    entitlement = effective_entitlement_policy(str(user_id), group)
+    lease_payload: dict[str, Any] = {
         "success": True,
-        "data": {
-            "userId": user_id,
-            "account": account,
-            "group": group or "default",
-            "sessionCookie": session_cookie,
-            "key": key,
+        "entitlement": entitlement,
+    }
+    if install_id or device_id:
+        entitlement_status, lease_payload = issue_entitlement_lease(
+            account_id=str(user_id),
+            group=group,
+            install_id=install_id,
+            device_id=device_id,
+            session_token=key,
+            source_verified=entitlement_source_verified,
+        )
+        if (
+            entitlement_status != 200
+            and str(lease_payload.get("code") or "") != "authorization_required"
+        ):
+            return entitlement_status, lease_payload
+    data = {
+        "userId": user_id,
+        "account": account,
+        "group": group or "default",
+        "sessionCookie": session_cookie,
+        "key": key,
+        "apiKey": key,
+        "apiToken": key,
+        "tokenMasked": mask_secret(key),
+        "tokenId": token.get("id"),
+        "tokenName": token.get("name"),
+        "tokenKind": "launcher",
+        "permissionMode": token.get("permissionMode") or "default",
+        "tokenGroup": token.get("tokenGroup") or "",
+        "source": token.get("source") or source,
+        "remainQuota": token.get("remainQuota"),
+        "unlimitedQuota": token.get("unlimitedQuota"),
+        "modelLimitsEnabled": token.get("modelLimitsEnabled"),
+        "modelLimits": token.get("modelLimits"),
+        "models": models,
+        "api": {
+            "token": key,
             "apiKey": key,
-            "apiToken": key,
-            "tokenMasked": mask_secret(key),
-            "tokenId": token.get("id"),
-            "tokenName": token.get("name"),
-            "tokenKind": "launcher",
-            "permissionMode": token.get("permissionMode") or "default",
-            "tokenGroup": token.get("tokenGroup") or "",
-            "source": token.get("source") or source,
-            "remainQuota": token.get("remainQuota"),
-            "unlimitedQuota": token.get("unlimitedQuota"),
-            "modelLimitsEnabled": token.get("modelLimitsEnabled"),
-            "modelLimits": token.get("modelLimits"),
-            "models": models,
-            "api": {
-                "token": key,
-                "apiKey": key,
-                "baseUrl": PUBLIC_API_BASE,
-            },
-            "defaults": {
-                "textModel": default_text_model(models),
-            },
+            "baseUrl": PUBLIC_API_BASE,
+        },
+        "entitlement": lease_payload.get("entitlement") or entitlement,
+        "defaults": {
+            "textModel": default_text_model(models),
         },
     }
+    if "entitlementLease" in lease_payload:
+        data["entitlementLease"] = lease_payload["entitlementLease"]
+        data["entitlementKey"] = lease_payload["entitlementKey"]
+    return 200, {"success": True, "data": data}
 
 
 def handle_email_code_register(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -719,11 +1435,14 @@ def handle_email_code_register(body: dict[str, Any]) -> tuple[int, dict[str, Any
         return 500, {"success": False, "error": "registration succeeded but the account was not found"}
     user_id = candidate_user_id(login_payload) or str(user.get("id") or "")
     group = user_group(login_payload) or str(user.get("group") or "default")
+    install_id, device_id = lease_identity_from_body(body)
     status, payload = build_launcher_payload(
         user_id=user_id,
         account=email,
         group=group,
         session_cookie=cookie_header(cookie_jar),
+        install_id=install_id,
+        device_id=device_id,
     )
     if status != 200:
         return status, payload
@@ -1092,10 +1811,13 @@ def handle_email_code_login(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     if int(user.get("status") or 0) != 1:
         return 403, {"success": False, "error": "账号当前不可用，请联系管理员"}
     account = str(user.get("email") or user.get("username") or email)
+    install_id, device_id = lease_identity_from_body(body)
     return build_launcher_payload(
         user_id=str(user["id"]),
         account=account,
         group=str(user.get("group") or "default"),
+        install_id=install_id,
+        device_id=device_id,
     )
 
 
@@ -1109,7 +1831,7 @@ def _bind_connection() -> sqlite3.Connection:
         os.makedirs(directory, mode=0o700, exist_ok=True)
     connection = sqlite3.connect(BIND_DB_PATH)
     connection.row_factory = sqlite3.Row
-    connection.execute(
+    connection.executescript(
         """
         create table if not exists bind_tickets (
             ticket_hash text primary key,
@@ -1117,7 +1839,74 @@ def _bind_connection() -> sqlite3.Connection:
             created_at integer not null,
             expires_at integer not null,
             claimed_at integer
-        )
+        );
+        create table if not exists entitlement_accounts (
+            account_id text primary key,
+            entitlement_version integer not null default 1,
+            updated_at integer not null,
+            revoked_at integer not null default 0
+        );
+        create table if not exists entitlement_devices (
+            account_id text not null,
+            install_id text not null,
+            device_id text not null,
+            first_seen_at integer not null,
+            last_seen_at integer not null,
+            entitlement_version integer not null,
+            revoked_at integer not null default 0,
+            primary key(account_id, install_id, device_id)
+        );
+        create table if not exists entitlement_phone_seats (
+            account_id text not null,
+            phone_device_id text not null,
+            first_claimed_at integer not null,
+            last_seen_at integer not null,
+            last_host_device_id text not null,
+            entitlement_version integer not null,
+            released_at integer not null default 0,
+            primary key(account_id, phone_device_id)
+        );
+        create table if not exists entitlement_account_grants (
+            account_id text primary key,
+            plan text not null,
+            features_json text not null,
+            limits_json text not null,
+            expires_at integer not null default 0,
+            source text not null,
+            code_label text not null default '',
+            updated_at integer not null,
+            revoked_at integer not null default 0
+        );
+        create table if not exists entitlement_audit (
+            id integer primary key autoincrement,
+            account_id text not null,
+            install_id text,
+            device_id text,
+            action text not null,
+            code text not null,
+            details_json text not null,
+            created_at integer not null
+        );
+        create table if not exists subscription_checkout_requests (
+            account_id text not null,
+            request_id text not null,
+            plan_id integer not null,
+            payment_method text not null,
+            status text not null,
+            order_id text not null default '',
+            order_json text not null default '{}',
+            checkout_token_hash text not null default '',
+            checkout_payload text not null default '{}',
+            created_at integer not null,
+            expires_at integer not null,
+            primary key(account_id, request_id)
+        );
+        create unique index if not exists subscription_checkout_order_idx
+            on subscription_checkout_requests(order_id)
+            where order_id <> '';
+        create unique index if not exists subscription_checkout_token_idx
+            on subscription_checkout_requests(checkout_token_hash)
+            where checkout_token_hash <> '';
         """
     )
     try:
@@ -1125,6 +1914,968 @@ def _bind_connection() -> sqlite3.Connection:
     except OSError:
         pass
     return connection
+
+
+def account_entitlement_policy(
+    connection: sqlite3.Connection,
+    account_id: str,
+    group: str,
+    now: int,
+) -> dict[str, Any]:
+    row = connection.execute(
+        """
+        select plan, features_json, limits_json, expires_at, source, code_label, revoked_at
+        from entitlement_account_grants
+        where account_id = ?
+        """,
+        (account_id,),
+    ).fetchone()
+    if not row or int(row["revoked_at"] or 0):
+        return inactive_entitlement_policy(group)
+    expires_at = int(row["expires_at"] or 0)
+    if expires_at and expires_at <= now:
+        return inactive_entitlement_policy(group)
+    try:
+        features = json.loads(row["features_json"] or "[]")
+        limits = json.loads(row["limits_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return inactive_entitlement_policy(group)
+    if not isinstance(features, list) or not isinstance(limits, dict):
+        return inactive_entitlement_policy(group)
+    try:
+        policy = normalize_authorization_entitlement(
+            {
+                "entitlement": {
+                    "source": row["source"],
+                    "plan": row["plan"],
+                    "features": features,
+                    "limits": limits,
+                    "expiresAt": expires_at,
+                    "codeLabel": row["code_label"],
+                },
+            },
+            strict_service=True,
+        )
+    except BridgeUpstreamError:
+        return inactive_entitlement_policy(group)
+    policy["group"] = str(group or "default").strip() or "default"
+    return policy
+
+
+def effective_entitlement_policy(
+    account_id: str,
+    group: str = "default",
+) -> dict[str, Any]:
+    connection = _bind_connection()
+    try:
+        return account_entitlement_policy(
+            connection,
+            str(account_id),
+            group,
+            int(time.time()),
+        )
+    finally:
+        connection.close()
+
+
+def persist_account_entitlement_grant(
+    account_id: str,
+    entitlement: dict[str, Any] | None,
+    *,
+    action: str,
+) -> int:
+    account = str(account_id)
+    now = int(time.time())
+    connection = _bind_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        version = ensure_entitlement_account(connection, account, now)
+        account_row = connection.execute(
+            "select revoked_at from entitlement_accounts where account_id = ?",
+            (account,),
+        ).fetchone()
+        account_was_revoked = bool(
+            account_row and int(account_row["revoked_at"] or 0)
+        )
+        previous = connection.execute(
+            """
+            select plan, features_json, limits_json, expires_at, source, code_label, revoked_at
+            from entitlement_account_grants
+            where account_id = ?
+            """,
+            (account,),
+        ).fetchone()
+        if entitlement is None:
+            next_values = None
+        else:
+            normalized = normalize_authorization_entitlement(entitlement)
+            next_values = (
+                normalized["plan"],
+                json.dumps(normalized["features"], ensure_ascii=False, sort_keys=True),
+                json.dumps(normalized["limits"], ensure_ascii=False, sort_keys=True),
+                int(normalized.get("expiresAt") or 0),
+                "authorization_code",
+                str(normalized.get("codeLabel") or ""),
+                0,
+            )
+        previous_values = (
+            tuple(previous)
+            if previous is not None
+            else None
+        )
+        changed = previous_values != next_values
+        if entitlement is not None and account_was_revoked:
+            changed = True
+        if entitlement is None:
+            if previous is not None and not int(previous["revoked_at"] or 0):
+                connection.execute(
+                    """
+                    update entitlement_account_grants
+                    set revoked_at = ?, updated_at = ?
+                    where account_id = ?
+                    """,
+                    (now, now, account),
+                )
+            else:
+                changed = False
+        else:
+            connection.execute(
+                """
+                insert into entitlement_account_grants(
+                    account_id, plan, features_json, limits_json, expires_at,
+                    source, code_label, updated_at, revoked_at
+                )
+                values(?, ?, ?, ?, ?, ?, ?, ?, 0)
+                on conflict(account_id) do update set
+                    plan = excluded.plan,
+                    features_json = excluded.features_json,
+                    limits_json = excluded.limits_json,
+                    expires_at = excluded.expires_at,
+                    source = excluded.source,
+                    code_label = excluded.code_label,
+                    updated_at = excluded.updated_at,
+                    revoked_at = 0
+                """,
+                (account, *next_values[:-1], now),
+            )
+        if changed:
+            version += 1
+            connection.execute(
+                """
+                update entitlement_accounts
+                set entitlement_version = ?, updated_at = ?, revoked_at = 0
+                where account_id = ?
+                """,
+                (version, now, account),
+            )
+        record_entitlement_audit(
+            connection,
+            account_id=account,
+            action=action,
+            code="ok",
+            details={
+                "plan": str(entitlement.get("plan") or "inactive") if entitlement else "inactive",
+                "entitlementVersion": version,
+                "changed": changed,
+            },
+            now=now,
+        )
+        connection.commit()
+        return version
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def ensure_entitlement_account(connection: sqlite3.Connection, account_id: str, now: int) -> int:
+    row = connection.execute(
+        "select entitlement_version from entitlement_accounts where account_id = ?",
+        (account_id,),
+    ).fetchone()
+    if row:
+        return int(row["entitlement_version"] or 1)
+    connection.execute(
+        """
+        insert into entitlement_accounts(account_id, entitlement_version, updated_at, revoked_at)
+        values(?, 1, ?, 0)
+        """,
+        (account_id, now),
+    )
+    return 1
+
+
+def record_entitlement_audit(
+    connection: sqlite3.Connection,
+    *,
+    account_id: str,
+    install_id: str = "",
+    device_id: str = "",
+    action: str,
+    code: str,
+    details: dict[str, Any] | None = None,
+    now: int | None = None,
+) -> None:
+    connection.execute(
+        """
+        insert into entitlement_audit(account_id, install_id, device_id, action, code, details_json, created_at)
+        values(?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account_id,
+            install_id,
+            device_id,
+            action,
+            code,
+            json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
+            int(now or time.time()),
+        ),
+    )
+
+
+def entitlement_audit_events(account_id: str) -> list[dict[str, Any]]:
+    connection = _bind_connection()
+    try:
+        rows = connection.execute(
+            """
+            select account_id, install_id, device_id, action, code, details_json, created_at
+            from entitlement_audit
+            where account_id = ?
+            order by id
+            """,
+            (str(account_id),),
+        ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["details"] = json.loads(item.pop("details_json") or "{}")
+            except json.JSONDecodeError:
+                item["details"] = {}
+            events.append(item)
+        return events
+    finally:
+        connection.close()
+
+
+def signed_entitlement_lease(
+    *,
+    account_id: str,
+    session_token: str,
+    install_id: str,
+    device_id: str,
+    policy: dict[str, Any],
+    entitlement_version: int,
+    now: int,
+) -> dict[str, Any]:
+    grant_expires_at = _entitlement_expiry_epoch(policy.get("expiresAt"))
+    expires_at = now + int(ENTITLEMENT_LEASE_TTL_SEC)
+    if grant_expires_at:
+        expires_at = min(expires_at, grant_expires_at)
+    offline_grace_until = expires_at + int(ENTITLEMENT_OFFLINE_GRACE_SEC)
+    if grant_expires_at:
+        offline_grace_until = min(offline_grace_until, grant_expires_at)
+    lease = {
+        "schema": "loom.entitlement_lease.v1",
+        "accountId": account_id,
+        "sessionBinding": entitlement_session_binding(session_token),
+        "installId": install_id,
+        "deviceId": device_id,
+        "hostDeviceId": device_id,
+        "plan": str(policy.get("plan") or "activated"),
+        "source": str(policy.get("source") or "authorization_code"),
+        "features": list(policy["features"]),
+        "limits": dict(policy["limits"]),
+        "issuedAt": now,
+        "expiresAt": expires_at,
+        "offlineGraceUntil": offline_grace_until,
+        "entitlementVersion": int(entitlement_version),
+        "keyId": ENTITLEMENT_KEY_ID,
+    }
+    lease["signature"] = sign_entitlement_payload(lease)
+    return lease
+
+
+def issue_entitlement_lease(
+    *,
+    account_id: str,
+    group: str,
+    install_id: str,
+    device_id: str,
+    session_token: str,
+    source_verified: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    if not install_id or not device_id or not session_token:
+        return 400, entitlement_error(
+            "device_identity_required",
+            "矩阵授权需要完整的设备身份和账号会话，请升级 LOOM 后重新登录。",
+            "relogin_with_device_identity",
+            {
+                "accountId": account_id,
+                "hasInstallId": bool(install_id),
+                "hasDeviceId": bool(device_id),
+                "hasSessionToken": bool(session_token),
+            },
+        )
+
+    if not source_verified:
+        cached_policy = effective_entitlement_policy(account_id, group)
+        cached_paid = cached_policy.get("source") == "authorization_code"
+        if not LICENSE_ENTITLEMENT_SERVICE_TOKEN:
+            if cached_paid:
+                return 503, entitlement_error(
+                    "authorization_service_unavailable",
+                    "授权服务尚未配置，不能签发新的付费矩阵权益。",
+                    "contact_support",
+                    {"offlineLeasePreserved": True},
+                )
+        else:
+            try:
+                live_entitlement = (
+                    current_authorization_entitlement_from_license_server(account_id)
+                )
+                persist_account_entitlement_grant(
+                    account_id,
+                    live_entitlement,
+                    action="sync_before_issue_lease",
+                )
+            except BridgeUpstreamError as error:
+                permanent_codes = {
+                    "ACCOUNT_ENTITLEMENT_NOT_FOUND",
+                    "ACCOUNT_ENTITLEMENT_REVOKED",
+                    "LICENSE_DISABLED",
+                    "LICENSE_EXPIRED",
+                    "LICENSE_INVALID",
+                }
+                if error.code in permanent_codes:
+                    persist_account_entitlement_grant(
+                        account_id,
+                        None,
+                        action=f"sync_before_issue_lease_{error.code.lower()}",
+                    )
+                elif cached_paid:
+                    return 503, entitlement_error(
+                        "authorization_service_unavailable",
+                        "授权服务暂时不可用，不能签发新的付费矩阵权益。",
+                        "retry_later",
+                        {
+                            "upstreamCode": error.code or "service_unavailable",
+                            "offlineLeasePreserved": True,
+                        },
+                    )
+
+    now = int(time.time())
+    try:
+        key_payload = entitlement_key_payload()
+    except Exception:
+        return 503, entitlement_error(
+            "entitlement_signing_unavailable",
+            "服务器权益签名密钥未配置，暂时无法签发矩阵授权。",
+            "contact_support",
+            {"accountId": account_id},
+        )
+
+    connection = _bind_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        policy = account_entitlement_policy(connection, account_id, group, now)
+        version = ensure_entitlement_account(connection, account_id, now)
+        if policy.get("source") != "authorization_code":
+            record_entitlement_audit(
+                connection,
+                account_id=account_id,
+                install_id=install_id,
+                device_id=device_id,
+                action="issue_lease",
+                code="authorization_required",
+                details={"group": policy["group"]},
+                now=now,
+            )
+            connection.commit()
+            payload = entitlement_error(
+                "authorization_required",
+                "当前账号尚未绑定有效授权码，手机连接和矩阵能力暂不可用。",
+                "bind_authorization_code",
+                {"accountId": account_id},
+            )
+            payload["entitlement"] = policy
+            return 403, payload
+        connection.execute(
+            """
+            insert into entitlement_devices(
+                account_id, install_id, device_id, first_seen_at, last_seen_at,
+                entitlement_version, revoked_at
+            )
+            values(?, ?, ?, ?, ?, ?, 0)
+            on conflict(account_id, install_id, device_id) do update set
+                last_seen_at = excluded.last_seen_at,
+                entitlement_version = excluded.entitlement_version,
+                revoked_at = 0
+            """,
+            (account_id, install_id, device_id, now, now, version),
+        )
+        lease = signed_entitlement_lease(
+            account_id=account_id,
+            session_token=session_token,
+            install_id=install_id,
+            device_id=device_id,
+            policy=policy,
+            entitlement_version=version,
+            now=now,
+        )
+        record_entitlement_audit(
+            connection,
+            account_id=account_id,
+            install_id=install_id,
+            device_id=device_id,
+            action="issue_lease",
+            code="ok",
+            details={
+                "group": policy["group"],
+                "plan": policy["plan"],
+                "limits": policy["limits"],
+                "entitlementVersion": version,
+            },
+            now=now,
+        )
+        connection.commit()
+        return 200, {
+            "success": True,
+            "entitlement": policy,
+            "entitlementLease": lease,
+            "entitlementKey": key_payload,
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def revoke_account_entitlements(account_id: str, *, reason: str = "") -> int:
+    now = int(time.time())
+    account = str(account_id)
+    connection = _bind_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        version = ensure_entitlement_account(connection, account, now) + 1
+        connection.execute(
+            """
+            update entitlement_accounts
+            set entitlement_version = ?, updated_at = ?, revoked_at = ?
+            where account_id = ?
+            """,
+            (version, now, now, account),
+        )
+        connection.execute(
+            "update entitlement_devices set revoked_at = ? where account_id = ? and revoked_at = 0",
+            (now, account),
+        )
+        record_entitlement_audit(
+            connection,
+            account_id=account,
+            action="revoke_entitlements",
+            code="ok",
+            details={"reason": reason, "entitlementVersion": version},
+            now=now,
+        )
+        connection.commit()
+        return version
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def verify_entitlement_lease(lease: Any) -> tuple[int, dict[str, Any]]:
+    if not isinstance(lease, dict):
+        return 401, entitlement_error(
+            "entitlement_required",
+            "缺少有效的账号权益租约，请重新登录。",
+            "relogin",
+        )
+    required = {
+        "schema",
+        "accountId",
+        "sessionBinding",
+        "installId",
+        "deviceId",
+        "hostDeviceId",
+        "features",
+        "limits",
+        "issuedAt",
+        "expiresAt",
+        "offlineGraceUntil",
+        "entitlementVersion",
+        "keyId",
+        "signature",
+    }
+    missing = sorted(key for key in required if key not in lease)
+    if missing:
+        return 401, entitlement_error(
+            "lease_malformed",
+            "账号权益租约字段不完整，请重新登录。",
+            "relogin",
+            {"missing": missing},
+        )
+    if lease.get("schema") != ENTITLEMENT_LEASE_SCHEMA:
+        return 401, entitlement_error(
+            "lease_schema_unsupported",
+            "账号权益租约版本不受支持，请更新 LOOM。",
+            "update_loom",
+        )
+    signature = str(lease.get("signature") or "")
+    signed = dict(lease)
+    signed.pop("signature", None)
+    try:
+        entitlement_private_key().public_key().verify(
+            base64.b64decode(signature, validate=True),
+            canonical_json(signed).encode("utf-8"),
+        )
+    except (InvalidSignature, ValueError, TypeError, RuntimeError, base64.binascii.Error):
+        return 401, entitlement_error(
+            "lease_signature_invalid",
+            "账号权益租约验签失败，请重新登录。",
+            "relogin",
+        )
+    if str(lease.get("keyId") or "") != ENTITLEMENT_KEY_ID:
+        return 401, entitlement_error(
+            "lease_key_unknown",
+            "账号权益租约使用了未知签名密钥，请更新 LOOM。",
+            "update_loom",
+        )
+    identity_fields = (
+        "accountId",
+        "sessionBinding",
+        "installId",
+        "deviceId",
+        "hostDeviceId",
+    )
+    if any(
+        not isinstance(lease.get(field), str)
+        or not str(lease.get(field) or "").strip()
+        for field in identity_fields
+    ):
+        return 401, entitlement_error(
+            "lease_malformed",
+            "账号权益租约身份字段无效，请重新登录。",
+            "relogin",
+        )
+    if str(lease["hostDeviceId"]) != str(lease["deviceId"]):
+        return 401, entitlement_error(
+            "lease_host_mismatch",
+            "账号权益租约主机身份不一致，请重新登录。",
+            "relogin",
+        )
+    features = lease.get("features")
+    limits = lease.get("limits")
+    if (
+        not isinstance(features, list)
+        or any(not isinstance(value, str) or not value.strip() for value in features)
+        or not isinstance(limits, dict)
+        or type(limits.get("devices")) is not int
+        or int(limits["devices"]) < 0
+        or type(limits.get("concurrentTasks")) is not int
+        or int(limits["concurrentTasks"]) < 0
+        or type(limits.get("unlimitedDevices")) is not bool
+    ):
+        return 401, entitlement_error(
+            "lease_malformed",
+            "账号权益租约能力或额度字段无效，请重新登录。",
+            "relogin",
+        )
+    numeric_fields = (
+        "issuedAt",
+        "expiresAt",
+        "offlineGraceUntil",
+        "entitlementVersion",
+    )
+    if any(
+        type(lease.get(field)) is not int or int(lease[field]) < 1
+        for field in numeric_fields
+    ):
+        return 401, entitlement_error(
+            "lease_malformed",
+            "账号权益租约时间或版本字段无效，请重新登录。",
+            "relogin",
+        )
+    issued_at = int(lease["issuedAt"])
+    expires_at = int(lease["expiresAt"])
+    offline_grace_until = int(lease["offlineGraceUntil"])
+    if (
+        not (issued_at < expires_at <= offline_grace_until)
+        or offline_grace_until - issued_at > MAX_ENTITLEMENT_LEASE_WINDOW_SEC
+    ):
+        return 401, entitlement_error(
+            "lease_time_window_invalid",
+            "账号权益租约时间窗口无效，请重新登录。",
+            "relogin",
+        )
+    return 200, {"success": True, "lease": lease}
+
+
+def _normalized_phone_device_ids(phone_device_ids: Any) -> list[str]:
+    if not isinstance(phone_device_ids, (list, tuple, set)):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in phone_device_ids:
+        device_id = str(value or "").strip()
+        if not device_id or device_id in seen:
+            continue
+        seen.add(device_id)
+        normalized.append(device_id)
+    return normalized
+
+
+def _phone_seat_result(
+    connection: sqlite3.Connection,
+    *,
+    lease: dict[str, Any],
+    operation: str,
+    phone_device_ids: list[str],
+    now: int,
+) -> tuple[int, dict[str, Any]]:
+    account_id = str(lease["accountId"])
+    host_device_id = str(lease.get("hostDeviceId") or lease["deviceId"])
+    limit = max(1, int((lease.get("limits") or {}).get("devices") or 1))
+    unlimited_devices = (lease.get("limits") or {}).get("unlimitedDevices") is True
+    released: list[str] = []
+
+    if operation == "matrix.device.release":
+        if phone_device_ids:
+            placeholders = ",".join("?" for _ in phone_device_ids)
+            connection.execute(
+                f"""
+                update entitlement_phone_seats
+                set released_at = ?, last_seen_at = ?
+                where account_id = ? and phone_device_id in ({placeholders}) and released_at = 0
+                """,
+                (now, now, account_id, *phone_device_ids),
+            )
+            released = phone_device_ids
+        record_entitlement_audit(
+            connection,
+            account_id=account_id,
+            install_id=str(lease["installId"]),
+            device_id=host_device_id,
+            action=operation,
+            code="ok",
+            details={"releasedPhoneDeviceIds": released},
+            now=now,
+        )
+        phone_seat_lease = signed_phone_seat_lease(
+            connection,
+            entitlement_lease=lease,
+            now=now,
+        )
+        return 200, {
+            "success": True,
+            "code": "ok",
+            "operation": operation,
+            "releasedPhoneDeviceIds": released,
+            "limits": lease["limits"],
+            "phoneSeatLease": phone_seat_lease,
+        }
+
+    if not phone_device_ids:
+        return 400, entitlement_error(
+            "phone_device_required",
+            "矩阵任务需要明确选择手机，不能使用空目标绕过设备额度。",
+            "select_phone_device",
+            {"operation": operation},
+        )
+
+    placeholders = ",".join("?" for _ in phone_device_ids)
+    foreign_rows = connection.execute(
+        f"""
+        select account_id, phone_device_id
+        from entitlement_phone_seats
+        where phone_device_id in ({placeholders})
+          and account_id != ?
+          and released_at = 0
+        order by first_claimed_at, account_id
+        """,
+        (*phone_device_ids, account_id),
+    ).fetchall()
+    foreign_phone_ids = sorted(
+        {str(row["phone_device_id"]) for row in foreign_rows}
+    )
+    if foreign_phone_ids:
+        details = {
+            "phoneDeviceIds": foreign_phone_ids,
+            "operation": operation,
+        }
+        record_entitlement_audit(
+            connection,
+            account_id=account_id,
+            install_id=str(lease["installId"]),
+            device_id=host_device_id,
+            action=operation,
+            code="phone_owned_by_another_account",
+            details=details,
+            now=now,
+        )
+        return 409, entitlement_error(
+            "phone_owned_by_another_account",
+            "这台手机已绑定其他模型账号，请在手机端重新生成配对码后修复连接。",
+            "repair_phone",
+            details,
+        )
+    active_rows = connection.execute(
+        """
+        select phone_device_id
+        from entitlement_phone_seats
+        where account_id = ? and released_at = 0
+        """,
+        (account_id,),
+    ).fetchall()
+    active = {str(row["phone_device_id"]) for row in active_rows}
+    new_phone_ids = [device_id for device_id in phone_device_ids if device_id not in active]
+    if not unlimited_devices and len(active) + len(new_phone_ids) > limit:
+        details = {
+            "accountId": account_id,
+            "limit": limit,
+            "used": len(active),
+            "requested": len(phone_device_ids),
+            "newPhoneDeviceIds": new_phone_ids,
+        }
+        record_entitlement_audit(
+            connection,
+            account_id=account_id,
+            install_id=str(lease["installId"]),
+            device_id=host_device_id,
+            action=operation,
+            code="device_limit_exceeded",
+            details=details,
+            now=now,
+        )
+        return 403, entitlement_error(
+            "device_limit_exceeded",
+            "当前账号绑定的手机数量超过系统安全上限，请联系技术支持。",
+            "contact_support",
+            details,
+        )
+
+    for phone_device_id in phone_device_ids:
+        connection.execute(
+            """
+            insert into entitlement_phone_seats(
+                account_id, phone_device_id, first_claimed_at, last_seen_at,
+                last_host_device_id, entitlement_version, released_at
+            )
+            values(?, ?, ?, ?, ?, ?, 0)
+            on conflict(account_id, phone_device_id) do update set
+                last_seen_at = excluded.last_seen_at,
+                last_host_device_id = excluded.last_host_device_id,
+                entitlement_version = excluded.entitlement_version,
+                released_at = 0
+            """,
+            (
+                account_id,
+                phone_device_id,
+                now,
+                now,
+                host_device_id,
+                int(lease["entitlementVersion"]),
+            ),
+        )
+    record_entitlement_audit(
+        connection,
+        account_id=account_id,
+        install_id=str(lease["installId"]),
+        device_id=host_device_id,
+        action=operation,
+        code="ok",
+        details={"claimedPhoneDeviceIds": phone_device_ids, "limit": limit},
+        now=now,
+    )
+    phone_seat_lease = signed_phone_seat_lease(
+        connection,
+        entitlement_lease=lease,
+        now=now,
+    )
+    return 200, {
+        "success": True,
+        "code": "ok",
+        "operation": operation,
+        "claimedPhoneDeviceIds": phone_device_ids,
+        "features": lease["features"],
+        "limits": lease["limits"],
+        "phoneSeatLease": phone_seat_lease,
+    }
+
+
+def signed_phone_seat_lease(
+    connection: sqlite3.Connection,
+    *,
+    entitlement_lease: dict[str, Any],
+    now: int,
+) -> dict[str, Any]:
+    account_id = str(entitlement_lease["accountId"])
+    host_device_id = str(
+        entitlement_lease.get("hostDeviceId")
+        or entitlement_lease["deviceId"]
+    )
+    rows = connection.execute(
+        """
+        select phone_device_id
+        from entitlement_phone_seats
+        where account_id = ? and last_host_device_id = ? and released_at = 0
+        order by phone_device_id
+        """,
+        (account_id, host_device_id),
+    ).fetchall()
+    expires_at = min(
+        int(entitlement_lease["offlineGraceUntil"]),
+        now + int(ENTITLEMENT_OFFLINE_GRACE_SEC),
+    )
+    payload = {
+        "schema": PHONE_SEAT_LEASE_SCHEMA,
+        "accountId": account_id,
+        "installId": str(entitlement_lease["installId"]),
+        "hostDeviceId": host_device_id,
+        "phoneDeviceIds": [str(row["phone_device_id"]) for row in rows],
+        "limit": max(
+            1,
+            int((entitlement_lease.get("limits") or {}).get("devices") or 1),
+        ),
+        "issuedAt": now,
+        "expiresAt": expires_at,
+        "entitlementVersion": int(entitlement_lease["entitlementVersion"]),
+        "keyId": ENTITLEMENT_KEY_ID,
+    }
+    payload["signature"] = sign_entitlement_payload(payload)
+    return payload
+
+
+def authorize_entitlement_operation(
+    lease: Any,
+    operation: str = "matrix.task.start",
+    phone_device_ids: Any = None,
+) -> tuple[int, dict[str, Any]]:
+    status, payload = verify_entitlement_lease(lease)
+    if status != 200:
+        return status, payload
+    checked_lease = payload["lease"]
+    account_id = str(checked_lease["accountId"])
+    install_id = str(checked_lease["installId"])
+    device_id = str(checked_lease["deviceId"])
+    now = int(time.time())
+    normalized_operation = str(operation or "matrix.task.start").strip()
+    normalized_phone_ids = _normalized_phone_device_ids(phone_device_ids)
+    if normalized_operation == "matrix.device.reclaim":
+        return 403, entitlement_error(
+            "phone_transfer_authorization_required",
+            "不能直接接管其他账号的手机。请先登录原账号释放设备，或联系技术支持完成可审计转移。",
+            "release_from_previous_account",
+            {
+                "phoneDeviceIds": normalized_phone_ids,
+                "operation": normalized_operation,
+            },
+        )
+    if normalized_operation in SAFETY_ENTITLEMENT_OPERATIONS:
+        connection = _bind_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if normalized_operation == "matrix.device.release":
+                status, result = _phone_seat_result(
+                    connection,
+                    lease=checked_lease,
+                    operation=normalized_operation,
+                    phone_device_ids=normalized_phone_ids,
+                    now=now,
+                )
+            else:
+                record_entitlement_audit(
+                    connection,
+                    account_id=account_id,
+                    install_id=install_id,
+                    device_id=device_id,
+                    action=normalized_operation,
+                    code="safety_cleanup_allowed",
+                    details={"entitlementVersion": checked_lease["entitlementVersion"]},
+                    now=now,
+                )
+                status, result = 200, {
+                    "success": True,
+                    "code": "ok",
+                    "operation": normalized_operation,
+                    "features": checked_lease["features"],
+                    "limits": checked_lease["limits"],
+                }
+            connection.commit()
+            return status, result
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    refresh_account_entitlement_authorization(account_id)
+    connection = _bind_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            select entitlement_version, revoked_at
+            from entitlement_accounts
+            where account_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        if (
+            not row
+            or int(row["revoked_at"] or 0)
+            or int(row["entitlement_version"] or 0)
+            != int(checked_lease["entitlementVersion"])
+        ):
+            connection.rollback()
+            return 403, entitlement_error(
+                "lease_revoked",
+                "账号权益已刷新或撤销，请重新同步账号。",
+                "refresh_entitlement",
+                {"accountId": account_id},
+            )
+        device = connection.execute(
+            """
+            select 1 from entitlement_devices
+            where account_id = ? and install_id = ? and device_id = ? and revoked_at = 0
+            """,
+            (account_id, install_id, device_id),
+        ).fetchone()
+        if not device:
+            connection.rollback()
+            return 403, entitlement_error(
+                "device_not_registered",
+                "当前设备未在账号权益中登记，请重新登录。",
+                "relogin",
+                {"accountId": account_id, "installId": install_id, "deviceId": device_id},
+            )
+        if int(checked_lease["expiresAt"]) <= now:
+            connection.rollback()
+            return 403, entitlement_error(
+                "lease_expired",
+                "账号权益租约已过期，不能启动新的矩阵任务；请联网重新同步账号。",
+                "refresh_entitlement",
+                {"accountId": account_id, "expiredAt": checked_lease["expiresAt"]},
+            )
+        status, result = _phone_seat_result(
+            connection,
+            lease=checked_lease,
+            operation=normalized_operation,
+            phone_device_ids=normalized_phone_ids,
+            now=now,
+        )
+        connection.commit()
+        return status, result
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def cleanup_bind_tickets(now: int | None = None) -> None:
@@ -1140,6 +2891,51 @@ def cleanup_bind_tickets(now: int | None = None) -> None:
         connection.close()
 
 
+def _bind_ticket_encryption_key() -> bytes:
+    if BIND_TICKET_SECRET:
+        secret = BIND_TICKET_SECRET.encode("utf-8")
+    else:
+        secret = entitlement_private_key().private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    return hashlib.sha256(b"loom-bind-ticket-aesgcm-v1\0" + secret).digest()
+
+
+def _seal_bind_ticket_payload(payload: dict[str, Any]) -> str:
+    nonce = secrets.token_bytes(12)
+    plaintext = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    ciphertext = AESGCM(_bind_ticket_encryption_key()).encrypt(
+        nonce,
+        plaintext,
+        b"loom.bind_ticket.v1",
+    )
+    return "v1." + base64.b64encode(nonce + ciphertext).decode("ascii")
+
+
+def _open_bind_ticket_payload(sealed: str) -> dict[str, Any]:
+    if not sealed.startswith("v1."):
+        raise ValueError("unsupported bind ticket payload")
+    raw = base64.b64decode(sealed[3:], validate=True)
+    if len(raw) < 29:
+        raise ValueError("invalid bind ticket payload")
+    plaintext = AESGCM(_bind_ticket_encryption_key()).decrypt(
+        raw[:12],
+        raw[12:],
+        b"loom.bind_ticket.v1",
+    )
+    payload = json.loads(plaintext.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("invalid bind ticket payload")
+    return payload
+
+
 def create_bind_ticket(payload: dict[str, Any], ttl_sec: int = BIND_TICKET_TTL_SEC) -> dict[str, Any]:
     ticket = "ocb_" + secrets.token_urlsafe(24)
     now = int(time.time())
@@ -1152,7 +2948,7 @@ def create_bind_ticket(payload: dict[str, Any], ttl_sec: int = BIND_TICKET_TTL_S
             insert into bind_tickets(ticket_hash, payload, created_at, expires_at, claimed_at)
             values(?, ?, ?, ?, null)
             """,
-            (_ticket_hash(ticket), json.dumps(payload, ensure_ascii=False), now, expires_at),
+            (_ticket_hash(ticket), _seal_bind_ticket_payload(payload), now, expires_at),
         )
         connection.commit()
     finally:
@@ -1213,12 +3009,930 @@ def handle_bind_claim(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     finally:
         connection.close()
     try:
-        payload = json.loads(row["payload"])
+        payload = _open_bind_ticket_payload(str(row["payload"] or ""))
     except Exception:
         return 500, {"success": False, "error": "ticket payload corrupted"}
     if not isinstance(payload, dict):
         return 500, {"success": False, "error": "ticket payload invalid"}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else None
+    install_id, device_id = lease_identity_from_body(body)
+    if data is not None and (install_id or device_id):
+        entitlement_status, entitlement_payload = issue_entitlement_lease(
+            account_id=str(data.get("userId") or ""),
+            group=str(data.get("group") or "default"),
+            install_id=install_id,
+            device_id=device_id,
+            session_token=str(data.get("apiToken") or data.get("apiKey") or data.get("key") or ""),
+        )
+        if (
+            entitlement_status != 200
+            and str(entitlement_payload.get("code") or "") != "authorization_required"
+        ):
+            return entitlement_status, entitlement_payload
+        data["entitlement"] = entitlement_payload["entitlement"]
+        if "entitlementLease" in entitlement_payload:
+            data["entitlementLease"] = entitlement_payload["entitlementLease"]
+            data["entitlementKey"] = entitlement_payload["entitlementKey"]
     return 200, payload
+
+
+def entitlement_public_key_response() -> tuple[int, dict[str, Any]]:
+    try:
+        return 200, {"success": True, "data": entitlement_key_payload()}
+    except Exception:
+        return 503, entitlement_error(
+            "entitlement_signing_unavailable",
+            "服务器权益签名密钥未配置，暂时无法提供矩阵授权公钥。",
+            "contact_support",
+        )
+
+
+def handle_entitlement_refresh(body: dict[str, Any], authorization: str = "") -> tuple[int, dict[str, Any]]:
+    owner = api_token_owner(authorization)
+    if not owner:
+        return 401, entitlement_error(
+            "account_token_required",
+            "请先登录模型账号，再刷新矩阵权益。",
+            "login",
+        )
+    if owner and not LICENSE_ENTITLEMENT_SERVICE_TOKEN:
+        return 503, entitlement_error(
+            "authorization_service_unavailable",
+            "授权服务尚未配置，无法安全刷新矩阵权益。",
+            "contact_support",
+            {"offlineLeasePreserved": True},
+        )
+    source_verified = False
+    if owner:
+        account_id = str(owner.get("user_id") or "")
+        try:
+            entitlement = current_authorization_entitlement_from_license_server(account_id)
+            persist_account_entitlement_grant(
+                account_id,
+                entitlement,
+                action="sync_authorization_code",
+            )
+            source_verified = True
+        except BridgeUpstreamError as error:
+            permanent_codes = {
+                "ACCOUNT_ENTITLEMENT_NOT_FOUND",
+                "ACCOUNT_ENTITLEMENT_REVOKED",
+                "LICENSE_DISABLED",
+                "LICENSE_EXPIRED",
+                "LICENSE_INVALID",
+            }
+            if error.code in permanent_codes:
+                persist_account_entitlement_grant(
+                    account_id,
+                    None,
+                    action=f"sync_authorization_code_{error.code.lower()}",
+                )
+                source_verified = True
+            else:
+                # Refuse to mint a fresh paid lease while the source of truth
+                # is unreachable. The client keeps its existing signed lease
+                # only until that lease's bounded offline grace expires.
+                return 503, entitlement_error(
+                    "authorization_service_unavailable",
+                    "授权服务暂时不可用，正在保留本机已有的离线权益。",
+                    "retry_later",
+                    {
+                        "upstreamCode": error.code or "service_unavailable",
+                        "offlineLeasePreserved": True,
+                    },
+                )
+    install_id, device_id = lease_identity_from_body(body)
+    status, lease_payload = issue_entitlement_lease(
+        account_id=str(owner.get("user_id") or ""),
+        group=str(owner.get("user_group") or "default"),
+        install_id=install_id,
+        device_id=device_id,
+        session_token=str(owner.get("key") or ""),
+        source_verified=source_verified,
+    )
+    if (
+        status != 200
+        and str(lease_payload.get("code") or "") != "authorization_required"
+    ):
+        return status, lease_payload
+    data = {
+        "entitlement": lease_payload.get("entitlement")
+        or inactive_entitlement_policy(str(owner.get("user_group") or "default")),
+    }
+    if "entitlementLease" in lease_payload:
+        data["entitlementLease"] = lease_payload["entitlementLease"]
+        data["entitlementKey"] = lease_payload["entitlementKey"]
+    return 200, {"success": True, "data": data}
+
+
+def handle_entitlement_redeem(
+    body: dict[str, Any],
+    authorization: str = "",
+) -> tuple[int, dict[str, Any]]:
+    owner = api_token_owner(authorization)
+    if not owner:
+        return 401, entitlement_error(
+            "account_token_required",
+            "请先登录模型账号，再绑定授权码。",
+            "login",
+        )
+    code = str(body.get("code") or "").strip().upper()
+    if len(code) < 8 or len(code) > 256:
+        return 400, entitlement_error(
+            "authorization_code_invalid",
+            "请输入有效的商业授权码。",
+            "check_code",
+        )
+    install_id, device_id = lease_identity_from_body(body)
+    if not install_id or not device_id:
+        return 400, entitlement_error(
+            "device_identity_required",
+            "当前安装缺少设备身份，请升级 LOOM 后重新登录。",
+            "relogin_with_device_identity",
+        )
+    account_id = str(owner.get("user_id") or "")
+    try:
+        entitlement = redeem_authorization_code_with_license_server(
+            code,
+            account_id=account_id,
+        )
+        persist_account_entitlement_grant(
+            account_id,
+            entitlement,
+            action="redeem_authorization_code",
+        )
+    except BridgeUpstreamError as error:
+        status = int(error.status_code or 502)
+        public_status = status if status in {400, 401, 403, 404, 409, 422, 429} else 503
+        public_code = {
+            "LICENSE_EXPIRED": "authorization_code_expired",
+            "LICENSE_DISABLED": "authorization_code_disabled",
+            "ACCOUNT_ENTITLEMENT_REVOKED": "authorization_code_revoked",
+            "ACCOUNT_ENTITLEMENT_ALREADY_REDEEMED": "authorization_code_already_bound",
+            "LICENSE_INVALID": "authorization_code_invalid",
+            "LICENSE_DATA_INVALID": "authorization_code_invalid",
+            "ACCOUNT_REDEEM_INVALID_REQUEST": "authorization_code_invalid",
+        }.get(
+            error.code,
+            "authorization_code_rejected"
+            if public_status < 500
+            else "authorization_service_unavailable",
+        )
+        return public_status, entitlement_error(
+            public_code,
+            str(error),
+            "check_code" if public_status < 500 else "retry_later",
+            error.details,
+        )
+    status, payload = issue_entitlement_lease(
+        account_id=account_id,
+        group=str(owner.get("user_group") or "default"),
+        install_id=install_id,
+        device_id=device_id,
+        session_token=str(owner.get("key") or ""),
+        source_verified=True,
+    )
+    if status != 200:
+        return status, payload
+    return 200, payload
+
+
+def handle_entitlement_migrate_legacy(
+    body: dict[str, Any],
+    authorization: str = "",
+) -> tuple[int, dict[str, Any]]:
+    del body
+    owner = api_token_owner(authorization)
+    if not owner:
+        return 401, entitlement_error(
+            "account_token_required",
+            "请先登录模型账号，再迁移旧版商业授权。",
+            "login",
+        )
+    return 410, entitlement_error(
+        "legacy_migration_disabled",
+        "旧版静态授权不能自动绑定账号。请登录后输入原授权码完成绑定。",
+        "use_authorization_code",
+    )
+
+
+def handle_entitlement_check(
+    body: dict[str, Any],
+    authorization: str = "",
+) -> tuple[int, dict[str, Any]]:
+    owner = api_token_owner(authorization)
+    if not owner:
+        return 401, entitlement_error(
+            "account_token_required",
+            "需要有效的模型账号令牌才能校验手机席位。",
+            "relogin",
+        )
+    lease = body.get("entitlementLease") or body.get("lease")
+    lease_account_id = str(lease.get("accountId") or "") if isinstance(lease, dict) else ""
+    owner_account_id = str(owner.get("user_id") or "")
+    if not lease_account_id or lease_account_id != owner_account_id:
+        return 403, entitlement_error(
+            "account_mismatch",
+            "当前账号与权益租约不一致。",
+            "relogin",
+            {
+                "leaseAccountId": lease_account_id,
+                "tokenAccountId": owner_account_id,
+            },
+        )
+    lease_session_binding = (
+        str(lease.get("sessionBinding") or "") if isinstance(lease, dict) else ""
+    )
+    owner_session_binding = entitlement_session_binding(str(owner.get("key") or ""))
+    if (
+        not lease_session_binding
+        or not owner_session_binding
+        or not hmac.compare_digest(lease_session_binding, owner_session_binding)
+    ):
+        return 403, entitlement_error(
+            "account_session_mismatch",
+            "当前登录会话与权益租约不一致，请重新登录后再试。",
+            "relogin",
+        )
+    operation = str(body.get("operation") or "matrix.task.start")
+    return authorize_entitlement_operation(
+        lease,
+        operation,
+        body.get("phoneDeviceIds") or body.get("deviceIds"),
+    )
+
+
+def _payment_bridge_error(error: BridgeUpstreamError) -> tuple[int, dict[str, Any]]:
+    upstream_status = int(error.status_code or 502)
+    public_status = (
+        upstream_status
+        if upstream_status in {400, 401, 403, 404, 409, 422, 429}
+        else 503
+    )
+    return public_status, {
+        "success": False,
+        "error": str(error),
+        "code": error.code
+        or (
+            "payment_request_rejected"
+            if public_status < 500
+            else "payment_service_unavailable"
+        ),
+    }
+
+
+def linux_companion_artifact() -> tuple[str, int, str] | None:
+    expected = str(LINUX_COMPANION_APK_SHA256 or "").strip().upper()
+    path = str(LINUX_COMPANION_APK_PATH or "").strip()
+    if not path or not os.path.isabs(path) or not expected or len(expected) != 64:
+        return None
+    try:
+        size = os.path.getsize(path)
+        if size <= 0 or size > 32 * 1024 * 1024:
+            return None
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        actual = digest.hexdigest().upper()
+    except OSError:
+        return None
+    if not hmac.compare_digest(actual, expected):
+        return None
+    return path, size, actual
+
+
+def _payment_owner(authorization: str) -> tuple[str, tuple[int, dict[str, Any]] | None]:
+    owner = api_token_owner(authorization)
+    if owner:
+        return str(owner.get("user_id") or ""), None
+    return "", (
+        401,
+        entitlement_error(
+            "account_token_required",
+            "请先登录模型账号，再购买或查询套餐。",
+            "login",
+        ),
+    )
+
+
+def _payment_client_ip(handler: Any) -> str:
+    peer_value = str(getattr(handler, "client_address", ("",))[0] or "").strip()
+    try:
+        peer = ipaddress.ip_address(peer_value)
+    except ValueError:
+        return ""
+    if peer.is_loopback:
+        headers = getattr(handler, "headers", {})
+        forwarded = str(headers.get("X-Real-IP") or "").strip()
+        if forwarded:
+            try:
+                return str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                pass
+    return str(peer)
+
+
+def _subscription_access_headers(account_id: str) -> dict[str, str]:
+    user = _newapi_fetchone(
+        "select id, access_token, status, deleted_at from users where id = ? limit 1",
+        (account_id,),
+    )
+    if not user or int(user.get("status") or 0) != 1 or user.get("deleted_at"):
+        raise BridgeUpstreamError(
+            "模型服务账号不可用，请重新登录。",
+            status_code=401,
+            code="subscription_account_unavailable",
+        )
+    access_token = str(user.get("access_token") or "").strip()
+    if not access_token:
+        generated = secrets.token_hex(16)
+        _newapi_execute(
+            "update users set access_token = ? where id = ? and (access_token is null or access_token = '')",
+            (generated, account_id),
+        )
+        refreshed = _newapi_fetchone(
+            "select access_token from users where id = ? limit 1",
+            (account_id,),
+        )
+        access_token = str((refreshed or {}).get("access_token") or "").strip()
+    if len(access_token) < 16:
+        raise BridgeUpstreamError(
+            "模型服务账号令牌初始化失败，请稍后重试。",
+            status_code=503,
+            code="subscription_access_token_unavailable",
+        )
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "New-Api-User": str(account_id),
+        "Accept": "application/json",
+    }
+
+
+def _subscription_request(
+    account_id: str,
+    path: str,
+    *,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return request_json(
+        urllib.request.build_opener(),
+        path,
+        method=method,
+        body=body,
+        headers=_subscription_access_headers(account_id),
+        timeout=20,
+    )
+
+
+def _money(value: Any) -> decimal.Decimal:
+    try:
+        amount = decimal.Decimal(str(value)).quantize(
+            decimal.Decimal("0.01"),
+            rounding=decimal.ROUND_HALF_UP,
+        )
+    except (decimal.InvalidOperation, TypeError, ValueError) as error:
+        raise BridgeUpstreamError(
+            "服务端套餐金额无效。",
+            status_code=502,
+            code="subscription_amount_invalid",
+        ) from error
+    if amount <= 0 or amount > decimal.Decimal("1000000"):
+        raise BridgeUpstreamError(
+            "服务端套餐金额超出允许范围。",
+            status_code=502,
+            code="subscription_amount_invalid",
+        )
+    return amount
+
+
+def _duration_days(plan: dict[str, Any]) -> int:
+    value = max(1, int(plan.get("duration_value") or 1))
+    unit = str(plan.get("duration_unit") or "day").strip().lower()
+    return {
+        "hour": 1,
+        "day": value,
+        "week": value * 7,
+        "month": value * 30,
+        "year": value * 365,
+    }.get(unit, value)
+
+
+def _normalize_subscription_plan(raw: dict[str, Any]) -> dict[str, Any] | None:
+    plan = raw.get("plan") if isinstance(raw.get("plan"), dict) else raw
+    if not isinstance(plan, dict) or not bool(plan.get("enabled", True)):
+        return None
+    try:
+        plan_id = int(plan.get("id"))
+    except (TypeError, ValueError):
+        return None
+    if plan_id <= 0:
+        return None
+    amount = _money(plan.get("price_amount"))
+    duration_days = _duration_days(plan)
+    subtitle = str(plan.get("subtitle") or "").strip()
+    benefits = [subtitle] if subtitle else []
+    benefits.append(f"订阅周期约 {duration_days} 天")
+    quota_reset = str(plan.get("quota_reset_period") or "never").strip().lower()
+    if quota_reset and quota_reset != "never":
+        benefits.append(f"额度按 {quota_reset} 周期重置")
+    return {
+        "planKey": f"newapi-subscription-{plan_id}",
+        "displayName": str(plan.get("title") or f"套餐 {plan_id}").strip(),
+        "description": subtitle,
+        "durationDays": duration_days,
+        "amountMinor": int(amount * 100),
+        "amount": format(amount, ".2f"),
+        "currency": "CNY",
+        "sourceCurrency": str(plan.get("currency") or "USD").upper(),
+        "pricingRule": "nominal_1_to_1",
+        "benefits": benefits,
+        "features": ["model.subscription"],
+    }
+
+
+def _payment_channels(payload: dict[str, Any]) -> list[str]:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    methods = data.get("pay_methods") if isinstance(data, dict) else []
+    channels: list[str] = []
+    for item in methods if isinstance(methods, list) else []:
+        value = item.get("type") if isinstance(item, dict) else item
+        channel = str(value or "").strip().lower()
+        if channel in {"alipay", "wxpay"} and channel not in channels:
+            channels.append(channel)
+    return channels
+
+
+def _plan_id_from_key(plan_key: str) -> int | None:
+    prefix = "newapi-subscription-"
+    if not plan_key.startswith(prefix):
+        return None
+    try:
+        value = int(plan_key[len(prefix):])
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _checkout_token(account_id: str, request_id: str, order_id: str) -> str:
+    message = f"{account_id}\n{request_id}\n{order_id}".encode("utf-8")
+    digest = hmac.new(
+        SUBSCRIPTION_CHECKOUT_SECRET.encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).hexdigest()
+    return f"scp_{digest}"
+
+
+def _checkout_url(token: str) -> str:
+    parsed = urllib.parse.urlparse(PUBLIC_API_BASE)
+    public_origin = (
+        f"{parsed.scheme}://{parsed.netloc}"
+        if parsed.scheme and parsed.netloc
+        else PUBLIC_API_BASE.rstrip("/").removesuffix("/v1")
+    )
+    return (
+        f"{public_origin.rstrip('/')}/api/openclaw/subscriptions/checkout"
+        f"?token={urllib.parse.quote(token, safe='')}"
+    )
+
+
+def _iso_time(timestamp: Any) -> str | None:
+    try:
+        value = int(timestamp or 0)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _native_order(account_id: str, order_id: str) -> dict[str, Any] | None:
+    return _newapi_fetchone(
+        """
+        select o.user_id, o.plan_id, o.money, o.trade_no, o.payment_method,
+               o.payment_provider, o.status, o.create_time, o.complete_time,
+               p.title
+        from subscription_orders o
+        join subscription_plans p on p.id = o.plan_id
+        where o.trade_no = ? and o.user_id = ?
+        limit 1
+        """,
+        (order_id, account_id),
+    )
+
+
+def _public_order(
+    row: dict[str, Any],
+    *,
+    checkout_token: str = "",
+    expires_at: int = 0,
+) -> dict[str, Any]:
+    native_status = str(row.get("status") or "").strip().lower()
+    status = {
+        "success": "paid",
+        "paid": "paid",
+        "completed": "paid",
+        "pending": "pending",
+        "expired": "expired",
+        "failed": "failed",
+        "cancelled": "failed",
+        "canceled": "failed",
+    }.get(native_status, "pending")
+    if status == "pending" and expires_at and expires_at <= int(time.time()):
+        status = "expired"
+    amount = _money(row.get("money"))
+    plan_id = int(row.get("plan_id") or 0)
+    order_id = str(row.get("trade_no") or "").strip()
+    checkout = _checkout_url(checkout_token) if checkout_token else ""
+    return {
+        "orderId": order_id,
+        "outTradeNo": order_id,
+        "planKey": f"newapi-subscription-{plan_id}",
+        "displayName": str(row.get("title") or f"套餐 {plan_id}"),
+        "paymentType": str(row.get("payment_method") or ""),
+        "amountMinor": int(amount * 100),
+        "amount": format(amount, ".2f"),
+        "currency": "CNY",
+        "status": status,
+        "qrcode": checkout,
+        "payUrl": checkout,
+        "expiresAt": _iso_time(expires_at),
+        "paidAt": _iso_time(row.get("complete_time")),
+        "createdAt": _iso_time(row.get("create_time")),
+        "updatedAt": _iso_time(row.get("complete_time") or row.get("create_time")),
+    }
+
+
+def _existing_checkout_order(
+    row: sqlite3.Row,
+    account_id: str,
+    request_id: str,
+) -> dict[str, Any] | None:
+    order_id = str(row["order_id"] or "").strip()
+    if not order_id:
+        return None
+    native = _native_order(account_id, order_id)
+    if not native:
+        return None
+    token = _checkout_token(account_id, request_id, order_id)
+    expected_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(expected_hash, str(row["checkout_token_hash"] or "")):
+        return None
+    return _public_order(
+        native,
+        checkout_token=token,
+        expires_at=int(row["expires_at"] or 0),
+    )
+
+
+def handle_payment_plans(
+    body: dict[str, Any], authorization: str = ""
+) -> tuple[int, dict[str, Any]]:
+    del body
+    account_id, denied = _payment_owner(authorization)
+    if denied:
+        return denied
+    try:
+        payload = _subscription_request(account_id, "/api/subscription/plans")
+        topup = _subscription_request(account_id, "/api/user/topup/info")
+    except BridgeUpstreamError as error:
+        return _payment_bridge_error(error)
+    raw_plans = payload.get("data") if isinstance(payload.get("data"), list) else []
+    plans = []
+    try:
+        for raw in raw_plans:
+            normalized = _normalize_subscription_plan(raw) if isinstance(raw, dict) else None
+            if normalized:
+                plans.append(normalized)
+    except BridgeUpstreamError as error:
+        return _payment_bridge_error(error)
+    topup_data = topup.get("data") if isinstance(topup.get("data"), dict) else topup
+    channels = _payment_channels(topup)
+    online_topup_enabled = bool(
+        isinstance(topup_data, dict)
+        and topup_data.get("enable_online_topup") is True
+    )
+    compliance_confirmed = bool(
+        isinstance(topup_data, dict)
+        and topup_data.get("payment_compliance_confirmed") is True
+    )
+    configured = bool(
+        online_topup_enabled
+        and compliance_confirmed
+        and channels
+    )
+    if not online_topup_enabled:
+        reason_code = "online_topup_disabled"
+        payment_message = "服务端在线充值尚未启用。"
+    elif not compliance_confirmed:
+        reason_code = "payment_compliance_unconfirmed"
+        payment_message = "服务端支付配置尚未完成确认。"
+    elif not channels:
+        reason_code = "payment_channels_unavailable"
+        payment_message = "服务端尚未启用可用的收款渠道。"
+    else:
+        reason_code = "ready"
+        payment_message = "ZPay 收款服务已就绪。"
+    return 200, {
+        "success": True,
+        "data": {
+            "plans": plans,
+            "payment": {
+                "provider": "newapi-epay",
+                "configured": configured,
+                "reconciliationConfigured": True,
+                "channels": channels,
+                "reasonCode": reason_code,
+                "message": payment_message,
+                "displayCurrency": "CNY",
+                "sourceCurrency": "USD",
+                "pricingRule": "nominal_1_to_1",
+            },
+        },
+    }
+
+
+def handle_payment_order_create(
+    body: dict[str, Any], authorization: str = "", client_ip: str = ""
+) -> tuple[int, dict[str, Any]]:
+    account_id, denied = _payment_owner(authorization)
+    if denied:
+        return denied
+    del client_ip
+    plan_key = str(body.get("planKey") or "").strip()
+    plan_id = _plan_id_from_key(plan_key)
+    payment_method = str(body.get("paymentType") or "").strip().lower()
+    request_id = str(body.get("requestId") or "").strip()
+    if plan_id is None or payment_method not in {"alipay", "wxpay"} or not (6 <= len(request_id) <= 128):
+        return 400, {
+            "success": False,
+            "error": "套餐、支付方式或请求标识无效。",
+            "code": "payment_request_invalid",
+        }
+    now = int(time.time())
+    expires_at = now + SUBSCRIPTION_CHECKOUT_TTL_SEC
+    connection = _bind_connection()
+    try:
+        connection.execute("begin immediate")
+        existing = connection.execute(
+            "select * from subscription_checkout_requests where account_id = ? and request_id = ?",
+            (account_id, request_id),
+        ).fetchone()
+        if existing:
+            connection.commit()
+            if int(existing["plan_id"]) != plan_id or str(existing["payment_method"]) != payment_method:
+                return 409, {
+                    "success": False,
+                    "error": "同一支付请求标识不能用于不同套餐或支付方式。",
+                    "code": "payment_request_conflict",
+                }
+            order = _existing_checkout_order(existing, account_id, request_id)
+            if order:
+                return 200, {"success": True, "data": {"order": order}}
+            return 409, {
+                "success": False,
+                "error": "该订单正在创建或结果待确认，请勿重复付款。",
+                "code": "payment_creation_in_progress",
+            }
+        connection.execute(
+            """
+            insert into subscription_checkout_requests(
+                account_id, request_id, plan_id, payment_method, status,
+                created_at, expires_at
+            ) values(?, ?, ?, ?, 'creating', ?, ?)
+            """,
+            (account_id, request_id, plan_id, payment_method, now, expires_at),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    plan = _newapi_fetchone(
+        "select id, title, price_amount, currency, enabled from subscription_plans where id = ? limit 1",
+        (plan_id,),
+    )
+    if not plan or not bool(plan.get("enabled")):
+        connection = _bind_connection()
+        try:
+            connection.execute(
+                "delete from subscription_checkout_requests where account_id = ? and request_id = ? and status = 'creating'",
+                (account_id, request_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return 404, {
+            "success": False,
+            "error": "套餐不存在或已经下架。",
+            "code": "payment_plan_unavailable",
+        }
+
+    try:
+        expected_amount = _money(plan.get("price_amount"))
+        payload = _subscription_request(
+            account_id,
+            "/api/subscription/epay/pay",
+            method="POST",
+            body={"plan_id": plan_id, "payment_method": payment_method},
+        )
+        action = str(payload.get("url") or "").strip()
+        fields = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        parsed_action = urllib.parse.urlparse(action)
+        if (
+            parsed_action.scheme != "https"
+            or not parsed_action.hostname
+            or parsed_action.hostname.lower() not in SUBSCRIPTION_PAYMENT_FORM_HOSTS
+        ):
+            raise BridgeUpstreamError(
+                "支付服务返回了未授权的收银台地址。",
+                status_code=502,
+                code="payment_checkout_host_invalid",
+            )
+        if not fields or any(isinstance(value, (dict, list)) for value in fields.values()):
+            raise BridgeUpstreamError(
+                "支付服务返回的收银台参数无效。",
+                status_code=502,
+                code="payment_checkout_payload_invalid",
+            )
+        order_id = str(fields.get("out_trade_no") or "").strip()
+        provider_amount = _money(fields.get("money"))
+        if (
+            not (6 <= len(order_id) <= 128)
+            or provider_amount != expected_amount
+            or str(fields.get("type") or "").strip().lower() != payment_method
+            or not str(fields.get("sign") or "").strip()
+        ):
+            raise BridgeUpstreamError(
+                "支付服务返回的订单关键信息校验失败。",
+                status_code=502,
+                code="payment_order_validation_failed",
+            )
+        native = _native_order(account_id, order_id)
+        if (
+            not native
+            or int(native.get("plan_id") or 0) != plan_id
+            or _money(native.get("money")) != expected_amount
+            or str(native.get("payment_method") or "").lower() != payment_method
+            or str(native.get("payment_provider") or "").lower() != "epay"
+        ):
+            raise BridgeUpstreamError(
+                "服务端订单落库校验失败，请勿重复付款。",
+                status_code=502,
+                code="payment_order_persistence_mismatch",
+            )
+        checkout_token = _checkout_token(account_id, request_id, order_id)
+        checkout_hash = hashlib.sha256(checkout_token.encode("utf-8")).hexdigest()
+        checkout_payload = json.dumps(
+            {"action": action, "fields": {str(key): str(value) for key, value in fields.items()}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        order = _public_order(native, checkout_token=checkout_token, expires_at=expires_at)
+        stored_order = dict(order)
+        stored_order["qrcode"] = ""
+        stored_order["payUrl"] = ""
+        connection = _bind_connection()
+        try:
+            connection.execute(
+                """
+                update subscription_checkout_requests
+                set status = 'pending', order_id = ?, order_json = ?,
+                    checkout_token_hash = ?, checkout_payload = ?
+                where account_id = ? and request_id = ? and status = 'creating'
+                """,
+                (
+                    order_id,
+                    json.dumps(stored_order, ensure_ascii=False, separators=(",", ":")),
+                    checkout_hash,
+                    checkout_payload,
+                    account_id,
+                    request_id,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return 200, {"success": True, "data": {"order": order}}
+    except BridgeUpstreamError as error:
+        connection = _bind_connection()
+        try:
+            connection.execute(
+                """
+                update subscription_checkout_requests
+                set status = 'creation_uncertain'
+                where account_id = ? and request_id = ? and status = 'creating'
+                """,
+                (account_id, request_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return _payment_bridge_error(error)
+
+
+def handle_payment_order_status(
+    body: dict[str, Any], authorization: str = ""
+) -> tuple[int, dict[str, Any]]:
+    account_id, denied = _payment_owner(authorization)
+    if denied:
+        return denied
+    order_id = str(body.get("orderId") or "").strip()
+    if not order_id:
+        return 400, {
+            "success": False,
+            "error": "订单号不能为空。",
+            "code": "payment_order_required",
+        }
+    native = _native_order(account_id, order_id)
+    if not native:
+        return 404, {
+            "success": False,
+            "error": "订单不存在。",
+            "code": "payment_order_not_found",
+        }
+    connection = _bind_connection()
+    try:
+        checkout = connection.execute(
+            """
+            select request_id, checkout_token_hash, expires_at
+            from subscription_checkout_requests
+            where account_id = ? and order_id = ?
+            limit 1
+            """,
+            (account_id, order_id),
+        ).fetchone()
+    finally:
+        connection.close()
+    token = ""
+    expires_at = 0
+    if checkout:
+        candidate = _checkout_token(account_id, str(checkout["request_id"]), order_id)
+        candidate_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+        if hmac.compare_digest(candidate_hash, str(checkout["checkout_token_hash"] or "")):
+            token = candidate
+        expires_at = int(checkout["expires_at"] or 0)
+    order = _public_order(native, checkout_token=token, expires_at=expires_at)
+    return 200, {"success": True, "data": {"order": order}}
+
+
+def handle_subscription_checkout(token: str) -> tuple[int, str, str]:
+    supplied = str(token or "").strip()
+    if not supplied.startswith("scp_") or len(supplied) != 68:
+        return 404, "<!doctype html><meta charset='utf-8'><p>支付链接无效。</p>", ""
+    token_hash = hashlib.sha256(supplied.encode("utf-8")).hexdigest()
+    connection = _bind_connection()
+    try:
+        row = connection.execute(
+            """
+            select account_id, request_id, order_id, checkout_token_hash,
+                   checkout_payload, expires_at
+            from subscription_checkout_requests
+            where checkout_token_hash = ?
+            limit 1
+            """,
+            (token_hash,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if not row or not hmac.compare_digest(token_hash, str(row["checkout_token_hash"] or "")):
+        return 404, "<!doctype html><meta charset='utf-8'><p>支付链接无效。</p>", ""
+    expected = _checkout_token(
+        str(row["account_id"]),
+        str(row["request_id"]),
+        str(row["order_id"]),
+    )
+    if not hmac.compare_digest(expected, supplied):
+        return 404, "<!doctype html><meta charset='utf-8'><p>支付链接无效。</p>", ""
+    if int(row["expires_at"] or 0) <= int(time.time()):
+        return 410, "<!doctype html><meta charset='utf-8'><p>支付链接已过期，请返回麓鸣重新创建订单。</p>", ""
+    native = _native_order(str(row["account_id"]), str(row["order_id"]))
+    if not native or str(native.get("status") or "").lower() != "pending":
+        return 409, "<!doctype html><meta charset='utf-8'><p>订单已完成或不可继续支付。</p>", ""
+    try:
+        payload = json.loads(str(row["checkout_payload"] or "{}"))
+    except json.JSONDecodeError:
+        payload = {}
+    action = str(payload.get("action") or "").strip() if isinstance(payload, dict) else ""
+    fields = payload.get("fields") if isinstance(payload, dict) and isinstance(payload.get("fields"), dict) else {}
+    parsed = urllib.parse.urlparse(action)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.hostname.lower() not in SUBSCRIPTION_PAYMENT_FORM_HOSTS
+    ):
+        return 503, "<!doctype html><meta charset='utf-8'><p>收银台配置无效，请返回麓鸣重试。</p>", ""
+    inputs = "".join(
+        f'<input type="hidden" name="{html.escape(str(key), quote=True)}" value="{html.escape(str(value), quote=True)}">'
+        for key, value in fields.items()
+    )
+    safe_action = html.escape(action, quote=True)
+    page = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>麓鸣安全支付</title><style>body{{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#071923;color:#eef}}main{{text-align:center;padding:28px}}button{{padding:12px 24px;border:0;border-radius:10px;background:#33d6b0;font-weight:700}}</style></head>
+<body><main><p>正在进入服务端订阅收银台…</p><form id="checkout" method="post" action="{safe_action}">{inputs}<button type="submit">继续支付</button></form></main><script>document.getElementById('checkout').submit();</script></body></html>"""
+    return 200, page, f"{parsed.scheme}://{parsed.netloc}"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1235,27 +3949,76 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _send_html(self, status: int, html: str) -> None:
+    def _send_html(self, status: int, html: str, form_origin: str = "") -> None:
         raw = html.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'self'")
+        form_action = "'self'"
+        parsed_form_origin = urllib.parse.urlparse(form_origin)
+        if parsed_form_origin.scheme == "https" and parsed_form_origin.hostname:
+            form_action = f"'self' {parsed_form_origin.scheme}://{parsed_form_origin.netloc}"
+        self.send_header("Content-Security-Policy", f"default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action {form_action}; frame-ancestors 'self'")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
+    def _send_linux_companion(self) -> None:
+        artifact = linux_companion_artifact()
+        if not artifact:
+            self._send(404, {
+                "success": False,
+                "error": "linux companion artifact unavailable",
+                "code": "linux_companion_unavailable",
+            })
+            return
+        path, size, digest = artifact
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.android.package-archive")
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("Content-Disposition", 'attachment; filename="LumiLinuxRuntime.apk"')
+        self.send_header("ETag", f'"sha256-{digest}"')
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        with open(path, "rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                self.wfile.write(chunk)
+
     def do_GET(self) -> None:
-        if self.path == "/health":
+        parsed_request = urllib.parse.urlparse(self.path)
+        path = parsed_request.path
+        if path == "/health":
             self._send(200, {"success": True, "service": "openclaw-newapi-bridge"})
             return
-        if self.path == "/api/openclaw/auth/capabilities":
+        if path == "/api/openclaw/auth/capabilities":
             self._send(200, {"success": True, "data": auth_capabilities_payload()})
             return
-        if self.path in ("/api/openclaw/bind/page", "/openclaw-bind"):
+        if path == "/api/openclaw/entitlements/public-key":
+            status, payload = entitlement_public_key_response()
+            self._send(status, payload)
+            return
+        if path in (
+            "/api/openclaw/account/subscription",
+            "/api/openclaw/subscription",
+        ):
+            status, payload = handle_account_subscription(
+                self.headers.get("Authorization") or ""
+            )
+            self._send(status, payload)
+            return
+        if path in ("/api/openclaw/bind/page", "/openclaw-bind"):
             self._send_html(200, BIND_PAGE_HTML)
+            return
+        if path == "/api/openclaw/subscriptions/checkout":
+            token = urllib.parse.parse_qs(parsed_request.query).get("token", [""])[0]
+            status, page, form_origin = handle_subscription_checkout(token)
+            self._send_html(status, page, form_origin)
+            return
+        if path == "/api/openclaw/downloads/linux-runtime.apk":
+            self._send_linux_companion()
             return
         self._send(404, {"success": False, "error": "not found"})
 
@@ -1263,6 +4026,35 @@ class Handler(BaseHTTPRequestHandler):
         routes = {
             "/api/openclaw/launcher-token": handle_launcher_token,
             "/api/openclaw/launcher-token/ensure": lambda body: handle_ensure_launcher_token(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/entitlements/refresh": lambda body: handle_entitlement_refresh(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/entitlements/redeem": lambda body: handle_entitlement_redeem(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/entitlements/migrate-legacy": lambda body: handle_entitlement_migrate_legacy(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/entitlements/check": lambda body: handle_entitlement_check(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/payments/plans": lambda body: handle_payment_plans(
+                body,
+                self.headers.get("Authorization") or "",
+            ),
+            "/api/openclaw/payments/orders/create": lambda body: handle_payment_order_create(
+                body,
+                self.headers.get("Authorization") or "",
+                _payment_client_ip(self),
+            ),
+            "/api/openclaw/payments/orders/status": lambda body: handle_payment_order_status(
                 body,
                 self.headers.get("Authorization") or "",
             ),
@@ -1281,7 +4073,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length") or "0")
-            if length > 65536:
+            max_request_bytes = (
+                196608
+                if self.path == "/api/openclaw/entitlements/migrate-legacy"
+                else 65536
+            )
+            if length > max_request_bytes:
                 self._send(413, {"success": False, "error": "request too large"})
                 return
             raw = self.rfile.read(length).decode("utf-8") if length else "{}"
@@ -1301,6 +4098,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    entitlement_private_key()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"openclaw-newapi-bridge listening on {HOST}:{PORT}", flush=True)
     server.serve_forever()

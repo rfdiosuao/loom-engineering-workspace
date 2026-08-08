@@ -25,6 +25,15 @@ from api.routes_matrix import _capture_matrix_screen, register_matrix_routes
 from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 from core.stream_tickets import StreamTicketIssuer
 from services.jobs import JobManager
+from tests.matrix_test_support import MatrixTestEntitlement, matrix_for_test
+
+
+def _entitled_context(**values) -> SimpleNamespace:
+    entitlement = MatrixTestEntitlement(values["paths"])
+    return SimpleNamespace(
+        get_entitlement_mgr=lambda: entitlement,
+        **values,
+    )
 
 
 class MatrixScreenContractTests(unittest.TestCase):
@@ -34,7 +43,7 @@ class MatrixScreenContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = SimpleNamespace(launcher_dir=temp_dir, wire_path="")
-            matrix = MatrixControlPlane(paths)
+            matrix = matrix_for_test(paths)
 
             self.assertIs(matrix_routes._build_phone_task_plan, phone_routes._build_phone_task_plan)
             self.assertIs(matrix_routes._submit_phone_job, phone_routes._submit_phone_job)
@@ -168,7 +177,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                 "image": {"mime": "image/jpeg", "base64": "QUJD"},
             },
         }
-        ctx = SimpleNamespace(paths=paths)
+        ctx = _entitled_context(paths=paths)
 
         with patch("api.routes_matrix._script_path", return_value=__file__), patch(
             "api.routes_matrix._run_phone_process_with_matrix_stream",
@@ -185,7 +194,7 @@ class MatrixScreenContractTests(unittest.TestCase):
             launcher_dir=os.path.dirname(__file__),
             node_exe=sys.executable,
         )
-        ctx = SimpleNamespace(paths=paths)
+        ctx = _entitled_context(paths=paths)
         cases = (
             ("phone_config_server_unreachable", "无法连接手机端 APKClaw ConfigServer"),
             ("forward_missing", "USB 转发已经失效，需要重新建立"),
@@ -246,7 +255,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                 launcher_dir=temp_dir,
                 node_exe=sys.executable,
             )
-            ctx = SimpleNamespace(paths=paths)
+            ctx = _entitled_context(paths=paths)
             device_ids = [f"phone-{index}" for index in range(12)]
             with patch("api.routes_matrix._script_path", return_value=__file__), patch(
                 "api.routes_matrix._run_phone_process_with_matrix_stream",
@@ -266,7 +275,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                 launcher_dir=temp_dir,
                 node_exe=sys.executable,
             )
-            matrix = MatrixControlPlane(paths)
+            matrix = matrix_for_test(paths)
             matrix.register_device(
                 {
                     "deviceId": "phone-a",
@@ -291,7 +300,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                     "image": {"mime": "image/jpeg", "base64": "QUJD"},
                 },
             }
-            ctx = SimpleNamespace(paths=paths)
+            ctx = _entitled_context(paths=paths)
             with patch("api.routes_matrix._script_path", return_value=__file__), patch(
                 "api.routes_matrix._run_phone_process_with_matrix_stream",
                 return_value={
@@ -321,7 +330,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                 "image": {"mime": "image/jpeg", "base64": "QUJD"},
             },
         }
-        ctx = SimpleNamespace(paths=paths)
+        ctx = _entitled_context(paths=paths)
         with patch("api.routes_matrix._script_path", return_value=__file__), patch(
             "api.routes_matrix._run_phone_process_with_matrix_stream",
             return_value={"returncode": 0, "stdout": json.dumps(payload), "stderr": ""},
@@ -344,7 +353,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                 "image": {"mime": "image/jpeg", "base64": "QUJD"},
             },
         }
-        ctx = SimpleNamespace(paths=paths)
+        ctx = _entitled_context(paths=paths)
         with patch("api.routes_matrix._script_path", return_value=__file__), patch(
             "api.routes_matrix._run_phone_process_with_matrix_stream",
             return_value={"returncode": 0, "stdout": json.dumps(payload), "stderr": ""},
@@ -369,7 +378,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                 "image": {"mime": "image/jpeg", "base64": "QUJD"},
             },
         }
-        ctx = SimpleNamespace(paths=paths)
+        ctx = _entitled_context(paths=paths)
         with patch("api.routes_matrix._script_path", return_value=__file__), patch(
             "api.routes_matrix._run_phone_process_with_matrix_stream",
             return_value={"returncode": 0, "stdout": json.dumps(payload), "stderr": ""},
@@ -394,7 +403,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                 launcher_dir=temp_dir,
                 node_exe=sys.executable,
             )
-            matrix = MatrixControlPlane(paths)
+            matrix = matrix_for_test(paths)
             matrix.register_device(
                 {
                     "deviceId": "phone-a",
@@ -412,7 +421,7 @@ class MatrixScreenContractTests(unittest.TestCase):
                     "image": {"mime": "image/jpeg", "base64": "QUJD"},
                 },
             }
-            ctx = SimpleNamespace(paths=paths)
+            ctx = _entitled_context(paths=paths)
             with patch("api.routes_matrix._script_path", return_value=__file__), patch(
                 "api.routes_matrix._run_phone_process_with_matrix_stream",
                 return_value={
@@ -431,7 +440,7 @@ class MatrixScreenContractTests(unittest.TestCase):
     def test_timeline_returns_only_recent_events_for_requested_device(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.append_runtime_event("phone.step", "phone-a", "first")
             matrix.append_runtime_event("phone.step", "phone-b", "other")
             matrix.append_runtime_event("phone.step", "phone-a", "latest")
@@ -445,7 +454,7 @@ class MatrixScreenContractTests(unittest.TestCase):
     def test_normal_matrix_stream_requires_one_time_topic_ticket_and_replays_after_seq(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             app, client = _client(temp_dir)
-            matrix = MatrixControlPlane(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
+            matrix = matrix_for_test(SimpleNamespace(launcher_dir=temp_dir, wire_path=""))
             matrix.append_runtime_event("phone.step", "phone-a", "first")
             matrix.append_runtime_event("phone.step", "phone-a", "second")
 
@@ -475,6 +484,12 @@ class MatrixScreenContractTests(unittest.TestCase):
 def _client(base_path: str) -> tuple[FastAPI, TestClient]:
     app = FastAPI()
     job_mgr = JobManager(lambda _message: None)
+    paths = SimpleNamespace(
+        base_path=base_path,
+        launcher_dir=base_path,
+        node_exe=sys.executable,
+    )
+    entitlement = MatrixTestEntitlement(paths)
 
     async def body(request):
         try:
@@ -490,8 +505,9 @@ def _client(base_path: str) -> tuple[FastAPI, TestClient]:
         auth_error=lambda _request: None,
         body=body,
         fastapi_json=fastapi_json,
+        get_entitlement_mgr=lambda: entitlement,
         get_job_mgr=lambda: job_mgr,
-        paths=SimpleNamespace(base_path=base_path, launcher_dir=base_path, node_exe=sys.executable),
+        paths=paths,
         stream_ticket_issuer=StreamTicketIssuer(ttl_seconds=30),
     )
     app.state.stream_ticket_issuer = ctx.stream_ticket_issuer

@@ -2,7 +2,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { signedJsonRequest } from './openclaw-phone-secure.mjs';
+import {
+  readLauncherPhoneConfigByDevice,
+  resolveLauncherPhoneConnection,
+  signedJsonRequest,
+} from './openclaw-phone-secure.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const defaultRoot = path.resolve(scriptDir, '..');
@@ -15,10 +19,8 @@ function usage() {
 Options:
   --root <path>          Launcher or OpenClawFiles root. Default: project root
   --device-id <id>       Optional. Select one configured APKClaw device for context defaults
-  --phone-url <url>      Optional phone Agent base URL for this context refresh
-  --phone-token <token>  Optional phone Agent token. Never written to context
   --phone-album <name>   Optional phone gallery album. Default: OpenClaw
-  --probe                Probe /api/device/status when phone URL and token exist
+  --probe                Probe the Bridge-authorized phone when available
   --write                Write data/.openclaw/workspace/runtime-context.json
   --json                 Print context JSON
   -h, --help             Show help
@@ -29,8 +31,8 @@ function parseArgs(argv) {
   const args = {
     root: defaultRoot,
     deviceId: '',
-    phoneUrl: process.env.OPENCLAW_PHONE_BASE_URL || '',
-    phoneToken: process.env.OPENCLAW_PHONE_TOKEN || '',
+    phoneUrl: '',
+    phoneToken: '',
     phoneAlbum: process.env.OPENCLAW_PHONE_ALBUM || 'LOOM',
     probe: false,
     write: false,
@@ -238,13 +240,19 @@ async function buildContext(args) {
   const imageConfig = await readJson(path.join(root, 'imgapi_config.json'), {});
   const videoConfig = await readJson(path.join(root, 'video_config.json'), {});
   const phoneFileConfig = await readPhoneConfig(root, args.deviceId);
+  const launcherPhone = await readLauncherPhoneConfigByDevice(args.deviceId);
+  const authorizedPhone = resolveLauncherPhoneConnection(
+    args,
+    launcherPhone,
+  );
   const desktopFileConfig = await readDesktopConfig(root);
   const publishFileConfig = await readPublishConfig(root);
-  const phoneUrl = args.phoneUrl || phoneFileConfig.baseUrl;
-  const phoneAlbum = args.phoneAlbum || phoneFileConfig.album || 'LOOM';
-  const tokenAvailable = hasText(args.phoneToken) || phoneFileConfig.tokenAvailable;
-  const phoneProbe = args.probe ? await probePhone(phoneUrl, args.phoneToken) : null;
-  const phoneProfile = args.probe ? await probePhoneProfile(phoneUrl, args.phoneToken) : null;
+  const phoneUrl = authorizedPhone.phoneUrl;
+  const phoneToken = authorizedPhone.phoneToken;
+  const phoneAlbum = args.phoneAlbum || launcherPhone.album || 'LOOM';
+  const tokenAvailable = hasText(phoneToken);
+  const phoneProbe = args.probe ? await probePhone(phoneUrl, phoneToken) : null;
+  const phoneProfile = args.probe ? await probePhoneProfile(phoneUrl, phoneToken) : null;
   const workspacePath = path.join(root, 'data', '.openclaw', 'workspace');
 
   return {
@@ -286,19 +294,30 @@ async function buildContext(args) {
         available: true,
         configured: isConfiguredConfig(imageConfig),
         localOutputDir: path.join(root, 'data', 'generated-images'),
-        cli: 'npm run phone:image',
-        editCli: 'npm run phone:image:edit -- --reference-image <path> --prompt "<edit instruction>"',
+        controlPolicy: 'managed-api-only',
+        capabilityIds: [
+          'loom.media.image.generate',
+          'loom.media.asset.transfer',
+        ],
       },
       videoGeneration: {
         available: true,
         configured: isConfiguredConfig(videoConfig),
+        controlPolicy: 'managed-api-only',
+        capabilityIds: [
+          'loom.media.video.generate',
+          'loom.media.asset.transfer',
+        ],
       },
       platformPublish: {
         available: true,
         configured: Boolean(phoneUrl && tokenAvailable) || hasText(publishFileConfig.reverseRelayUrl),
-        controlPolicy: 'launcher-cli-wrapper',
-        directCli: 'npm run phone:publish -- --transport direct',
-        reverseCli: 'npm run phone:publish -- --transport reverse',
+        controlPolicy: 'managed-api-only',
+        capabilityId: 'loom.phone.publish',
+        launcherCommand: {
+          endpoint: '/api/cli/run',
+          command: 'phone:publish',
+        },
         consumerEndpoint: '/api/lumi/publish/execute',
         defaultPlatform: publishFileConfig.platformId,
         defaultTransport: publishFileConfig.transportMode,
@@ -306,24 +325,21 @@ async function buildContext(args) {
         selectedDeviceId: publishFileConfig.selectedDeviceId || null,
         reverseRelayUrl: publishFileConfig.reverseRelayUrl || null,
         reverseChannelId: publishFileConfig.reverseChannelId || null,
-        tokenPolicy: 'never expose token; publish through launcher CLI or reverse packet only',
+        tokenPolicy: 'never expose token; publish through LOOM managed API or Agent capability only',
       },
       phoneAgent: {
         available: true,
         configured: hasText(phoneUrl) && tokenAvailable,
-        controlPolicy: 'wrapper-only',
-        agentCli: 'npm run phone:agent',
-        fleetCli: 'npm run phone:fleet',
-        imageCli: 'npm run phone:image',
-        imageEditCli: 'npm run phone:image:edit -- --reference-image <path> --prompt "<edit instruction>"',
-        visionCli: 'npm run phone:vision',
+        controlPolicy: 'managed-api-only',
+        launcherEndpoint: '/api/cli/run',
+        launcherCommands: {
+          agent: 'phone:agent',
+          fleet: 'phone:fleet',
+          vision: 'phone:vision',
+          video: 'phone:video',
+          publish: 'phone:publish',
+        },
         videoDownloadDir: path.join(root, 'data', 'phone-videos'),
-        videoCli: 'npm run phone:video',
-        publishCli: 'npm run phone:publish',
-        gameModeCli: 'npm run phone:game',
-        shoppingDemoCli: 'npm run phone:demo:shopping -- --query "<search query>"',
-        readDemoCli: 'npm run phone:demo:read',
-        gameFallbackDemoCli: 'npm run phone:demo:game -- --goal "<goal>"',
         multiDevice: phoneFileConfig.devices.length > 1,
         defaultDeviceId: phoneFileConfig.selectedDeviceId || null,
         deviceCliArg: '--device-id <id>',
@@ -334,7 +350,7 @@ async function buildContext(args) {
         verifiedVersionCode: 860,
         maxRoundsPerTask: 60,
         tokenSource: phoneFileConfig.source ? path.relative(root, phoneFileConfig.source).replace(/\\/g, '/') : 'data/.openclaw/launcher/phone-agent.json',
-        tokenPolicy: 'never expose token; use launcher CLI helpers only',
+        tokenPolicy: 'never expose token; use LOOM managed API or MCP tools only',
       },
       desktopAgent: {
         available: true,
@@ -370,7 +386,7 @@ async function buildContext(args) {
     phone: {
       configured: hasText(phoneUrl) && tokenAvailable,
       connected: Boolean(phoneProbe?.ok),
-      endpoint: 'launcher-cli-wrapper',
+      endpoint: 'launcher-api',
       baseUrl: null,
       tokenAvailable,
       configPath: phoneFileConfig.source ? path.relative(root, phoneFileConfig.source).replace(/\\/g, '/') : 'data/.openclaw/launcher/phone-agent.json',

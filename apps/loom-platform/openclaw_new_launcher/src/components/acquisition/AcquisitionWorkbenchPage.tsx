@@ -12,6 +12,7 @@ import {
 } from '../../services/api';
 import { Button, Input, showConfirm, showToast } from '../common';
 import { buildMcpJson, buildOneShotAgentPrompt } from '../agentAccess/agentPrompt';
+import { useAppStore } from '../../stores/appStore';
 
 const EMPTY_SNAPSHOT: AcquisitionSnapshot = {
   schema: 'loom.customer_acquisition.v1',
@@ -169,6 +170,7 @@ async function copyText(value: string) {
 }
 
 export const AcquisitionWorkbenchPage = () => {
+  const openFeature = useAppStore((state) => state.openFeature);
   const [snapshot, setSnapshot] = React.useState<AcquisitionSnapshot>(EMPTY_SNAPSHOT);
   const [matrixStatus, setMatrixStatus] = React.useState<MatrixStatusSnapshot>(EMPTY_MATRIX_STATUS);
   const [matrixError, setMatrixError] = React.useState('');
@@ -355,7 +357,17 @@ export const AcquisitionWorkbenchPage = () => {
                 {matrixStatus.devices.slice(0, 4).map((device) => (
                   <MatrixDeviceItem key={device.deviceId} device={device} />
                 ))}
-                {matrixStatus.devices.length === 0 ? <Empty>暂无手机接入，绑定手机后这里会显示真实矩阵状态</Empty> : null}
+                {matrixStatus.devices.length === 0 ? (
+                  <div data-acquisition-empty-actions className="sm:col-span-2 rounded-[8px] border border-dashed border-border bg-surface p-3">
+                    <Empty>暂无手机接入，绑定手机后这里会显示真实矩阵状态</Empty>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <Button variant="primary" className="min-h-9 py-1.5 text-xs" onClick={() => openFeature('workbench')}>绑定手机</Button>
+                      <Button variant="quiet" className="min-h-9 py-1.5 text-xs" onClick={() => openFeature('workbench')}>打开手机矩阵</Button>
+                      <Button variant="quiet" className="min-h-9 py-1.5 text-xs" onClick={() => openFeature('skills')}>选择模板</Button>
+                      <Button variant="quiet" className="min-h-9 py-1.5 text-xs" onClick={() => openFeature('agentAccess')}>排查连接</Button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
               {matrixStatus.devices.length > 4 ? (
                 <div className="mt-2 text-[11px] font-black text-accent">另有 {matrixStatus.devices.length - 4} 台设备已接入</div>

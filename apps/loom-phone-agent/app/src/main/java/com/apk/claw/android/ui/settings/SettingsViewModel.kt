@@ -9,16 +9,22 @@ import com.apk.claw.android.R
 import com.apk.claw.android.channel.ChannelManager
 import com.apk.claw.android.floating.FloatingCircleManager
 import com.apk.claw.android.server.ConfigServerManager
+import com.apk.claw.android.server.ConfigServerLifecyclePhase
+import com.apk.claw.android.server.ConfigServerState
+import com.apk.claw.android.server.PhoneNetworkMode
 import com.apk.claw.android.server.TokenValidator
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
 import com.apk.claw.android.widget.QRCodeDialog
+import com.apk.claw.android.workflow.WorkflowTemplateManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
 /**
  * SettingsActivity 的 ViewModel
@@ -35,6 +41,11 @@ class SettingsViewModel : ViewModel() {
 
     init {
         refresh()
+        viewModelScope.launch {
+            ConfigServerManager.state.collect { state ->
+                updateTrailingText(MenuAction.LAN_CONFIG.name, getLanConfigTrailingText(state))
+            }
+        }
     }
 
     fun refresh() {
@@ -58,7 +69,13 @@ class SettingsViewModel : ViewModel() {
             MenuAction.WECHAT.name to SettingValue.Text(ClawApplication.instance.getString(if (wechatBotToken) R.string.common_bound else R.string.common_unbound)),
             MenuAction.PC_PAIRING.name to SettingValue.Text(ClawApplication.instance.getString(if (phonePaired) R.string.pc_pairing_status_paired else R.string.pc_pairing_status_unpaired)),
             MenuAction.LAN_CONFIG.name to SettingValue.Text(getLanConfigTrailingText()),
-            MenuAction.PUBLISH_RELAY.name to SettingValue.Text(getPublishRelayTrailingText()),
+            MenuAction.CONNECTION_DIAGNOSTICS.name to SettingValue.Text(ClawApplication.instance.getString(R.string.connection_diagnostics_action)),
+            MenuAction.SKILL_CENTER.name to SettingValue.Text(
+                ClawApplication.instance.getString(
+                    R.string.skill_center_count,
+                    WorkflowTemplateManager.getAllTemplates().size + 2
+                )
+            ),
             MenuAction.FLOATING_CLICK.name to SettingValue.Switch(FloatingCircleManager.isFloatingClickEnabled()),
             MenuAction.FLOATING_SIZE.name to SettingValue.Text(FloatingCircleManager.getFloatingSizeLabel(ClawApplication.instance))
         )
@@ -181,44 +198,68 @@ class SettingsViewModel : ViewModel() {
     /**
      * 切换局域网配置服务开关
      */
-    fun toggleConfigServer(context: Context): String {
-        return if (ConfigServerManager.isRunning()) {
-            ConfigServerManager.stop()
-            KVUtils.setConfigServerEnabled(false)
-            val text = getLanConfigTrailingText()
-            updateTrailingText(MenuAction.LAN_CONFIG.name, text)
-            text
-        } else {
-            val started = ConfigServerManager.start(context)
-            if (started) {
-                KVUtils.setConfigServerEnabled(true)
-                val text = getLanConfigTrailingText()
-                updateTrailingText(MenuAction.LAN_CONFIG.name, text)
-                text
-            } else {
-                ClawApplication.instance.getString(R.string.lan_config_no_wifi)
+    fun toggleConfigServer(context: Context) {
+        when (ConfigServerManager.state.value.phase) {
+            ConfigServerLifecyclePhase.STARTING,
+            ConfigServerLifecyclePhase.STOPPING -> return
+            ConfigServerLifecyclePhase.READY -> {
+                updateTrailingText(
+                    MenuAction.LAN_CONFIG.name,
+                    ClawApplication.instance.getString(R.string.lan_config_stopping)
+                )
+                viewModelScope.launch {
+                    withContext(Dispatchers.IO) {
+                        ConfigServerManager.disable()
+                    }
+                }
+            }
+            ConfigServerLifecyclePhase.STOPPED,
+            ConfigServerLifecyclePhase.ERROR -> {
+                updateTrailingText(
+                    MenuAction.LAN_CONFIG.name,
+                    ClawApplication.instance.getString(R.string.lan_config_starting)
+                )
+                viewModelScope.launch {
+                    val started = withContext(Dispatchers.IO) {
+                        ConfigServerManager.enable(context)
+                    }
+                    if (!started) {
+                        Toast.makeText(context, R.string.lan_config_no_wifi, Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
     }
 
-    private fun getLanConfigTrailingText(): String {
-        return if (ConfigServerManager.isRunning()) {
-            ConfigServerManager.getAddress() ?: ClawApplication.instance.getString(R.string.lan_config_stopped)
-        } else {
-            ClawApplication.instance.getString(R.string.lan_config_stopped)
+    private fun getLanConfigTrailingText(state: ConfigServerState = ConfigServerManager.state.value): String {
+        return when (state.phase) {
+            ConfigServerLifecyclePhase.STOPPED -> ClawApplication.instance.getString(R.string.lan_config_stopped)
+            ConfigServerLifecyclePhase.STARTING -> ClawApplication.instance.getString(R.string.lan_config_switching)
+            ConfigServerLifecyclePhase.STOPPING -> ClawApplication.instance.getString(R.string.lan_config_switching)
+            ConfigServerLifecyclePhase.ERROR -> ClawApplication.instance.getString(R.string.lan_config_error)
+            ConfigServerLifecyclePhase.READY -> {
+                val address = ConfigServerManager.getAddress()
+                when {
+                    address.isNullOrBlank() -> ClawApplication.instance.getString(R.string.lan_config_usb_ready)
+                    ConfigServerManager.getNetworkMode(ClawApplication.instance) == PhoneNetworkMode.HOTSPOT_HOST ->
+                        ClawApplication.instance.getString(R.string.lan_config_hotspot_ready, address)
+                    else -> ClawApplication.instance.getString(R.string.lan_config_lan_ready, address)
+                }
+            }
         }
     }
 
-    private fun getPublishRelayTrailingText(): String {
-        val configured = KVUtils.getPublishRelayBaseUrl().isNotBlank() && KVUtils.getPublishRelayChannelId().isNotBlank()
-        if (!configured) return ClawApplication.instance.getString(R.string.common_unconfigured)
-        return ClawApplication.instance.getString(
-            if (KVUtils.isPublishRelayEnabled()) {
-                R.string.publish_relay_status_on
-            } else {
-                R.string.publish_relay_status_off
-            }
+    fun connectionDiagnostics(): String {
+        val app = ClawApplication.instance
+        val pairing = app.getString(
+            if (TokenValidator.isTokenConfigured()) R.string.pc_pairing_status_paired else R.string.pc_pairing_status_unpaired
         )
+        val state = getLanConfigTrailingText()
+        val mode = ConfigServerManager.getNetworkMode(app).wireName
+        val candidates = ConfigServerManager.getNetworkCandidates(app)
+            .joinToString(separator = "\n") { "${it.mode.wireName}  ${it.address}" }
+            .ifBlank { app.getString(R.string.connection_diagnostics_no_lan) }
+        return app.getString(R.string.connection_diagnostics_summary, pairing, state, mode, candidates)
     }
 
     fun isDingtalkBound(): Boolean {
@@ -336,8 +377,10 @@ class SettingsViewModel : ViewModel() {
         DINGDING, FEISHU, QQ, DISCORD, TELEGRAM, WECHAT,
         PC_PAIRING,
         LAN_CONFIG,
+        CONNECTION_DIAGNOSTICS,
+        ENHANCED_CAPABILITY,
+        SKILL_CENTER,
         LLM_CONFIG,
-        PUBLISH_RELAY,
         FLOATING_CLICK,
         FLOATING_SIZE
     }

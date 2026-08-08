@@ -21,6 +21,22 @@ SENSITIVE_KEY_MARKERS = ("token", "secret", "password", "credential", "api_key",
 DEFAULT_TEMPLATE_SERVER_URL = "https://api.heang.top/api/loom/templates"
 
 
+class TemplateError(RuntimeError):
+    """Safe, user-facing template library error."""
+
+
+class TemplateNotFound(TemplateError):
+    pass
+
+
+class TemplateDisabled(TemplateError):
+    pass
+
+
+class TemplateVersionConflict(TemplateError):
+    pass
+
+
 class AcquisitionTemplateLibrary:
     def __init__(self, paths: AppPaths, *, uploader: TemplateUploader | None = None):
         self.paths = paths
@@ -47,6 +63,7 @@ class AcquisitionTemplateLibrary:
                 },
                 "stats": {
                     "total": len(templates),
+                    "enabled": sum(1 for item in templates if item.get("enabled") is not False),
                     "pendingUpload": sum(1 for item in templates if item.get("uploadStatus") in {"pending_upload", "upload_failed"}),
                     "uploaded": sum(1 for item in templates if item.get("uploadStatus") == "uploaded"),
                 },
@@ -68,7 +85,24 @@ class AcquisitionTemplateLibrary:
     def save_from_acquisition(self, raw: Json) -> Json:
         state = self._load_state()
         templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
-        template = self._build_template(raw)
+        proposed_id = _template_id(raw.get("templateId") or f"{raw.get('industry') or raw.get('category') or raw.get('topic') or '通用获客'}-{raw.get('name') or raw.get('topic') or '获客打法模板'}")
+        existing = next((item for item in templates if item.get("templateId") == proposed_id), None)
+        expected_version = _optional_int(raw.get("expectedVersion")) if "expectedVersion" in raw else None
+        if existing:
+            current_version = max(1, _int(existing.get("version"), 1))
+            if expected_version is not None and expected_version != current_version:
+                raise TemplateVersionConflict(
+                    f"模板已更新（当前版本 {current_version}），请刷新后重试"
+                )
+            source = {**existing, **raw, "templateId": proposed_id}
+            template = self._build_template(source)
+            template["version"] = current_version + 1
+            template["createdAt"] = existing.get("createdAt") or template["createdAt"]
+            template["enabled"] = raw.get("enabled") is not False if "enabled" in raw else existing.get("enabled") is not False
+        else:
+            if expected_version not in {None, 0}:
+                raise TemplateVersionConflict("模板不存在或已被删除，请刷新后重试")
+            template = self._build_template({**raw, "templateId": proposed_id})
         templates = [item for item in templates if item.get("templateId") != template["templateId"]]
         templates.append(template)
         state["templates"] = templates[-500:]
@@ -78,6 +112,116 @@ class AcquisitionTemplateLibrary:
         state = self._load_state()
         current = next((item for item in state.get("templates", []) if item.get("templateId") == template["templateId"]), template)
         return _redact_json({"template": current, "upload": upload, "status": self.status()})
+
+    def resolve_template(
+        self,
+        template_id: str,
+        *,
+        expected_version: int | None = None,
+        require_enabled: bool = True,
+    ) -> Json:
+        safe_id = _template_id(template_id)
+        state = self._load_state()
+        templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
+        template = next((item for item in templates if item.get("templateId") == safe_id), None)
+        if not template:
+            raise TemplateNotFound("未找到共享模板")
+        current_version = max(1, _int(template.get("version"), 1))
+        if expected_version is not None and expected_version != current_version:
+            raise TemplateVersionConflict(
+                f"模板版本不一致（请求 {expected_version}，当前 {current_version}），请刷新后重试"
+            )
+        if require_enabled and template.get("enabled") is False:
+            raise TemplateDisabled("共享模板已停用，请启用后再执行")
+        return _redact_json(dict(template))
+
+    def materialize_request(self, raw: Json) -> Json:
+        materialized = dict(raw) if isinstance(raw, dict) else {}
+        template_id = str(materialized.get("templateId") or "").strip()
+        if not template_id:
+            return _redact_json(materialized)
+        expected_version = _optional_int(
+            materialized.get("templateVersion")
+            if "templateVersion" in materialized
+            else materialized.get("expectedVersion")
+        )
+        template = self.resolve_template(
+            template_id,
+            expected_version=expected_version,
+            require_enabled=True,
+        )
+        version = max(1, _int(template.get("version"), 1))
+        platforms = _string_list(template.get("platforms"), ["manual"])
+        platform = platforms[0] if platforms else "manual"
+        materialized.setdefault("topic", template.get("name") or "获客打法模板")
+        materialized.setdefault("platform", platform)
+        materialized.setdefault("target", template.get("targetCustomer") or "潜在客户")
+        materialized.setdefault("targetCustomer", template.get("targetCustomer") or "潜在客户")
+        materialized.setdefault("knowledge", template.get("replyStyle") or "自然、不强推、先确认需求")
+        materialized["templateId"] = str(template.get("templateId") or template_id)
+        materialized["templateVersion"] = version
+        materialized["templateName"] = str(template.get("name") or "获客打法模板")
+        materialized["sharedTemplate"] = {
+            "templateId": materialized["templateId"],
+            "version": version,
+            "name": materialized["templateName"],
+            "industry": template.get("industry") or "通用获客",
+            "platforms": platforms,
+            "targetCustomer": template.get("targetCustomer") or "潜在客户",
+            "keywords": _string_list(template.get("keywords"), []),
+            "leadRules": _string_list(template.get("leadRules"), []),
+            "replyStyle": template.get("replyStyle") or "自然、不强推、先确认需求",
+            "safetyPolicy": template.get("safetyPolicy") if isinstance(template.get("safetyPolicy"), dict) else {},
+            "feishuMapping": template.get("feishuMapping") if isinstance(template.get("feishuMapping"), dict) else {},
+        }
+        if not str(materialized.get("prompt") or "").strip():
+            keywords = "、".join(materialized["sharedTemplate"]["keywords"]) or "未指定"
+            lead_rules = "；".join(materialized["sharedTemplate"]["leadRules"]) or "按公开意向信号判断"
+            materialized["prompt"] = _clip(
+                f"使用共享模板 {materialized['templateName']}（{materialized['templateId']}@v{version}）执行获客任务。"
+                f"平台：{platform}；目标客户：{materialized['targetCustomer']}；关键词：{keywords}；"
+                f"线索规则：{lead_rules}；回复风格：{materialized['knowledge']}。"
+                "只读取公开可见内容，只生成线索与待人工确认草稿；禁止执行任何对外发送、互动、添加联系人或发布动作。",
+                2000,
+            )
+        return _redact_json(materialized)
+
+    def set_enabled(self, template_id: str, enabled: bool, *, expected_version: int | None = None) -> Json:
+        state = self._load_state()
+        templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
+        template = next((item for item in templates if item.get("templateId") == template_id), None)
+        if not template:
+            raise TemplateNotFound("未找到共享模板")
+        current_version = max(1, _int(template.get("version"), 1))
+        if expected_version is not None and expected_version != current_version:
+            raise TemplateVersionConflict(
+                f"模板已更新（当前版本 {current_version}），请刷新后重试"
+            )
+        template = {**template}
+        template["enabled"] = bool(enabled)
+        template["version"] = current_version + 1
+        template["updatedAt"] = _now_iso()
+        template["uploadStatus"] = "pending_upload"
+        template["uploadError"] = ""
+        template["remote"] = {}
+        self._replace_template(state, template)
+        return _redact_json({"template": template, "status": self.status()})
+
+    def delete_template(self, template_id: str, *, expected_version: int | None = None) -> Json:
+        state = self._load_state()
+        templates = [item for item in state.get("templates", []) if isinstance(item, dict)]
+        template = next((item for item in templates if item.get("templateId") == template_id), None)
+        if not template:
+            raise TemplateNotFound("未找到共享模板")
+        current_version = max(1, _int(template.get("version"), 1))
+        if expected_version is not None and expected_version != current_version:
+            raise TemplateVersionConflict(
+                f"模板已更新（当前版本 {current_version}），请刷新后重试"
+            )
+        state["templates"] = [item for item in templates if item.get("templateId") != template_id]
+        state["updatedAt"] = _now_iso()
+        self._write_state(state)
+        return _redact_json({"status": "deleted", "templateId": template_id, "version": current_version})
 
     def upload_template(self, template_id: str) -> Json:
         state = self._load_state()
@@ -153,6 +297,7 @@ class AcquisitionTemplateLibrary:
             "schema": "loom.acquisition_template.v1",
             "templateId": template_id,
             "version": 1,
+            "enabled": raw.get("enabled") is not False,
             "name": name,
             "industry": industry,
             "platforms": platforms,
@@ -299,6 +444,13 @@ def _int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _redact_json(value: Any) -> Any:

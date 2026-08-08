@@ -36,8 +36,10 @@ object PublishRelayManager {
     private const val DEFAULT_SCREENSHOT_GRID_COLUMNS = 6
     private const val DEFAULT_SCREENSHOT_GRID_ROWS = 12
     private const val DEFAULT_WAIT_MS = 15_000L
-    private const val DEFAULT_LEASE_MS = 30_000L
+    private const val DEFAULT_LEASE_MS = 15 * 60_000L
     private const val RETRY_DELAY_MS = 5_000L
+    private const val PUBLISH_OUTCOME_WAIT_MS = 12_000L
+    private const val PUBLISH_OUTCOME_POLL_MS = 400L
     private val gson = Gson()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = OkHttpClient.Builder()
@@ -71,6 +73,8 @@ object PublishRelayManager {
         val responseText: String,
         val responseJson: JsonObject?,
         val errorMessage: String,
+        val commitToken: String = "",
+        val commitAuthorized: Boolean = false,
     )
 
     data class RelayCheckResult(
@@ -112,7 +116,10 @@ object PublishRelayManager {
         }
 
         return try {
-            val healthResponse = getJson("$normalizedBaseUrl/health", normalizedToken)
+            val healthResponse = getJson(
+                "$normalizedBaseUrl/api/lumi/relay/health",
+                normalizedToken,
+            )
             if (healthResponse.statusCode !in 200..299) {
                 return RelayCheckResult(
                     false,
@@ -121,22 +128,11 @@ object PublishRelayManager {
                 )
             }
 
-            val statusUrl = "$normalizedBaseUrl/api/lumi/relay/status?channelId=${URLEncoder.encode(normalizedChannelId, Charsets.UTF_8.name())}"
-            val channelResponse = getJson(statusUrl, normalizedToken)
-            if (channelResponse.statusCode !in 200..299) {
-                return RelayCheckResult(
-                    false,
-                    "Relay channel check failed: HTTP ${channelResponse.statusCode}",
-                    healthStatusCode = healthResponse.statusCode,
-                    channelStatusCode = channelResponse.statusCode,
-                )
-            }
-
             RelayCheckResult(
                 true,
                 "Relay reachable",
                 healthStatusCode = healthResponse.statusCode,
-                channelStatusCode = channelResponse.statusCode,
+                channelStatusCode = null,
             )
         } catch (error: Exception) {
             RelayCheckResult(false, error.message ?: "Relay check failed")
@@ -175,7 +171,7 @@ object PublishRelayManager {
                         continue
                     }
 
-                    val execution = executePacketLocally(packet)
+                    val execution = executePacketLocally(config, packet)
                     completeRelayPacket(config, packet, execution)
                 } catch (e: Exception) {
                     XLog.e(TAG, "Publish relay loop failed", e)
@@ -200,7 +196,7 @@ object PublishRelayManager {
     }
 
     private fun pollRelayPacket(config: Config): RelayPollPacket? {
-        val clientId = KVUtils.ensurePublishRelayClientId()
+        val clientId = KVUtils.ensureLumiDeviceInstanceId()
         val pollUrl = buildString {
             append(normalizeBaseUrl(config.baseUrl))
             append("/api/lumi/relay/poll?channelId=")
@@ -234,10 +230,13 @@ object PublishRelayManager {
         )
     }
 
-    private fun executePacketLocally(packet: RelayPollPacket): RelayExecutionResult {
+    private fun executePacketLocally(
+        config: Config,
+        packet: RelayPollPacket,
+    ): RelayExecutionResult {
         val schema = packetSchema(packet.packet)
         return when (schema) {
-            PUBLISH_PACKET_SCHEMA -> executePublishPacketLocally(packet)
+            PUBLISH_PACKET_SCHEMA -> executePublishPacketLocally(config, packet)
             SCREENSHOT_PACKET_SCHEMA -> executeScreenshotPacketLocally(packet)
             else -> RelayExecutionResult(
                 success = false,
@@ -249,7 +248,20 @@ object PublishRelayManager {
         }
     }
 
-    private fun executePublishPacketLocally(packet: RelayPollPacket): RelayExecutionResult {
+    private fun executePublishPacketLocally(
+        config: Config,
+        packet: RelayPollPacket,
+    ): RelayExecutionResult {
+        val draftOnly = packetBoolean(packet.packet, "draftOnly", true)
+        if (!PublishRelaySecurityPolicy.mayExecute(config.baseUrl, draftOnly)) {
+            return RelayExecutionResult(
+                success = false,
+                statusCode = 403,
+                responseText = "",
+                responseJson = null,
+                errorMessage = "Formal publish requires an HTTPS relay",
+            )
+        }
         if (!KVUtils.hasLlmConfig()) {
             return RelayExecutionResult(
                 success = false,
@@ -287,8 +299,70 @@ object PublishRelayManager {
             override fun getRemoteHostName(): String = "localhost"
         }
 
-        val response = PublishApiController.handleExecutePacket(session)
-        return parseRelayExecutionResponse(response)
+        val gate = PublishCommitGuard(
+            draftOnly = draftOnly,
+            screenTree = {
+                ClawAccessibilityService.getInstance()?.screenTreeJson
+            },
+            authorizeCommit = {
+                authorizeFormalPublishCommit(config, packet)
+            },
+            screenObservedAt = {
+                ClawAccessibilityService.getInstance()?.currentPackageObservedAt ?: 0L
+            },
+        )
+        val response = PublishApiController.handleExecutePacket(
+            session,
+            gate::beforeToolDispatch,
+        )
+        val execution = parseRelayExecutionResponse(response).copy(
+            commitToken = gate.commitToken,
+            commitAuthorized = gate.commitAuthorized,
+        )
+        if (draftOnly || !execution.success) return execution
+        if (!gate.commitAuthorized) {
+            return execution.copy(
+                success = false,
+                statusCode = 409,
+                errorMessage = "Formal publish did not receive commit authorization",
+            )
+        }
+
+        val outcome = awaitFormalPublishOutcome(gate)
+        val outcomeJson = JsonObject().apply {
+            addProperty("verified", outcome.verified)
+            addProperty("evidence", outcome.evidence)
+        }
+        val responseJson = (execution.responseJson?.deepCopy() ?: JsonObject()).apply {
+            add("publishPostcondition", outcomeJson)
+        }
+        if (!outcome.verified) {
+            val detail = outcome.evidence.takeIf { it.isNotBlank() }
+                ?.let { ": $it" }
+                .orEmpty()
+            return execution.copy(
+                success = false,
+                statusCode = 409,
+                responseJson = responseJson,
+                errorMessage = "Formal publish outcome was not verified$detail",
+            )
+        }
+        return execution.copy(responseJson = responseJson)
+    }
+
+    private fun awaitFormalPublishOutcome(gate: PublishCommitGuard): PublishOutcomeInspection {
+        val deadlineMs = System.currentTimeMillis() + PUBLISH_OUTCOME_WAIT_MS
+        do {
+            val service = ClawAccessibilityService.getInstance()
+            val inspection = gate.inspectCompletion(
+                executionSucceeded = true,
+                tree = service?.screenTreeJson,
+                observedAtMs = service?.currentPackageObservedAt ?: 0L,
+            )
+            if (inspection.verified || inspection.evidence.isNotBlank()) return inspection
+            if (System.currentTimeMillis() >= deadlineMs) return inspection
+            Thread.sleep(PUBLISH_OUTCOME_POLL_MS)
+        } while (true)
     }
 
     private fun executeScreenshotPacketLocally(packet: RelayPollPacket): RelayExecutionResult {
@@ -426,6 +500,43 @@ object PublishRelayManager {
         return URLEncoder.encode(value, Charsets.UTF_8.name())
     }
 
+    private fun authorizeFormalPublishCommit(
+        config: Config,
+        packet: RelayPollPacket,
+    ): PublishCommitDecision {
+        val clientId = KVUtils.ensureLumiDeviceInstanceId()
+        val payload = JsonObject().apply {
+            addProperty("packetId", packet.packetId)
+            addProperty("leaseId", packet.leaseId)
+            addProperty("clientId", clientId)
+            addProperty("channelId", packet.channelId.ifBlank { config.channelId })
+        }
+        val url = "${normalizeBaseUrl(config.baseUrl)}/api/lumi/relay/commit-authorize"
+        val response = postJson(url, payload, config.token)
+        if (response.statusCode !in 200..299) {
+            val detail = response.bodyJson
+                ?.get("error")
+                ?.takeIf { it.isJsonPrimitive }
+                ?.asString
+                .orEmpty()
+            throw IllegalStateException(
+                "Relay commit authorization failed: HTTP ${response.statusCode}" +
+                    if (detail.isBlank()) "" else " ${detail.take(160)}"
+            )
+        }
+        val data = response.bodyJson?.getAsJsonObject("data")
+            ?: throw IllegalStateException("Relay commit authorization returned no data")
+        val token = data.get("commitToken")
+            ?.takeIf { it.isJsonPrimitive }
+            ?.asString
+            .orEmpty()
+        val expiresAt = data.get("expiresAt")
+            ?.takeIf { it.isJsonPrimitive }
+            ?.asLong
+            ?: 0L
+        return PublishCommitDecision(token = token, expiresAtMs = expiresAt)
+    }
+
     private fun completeRelayPacket(
         config: Config,
         packet: RelayPollPacket,
@@ -434,12 +545,15 @@ object PublishRelayManager {
         val payload = JsonObject().apply {
             addProperty("packetId", packet.packetId)
             addProperty("leaseId", packet.leaseId)
-            addProperty("clientId", KVUtils.getPublishRelayClientId())
+            addProperty("clientId", KVUtils.ensureLumiDeviceInstanceId())
             addProperty("channelId", packet.channelId.ifBlank { config.channelId })
             addProperty("success", execution.success)
             addProperty("statusCode", execution.statusCode)
             addProperty("error", execution.errorMessage)
             addProperty("responseText", execution.responseText)
+            if (execution.commitAuthorized && execution.commitToken.isNotBlank()) {
+                addProperty("commitToken", execution.commitToken)
+            }
             execution.responseJson?.let { add("result", it) }
         }
 

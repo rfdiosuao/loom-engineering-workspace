@@ -1,0 +1,9 @@
+{
+  "schema": "loom.agent.run.v1",
+  "runId": "run_initial_private_001",
+  "sessionId": "session_initial_private_001",
+  "status": "queued",
+  "campaignIds": [],
+  "modelId": "claude-sonnet-4-5",
+  "modelSource": "session"
+}

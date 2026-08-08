@@ -8,6 +8,7 @@ import {
   markCalls,
   navigateTo,
   proxyIntents,
+  waitForProxyIntent,
 } from './support/control-audit';
 import {
   AUDIT_FEISHU_STATUS,
@@ -894,18 +895,25 @@ test('matrix workbench selects devices, configures a task, dispatches, and suppo
   await drawer.getByRole('button', { name: '完成' }).click();
   const beforeDispatch = await markCalls(audit);
   await main.getByRole('button', { name: '下发任务' }).click();
-  await expectProxyIntent(audit, beforeDispatch, {
-    method: 'POST',
-    path: '/api/matrix/dispatch',
-    body: {
+  const dispatchIntent = await waitForProxyIntent(audit, beforeDispatch, 'POST', '/api/matrix/dispatch');
+  const dispatchBody = dispatchIntent.body as { campaignId: string; deviceAssignments: Array<{ assignmentId: string }> };
+  expect(dispatchBody).toEqual({
+    schema: 'loom.matrix.dispatch.v2',
+    campaignId: expect.stringMatching(/^campaign_ui_\d+_[0-9a-f]+$/),
+    concurrency: 1,
+    mode: 'full',
+    profile: 'deep',
+    deviceAssignments: [{
+      assignmentId: expect.any(String),
+      deviceId: 'phone-audit-1',
       prompt: 'mocked matrix dispatch only',
       templateId: 'audit-template',
-      target: { deviceIds: ['phone-audit-1'] },
-      mode: 'full',
-      profile: 'deep',
-      confirmed: true,
-    },
+      input: { sharedTemplate: { templateId: 'audit-template' } },
+      timeoutSec: 180,
+      retryBudget: 1,
+    }],
   });
+  expect(dispatchBody.deviceAssignments[0].assignmentId).toBe(`${dispatchBody.campaignId}_assignment_1`);
   await expect(main.locator('[data-matrix-action-result]')).toContainText('campaign-audit-1');
   await main.getByRole('button', { name: '高级参数' }).click();
   await expect(riskConfirmation).not.toBeChecked();

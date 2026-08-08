@@ -22,7 +22,8 @@ data class AgentRunOptions(
     val toolPolicy: AgentToolPolicy = AgentToolPolicy.FULL_ACCESS,
     val maxRounds: Int? = null,
     val allowReplayFailedStep: Boolean = true,
-    val oldPostconditionAbsent: () -> Boolean = { false }
+    val oldPostconditionAbsent: () -> Boolean = { false },
+    val beforeToolDispatch: (String, Map<String, Any>) -> String? = { _, _ -> null },
 )
 
 object AgentReplaySafetyPolicy {

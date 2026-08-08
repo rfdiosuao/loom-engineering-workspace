@@ -3,9 +3,116 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from ..domains import relay as relay_domain
+
 
 Route = Callable[[Any, Any], None]
 LOGGER = logging.getLogger("openclaw-license")
+
+
+def _send_producer_error(handler: Any, error: Exception) -> None:
+    headers = (
+        {"WWW-Authenticate": 'Bearer realm="loom-relay-producer"'}
+        if error.status == 401
+        else None
+    )
+    message = str(error)
+    code = error.code
+    handler.send_json(
+        error.status,
+        {
+            "ok": False,
+            "error": {"message": message, "code": code},
+            "message": message,
+            "code": code,
+        },
+        headers=headers,
+    )
+
+
+def _producer_context(handler: Any, authorization: Any) -> dict[str, Any]:
+    api = handler.facade
+    producer_token = relay_domain.publish_relay_producer_request_token(
+        handler.headers
+    )
+    context = relay_domain.publish_relay_validate_producer_authorization(
+        authorization,
+        current_entitlement_fn=api.current_account_entitlement,
+        producer_token=producer_token,
+        settings=api.SETTINGS,
+    )
+    scope = relay_domain.publish_relay_producer_scope_from_headers(handler.headers)
+    if (
+        scope["accountId"] != context["accountId"]
+        or scope["entitlementVersion"] != context["entitlementVersion"]
+        or not api.secrets.compare_digest(
+            scope["runtimeConfigDigest"],
+            context["runtimeConfigDigest"],
+        )
+    ):
+        raise api.ActivationError(
+            "Relay producer authentication required",
+            401,
+            "RELAY_PRODUCER_AUTH_REQUIRED",
+        )
+    return context
+
+
+def _producer_status_record(
+    handler: Any,
+    packet_id: str,
+    scope: dict[str, Any],
+) -> dict[str, Any]:
+    api = handler.facade
+    producer_token = relay_domain.publish_relay_producer_request_token(
+        handler.headers
+    )
+    record = relay_domain.publish_relay_status(
+        packet_id,
+        include_packet=True,
+        account_id=scope["accountId"],
+        entitlement_version=scope["entitlementVersion"],
+        runtime_config_digest=scope["runtimeConfigDigest"],
+        settings=api.SETTINGS,
+        defaults=api.DB_DEFAULTS,
+        connect_fn=api.connect,
+    )
+    packet = record.get("packet")
+    authorization = packet.get("authorization") if isinstance(packet, dict) else None
+    try:
+        context = relay_domain.publish_relay_validate_producer_authorization(
+            authorization,
+            current_entitlement_fn=api.current_account_entitlement,
+            producer_token=producer_token,
+            settings=api.SETTINGS,
+        )
+    except api.ActivationError as error:
+        if error.status != 401:
+            raise
+        raise api.ActivationError(
+            "Relay packet not found",
+            404,
+            "RELAY_PACKET_NOT_FOUND",
+        ) from None
+    if (
+        context["accountId"] != scope["accountId"]
+        or context["entitlementVersion"] != scope["entitlementVersion"]
+        or not api.secrets.compare_digest(
+            context["runtimeConfigDigest"],
+            scope["runtimeConfigDigest"],
+        )
+    ):
+        raise api.ActivationError(
+            "Relay packet not found",
+            404,
+            "RELAY_PACKET_NOT_FOUND",
+        )
+    public_record = dict(record)
+    if isinstance(packet, dict):
+        public_packet = dict(packet)
+        public_packet.pop("authorization", None)
+        public_record["packet"] = public_packet
+    return public_record
 
 
 def get_api_lumi_relay_health(handler, parsed):
@@ -102,31 +209,32 @@ def get_api_lumi_relay_poll(handler, parsed):
 
 def get_api_lumi_relay_status(handler, parsed):
     api = handler.facade
-    if not handler.require_publish_relay_auth():
-        return
-    query = api.parse_qs(parsed.query)
-    packet_id = api.normalize_string(
-        (query.get("id") or query.get("packetId") or query.get("packet_id") or [""])[0]
-    )
-    channel_id = api.normalize_string(
-        (query.get("channelId") or query.get("channel_id") or [""])[0]
-    )
     try:
-        if packet_id:
-            handler.send_json(
-                200,
-                {
-                    "ok": True,
-                    "data": api.publish_relay_status(packet_id, include_packet=True),
-                },
+        query = api.parse_qs(parsed.query)
+        packet_id = api.normalize_string(
+            (
+                query.get("id")
+                or query.get("packetId")
+                or query.get("packet_id")
+                or [""]
+            )[0]
+        )
+        if not packet_id:
+            raise api.ActivationError(
+                "Missing packetId",
+                400,
+                "RELAY_PACKET_ID_REQUIRED",
             )
-        else:
-            handler.send_json(
-                200,
-                {"ok": True, "data": {"queue": api.publish_relay_stats(channel_id)}},
-            )
+        scope = relay_domain.publish_relay_producer_scope_from_headers(handler.headers)
+        handler.send_json(
+            200,
+            {
+                "ok": True,
+                "data": _producer_status_record(handler, packet_id, scope),
+            },
+        )
     except api.ActivationError as error:
-        handler.send_json(error.status, {"ok": False, "error": str(error)})
+        _send_producer_error(handler, error)
     except Exception:
         LOGGER.exception("Publish relay status failed")
         handler.send_json(500, {"ok": False, "error": "Internal server error"})
@@ -134,10 +242,23 @@ def get_api_lumi_relay_status(handler, parsed):
 
 def post_api_lumi_relay_packet(handler, parsed):
     api = handler.facade
-    if not handler.require_publish_relay_auth():
-        return
     try:
-        record = api.publish_relay_enqueue(handler.read_json())
+        packet = handler.read_json()
+        if not isinstance(packet, dict):
+            raise api.ActivationError(
+                "Invalid JSON body",
+                400,
+                "RELAY_PACKET_INVALID",
+            )
+        producer = _producer_context(handler, packet.get("authorization"))
+        record = relay_domain.publish_relay_enqueue(
+            packet,
+            account_id=producer["accountId"],
+            settings=api.SETTINGS,
+            defaults=api.DB_DEFAULTS,
+            connect_fn=api.connect,
+            packet_id_fn=api.publish_relay_packet_id,
+        )
         handler.send_json(
             202,
             {
@@ -154,7 +275,16 @@ def post_api_lumi_relay_packet(handler, parsed):
             },
         )
     except api.ActivationError as error:
-        handler.send_json(error.status, {"ok": False, "error": str(error)})
+        _send_producer_error(handler, error)
+    except ValueError:
+        handler.send_json(
+            400,
+            {
+                "ok": False,
+                "error": "Invalid JSON body",
+                "code": "RELAY_PACKET_INVALID",
+            },
+        )
     except Exception:
         LOGGER.exception("Publish relay enqueue failed")
         handler.send_json(500, {"ok": False, "error": "Internal server error"})
@@ -174,6 +304,23 @@ def post_api_lumi_relay_complete(handler, parsed):
         handler.send_json(500, {"ok": False, "error": "Internal server error"})
 
 
+def post_api_lumi_relay_commit_authorize(handler, parsed):
+    api = handler.facade
+    if not handler.require_publish_relay_auth():
+        return
+    try:
+        data = api.publish_relay_authorize_commit(handler.read_json())
+        handler.send_json(200, {"ok": True, "data": data})
+    except api.ActivationError as error:
+        handler.send_json(
+            error.status,
+            {"ok": False, "error": str(error), "code": error.code},
+        )
+    except Exception:
+        LOGGER.exception("Publish relay commit authorization failed")
+        handler.send_json(500, {"ok": False, "error": "Internal server error"})
+
+
 GET_ROUTES: dict[str, Route] = {
     "/api/lumi/relay/health": get_api_lumi_relay_health,
     "/api/lumi/publish/health": get_api_lumi_relay_health,
@@ -187,6 +334,8 @@ GET_ROUTES: dict[str, Route] = {
 POST_ROUTES: dict[str, Route] = {
     "/api/lumi/relay/packet": post_api_lumi_relay_packet,
     "/api/lumi/publish/packet": post_api_lumi_relay_packet,
+    "/api/lumi/relay/commit-authorize": post_api_lumi_relay_commit_authorize,
+    "/api/lumi/publish/commit-authorize": post_api_lumi_relay_commit_authorize,
     "/api/lumi/relay/complete": post_api_lumi_relay_complete,
     "/api/lumi/publish/complete": post_api_lumi_relay_complete,
 }

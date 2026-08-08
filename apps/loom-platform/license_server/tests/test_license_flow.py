@@ -40,6 +40,9 @@ def load_server(temp_dir: Path):
     os.environ["MEMBER_GATEWAY_IMAGE_TOKEN"] = ""
     os.environ["MEMBER_GATEWAY_VIDEO_TOKEN"] = ""
     os.environ["OPENCLAW_PUBLISH_RELAY_TOKEN"] = "test-relay-token"
+    os.environ["LICENSE_ACCOUNT_REDEEM_SERVICE_TOKEN"] = (
+        "test-account-redeem-service-token"
+    )
     os.environ["LICENSE_PUBLIC_URL"] = "https://license.heang.top/"
     os.environ["LICENSE_SUPPORT_URL"] = "https://license.heang.top/"
 
@@ -1746,6 +1749,24 @@ class LicenseServerFlowTests(unittest.TestCase):
             expected_status=204,
         )
         self.assertEqual(public_headers.get("Access-Control-Allow-Origin"), "*")
+
+        for path in (
+            "/api/service/account-entitlements/current",
+            "/api/service/payments/plans",
+            "/api/service/payments/orders/create",
+            "/api/service/payments/orders/status",
+            "/api/payments/zpay/notify",
+            "/api/payments/zpay/return",
+        ):
+            with self.subTest(path=path):
+                _, sensitive_headers = self.request_raw(
+                    "OPTIONS",
+                    path,
+                    headers={"Origin": "https://evil.example"},
+                    expected_status=204,
+                )
+                self.assertIsNone(sensitive_headers.get("Access-Control-Allow-Origin"))
+                self.assertIsNone(sensitive_headers.get("Access-Control-Allow-Headers"))
 
     def test_login_and_register_rate_limits_block_repeated_attempts(self) -> None:
         self.server.create_account_record(

@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.agent.run.v2",
+  "title": "LOOM Agent Run v2",
+  "type": "object",
+  "required": [
+    "schema",
+    "runId",
+    "sessionId",
+    "status",
+    "executionState",
+    "campaignIds"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.agent.run.v2"
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "queued",
+        "running",
+        "waiting_approval",
+        "paused",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "executionState": {
+      "$ref": "#/$defs/executionState"
+    },
+    "checkpoint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "campaignIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "modelId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "modelSource": {
+      "enum": [
+        "session",
+        "account-default"
+      ]
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "error": {
+      "$ref": "#/$defs/error"
+    }
+  },
+  "$defs": {
+    "executionState": {
+      "type": "object",
+      "required": [
+        "phase",
+        "retryable",
+        "degraded"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "planning",
+            "tool",
+            "terminal"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "degraded": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "recoverable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recoverable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

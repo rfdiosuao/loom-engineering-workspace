@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -187,6 +188,41 @@ def test_agent_shutdown_preserves_incomplete_drain_flags() -> None:
     assert response.json()["code"] == "agent_shutdown_incomplete"
 
 
+def test_agent_account_scope_change_is_not_reported_as_a_missing_resource() -> None:
+    class StaleAccountService(FakeAgentService):
+        def bootstrap(self):
+            raise KeyError("agent account scope")
+
+    client, _service = _client(StaleAccountService())
+
+    response = client.get("/api/agent/bootstrap")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "AGENT_ACCOUNT_CONTEXT_CHANGED"
+    assert response.json()["error"] == "模型账号已切换，智能体需要重新连接，请刷新后重试。"
+    assert "agent resource not found" not in response.text
+
+
+def test_agent_entitlement_denial_is_actionable_and_never_leaks_internal_protocol_text() -> None:
+    class InactiveEntitlementService(FakeAgentService):
+        def create_session(self, body):
+            raise PermissionError(
+                "AGENT_ENTITLEMENT_REQUIRED: account entitlement is inactive"
+            )
+
+    client, _service = _client(InactiveEntitlementService())
+
+    response = client.post("/api/agent/sessions", json={"title": "不应创建"})
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。",
+        "code": "AGENT_ENTITLEMENT_REQUIRED",
+    }
+    assert "account entitlement" not in response.text
+    assert "is inactive" not in response.text
+
+
 def test_sync_agent_service_calls_do_not_block_the_event_loop() -> None:
     async def scenario() -> float:
         started = time.monotonic()
@@ -239,6 +275,137 @@ def test_agent_session_message_run_and_approval_routes() -> None:
     assert rejected_from_ui.json()["approval"]["status"] == "rejected"
     assert any(call[0] == "queue_approval_resolution" for call in service.calls)
     assert any(call[0] == "send_message" for call in service.calls)
+
+
+def test_real_agent_session_detail_route_returns_only_canonical_public_dtos() -> None:
+    from tests.test_agent_account_isolation import (
+        _public_contract_violations,
+        _service,
+    )
+
+    with tempfile.TemporaryDirectory() as root:
+        service = _service(root, "account-route-contract")
+        try:
+            client, _ = _client(service)
+            created_response = client.post(
+                "/api/agent/sessions",
+                json={"title": "Route public contract"},
+            )
+            assert created_response.status_code == 200
+            session = created_response.json()["session"]
+            sent_response = client.post(
+                f"/api/agent/sessions/{session['sessionId']}/messages",
+                json={
+                    "clientMessageId": "route-public-contract",
+                    "text": "Exercise the real agent route",
+                },
+            )
+            assert sent_response.status_code == 200
+            sent = sent_response.json()
+            detail_response = client.get(
+                f"/api/agent/sessions/{session['sessionId']}?limit=50"
+            )
+            assert detail_response.status_code == 200
+            detail = detail_response.json()
+            persisted_run = service.repository.get_run(sent["run"]["runId"])
+        finally:
+            service.shutdown()
+
+    assert persisted_run["ownerAccountId"] == "account-route-contract"
+    assert persisted_run["request"]["prompt"] == "Exercise the real agent route"
+    public_records = [
+        ("route.create_session", session),
+        ("route.send_message.message", sent["message"]),
+        ("route.send_message.run", sent["run"]),
+        ("route.session_detail.session", detail["session"]),
+        *(
+            (f"route.session_detail.messages[{index}]", message)
+            for index, message in enumerate(detail["messages"])
+        ),
+        *(
+            (f"route.session_detail.runs[{index}]", run)
+            for index, run in enumerate(detail["runs"])
+        ),
+    ]
+    violations = [
+        violation
+        for label, payload in public_records
+        for violation in _public_contract_violations(label, payload)
+    ]
+    assert violations == []
+
+
+def test_real_agent_approval_route_projects_queued_outcome() -> None:
+    from tests.test_agent_account_isolation import (
+        _public_contract_violations,
+        _service,
+    )
+
+    with tempfile.TemporaryDirectory() as root:
+        service = _service(root, "account-route-approval")
+        try:
+            session = service.create_session({"title": "Route approval projection"})
+            run = service.repository.create_run(
+                {
+                    "schema": "loom.agent.run.v1",
+                    "runId": "run-route-approval",
+                    "sessionId": session["sessionId"],
+                    "status": "waiting_approval",
+                    "executionState": {
+                        "phase": "planning",
+                        "retryable": False,
+                        "degraded": False,
+                    },
+                    "checkpoint": "",
+                    "campaignIds": [],
+                    "request": {"prompt": "private approval route request"},
+                    "controlState": "private-control-state",
+                }
+            )
+            approval = service.repository.create_approval(
+                {
+                    "schema": "loom.agent.approval.v1",
+                    "approvalId": "approval-route-public",
+                    "sessionId": session["sessionId"],
+                    "runId": run["runId"],
+                    "toolCallId": "tool-route-public",
+                    "capability": "loom.test.route-public",
+                    "inputHash": "sha256:" + ("b" * 64),
+                    "actionSummary": "Exercise queued route projection",
+                    "targets": {"kind": "contract-test"},
+                    "inputSummary": {"safe": True},
+                    "risk": "outbound",
+                    "riskReason": "Contract boundary test",
+                    "status": "pending",
+                    "requestedAt": "2026-08-08T10:00:00Z",
+                    "expiresAt": "2026-08-08T11:00:00Z",
+                }
+            )
+            client, _ = _client(service)
+
+            response = client.post(
+                f"/api/agent/approvals/{approval['approvalId']}",
+                json={"decision": "rejected", "operator": "route-contract-test"},
+            )
+            persisted_run = service.repository.get_run(run["runId"])
+            persisted_approval = service.repository.get_approval(approval["approvalId"])
+        finally:
+            service.shutdown()
+
+    assert response.status_code == 200
+    outcome = response.json()
+    assert persisted_run["ownerAccountId"] == "account-route-approval"
+    assert persisted_run["request"]["prompt"] == "private approval route request"
+    assert persisted_approval["ownerAccountId"] == "account-route-approval"
+    violations = [
+        violation
+        for label, payload in (
+            ("route.approval", outcome["approval"]),
+            ("route.approval.run", outcome["run"]),
+        )
+        for violation in _public_contract_violations(label, payload)
+    ]
+    assert violations == []
 
 
 def test_agent_stream_requires_single_use_ticket_and_replays_after_sequence() -> None:

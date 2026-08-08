@@ -1,0 +1,105 @@
+{
+  "schema": "loom.mobile-agent-runtime.v1",
+  "scope": {
+    "accountId": "account-a",
+    "customerId": "customer-a",
+    "workspaceId": "workspace-a"
+  },
+  "providerSchemas": [
+    {
+      "id": "openai-compatible",
+      "protocols": ["responses", "chat_completions"],
+      "fields": [
+        {
+          "id": "baseUrl",
+          "type": "url",
+          "required": true,
+          "sensitive": false,
+          "writeOnly": false
+        },
+        {
+          "id": "apiKey",
+          "type": "secret",
+          "required": true,
+          "sensitive": true,
+          "writeOnly": true
+        }
+      ]
+    }
+  ],
+  "providerConfigurations": [
+    {
+      "providerId": "luming-relay",
+      "schemaId": "openai-compatible",
+      "values": {
+        "baseUrl": "https://example.invalid/v1"
+      },
+      "credentialHandles": {
+        "apiKey": "vault:provider.account-a.opaque-001"
+      },
+      "commitState": "committed"
+    }
+  ],
+  "workspacePolicy": {
+    "rootHandle": "workspace:account-a.customer-a.workspace-a",
+    "readOnlyInputs": true,
+    "separateOutput": true,
+    "credentialHandlesOnly": true,
+    "allowHostSockets": false
+  },
+  "memoryPolicy": {
+    "namespace": {
+      "accountId": "account-a",
+      "customerId": "customer-a",
+      "workspaceId": "workspace-a"
+    },
+    "crossAccount": false,
+    "crossCustomer": false,
+    "retentionDays": 90
+  },
+  "skills": [
+    {
+      "id": "device-summary",
+      "version": "1.0.0",
+      "summary": "Read approved device facts and write a workspace summary.",
+      "sourceDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "metadataOnly": true,
+      "requiredCapabilities": ["device.profile.read", "workspace.file.write"]
+    }
+  ],
+  "capabilityGrant": {
+    "approvalId": "approval-a",
+    "allowedCapabilities": ["device.profile.read", "workspace.file.write"],
+    "expiresAt": "2026-08-01T12:00:00Z",
+    "remoteShell": false,
+    "arbitraryCommands": false
+  },
+  "backends": {
+    "items": [
+      {
+        "id": "android-native",
+        "kind": "native",
+        "state": "available",
+        "authorized": true,
+        "capabilities": ["device.profile.read", "workspace.file.write"],
+        "priority": 100
+      },
+      {
+        "id": "linux-optional",
+        "kind": "optional_linux",
+        "state": "unavailable",
+        "authorized": false,
+        "capabilities": ["workspace.file.read", "workspace.file.write"],
+        "priority": 20
+      }
+    ],
+    "preferredBackendId": null,
+    "fallbackOrder": ["android-native", "linux-optional"]
+  },
+  "tracePolicy": {
+    "redactedHeaderNames": ["authorization", "x-api-key", "cookie"],
+    "maxResponseChars": 2048,
+    "includeCredentialValues": false,
+    "debugApiEnabled": false
+  }
+}

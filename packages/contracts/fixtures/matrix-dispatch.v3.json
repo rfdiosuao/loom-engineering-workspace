@@ -1,0 +1,18 @@
+{
+  "schema": "loom.matrix.dispatch.v3",
+  "campaignId": "cmp_fixture_v3_001",
+  "concurrency": 8,
+  "mode": "safe",
+  "profile": "standard",
+  "deviceAssignments": [
+    {
+      "assignmentId": "asg_fixture_v3_001",
+      "deviceId": "LUMI-P01",
+      "prompt": "Execute the bounded v3 fixture.",
+      "templateId": "bounded_fixture_v3",
+      "input": {},
+      "timeoutSec": 30,
+      "retryBudget": 1
+    }
+  ]
+}

@@ -77,6 +77,89 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertEqual(payload["action"], "review_api_key")
         self.assertIn("API Key", payload["error"])
 
+    def test_provider_probe_route_returns_live_capabilities_without_echoing_key(self) -> None:
+        calls: list[dict] = []
+        secret = "route-provider-secret-not-real"
+
+        class FakeWireService:
+            def probe_provider_compatibility(self, **kwargs):
+                calls.append(kwargs)
+                return {
+                    "reachable": True,
+                    "protocols": ["responses"],
+                    "toolCall": True,
+                    "streaming": True,
+                    "selectedModel": "live-model",
+                    "source": "live-probe",
+                    "fallbackUsed": True,
+                }
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_wire_svc=lambda: FakeWireService(),
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/components/model-config/probe-provider",
+            json={
+                "provider": "Example",
+                "baseUrl": "https://api.example.invalid/v1",
+                "apiKey": secret,
+                "preferredModel": "stale-model",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["probe"]["selectedModel"], "live-model")
+        self.assertEqual(calls[0]["api_key"], secret)
+        self.assertNotIn(secret, repr(response.json()))
+
+    def test_provider_probe_route_returns_sanitized_actionable_error(self) -> None:
+        class FakeWireService:
+            def probe_provider_compatibility(self, **_kwargs):
+                raise WireConfigError(
+                    "http_524: raw upstream body",
+                    detail={
+                        "code": "upstream_response_timeout",
+                        "messageZh": "上游模型服务响应超时，请稍后重试或切换服务节点。",
+                        "retryable": True,
+                        "statusCode": 524,
+                    },
+                )
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_wire_svc=lambda: FakeWireService(),
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+
+        response = TestClient(app).post(
+            "/api/components/model-config/probe-provider",
+            json={
+                "provider": "Example",
+                "baseUrl": "https://api.example.invalid/v1",
+                "apiKey": "route-provider-secret-not-real",
+            },
+        )
+
+        self.assertEqual(response.status_code, 524)
+        self.assertEqual(response.json()["code"], "upstream_response_timeout")
+        self.assertEqual(response.json()["action"], "retry_provider_probe")
+        self.assertNotIn("raw upstream body", repr(response.json()))
+
     def test_session_preservation_failure_has_actionable_chinese_message(self) -> None:
         message = _model_config_error_text(
             WireConfigError(
@@ -98,7 +181,7 @@ class ComponentRouteResolutionTests(unittest.TestCase):
 
             self.assertIsNotNone(component)
             self.assertEqual(component.component_id, "codex-desktop")
-            self.assertEqual(component.name, "ChatGPT Codex 原版")
+            self.assertEqual(component.name, "Codex Desktop")
             self.assertEqual(component.archive_type, "msstore")
             self.assertEqual(component.install_command, ())
             self.assertIsNotNone(error)
@@ -116,6 +199,26 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             self.assertIsNotNone(error)
             self.assertIn("release-manifest.json", error or "")
 
+    def test_declarative_agent_resolution_does_not_depend_on_binary_release_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pi, pi_error = _resolve_component_for_action(
+                os.path.join(temp_dir, "release-manifest.json"),
+                "pi",
+                allow_fallback=False,
+            )
+            grok, grok_error = _resolve_component_for_action(
+                os.path.join(temp_dir, "release-manifest.json"),
+                "grok-build",
+                allow_fallback=False,
+            )
+
+            self.assertIsNone(pi_error)
+            self.assertEqual(pi.archive_type, "external")
+            self.assertEqual(pi.install_command[-1], "@earendil-works/pi-coding-agent")
+            self.assertIsNone(grok_error)
+            self.assertEqual(grok.external_paths, ("grok",))
+            self.assertEqual(grok.install_command, ())
+
     def test_model_config_apply_ensures_managed_launcher_token_before_writing(self) -> None:
         calls: list[str] = []
 
@@ -123,8 +226,8 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             def current(self):
                 return {"source": ACCOUNT_SOURCE, "memberToken": "old-token"}
 
-            def ensure_launcher_token(self):
-                calls.append("ensure")
+            def ensure_launcher_token(self, *, force_refresh=False):
+                calls.append(f"ensure:{force_refresh}")
                 return {"source": ACCOUNT_SOURCE, "memberToken": "dedicated-token"}
 
         class FakeWireService:
@@ -166,8 +269,62 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(calls, ["ensure", "write:True"])
+        self.assertEqual(calls, ["ensure:True", "write:True"])
         self.assertEqual(response.json()["status"]["transactionId"], "tx-test")
+
+    def test_model_config_apply_rejects_model_removed_from_refreshed_catalog(self) -> None:
+        calls: list[str] = []
+
+        class FakeAccountManager:
+            def current(self):
+                return {"source": ACCOUNT_SOURCE, "memberToken": "old-token"}
+
+            def ensure_launcher_token(self, *, force_refresh=False):
+                calls.append(f"ensure:{force_refresh}")
+                return {
+                    "source": ACCOUNT_SOURCE,
+                    "memberToken": "dedicated-token",
+                    "gatewayDefaultModel": "glm-5.2-coding",
+                }
+
+        class FakeWireService:
+            def sync_agent_model_config(self, *_args, **_kwargs):
+                calls.append("write")
+                raise AssertionError("a removed model must not be written")
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_newapi_account_mgr=lambda: FakeAccountManager(),
+            get_wire_svc=lambda: FakeWireService(),
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+        client = TestClient(app)
+
+        with patch(
+            "api.routes_components._model_config_status",
+            side_effect=[
+                {"installed": True, "componentStatus": "ready", "availableModels": ["gpt-5.6-luna"]},
+                {"installed": True, "componentStatus": "ready", "availableModels": ["glm-5.2-coding"]},
+            ],
+        ):
+            response = client.post(
+                "/api/components/model-config/apply",
+                json={"componentId": "codex-desktop", "model": "gpt-5.6-luna", "confirmed": True},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(calls, ["ensure:True"])
+        payload = response.json()
+        self.assertEqual(payload["code"], "selected_model_not_listed")
+        self.assertEqual(payload["action"], "choose_compatible_model")
+        self.assertEqual(payload["status"]["availableModels"], ["glm-5.2-coding"])
+        self.assertIn("已刷新", payload["error"])
 
     def test_model_config_apply_does_not_write_when_launcher_token_prepare_fails(self) -> None:
         calls: list[str] = []
@@ -176,7 +333,8 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             def current(self):
                 return {"source": ACCOUNT_SOURCE, "memberToken": "bad-token"}
 
-            def ensure_launcher_token(self):
+            def ensure_launcher_token(self, *, force_refresh=False):
+                self.force_refresh = force_refresh
                 calls.append("ensure")
                 raise NewApiAccountError("launcher_token_ensure_no_text_models")
 
@@ -217,7 +375,8 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             def current(self):
                 return {"source": ACCOUNT_SOURCE, "memberToken": "legacy-token"}
 
-            def ensure_launcher_token(self):
+            def ensure_launcher_token(self, *, force_refresh=False):
+                self.force_refresh = force_refresh
                 raise NewApiAccountError("launcher token upgrade requires re-login", status_code=403)
 
         class FakeWireService:
@@ -252,6 +411,111 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertEqual(payload["code"], "account_relogin_required")
         self.assertEqual(payload["action"], "open_model_account")
         self.assertIn("配置未写入", payload["error"])
+
+    def test_model_config_apply_reports_transient_catalog_outage_without_relogin_advice(self) -> None:
+        class FakeAccountManager:
+            def current(self):
+                return {"source": ACCOUNT_SOURCE, "memberToken": "valid-token"}
+
+            def ensure_launcher_token(self, *, force_refresh=False):
+                self.force_refresh = force_refresh
+                raise NewApiAccountError("http_503: upstream unavailable", status_code=503)
+
+        class FakeWireService:
+            def sync_agent_model_config(self, *_args, **_kwargs):
+                raise AssertionError("model config must stay unchanged during an upstream outage")
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_newapi_account_mgr=lambda: FakeAccountManager(),
+            get_wire_svc=lambda: FakeWireService(),
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+        client = TestClient(app)
+
+        with patch(
+            "api.routes_components._model_config_status",
+            return_value={"installed": True, "componentStatus": "ready"},
+        ):
+            response = client.post(
+                "/api/components/model-config/apply",
+                json={"componentId": "codex-desktop", "model": "glm-5.2-coding", "confirmed": True},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["code"], "model_catalog_refresh_unavailable")
+        self.assertEqual(payload["action"], "retry_model_config")
+        self.assertIn("上游", payload["error"])
+        self.assertNotIn("重新登录", payload["error"])
+        self.assertNotIn("自动创建", payload["error"])
+
+    def test_model_config_apply_uses_cached_catalog_during_transient_refresh_outage(self) -> None:
+        calls: list[str] = []
+
+        class FakeAccountManager:
+            def current(self):
+                return {"source": ACCOUNT_SOURCE, "memberToken": "valid-token"}
+
+            def ensure_launcher_token(self, *, force_refresh=False):
+                calls.append(f"ensure:{force_refresh}")
+                raise NewApiAccountError("http_503: upstream unavailable", status_code=503)
+
+        class FakeWireService:
+            def sync_agent_model_config(self, component_id, *, model="", validate_remote=False):
+                calls.append(f"write:{model}:{validate_remote}")
+                return {
+                    "componentId": component_id,
+                    "model": model,
+                    "configured": True,
+                    "remoteVerified": True,
+                    "transactionId": "tx-cached-catalog",
+                    "transactionState": "committed",
+                }
+
+        async def body(request):
+            return await request.json()
+
+        ctx = SimpleNamespace(
+            auth_error=lambda _request: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(status_code=status_code, content=data),
+            get_newapi_account_mgr=lambda: FakeAccountManager(),
+            get_wire_svc=lambda: FakeWireService(),
+        )
+        app = FastAPI()
+        register_component_routes(app, ctx)
+        client = TestClient(app)
+
+        with patch(
+            "api.routes_components._model_config_status",
+            return_value={
+                "installed": True,
+                "componentStatus": "ready",
+                "availableModels": ["deepseek-v3.2"],
+            },
+        ):
+            response = client.post(
+                "/api/components/model-config/apply",
+                json={
+                    "componentId": "codex-desktop",
+                    "model": "deepseek-v3.2",
+                    "confirmed": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            calls,
+            ["ensure:True", "write:deepseek-v3.2:True"],
+        )
+        self.assertEqual(response.json()["status"]["transactionId"], "tx-cached-catalog")
 
     def test_model_config_apply_explains_remote_probe_failure_without_claiming_success(self) -> None:
         class FakeWireService:
@@ -329,6 +593,14 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertNotIn("http_404", payload["error"])
         self.assertNotIn("openai_error", payload["error"])
         self.assertTrue(any("http_404" in line for line in logs))
+
+    def test_model_config_apply_translates_removed_model_without_raw_error(self) -> None:
+        payload = _model_config_error_payload(WireConfigError("selected_model_not_listed"))
+
+        self.assertEqual(payload["code"], "selected_model_not_listed")
+        self.assertEqual(payload["action"], "choose_compatible_model")
+        self.assertIn("刷新", payload["error"])
+        self.assertNotIn("selected_model_not_listed", payload["error"])
 
     def test_model_config_disable_requires_confirmation(self) -> None:
         calls: list[str] = []

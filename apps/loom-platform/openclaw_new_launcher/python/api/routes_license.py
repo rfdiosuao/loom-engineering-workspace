@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+
 from fastapi import Request
 
+from api.routes_account import _account_transition_scope
 from api.safe_payload import public_safe_payload
 from core.license_manager import LicenseError
+from core.newapi_account_manager import NewApiAccountError
 
 
 def _commercial_status(diagnosis: dict, has_license: bool) -> tuple[str, str]:
     if has_license:
         return "authorized", "AUTHORIZED"
     raw = str(diagnosis.get("code") or "missing").strip().lower()
-    if raw == "expired":
+    if raw == "expired" or "expired" in raw:
         return "expired", "LICENSE_EXPIRED"
     if raw in {"device_id_mismatch", "install_id_mismatch"}:
         return "device_mismatch", "DEVICE_MISMATCH"
@@ -21,15 +26,84 @@ def _commercial_status(diagnosis: dict, has_license: bool) -> tuple[str, str]:
     return "unauthorized", "LICENSE_REQUIRED"
 
 
+def _epoch_iso(value) -> str | None:
+    if type(value) is not int or value <= 0:
+        return None
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _account_license_payload(state: dict, license_manager) -> dict | None:
+    if not state.get("authorized"):
+        return None
+    lease = state.get("lease") if isinstance(state.get("lease"), dict) else {}
+    limits = state.get("limits") if isinstance(state.get("limits"), dict) else {}
+    unlimited_devices = limits.get("unlimitedDevices") is True
+    expires_at = _epoch_iso(state.get("expiresAt"))
+    device_id = str(
+        lease.get("hostDeviceId")
+        or lease.get("deviceId")
+        or license_manager.device_id()
+    )
+    return {
+        "licensee": str(lease.get("accountId") or "LOOM account"),
+        "edition": str(state.get("plan") or "activated"),
+        "plan": str(state.get("plan") or "activated"),
+        "expires": expires_at,
+        "expiresAt": expires_at,
+        "features": list(state.get("features") or []),
+        "installId": str(lease.get("installId") or license_manager.get_install_id()),
+        "deviceId": device_id,
+        "deviceLimit": None if unlimited_devices else limits.get("devices"),
+        "unlimitedDevices": unlimited_devices,
+        "signature": str(lease.get("signature") or ""),
+        "status": "offline_grace" if state.get("offline") else "authorized",
+        "code": "OFFLINE_GRACE" if state.get("offline") else "AUTHORIZED",
+        "memberId": str(lease.get("accountId") or ""),
+        "activationCodeLabel": str(lease.get("codeLabel") or ""),
+    }
+
+
 def register_license_routes(app, ctx) -> None:
+    account_transition_lock = asyncio.Lock()
+
     @app.api_route("/api/license/current", methods=["GET", "POST"])
     async def license_current(request: Request):
         if error := ctx.auth_error(request):
             return error
         license_manager = ctx.get_license_mgr()
-        license_data = license_manager.current_license()
-        diagnosis = license_manager.diagnose(include_gateway_profile=False)
-        status, code = _commercial_status(diagnosis, isinstance(license_data, dict))
+        entitlement_getter = getattr(ctx, "get_entitlement_mgr", None)
+        entitlement_state = (
+            entitlement_getter().current_state("matrix.devices")
+            if callable(entitlement_getter)
+            else {}
+        )
+        use_account_entitlement = bool(
+            isinstance(entitlement_state, dict)
+            and (
+                entitlement_state.get("source") == "account_entitlement"
+                or entitlement_state.get("accountLeaseSeen")
+            )
+        )
+        if use_account_entitlement:
+            license_data = _account_license_payload(entitlement_state, license_manager)
+            diagnosis = {
+                "code": entitlement_state.get("code") or (
+                    "ok" if entitlement_state.get("authorized") else "entitlement_required"
+                ),
+                "message": entitlement_state.get("message") or "",
+            }
+            status, code = _commercial_status(
+                diagnosis,
+                isinstance(license_data, dict),
+            )
+            if isinstance(license_data, dict) and entitlement_state.get("offline"):
+                status, code = "offline_grace", "OFFLINE_GRACE"
+            source = "account_entitlement"
+        else:
+            license_data = license_manager.current_license()
+            diagnosis = license_manager.diagnose(include_gateway_profile=False)
+            status, code = _commercial_status(diagnosis, isinstance(license_data, dict))
+            source = "legacy_license" if isinstance(license_data, dict) else "none"
         gateway_profile = license_manager.current_gateway_profile()
         try:
             member = ctx.get_member_mgr().current()
@@ -44,6 +118,7 @@ def register_license_routes(app, ctx) -> None:
             "reason": str(diagnosis.get("message") or ""),
             "installId": license_manager.get_install_id(),
             "deviceId": license_manager.device_id(),
+            "source": source,
         }))
 
     @app.get("/api/license/client-config")
@@ -57,7 +132,9 @@ def register_license_routes(app, ctx) -> None:
         if error := ctx.auth_error(request):
             return error
         body = await ctx.body(request)
-        return ctx.fastapi_json({"authorized": ctx.get_license_mgr().is_authorized(body.get("feature"))})
+        entitlement_getter = getattr(ctx, "get_entitlement_mgr", None)
+        authorizer = entitlement_getter() if callable(entitlement_getter) else ctx.get_license_mgr()
+        return ctx.fastapi_json({"authorized": authorizer.is_authorized(body.get("feature"))})
 
     @app.post("/api/license/activate")
     async def license_activate(request: Request):
@@ -67,6 +144,51 @@ def register_license_routes(app, ctx) -> None:
         code = body.get("code", "")
         if not code:
             return ctx.fastapi_json({"error": "授权码不能为空"}, 400)
+        account_manager_getter = getattr(ctx, "get_newapi_account_mgr", None)
+        account_manager = account_manager_getter() if callable(account_manager_getter) else None
+        public_account = account_manager.public_session() if account_manager is not None else {}
+        if isinstance(public_account, dict) and public_account.get("loggedIn"):
+            try:
+                async with _account_transition_scope(ctx, account_transition_lock):
+                    current_account = await asyncio.to_thread(account_manager.public_session)
+                    if not isinstance(current_account, dict) or current_account.get("loggedIn") is not True:
+                        return ctx.fastapi_json(
+                            {"error": "账号状态已变化，未执行授权兑换，请重新登录后重试。"},
+                            409,
+                        )
+                    await asyncio.to_thread(account_manager.redeem_entitlement_code, str(code))
+                    entitlement_getter = getattr(ctx, "get_entitlement_mgr", None)
+                    entitlement_state = (
+                        entitlement_getter().current_state("matrix.devices")
+                        if callable(entitlement_getter)
+                        else {}
+                    )
+                    license_data = _account_license_payload(
+                        entitlement_state,
+                        ctx.get_license_mgr(),
+                    )
+                    if not isinstance(license_data, dict):
+                        return ctx.fastapi_json(
+                            {"error": "账号授权已提交，但未返回可信权益租约，请刷新账号后重试。"},
+                            502,
+                        )
+                    return ctx.fastapi_json(public_safe_payload({
+                        "license": license_data,
+                        "account": await asyncio.to_thread(account_manager.public_session),
+                        "status": "authorized",
+                        "code": "AUTHORIZED",
+                        "source": "account_entitlement",
+                    }))
+            except ValueError as exc:
+                if "account transition" not in str(exc).lower():
+                    raise
+                return ctx.fastapi_json(
+                    {"error": "账号正在切换，未执行授权兑换，请稍后重试。"},
+                    409,
+                )
+            except NewApiAccountError as exc:
+                status_code = exc.status_code if exc.status_code in {400, 401, 403, 409, 429, 502, 503} else 400
+                return ctx.fastapi_json({"error": str(exc)}, status_code)
         try:
             result = ctx.get_license_mgr().activate(code)
             try:

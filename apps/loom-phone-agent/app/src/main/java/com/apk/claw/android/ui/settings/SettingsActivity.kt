@@ -17,7 +17,10 @@ import kotlinx.coroutines.launch
 import android.content.Intent
 import com.apk.claw.android.appViewModel
 import com.apk.claw.android.floating.FloatingCircleManager
+import com.apk.claw.android.privilege.PrivilegeBackendStatus
+import com.apk.claw.android.privilege.ShizukuPrivilegeBackend
 import com.apk.claw.android.server.ConfigServerManager
+import com.apk.claw.android.ui.skill.SkillCenterActivity
 
 /**
  * 设置页面
@@ -38,11 +41,6 @@ class SettingsActivity : BaseActivity() {
 
     // 注册手机配对页返回后刷新
     private val pcPairingLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
-        viewModel.refresh()
-    }
-
-    // 注册发布中转配置页返回后刷新
-    private val publishRelayConfigLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
         viewModel.refresh()
     }
 
@@ -77,9 +75,54 @@ class SettingsActivity : BaseActivity() {
 
     private fun refreshSettings() {
         viewModel.refresh()
+        ShizukuPrivilegeBackend.refresh()
     }
 
     private fun initMenuGroups() {
+        val connectionGroup = findViewById<MenuGroup>(R.id.connectionGroup)
+        connectionGroup.setTitle(getString(R.string.settings_group_connection))
+
+        menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name] = connectionGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_pc_pairing,
+            title = getString(R.string.menu_pc_pairing),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.PC_PAIRING) },
+            showDivider = true
+        )
+        menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name] = connectionGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_lan_config,
+            title = getString(R.string.menu_lan_config),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.LAN_CONFIG) },
+            showDivider = true
+        )
+        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+        menuItems[SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS.name] = connectionGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_settings,
+            title = getString(R.string.menu_connection_diagnostics),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS) },
+            showDivider = false
+        )
+        menuItems[SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+
+        val capabilityGroup = findViewById<MenuGroup>(R.id.capabilityGroup)
+        capabilityGroup.setTitle(getString(R.string.settings_group_enhanced_capabilities))
+        menuItems[SettingsViewModel.MenuAction.SKILL_CENTER.name] = capabilityGroup.addMenuItem(
+            leadingIcon = R.drawable.icon_book_open,
+            title = getString(R.string.menu_skill_center),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.SKILL_CENTER) },
+            showDivider = true
+        )
+        menuItems[SettingsViewModel.MenuAction.SKILL_CENTER.name]
+            ?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+        menuItems[SettingsViewModel.MenuAction.ENHANCED_CAPABILITY.name] = capabilityGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_settings,
+            title = getString(R.string.menu_enhanced_capability),
+            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.ENHANCED_CAPABILITY) },
+            showDivider = false
+        )
+        menuItems[SettingsViewModel.MenuAction.ENHANCED_CAPABILITY.name]
+            ?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+
         // 通道
         val channelGroup = findViewById<MenuGroup>(R.id.channelGroup)
         channelGroup.setTitle(getString(R.string.settings_group_channel))
@@ -120,22 +163,6 @@ class SettingsActivity : BaseActivity() {
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.WECHAT) },
             showDivider = true
         )
-        menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name] = channelGroup.addMenuItem(
-            leadingIcon = R.drawable.ic_pc_pairing,
-            title = getString(R.string.menu_pc_pairing),
-            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.PC_PAIRING) },
-            showDivider = true
-        )
-        menuItems[SettingsViewModel.MenuAction.PC_PAIRING.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
-        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name] = channelGroup.addMenuItem(
-            leadingIcon = R.drawable.ic_lan_config,
-            title = getString(R.string.menu_lan_config),
-            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.LAN_CONFIG) },
-            showDivider = false
-        )
-        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
-
-
         val modelGroup = findViewById<MenuGroup>(R.id.modelGroup)
         modelGroup.setTitle(getString(R.string.settings_group_model))
 
@@ -146,17 +173,6 @@ class SettingsActivity : BaseActivity() {
             showDivider = false
         )
         menuItems[SettingsViewModel.MenuAction.LLM_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
-
-        val publishGroup = findViewById<MenuGroup>(R.id.publishGroup)
-        publishGroup.setTitle(getString(R.string.settings_group_publish))
-
-        menuItems[SettingsViewModel.MenuAction.PUBLISH_RELAY.name] = publishGroup.addMenuItem(
-            leadingIcon = R.drawable.ic_lan_config,
-            title = getString(R.string.menu_publish_relay),
-            onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.PUBLISH_RELAY) },
-            showDivider = false
-        )
-        menuItems[SettingsViewModel.MenuAction.PUBLISH_RELAY.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
 
         val displayGroup = findViewById<MenuGroup>(R.id.displayGroup)
         displayGroup.setTitle(getString(R.string.settings_group_display))
@@ -208,6 +224,13 @@ class SettingsActivity : BaseActivity() {
                         viewModel.refresh()
                         appViewModel.initAgent()
                         appViewModel.afterInit()
+                    }
+                }
+
+                launch {
+                    ShizukuPrivilegeBackend.status.collect { status ->
+                        menuItems[SettingsViewModel.MenuAction.ENHANCED_CAPABILITY.name]
+                            ?.setTrailingText(enhancedCapabilityStatus(status))
                     }
                 }
 
@@ -276,19 +299,26 @@ class SettingsActivity : BaseActivity() {
                                 }
                             }
                             SettingsViewModel.MenuAction.LAN_CONFIG -> {
-                                val result = viewModel.toggleConfigServer(this@SettingsActivity)
-                                if (result == getString(R.string.lan_config_no_wifi)) {
-                                    Toast.makeText(this@SettingsActivity, R.string.lan_config_no_wifi, Toast.LENGTH_SHORT).show()
-                                }
+                                viewModel.toggleConfigServer(this@SettingsActivity)
+                            }
+                            SettingsViewModel.MenuAction.CONNECTION_DIAGNOSTICS -> {
+                                AlertDialog.show(
+                                    this@SettingsActivity,
+                                    getString(R.string.connection_diagnostics_title),
+                                    viewModel.connectionDiagnostics()
+                                )
+                            }
+                            SettingsViewModel.MenuAction.ENHANCED_CAPABILITY -> {
+                                showEnhancedCapabilityDialog(ShizukuPrivilegeBackend.status.value)
+                            }
+                            SettingsViewModel.MenuAction.SKILL_CENTER -> {
+                                startActivity(Intent(this@SettingsActivity, SkillCenterActivity::class.java))
                             }
                             SettingsViewModel.MenuAction.PC_PAIRING -> {
                                 pcPairingLauncher.launch(Intent(this@SettingsActivity, PcPairingActivity::class.java))
                             }
                             SettingsViewModel.MenuAction.LLM_CONFIG -> {
                                 llmConfigLauncher.launch(Intent(this@SettingsActivity, LlmConfigActivity::class.java))
-                            }
-                            SettingsViewModel.MenuAction.PUBLISH_RELAY -> {
-                                publishRelayConfigLauncher.launch(Intent(this@SettingsActivity, PublishRelayConfigActivity::class.java))
                             }
                             SettingsViewModel.MenuAction.FLOATING_CLICK -> Unit
                             SettingsViewModel.MenuAction.FLOATING_SIZE -> {
@@ -314,6 +344,98 @@ class SettingsActivity : BaseActivity() {
             actionTitle = getString(R.string.unbind_action),
             onAction = onUnbind
         )
+    }
+
+    private fun enhancedCapabilityStatus(status: PrivilegeBackendStatus): String = getString(
+        when (status.selection.reasonCode) {
+            "shizuku_not_installed" -> R.string.enhanced_status_not_installed
+            "enhanced_mode_disabled" -> R.string.enhanced_status_disabled
+            "shizuku_service_stopped", "shizuku_binder_dead" -> R.string.enhanced_status_service_stopped
+            "shizuku_permission_required" -> R.string.enhanced_status_permission_required
+            "shizuku_permission_denied" -> R.string.enhanced_status_permission_denied
+            "shizuku_ready" -> R.string.enhanced_status_ready
+            "sui_root_disabled" -> R.string.enhanced_status_root_disabled
+            else -> R.string.enhanced_status_standard
+        }
+    )
+
+    private fun showEnhancedCapabilityDialog(status: PrivilegeBackendStatus) {
+        when (status.selection.reasonCode) {
+            "shizuku_not_installed" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_not_installed_message),
+                actionTitle = getString(R.string.enhanced_open_official_guide),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = ::openShizukuManager
+            )
+            "enhanced_mode_disabled" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_enable_message),
+                actionTitle = getString(R.string.enhanced_enable_action),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = {
+                    ShizukuPrivilegeBackend.setUserEnabled(true)
+                    showEnhancedCapabilityDialog(ShizukuPrivilegeBackend.status.value)
+                }
+            )
+            "shizuku_service_stopped", "shizuku_binder_dead" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_service_stopped_message),
+                actionTitle = getString(R.string.enhanced_open_shizuku),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = ::openShizukuManager
+            )
+            "shizuku_permission_required" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_permission_message),
+                actionTitle = getString(R.string.enhanced_request_permission),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = {
+                    if (!ShizukuPrivilegeBackend.requestAuthorization()) {
+                        Toast.makeText(this, R.string.enhanced_request_failed, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+            "shizuku_permission_denied" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_permission_denied_message),
+                actionTitle = getString(R.string.enhanced_open_shizuku),
+                cancelTitle = getString(R.string.enhanced_keep_standard),
+                onAction = ::openShizukuManager
+            )
+            "shizuku_ready" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_ready_message),
+                actionTitle = getString(R.string.enhanced_disable_action),
+                cancelTitle = getString(R.string.common_cancel),
+                onAction = { ShizukuPrivilegeBackend.setUserEnabled(false) }
+            )
+            "sui_root_disabled" -> AlertDialog.show(
+                context = this,
+                title = getString(R.string.enhanced_dialog_title),
+                message = getString(R.string.enhanced_root_disabled_message),
+                actionTitle = getString(R.string.enhanced_disable_action),
+                cancelTitle = getString(R.string.common_cancel),
+                onAction = { ShizukuPrivilegeBackend.setUserEnabled(false) }
+            )
+            else -> AlertDialog.show(
+                this,
+                getString(R.string.enhanced_dialog_title),
+                getString(R.string.enhanced_standard_message)
+            )
+        }
+    }
+
+    private fun openShizukuManager() {
+        if (!ShizukuPrivilegeBackend.openManagerOrDownload(this)) {
+            Toast.makeText(this, R.string.enhanced_open_failed, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun showFloatingSizeDialog() {

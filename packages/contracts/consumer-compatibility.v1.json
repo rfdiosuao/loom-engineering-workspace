@@ -1,0 +1,33 @@
+{
+  "schema": "loom.contract.consumer-compatibility.v1",
+  "contracts": [
+    {
+      "schemaId": "loom.matrix.dispatch.v2",
+      "consumer": "loom-platform.phone_matrix.MatrixControlPlane",
+      "status": "supported",
+      "replacementSchemaId": "loom.matrix.dispatch.v3",
+      "compatibilityFixture": "fixtures/compat/matrix-dispatch.v2.consumer-gap.json",
+      "limits": {
+        "concurrency": {
+          "maximum": 8
+        },
+        "deviceAssignments": {
+          "maximumItems": 100
+        },
+        "prompt": {
+          "maximumLength": 2000
+        },
+        "retryBudget": {
+          "maximum": 10
+        },
+        "templateId": {
+          "maximumLength": 80
+        },
+        "timeoutSec": {
+          "minimum": 30,
+          "maximum": 1200
+        }
+      }
+    }
+  ]
+}

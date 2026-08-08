@@ -6,7 +6,7 @@ import {
 } from '../../version';
 import { useTheme } from '../../hooks/useTheme';
 
-const DEFAULT_LOGO_SRC = new URL('../../assets/luming-logo.svg', import.meta.url).href;
+const DEFAULT_LOGO_SRC = new URL('../../assets/luming-logo-full.png', import.meta.url).href;
 
 const LoomBrandFallbackGlyph: React.FC<{ className?: string }> = ({ className = '' }) => (
   <svg viewBox="0 0 64 64" className={className} focusable="false" aria-hidden="true">
@@ -19,14 +19,22 @@ const LoomBrandFallbackGlyph: React.FC<{ className?: string }> = ({ className = 
 
 const LoomBrandImage: React.FC<{ className?: string }> = ({ className = '' }) => {
   const { logoUrl } = useTheme();
-  const [failed, setFailed] = React.useState(false);
-  const logoSrc = logoUrl || APP_BRAND_LOGO_URL || APP_BRAND_LOGO_DATA_URL || DEFAULT_LOGO_SRC;
+  const logoCandidates = React.useMemo(() => Array.from(new Set([
+    logoUrl,
+    APP_BRAND_LOGO_URL,
+    APP_BRAND_LOGO_DATA_URL,
+    DEFAULT_LOGO_SRC,
+  ].map((value) => String(value || '').trim()).filter(Boolean))), [logoUrl]);
+  const [candidateIndex, setCandidateIndex] = React.useState(0);
+  const logoSrc = logoCandidates[candidateIndex] || '';
 
   React.useEffect(() => {
-    setFailed(false);
-  }, [logoSrc]);
+    setCandidateIndex(0);
+  }, [logoCandidates]);
 
-  if (failed) return <LoomBrandFallbackGlyph className={className} />;
+  const advanceLogoCandidate = () => setCandidateIndex((index) => index + 1);
+
+  if (!logoSrc) return <LoomBrandFallbackGlyph className={className} />;
 
   return (
     <img
@@ -34,7 +42,7 @@ const LoomBrandImage: React.FC<{ className?: string }> = ({ className = '' }) =>
       alt=""
       className={className}
       draggable={false}
-      onError={() => setFailed(true)}
+      onError={advanceLogoCandidate}
     />
   );
 };

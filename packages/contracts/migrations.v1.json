@@ -1,0 +1,12 @@
+{
+  "schema": "loom.contract.migrations.v1",
+  "migrations": [
+    {
+      "id": "agent-run.v1.private-to-public",
+      "sourceSchemaId": "loom.agent.run.v1",
+      "sourceFixture": "fixtures/negative/agent-run.v1.private-producer.json",
+      "transform": "agent-run.v1.public-projection",
+      "expectedFixture": "fixtures/migration/agent-run.v1.public-projection.json"
+    }
+  ]
+}

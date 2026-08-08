@@ -131,6 +131,7 @@ class ProtectedReleaseContractTests(unittest.TestCase):
                         "from core.paths import AppPaths; "
                         "from services.agent_service import AgentService; "
                         "service = AgentService(AppPaths(sys.argv[2])); "
+                        "service._account_scoped = False; "
                         "payload = service.bootstrap(); "
                         "service.shutdown(); "
                         "print(json.dumps(payload))"

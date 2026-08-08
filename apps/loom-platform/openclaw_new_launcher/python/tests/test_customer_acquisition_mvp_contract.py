@@ -17,6 +17,8 @@ if PYTHON_DIR not in sys.path:
 
 REPO_ROOT = os.path.dirname(PYTHON_DIR)
 
+from tests.matrix_test_support import matrix_for_test
+
 
 class CustomerAcquisitionMvpContractTests(unittest.TestCase):
     def test_acquisition_nav_page_and_api_contract_are_registered(self) -> None:
@@ -37,8 +39,10 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         acquisition_nav = next(line for line in registry.splitlines() if "key: 'acquisition'" in line)
         self.assertIn("label: '获客'", acquisition_nav)
         self.assertIn("action: { type: 'page' }", acquisition_nav)
-        self.assertNotIn("requiresLicense", acquisition_nav)
+        self.assertIn("requiresLicense: true", acquisition_nav)
         self.assertIn("AcquisitionWorkbenchPage", pages)
+        self.assertIn("GuardedAcquisitionWorkbenchPage", pages)
+        self.assertIn("<PhoneMatrixAccessGate>", pages)
         self.assertIn("acquisitionApi", api)
         self.assertIn("/api/matrix/acquisition", api)
         self.assertIn("/api/matrix/acquisition/import", api)
@@ -48,6 +52,25 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         self.assertIn("/api/matrix/acquisition/agent/run", api)
         self.assertIn("/api/matrix/acquisition/agent/result", api)
         self.assertIn("/api/matrix/acquisition/agent/result", routes)
+
+    def test_matrix_workbench_selects_versioned_shared_templates_for_canonical_dispatch(self) -> None:
+        page_path = os.path.join(REPO_ROOT, "src", "components", "matrix", "MatrixWorkbenchPage.tsx")
+        drawer_path = os.path.join(REPO_ROOT, "src", "components", "matrix", "MatrixTaskDrawer.tsx")
+
+        with open(page_path, "r", encoding="utf-8") as handle:
+            page = handle.read()
+        with open(drawer_path, "r", encoding="utf-8") as handle:
+            drawer = handle.read()
+
+        self.assertIn("acquisitionApi.templates()", page)
+        self.assertIn("MATRIX_DISPATCH_SCHEMA", page)
+        self.assertIn("sharedTemplate", page)
+        self.assertIn("templateVersion", page)
+        self.assertIn("templateOptions", page)
+        self.assertIn("templateOptions", drawer)
+        self.assertIn("选择共享模板", drawer)
+        self.assertIn("template.templateId", drawer)
+        self.assertIn("template.version", drawer)
 
     def test_acquisition_page_exposes_overview_feishu_and_ai_prompt_contract(self) -> None:
         page_path = os.path.join(REPO_ROOT, "src", "components", "acquisition", "AcquisitionWorkbenchPage.tsx")
@@ -142,7 +165,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             flow = matrix.create_acquisition_demo_flow(
                 {
                     "topic": "企业知识库获客",
@@ -198,7 +221,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as temp_dir, patch("core.phone_matrix.FeishuAcquisitionIntegration", FakeFeishu):
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             result = matrix.import_acquisition_leads(
                 {
                     "topic": "本地商家获客",
@@ -259,7 +282,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir, patch("core.phone_matrix.FeishuAcquisitionIntegration", FakeFeishu):
             paths = AppPaths(base_path=temp_dir)
-            matrices = [MatrixControlPlane(paths), MatrixControlPlane(paths)]
+            matrices = [matrix_for_test(paths), matrix_for_test(paths)]
             start = threading.Barrier(2)
 
             def run_import(matrix):
@@ -282,7 +305,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             flow = matrix.create_acquisition_demo_flow({"topic": "装修获客", "leadSummary": "用户想看报价和案例"})
             confirmed = matrix.confirm_acquisition_draft(flow["draft"]["draftId"], {"operator": "sales"})
             result = matrix.record_acquisition_manual_send(
@@ -327,7 +350,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
                 return {"leadId": lead["leadId"], "syncStatus": "synced", "recordId": "rec_agent_1"}
 
         with tempfile.TemporaryDirectory() as temp_dir, patch("core.phone_matrix.FeishuAcquisitionIntegration", FakeFeishu):
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             result = matrix.run_acquisition_agent_task(
                 {
                     "dryRun": True,
@@ -381,7 +404,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             ingest = matrix.ingest_acquisition_agent_result(
                 {
                     "schema": "loom.acquisition.agent_result.v1",
@@ -419,7 +442,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             result = matrix.run_acquisition_agent_task(
                 {
                     "dryRun": True,
@@ -466,7 +489,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             result = matrix.run_acquisition_agent_task(
                 {
                     "dryRun": True,
@@ -602,7 +625,7 @@ class CustomerAcquisitionMvpContractTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             result = matrix.run_acquisition_agent_task(
                 {
                     "dryRun": False,

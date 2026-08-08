@@ -11,12 +11,16 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.widget.ImageView
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
+import androidx.annotation.VisibleForTesting
+import com.apk.claw.android.BuildConfig
 import com.apk.claw.android.R
 import com.apk.claw.android.base.BaseActivity
 import com.apk.claw.android.server.ConfigServerManager
 import com.apk.claw.android.server.PcPairingReadinessPolicy
+import com.apk.claw.android.server.PairingTransportMode
 import com.apk.claw.android.server.PhonePairingBootstrap
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.widget.CommonToolbar
@@ -24,18 +28,49 @@ import com.apk.claw.android.widget.KButton
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Creates a phone-owned, short-lived pairing code without exposing the
  * long-lived phone credential to the user.
  */
 class PcPairingActivity : BaseActivity() {
+    data class PairingRuntime(
+        val lanIp: String?,
+        val serverRunning: Boolean,
+        val serverPort: Int?
+    )
+
+    companion object {
+        private fun interface PairingRuntimeProvider {
+            fun snapshot(): PairingRuntime
+        }
+
+        private val pairingRuntimeProviderForTests = AtomicReference<PairingRuntimeProvider?>(null)
+
+        @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+        @JvmStatic
+        fun installPairingRuntimeProviderForTests(provider: () -> PairingRuntime): AutoCloseable {
+            check(BuildConfig.DEBUG) { "Pairing runtime overrides are only available in debug builds." }
+            val override = PairingRuntimeProvider { provider() }
+            check(pairingRuntimeProviderForTests.compareAndSet(null, override)) {
+                "A pairing runtime override is already installed."
+            }
+            return AutoCloseable {
+                pairingRuntimeProviderForTests.compareAndSet(override, null)
+            }
+        }
+    }
+
     private val handler = Handler(Looper.getMainLooper())
     private var session: PhonePairingBootstrap.SessionView? = null
+    private var transportMode = PairingTransportMode.USB
+    private var pairingRuntimeSnapshot: PairingRuntime? = null
 
     private lateinit var codeView: TextView
     private lateinit var codeSection: View
     private lateinit var expiryView: TextView
+    private lateinit var endpointView: TextView
     private lateinit var tipView: TextView
     private lateinit var statusView: TextView
     private lateinit var payloadView: TextView
@@ -56,6 +91,11 @@ class PcPairingActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pairingRuntimeSnapshot = if (BuildConfig.DEBUG) {
+            pairingRuntimeProviderForTests.get()?.snapshot()
+        } else {
+            null
+        }
         setContentView(R.layout.activity_pc_pairing)
 
         findViewById<CommonToolbar>(R.id.toolbar).apply {
@@ -66,12 +106,24 @@ class PcPairingActivity : BaseActivity() {
         codeSection = findViewById(R.id.pairingCodeSection)
         codeView = findViewById(R.id.tvPairingCode)
         expiryView = findViewById(R.id.tvPairingExpiry)
+        endpointView = findViewById(R.id.tvPairingEndpoint)
         statusView = findViewById(R.id.tvPairingStatus)
         payloadView = findViewById(R.id.tvPairingPayload)
         qrView = findViewById(R.id.ivPairingQr)
 
         findViewById<KButton>(R.id.btnCopy).setOnClickListener { copyPayload() }
         findViewById<KButton>(R.id.btnGenerate).setOnClickListener { createPairingSession() }
+        findViewById<RadioGroup>(R.id.pairingTransportSelector)
+            .setOnCheckedChangeListener { _, checkedId ->
+                val selectedMode = when (checkedId) {
+                    R.id.rbPairingUsb -> PairingTransportMode.USB
+                    else -> PairingTransportMode.LAN
+                }
+                if (selectedMode != transportMode) {
+                    transportMode = selectedMode
+                    createPairingSession()
+                }
+            }
         createPairingSession()
     }
 
@@ -82,20 +134,21 @@ class PcPairingActivity : BaseActivity() {
 
     private fun createPairingSession() {
         handler.removeCallbacks(countdown)
-        if (!ConfigServerManager.isRunning()) {
-            if (!ConfigServerManager.start(this)) {
-                showUnavailable(getString(R.string.pc_pairing_server_failed))
-                return
-            }
-            KVUtils.setConfigServerEnabled(true)
-        }
+        revokeCurrentSession()
+        val runtime = currentPairingRuntime() ?: return
         val readiness = PcPairingReadinessPolicy.evaluate(
-            lanIp = ConfigServerManager.getLanIpAddress(this),
-            serverRunning = ConfigServerManager.isRunning(),
-            serverPort = ConfigServerManager.getPort()
+            lanIp = runtime.lanIp,
+            serverRunning = runtime.serverRunning,
+            serverPort = runtime.serverPort,
+            transportMode = transportMode
         )
         if (!readiness.ready) {
-            showUnavailable(readiness.message)
+            val message = if (readiness.errorCode == "config_lan_unavailable") {
+                getString(R.string.pc_pairing_lan_unavailable)
+            } else {
+                readiness.message
+            }
+            showUnavailable(message)
             return
         }
         val next = PhonePairingBootstrap.createSession(
@@ -108,6 +161,7 @@ class PcPairingActivity : BaseActivity() {
         val usesUsbCode = next.transportHint == "usb"
         codeSection.visibility = if (usesUsbCode) View.VISIBLE else View.GONE
         codeView.text = if (usesUsbCode) next.code else ""
+        endpointView.text = readiness.baseUrl
         tipView.setText(
             if (usesUsbCode) R.string.pc_pairing_tip_usb else R.string.pc_pairing_tip_lan
         )
@@ -119,6 +173,22 @@ class PcPairingActivity : BaseActivity() {
             getString(R.string.pc_pairing_lan_ready)
         }
         handler.post(countdown)
+    }
+
+    private fun currentPairingRuntime(): PairingRuntime? {
+        pairingRuntimeSnapshot?.let { return it }
+        if (!ConfigServerManager.isRunning()) {
+            if (!ConfigServerManager.start(this)) {
+                showUnavailable(getString(R.string.pc_pairing_server_failed))
+                return null
+            }
+            KVUtils.setConfigServerEnabled(true)
+        }
+        return PairingRuntime(
+            lanIp = ConfigServerManager.getLanIpAddress(this),
+            serverRunning = ConfigServerManager.isRunning(),
+            serverPort = ConfigServerManager.getPort()
+        )
     }
 
     private fun copyPayload() {
@@ -133,13 +203,26 @@ class PcPairingActivity : BaseActivity() {
     }
 
     private fun showUnavailable(message: String) {
-        session = null
+        revokeCurrentSession()
         codeSection.visibility = View.GONE
         codeView.text = "------"
         expiryView.text = ""
+        endpointView.text = ""
+        tipView.setText(
+            if (transportMode == PairingTransportMode.LAN) {
+                R.string.pc_pairing_tip_lan_unavailable
+            } else {
+                R.string.pc_pairing_tip_usb
+            }
+        )
         payloadView.text = ""
         qrView.setImageDrawable(null)
         statusView.text = message
+    }
+
+    private fun revokeCurrentSession() {
+        session?.let { PhonePairingBootstrap.revokeSession(it.sessionId) }
+        session = null
     }
 
     private fun generateQrBitmap(content: String, size: Int): Bitmap {

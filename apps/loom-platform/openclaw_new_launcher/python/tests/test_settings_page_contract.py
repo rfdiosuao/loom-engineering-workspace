@@ -111,6 +111,16 @@ class SettingsPageContractTests(unittest.TestCase):
         self.assertIn("setLanguage: (language: AppLanguage)", source)
         self.assertIn("persistAppLanguage(language)", source)
 
+    def test_about_page_describes_the_candidate_product_without_demo_copy(self) -> None:
+        with open(SETTINGS_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertNotIn("演示稳定版", source)
+        self.assertNotIn("第一版演示", source)
+        self.assertNotIn("demo-stable", source)
+        self.assertIn("Skill 中心", source)
+        self.assertIn("共享模板", source)
+
 
 if __name__ == "__main__":
     unittest.main()

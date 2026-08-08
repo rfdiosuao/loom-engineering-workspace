@@ -85,6 +85,9 @@ _job_mgr: JobManager | None = None
 _wire_svc: WireService | None = None
 _agent_service: AgentService | None = None
 _agent_service_lock = threading.RLock()
+_account_transition_lock = threading.RLock()
+_account_transition_token = 0
+_active_account_transition: int | None = None
 _storyboard_svc = None
 _bridge_instance_id = secrets.token_hex(16)
 _bridge_process_started_at_ms = int(time.time() * 1000)
@@ -111,6 +114,9 @@ def _get_newapi_account_mgr() -> NewApiAccountManager:
     if _newapi_account_mgr is None:
         _newapi_account_mgr = NewApiAccountManager(paths, append_log)
     return _newapi_account_mgr
+
+def _get_entitlement_mgr():
+    return _get_newapi_account_mgr().account_entitlement
 
 def _get_process_svc() -> OpenClawProcessService:
     global _process_svc
@@ -181,9 +187,40 @@ def _get_wire_svc() -> WireService:
     return _wire_svc
 
 
+def _begin_account_transition() -> int:
+    global _account_transition_token, _active_account_transition
+    with _account_transition_lock:
+        if _active_account_transition is not None:
+            raise ValueError("account transition already in progress")
+        _account_transition_token += 1
+        _active_account_transition = _account_transition_token
+        return _account_transition_token
+
+
+def _end_account_transition(token: object = None) -> bool:
+    global _active_account_transition
+    with _account_transition_lock:
+        if (
+            _active_account_transition is None
+            or token != _active_account_transition
+        ):
+            return False
+        _active_account_transition = None
+        return True
+
+
+def _account_transition_active() -> bool:
+    with _account_transition_lock:
+        return _active_account_transition is not None
+
+
 def _get_agent_service() -> AgentService:
     global _agent_service
+    if _account_transition_active():
+        raise ValueError("account transition in progress; retry after login completes")
     with _agent_service_lock:
+        if _account_transition_active():
+            raise ValueError("account transition in progress; retry after login completes")
         if _agent_service is None:
             _agent_service = AgentService(
                 paths,
@@ -221,6 +258,271 @@ def _shutdown_agent_service() -> dict:
         if result["drained"] and _agent_service is service:
             _agent_service = None
         return result
+
+
+def _shutdown_bridge_runtime() -> dict:
+    from api.routes_phone import stop_phone_daemon
+
+    result: dict = {
+        "agent": {},
+        "daemon": {},
+        "errors": [],
+        "executionMayContinue": False,
+    }
+    try:
+        result["agent"] = _shutdown_agent_service()
+    except Exception as exc:
+        result["errors"].append("agent")
+        result["executionMayContinue"] = True
+        append_log(
+            "[Bridge] agent shutdown failed during bridge exit: "
+            f"{type(exc).__name__}\n"
+        )
+    try:
+        daemon = stop_phone_daemon(base_root=paths.base_path)
+        result["daemon"] = daemon
+        if not daemon.get("ok") or daemon.get("running"):
+            result["errors"].append("daemon")
+            result["executionMayContinue"] = True
+    except Exception as exc:
+        result["errors"].append("daemon")
+        result["executionMayContinue"] = True
+        append_log(
+            "[Bridge] phone daemon shutdown failed during bridge exit: "
+            f"{type(exc).__name__}\n"
+        )
+    return result
+
+
+def _account_logout_cleanup(identity: object = None) -> dict:
+    from api.routes_phone import (
+        cleanup_phone_usb_for_account,
+        stop_phone_event_syncs_for_account,
+        stop_phone_daemon,
+    )
+    from core.job_ownership import (
+        capture_account_runtime_identity,
+        coerce_account_runtime_identity,
+        job_requires_account_scope,
+        job_visible_to_account,
+    )
+    from core.phone_matrix import MatrixControlPlane
+
+    result: dict = {
+        "performed": True,
+        "identityResolved": False,
+        "identityChanged": False,
+        "agent": {},
+        "matrix": {},
+        "cancelledJobIds": [],
+        "unfinishedJobIds": [],
+        "eventSync": {},
+        "daemon": {},
+        "usb": {},
+        "errors": [],
+    }
+    account_context = _build_fastapi_context()
+    current_session: object = None
+    account_manager_getter = getattr(
+        account_context,
+        "get_newapi_account_mgr",
+        None,
+    )
+    if callable(account_manager_getter):
+        try:
+            account_manager = account_manager_getter()
+            public_session = getattr(account_manager, "public_session", None)
+            if callable(public_session):
+                current_session = public_session()
+        except Exception as exc:
+            append_log(
+                "[Account] current session identity unavailable during cleanup: "
+                f"{type(exc).__name__}\n"
+            )
+    current_identity = capture_account_runtime_identity(
+        account_context,
+        current_session,
+    )
+    captured_identity = (
+        coerce_account_runtime_identity(identity)
+        if identity is not None
+        else current_identity
+    )
+    result["identityResolved"] = captured_identity.resolved
+    if captured_identity.logged_in and not captured_identity.resolved:
+        result.update({
+            "ok": False,
+            "code": "account_runtime_identity_unresolved",
+            "executionMayContinue": True,
+        })
+        return result
+
+    identity_matches_current = captured_identity.matches(current_identity)
+    result["identityChanged"] = bool(
+        captured_identity.resolved and not identity_matches_current
+    )
+
+    def record_error(component: str, exc: Exception) -> None:
+        result["errors"].append({
+            "component": component,
+            "code": f"{component}_cleanup_failed",
+        })
+        append_log(
+            f"[Account] logout cleanup failed for {component}: "
+            f"{type(exc).__name__}\n"
+        )
+
+    if identity_matches_current:
+        try:
+            result["agent"] = _shutdown_agent_service()
+        except Exception as exc:
+            record_error("agent", exc)
+    else:
+        result["agent"] = {
+            "stopped": False,
+            "skipped": True,
+            "reason": "account_identity_changed",
+            "executionMayContinue": True,
+        }
+
+    try:
+        result["matrix"] = MatrixControlPlane(
+            paths,
+            owner_account_id=captured_identity.account_id,
+            owner_account_binding=captured_identity.owner_binding,
+        ).emergency_stop(all_tasks=True)
+    except Exception as exc:
+        record_error("matrix", exc)
+
+    account_job_kinds = {
+        "agent",
+        "cli",
+        "image",
+        "video",
+        "media.transfer",
+        "publish",
+        "storyboard",
+    }
+    def account_runtime_job(job: Mapping) -> bool:
+        snapshot = dict(job)
+        progress = (
+            snapshot.get("progress")
+            if isinstance(snapshot.get("progress"), dict)
+            else {}
+        )
+        has_owner = bool(
+            str(progress.get("ownerAccountId") or "").strip()
+            or str(progress.get("ownerAccountBinding") or "").strip()
+        )
+        if job_requires_account_scope(snapshot):
+            if has_owner:
+                return job_visible_to_account(
+                    snapshot,
+                    account_id=captured_identity.account_id,
+                    owner_binding=captured_identity.owner_binding,
+                )
+            return identity_matches_current
+        kind = str(snapshot.get("kind") or "")
+        is_account_runtime = (
+            kind in account_job_kinds
+            or kind.startswith(
+                ("agent.", "phone.", "matrix.", "storyboard.")
+            )
+        )
+        return identity_matches_current and is_account_runtime
+
+    try:
+        job_manager = _get_job_mgr()
+        result["cancelledJobIds"] = sorted(
+            job_manager.cancel_matching(
+                account_runtime_job,
+                wait_for_workers=True,
+            )
+        )
+        result["unfinishedJobIds"] = sorted(
+            str(job.get("id") or "")
+            for job in job_manager.list(limit=1000)
+            if (
+                account_runtime_job(job)
+                and str(job.get("status") or "") in {
+                    "queued",
+                    "running",
+                    "cancelling",
+                }
+                and str(job.get("id") or "")
+            )
+        )
+    except Exception as exc:
+        record_error("jobs", exc)
+
+    try:
+        result["eventSync"] = stop_phone_event_syncs_for_account(
+            captured_identity.account_id
+        )
+    except Exception as exc:
+        record_error("event_sync", exc)
+
+    if identity_matches_current:
+        try:
+            result["daemon"] = stop_phone_daemon(
+                base_root=paths.base_path
+            )
+        except Exception as exc:
+            record_error("daemon", exc)
+    else:
+        result["daemon"] = {
+            "stopped": False,
+            "skipped": True,
+            "reason": "account_identity_changed",
+            "executionMayContinue": True,
+        }
+
+    try:
+        result["usb"] = cleanup_phone_usb_for_account(
+            account_context,
+            captured_identity.account_id,
+        )
+    except Exception as exc:
+        record_error("usb", exc)
+
+    agent_may_continue = bool(
+        isinstance(result.get("agent"), Mapping)
+        and result["agent"].get("executionMayContinue")
+    )
+    event_may_continue = bool(
+        isinstance(result.get("eventSync"), Mapping)
+        and result["eventSync"].get("executionMayContinue")
+    )
+    daemon_may_continue = bool(
+        isinstance(result.get("daemon"), Mapping)
+        and (
+            result["daemon"].get("running")
+            or result["daemon"].get("executionMayContinue")
+            or result["daemon"].get("outcomeIndeterminate")
+        )
+    )
+    matrix_may_continue = bool(
+        isinstance(result.get("matrix"), Mapping)
+        and (
+            result["matrix"].get("executionMayContinue")
+            or result["matrix"].get("outcomeIndeterminate")
+        )
+    )
+    usb_may_continue = bool(
+        isinstance(result.get("usb"), Mapping)
+        and result["usb"].get("executionMayContinue")
+    )
+    result["executionMayContinue"] = bool(
+        result["errors"]
+        or result["unfinishedJobIds"]
+        or agent_may_continue
+        or matrix_may_continue
+        or event_may_continue
+        or daemon_may_continue
+        or usb_may_continue
+    )
+    result["ok"] = not result["executionMayContinue"]
+    return result
 
 
 def _get_bridge_identity() -> dict:
@@ -871,8 +1173,12 @@ def _fastapi_auth_error(request):
     return None
 
 
-def _fastapi_protected_error(path: str):
-    denial = commercial_feature_denial(path, _get_license_mgr())
+def _fastapi_protected_error(path: str, *, method: str | None = None):
+    denial = commercial_feature_denial(
+        path,
+        _get_entitlement_mgr(),
+        method=method,
+    )
     if denial:
         return _fastapi_json(denial, 403)
     return None
@@ -921,6 +1227,7 @@ def _build_fastapi_context():
         get_image_client=_get_image_client,
         get_desktop_agent_svc=_get_desktop_agent_svc,
         get_job_mgr=_get_job_mgr,
+        get_entitlement_mgr=_get_entitlement_mgr,
         get_license_mgr=_get_license_mgr,
         get_member_mgr=_get_member_mgr,
         get_newapi_account_mgr=_get_newapi_account_mgr,
@@ -931,6 +1238,10 @@ def _build_fastapi_context():
         get_app_updater=_get_app_updater,
         get_agent_service=_get_agent_service,
         get_bridge_identity=_get_bridge_identity,
+        begin_account_transition=_begin_account_transition,
+        end_account_transition=_end_account_transition,
+        account_transition_active=_account_transition_active,
+        account_logout_cleanup=_account_logout_cleanup,
         shutdown_agent_service=_shutdown_agent_service,
         get_storyboard_svc=_get_storyboard_svc,
         get_video_client=_get_video_client,
@@ -979,8 +1290,10 @@ def _serve_fastapi(port: int, token: str) -> None:
     try:
         server.run()
     finally:
-        _shutdown_agent_service()
-        _remove_bridge_session_if_owned()
+        try:
+            _shutdown_bridge_runtime()
+        finally:
+            _remove_bridge_session_if_owned()
 
 def _serve_dependency_error(port: int, token: str) -> None:
     Handler.bridge_token = token
@@ -994,8 +1307,10 @@ def _serve_dependency_error(port: int, token: str) -> None:
     try:
         server.serve_forever()
     finally:
-        _shutdown_agent_service()
-        _remove_bridge_session_if_owned()
+        try:
+            _shutdown_bridge_runtime()
+        finally:
+            _remove_bridge_session_if_owned()
 
 
 def main() -> None:

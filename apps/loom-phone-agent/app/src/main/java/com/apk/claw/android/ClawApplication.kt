@@ -1,9 +1,11 @@
 package com.apk.claw.android
 
+import android.content.Context
 import com.apk.claw.android.agent.DefaultAgentService
 import com.apk.claw.android.base.BaseApp
 import com.apk.claw.android.channel.ChannelManager
 import com.apk.claw.android.publish.PublishRelayManager
+import com.apk.claw.android.privilege.ShizukuPrivilegeBackend
 import com.apk.claw.android.rpa.HybridRuntimeInstaller
 import com.apk.claw.android.server.ConfigServerManager
 import com.apk.claw.android.tool.ToolRegistry
@@ -11,6 +13,7 @@ import com.apk.claw.android.utils.CrashReportStore
 import com.apk.claw.android.utils.KVUtils
 import com.apk.claw.android.utils.XLog
 import com.blankj.utilcode.util.NetworkUtils
+import rikka.shizuku.ShizukuProvider
 
 /**
  * Application 入口
@@ -26,6 +29,13 @@ class ClawApplication : BaseApp() {
         lateinit var appViewModelInstance: AppViewModel
     }
 
+    override fun attachBaseContext(base: Context) {
+        // The 2.4.2 capability layer supports user-installed Shizuku only.
+        // Root/Sui automatic initialization stays disabled behind a separate gate.
+        ShizukuProvider.disableAutomaticSuiInitialization()
+        super.attachBaseContext(base)
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -33,6 +43,7 @@ class ClawApplication : BaseApp() {
         registerNetworkCallback()
         appViewModelInstance = getAppViewModelProvider()[AppViewModel::class.java]
         KVUtils.init(this)
+        ShizukuPrivilegeBackend.initialize(this)
         ToolRegistry.getInstance().registerAllTools(ToolRegistry.DeviceType.MOBILE)
         HybridRuntimeInstaller.install(this)
         XLog.e(TAG, "ClawApplication initialized, tools registered: ${ToolRegistry.getInstance().getAllTools().size}")

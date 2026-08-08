@@ -160,6 +160,14 @@ test('major workbenches share the canonical canvas and surface color hierarchy',
   assert.doesNotMatch(creative, /rounded-\[10px\]/);
 });
 
+test('active sidebar navigation keeps readable text on the dark rail', () => {
+  const source = readSource('./sidebar/Sidebar.tsx');
+  const navButton = sourceBlock(source, 'const NavButton', 'const UtilityButton');
+
+  assert.match(navButton, /isActive \? 'text-white'/);
+  assert.match(navButton, /isActive \? 'text-white' : 'text-white\/68/);
+});
+
 test('toast notifications expose one live region per message', () => {
   const common = readSource('./common/index.tsx');
   const container = sourceBlock(common, 'data-toast-container', '{toasts.map');
@@ -197,6 +205,17 @@ test('web registration opener reports success and failure instead of rejecting s
   assert.match(handler, /catch\s*\(error\)/);
   assert.match(handler, /showToast\([^\n]+, 'success'\)/);
   assert.match(handler, /showToast\([^\n]+, 'error'\)/);
+});
+
+test('payment fallback validates HTTPS before exposing the external opener', () => {
+  const source = readSource('./license/LicensePage.tsx');
+
+  assert.match(source, /function safePaymentPayUrl\(/);
+  assert.match(source, /parsed\.protocol !== 'https:'/);
+  assert.match(source, /parsed\.username \|\| parsed\.password/);
+  assert.match(source, /const paymentPayUrl = useMemo/);
+  assert.doesNotMatch(source, /openExternalUrl\(paymentOrder\.payUrl/);
+  assert.match(source, /openExternalUrl\(paymentPayUrl\)/);
 });
 
 test('Models page does not render an unreachable re-login notice branch', () => {
@@ -270,12 +289,43 @@ test('named form controls expose accessible labels', () => {
   assert.ok(settingsSource.includes('aria-label={copy.appearance.languageTitle}'));
 });
 
-test('account login no longer exposes the legacy license-code activation block', () => {
+test('account login exposes account entitlement redemption without the legacy activation block', () => {
   const licenseSource = readSource('./license/LicensePage.tsx');
 
   assert.doesNotMatch(licenseSource, /handleLegacyActivate/);
   assert.doesNotMatch(licenseSource, /licenseApi\.activate/);
   assert.doesNotMatch(licenseSource, /aria-label="旧授权码"/);
+  assert.match(licenseSource, /aria-label="商业矩阵授权码"/);
+});
+
+test('account identity transitions clear all in-memory Agent projections and attachment drafts', () => {
+  const licenseSource = readSource('./license/LicensePage.tsx');
+  const applyAccount = sourceBlock(
+    licenseSource,
+    'const applyAccount',
+    'const refresh',
+  );
+
+  assert.match(licenseSource, /import \{ useAgentStore \} from '\.\.\/\.\.\/stores\/agentStore'/);
+  assert.match(applyAccount, /previousIdentity !== nextIdentity/);
+  assert.match(applyAccount, /useAgentStore\.getState\(\)\.reset\(\)/);
+  assert.ok(
+    applyAccount.indexOf('useAgentStore.getState().reset()')
+      < applyAccount.indexOf('cachedAccount.current = next'),
+  );
+});
+
+test('phone matrix gate sends authorization binding through the logged-in account page', () => {
+  const gateSource = readSource('./license/PhoneMatrixAccessGate.tsx');
+  const paywallSource = readSource('./license/LicensePaywall.tsx');
+
+  assert.match(gateSource, /accountBindingOnly/);
+  assert.match(paywallSource, /accountBindingOnly/);
+  assert.match(paywallSource, /setCurrentPage\('license'\)/);
+  assert.match(paywallSource, /登录模型账号并绑定授权码/);
+  assert.match(paywallSource, /未激活账号可用 0 台手机/);
+  assert.match(paywallSource, /当前账号下已连接的全部手机均可使用/);
+  assert.doesNotMatch(paywallSource, /正在核验这台电脑的矩阵使用资格/);
 });
 
 test('shared modal, confirmation, and toast controls expose accessibility contracts', () => {

@@ -7,6 +7,7 @@ import inspect
 import io
 import pickle
 import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -18,12 +19,14 @@ from test_license_flow import load_server
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNTIME_ROOT = ROOT
-if not (
-    RUNTIME_ROOT / "openclaw_new_launcher" / "python-runtime" / "python.exe"
-).is_file():
-    RUNTIME_ROOT = ROOT.parent.parent
-PYTHON = RUNTIME_ROOT / "openclaw_new_launcher" / "python-runtime" / "python.exe"
+_PYTHON_CANDIDATES = (
+    ROOT / "openclaw_new_launcher" / "python-runtime" / "python.exe",
+    ROOT.parent.parent / "openclaw_new_launcher" / "python-runtime" / "python.exe",
+)
+PYTHON = next(
+    (candidate for candidate in _PYTHON_CANDIDATES if candidate.is_file()),
+    Path(sys.executable),
+)
 SERVER = LICENSE_SERVER_ROOT / "server.py"
 
 

@@ -24,8 +24,6 @@ Commands:
 
 Common options:
   --device-id <id>
-  --phone-url <url>
-  --phone-token <token>
   --json
 `.trim();
 }

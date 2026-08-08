@@ -96,7 +96,7 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
 
             self.assertEqual(default_manifest_path(debug_dir), parent_manifest)
 
-    def test_missing_manifest_exposes_five_simulation_targets_without_state_write(self) -> None:
+    def test_missing_manifest_exposes_codex_desktop_and_cli_without_duplicate_chatgpt_product(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = os.path.join(temp_dir, "components-state.json")
             catalog = ComponentCatalog(
@@ -115,13 +115,36 @@ class ComponentCatalogFallbackTests(unittest.TestCase):
             self.assertNotIn("All manifest sources", status["warning"])
             self.assertEqual(
                 [component["id"] for component in status["components"]],
-                ["codex-desktop", "claude-code", "opencode", "openclaw-companion", "hermes"],
+                [
+                    "codex-desktop",
+                    "codex-cli",
+                    "claude-code",
+                    "opencode",
+                    "openclaw-companion",
+                    "hermes",
+                    "gemini-cli",
+                    "goose",
+                    "grok-build",
+                    "pi",
+                ],
             )
             codex = next(component for component in status["components"] if component["id"] == "codex-desktop")
-            self.assertEqual(codex["name"], "ChatGPT Codex 原版")
+            codex_cli = next(component for component in status["components"] if component["id"] == "codex-cli")
+            self.assertEqual(codex["name"], "Codex Desktop")
+            self.assertEqual(codex_cli["name"], "Codex CLI")
             self.assertEqual(codex["type"], "msstore")
+            self.assertNotEqual(codex_cli["type"], "msstore")
+            self.assertNotIn("chatgpt-desktop", {component["id"] for component in status["components"]})
             self.assertEqual(codex["installCommand"], [])
+            self.assertTrue(codex["installLocked"])
             self.assertEqual(codex["urls"], ["https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"])
+            pi = next(component for component in status["components"] if component["id"] == "pi")
+            grok = next(component for component in status["components"] if component["id"] == "grok-build")
+            self.assertFalse(pi["installLocked"])
+            self.assertEqual(pi["installMode"], "managed_npm")
+            self.assertFalse(pi["sandbox"])
+            self.assertTrue(grok["installLocked"])
+            self.assertEqual(grok["installMode"], "official_manual")
             self.assertTrue(all(component["status"] == "not_installed" for component in status["components"]))
             self.assertFalse(os.path.exists(state_path))
 

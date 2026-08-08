@@ -8,7 +8,6 @@
     "runId",
     "sessionId",
     "status",
-    "executionState",
     "campaignIds"
   ],
   "properties": {

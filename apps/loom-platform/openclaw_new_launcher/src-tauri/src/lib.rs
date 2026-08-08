@@ -93,6 +93,131 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+
+#[cfg(windows)]
+struct UpdateHandoffArgs<'a> {
+    powershell: &'a std::path::Path,
+    script: &'a std::path::Path,
+    installer: &'a std::path::Path,
+    install_root: &'a std::path::Path,
+    app_exe: &'a std::path::Path,
+    recovery_root: &'a std::path::Path,
+    marker_path: &'a std::path::Path,
+    ready_path: &'a std::path::Path,
+    target_version: &'a str,
+    test_mode: bool,
+    launch_log: &'a std::path::Path,
+}
+
+#[cfg(windows)]
+fn update_handoff_stdio(
+    command: &mut Command,
+    launch_log: &std::path::Path,
+) -> Result<(), String> {
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(launch_log)
+        .map_err(|error| format!("无法创建升级启动日志: {error}"))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|error| format!("无法复制升级启动日志句柄: {error}"))?;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr));
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn append_update_handoff_arguments(command: &mut Command, args: &UpdateHandoffArgs<'_>) {
+    command.arg("-Installer").arg(args.installer);
+    command.arg("-InstallRoot").arg(args.install_root);
+    command.arg("-AppExe").arg(args.app_exe);
+    command.arg("-RecoveryRoot").arg(args.recovery_root);
+    command.arg("-MarkerPath").arg(args.marker_path);
+    command.arg("-ReadyPath").arg(args.ready_path);
+    command.arg("-ParentPid").arg(std::process::id().to_string());
+    command.arg("-Version").arg(args.target_version);
+    command.arg("-BrandId").arg(BRAND_ID);
+    command.arg("-BrandDisplayName").arg(BRAND_DISPLAY_NAME);
+    if args.test_mode {
+        command.arg("-TestMode");
+    }
+}
+
+#[cfg(windows)]
+fn spawn_update_handoff(args: &UpdateHandoffArgs<'_>) -> Result<std::process::Child, String> {
+    let mut command = Command::new(args.powershell);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    command.arg(args.script);
+    append_update_handoff_arguments(&mut command, args);
+    update_handoff_stdio(&mut command, args.launch_log)?;
+    command
+        .spawn()
+        .map_err(|error| format!("无法启动升级交接进程: {error}"))
+}
+
+#[cfg(windows)]
+fn powershell_quote(value: &std::path::Path) -> String {
+    format!("'{}'", value.to_string_lossy().replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn powershell_text_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn spawn_update_handoff_encoded(
+    args: &UpdateHandoffArgs<'_>,
+) -> Result<std::process::Child, String> {
+    use base64::Engine;
+
+    let mut invocation = format!(
+        "& {} -Installer {} -InstallRoot {} -AppExe {} -RecoveryRoot {} -MarkerPath {} -ReadyPath {} -ParentPid {} -Version {} -BrandId {} -BrandDisplayName {}",
+        powershell_quote(args.script),
+        powershell_quote(args.installer),
+        powershell_quote(args.install_root),
+        powershell_quote(args.app_exe),
+        powershell_quote(args.recovery_root),
+        powershell_quote(args.marker_path),
+        powershell_quote(args.ready_path),
+        std::process::id(),
+        powershell_text_quote(args.target_version),
+        powershell_text_quote(BRAND_ID),
+        powershell_text_quote(BRAND_DISPLAY_NAME),
+    );
+    if args.test_mode {
+        invocation.push_str(" -TestMode");
+    }
+    invocation.push_str("; if (-not $?) { exit 1 }");
+    let encoded_bytes = invocation
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(encoded_bytes);
+    let mut command = Command::new(args.powershell);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        &encoded,
+    ]);
+    update_handoff_stdio(&mut command, args.launch_log)?;
+    command
+        .spawn()
+        .map_err(|error| format!("无法通过兼容模式启动升级交接进程: {error}"))
+}
 const PRIMARY_PAYLOAD_DIR: &str = "LOOMFiles";
 const LEGACY_PAYLOAD_DIR: &str = "OpenClawFiles";
 const PORTABLE_PAYLOAD_DIRS: [&str; 2] = [PRIMARY_PAYLOAD_DIR, LEGACY_PAYLOAD_DIR];
@@ -175,7 +300,14 @@ fn kill_process_tree(pid: u32) {
         let mut command = Command::new("taskkill");
         command.args(["/F", "/T", "/PID", &pid.to_string()]);
         command.creation_flags(CREATE_NO_WINDOW);
-        let _ = command.output();
+        // Never wait for taskkill here. During an update this function runs on
+        // the old process' exit path; a blocked taskkill must not prevent the
+        // detached installer from observing that its parent has exited.
+        let _ = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
 
     #[cfg(not(windows))]
@@ -183,6 +315,17 @@ fn kill_process_tree(pid: u32) {
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output();
+    }
+}
+
+fn update_test_mode_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var("LOOM_UPDATE_TEST_MODE").ok().as_deref() == Some("1")
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
     }
 }
 
@@ -202,7 +345,7 @@ async fn post_bridge_shutdown(path: &str) {
 
     let url = format!("http://127.0.0.1:{}/{}", port, path.trim_start_matches('/'));
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(4))
         .build()
     {
         Ok(client) => client,
@@ -217,9 +360,17 @@ async fn post_bridge_shutdown(path: &str) {
 }
 
 async fn shutdown_backend() {
-    post_bridge_shutdown("/api/agent/shutdown").await;
-    post_bridge_shutdown("/api/process/stop").await;
-    post_bridge_shutdown("/api/desktop-agent/stop").await;
+    let agent_shutdown =
+        tauri::async_runtime::spawn(post_bridge_shutdown("/api/agent/shutdown"));
+    let process_shutdown =
+        tauri::async_runtime::spawn(post_bridge_shutdown("/api/process/stop"));
+    let desktop_shutdown =
+        tauri::async_runtime::spawn(post_bridge_shutdown("/api/desktop-agent/stop"));
+    let _ = (
+        agent_shutdown.await,
+        process_shutdown.await,
+        desktop_shutdown.await,
+    );
     terminate_bridge_process_tree();
 }
 
@@ -269,28 +420,63 @@ fn path_check(id: &str, label: &str, path: &std::path::Path, required: bool) -> 
     }
 }
 
-fn protected_feature(path: &str) -> Option<&'static str> {
-    const RULES: [(&str, &str); 5] = [
-        ("api/matrix/acquisition/feishu", "acquisition.feishu"),
-        ("api/matrix/acquisition/templates", "templates.cloud"),
-        ("api/matrix/acquisition", "acquisition.workbench"),
+fn is_safety_cleanup_request(path: &str, method: &str) -> bool {
+    let normalized_method = method.trim().to_ascii_uppercase();
+    if normalized_method == "POST"
+        && matches!(
+            path,
+            "api/matrix/cancel"
+                | "api/matrix/emergency-stop"
+                | "api/phone/usb/disconnect"
+                | "api/phone/daemon/stop"
+                | "api/phone/events/stop"
+        )
+    {
+        return true;
+    }
+    if normalized_method == "POST" {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() == 5
+            && parts[..3] == ["api", "matrix", "tasks"]
+            && !parts[3].is_empty()
+            && parts[4] == "pause"
+        {
+            return true;
+        }
+    }
+    if normalized_method != "DELETE" {
+        return false;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() == 5
+        && parts[..3] == ["api", "phone-stream", "devices"]
+        && !parts[3].is_empty()
+        && parts[4] == "session"
+    {
+        return true;
+    }
+    if let Some(device_id) = path.strip_prefix("api/phone/config/device/") {
+        return !device_id.is_empty() && !device_id.contains('/');
+    }
+    parts.len() == 5
+        && parts[..3] == ["api", "matrix", "devices"]
+        && !parts[3].is_empty()
+        && parts[4] == "lease"
+}
+
+fn protected_feature(path: &str, method: &str) -> Option<&'static str> {
+    const RULES: [(&str, &str); 3] = [
         ("api/matrix", "matrix.devices"),
+        ("api/phone-stream", "matrix.devices"),
         ("api/phone", "matrix.devices"),
     ];
-    const PUBLIC_SAFETY_PATHS: [&str; 4] = [
-        "api/matrix/cancel",
-        "api/matrix/emergency-stop",
-        "api/phone/daemon/stop",
-        "api/phone/events/stop",
-    ];
-
     let normalized = path
         .split('?')
         .next()
         .unwrap_or("")
         .trim_start_matches('/')
         .trim_end_matches('/');
-    if PUBLIC_SAFETY_PATHS.contains(&normalized) {
+    if is_safety_cleanup_request(normalized, method) {
         return None;
     }
     for (prefix, feature) in RULES {
@@ -306,24 +492,27 @@ fn protected_feature(path: &str) -> Option<&'static str> {
     None
 }
 
-fn protected_feature_for_request(path: &str, body: Option<&str>) -> Option<&'static str> {
-    if let Some(feature) = protected_feature(path) {
+fn protected_feature_for_request(
+    path: &str,
+    method: &str,
+    body: Option<&str>,
+) -> Option<&'static str> {
+    if let Some(feature) = protected_feature(path, method) {
         return Some(feature);
     }
-    let normalized = path
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .trim_matches('/');
+    let normalized = path.split('?').next().unwrap_or("").trim_matches('/');
     if normalized != "api/cli/run" {
         return None;
     }
-    let command = serde_json::from_str::<serde_json::Value>(body?)
-        .ok()?
+    let payload = serde_json::from_str::<serde_json::Value>(body?).ok()?;
+    let command = payload
         .get("command")?
         .as_str()?
         .trim()
         .to_ascii_lowercase();
+    if is_phone_video_stop_cleanup(&command, payload.get("args")) {
+        return None;
+    }
     if command.starts_with("phone:")
         || command.starts_with("loom:phone:")
         || command.starts_with("openclaw:phone:")
@@ -333,6 +522,61 @@ fn protected_feature_for_request(path: &str, body: Option<&str>) -> Option<&'sta
     None
 }
 
+fn is_phone_video_stop_cleanup(command: &str, args: Option<&serde_json::Value>) -> bool {
+    if command != "phone:video" {
+        return false;
+    }
+    let Some(args) = args.and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+
+    let mut saw_stop = false;
+    let mut device_id = "";
+    let mut index = 0;
+    while index < args.len() {
+        let Some(raw) = args[index].as_str().map(str::trim) else {
+            return false;
+        };
+        let normalized = raw.to_ascii_lowercase();
+        if normalized == "stop" {
+            if saw_stop {
+                return false;
+            }
+            saw_stop = true;
+        } else if normalized == "--json" {
+        } else if normalized == "--device-id" {
+            if !device_id.is_empty() || index + 1 >= args.len() {
+                return false;
+            }
+            let Some(candidate) = args[index + 1].as_str().map(str::trim) else {
+                return false;
+            };
+            if candidate.is_empty() || candidate.starts_with('-') {
+                return false;
+            }
+            device_id = candidate;
+            index += 1;
+        } else if normalized.starts_with("--device-id=") {
+            if !device_id.is_empty() {
+                return false;
+            }
+            let Some((_, candidate)) = raw.split_once('=') else {
+                return false;
+            };
+            let candidate = candidate.trim();
+            if candidate.is_empty() || candidate.starts_with('-') {
+                return false;
+            }
+            device_id = candidate;
+        } else {
+            return false;
+        }
+        index += 1;
+    }
+
+    saw_stop && !device_id.is_empty()
+}
+
 #[cfg(test)]
 mod commercial_feature_path_tests {
     use super::protected_feature_for_request;
@@ -340,15 +584,32 @@ mod commercial_feature_path_tests {
     #[test]
     fn maps_commercial_routes_with_longest_prefix_precedence() {
         let cases = [
-            ("/api/matrix/acquisition/feishu/status", Some("acquisition.feishu")),
-            ("/api/matrix/acquisition/templates/upload", Some("templates.cloud")),
-            ("/api/matrix/acquisition/agent/result", Some("acquisition.workbench")),
+            (
+                "/api/matrix/acquisition/feishu/status",
+                Some("matrix.devices"),
+            ),
+            (
+                "/api/matrix/acquisition/templates/upload",
+                Some("matrix.devices"),
+            ),
+            (
+                "/api/matrix/acquisition/agent/result",
+                Some("matrix.devices"),
+            ),
             ("/api/matrix/status", Some("matrix.devices")),
             ("/api/phone/task", Some("matrix.devices")),
+            (
+                "/api/phone-stream/devices/phone-a/session",
+                Some("matrix.devices"),
+            ),
         ];
 
         for (path, expected) in cases {
-            assert_eq!(protected_feature_for_request(path, None), expected, "path={path}");
+            assert_eq!(
+                protected_feature_for_request(path, "GET", None),
+                expected,
+                "path={path}"
+            );
         }
     }
 
@@ -364,43 +625,117 @@ mod commercial_feature_path_tests {
             "/api/process/start",
             "/api/image/generate/submit",
             "/api/video/generate",
+            "/api/matrixevil/status",
+            "/api/phonebook/task",
+        ] {
+            assert_eq!(
+                protected_feature_for_request(path, "GET", None),
+                None,
+                "path={path}"
+            );
+        }
+        for path in [
             "/api/matrix/cancel",
             "/api/matrix/emergency-stop",
             "/api/phone/daemon/stop",
             "/api/phone/events/stop",
-            "/api/matrixevil/status",
-            "/api/phonebook/task",
         ] {
-            assert_eq!(protected_feature_for_request(path, None), None, "path={path}");
+            assert_eq!(
+                protected_feature_for_request(path, "POST", None),
+                None,
+                "path={path}"
+            );
         }
         assert_eq!(
-            protected_feature_for_request("/api/matrix/acquisitionevil", None),
+            protected_feature_for_request("/api/matrix/acquisitionevil", "GET", None),
             Some("matrix.devices")
         );
     }
 
     #[test]
-    fn gates_all_phone_commands_on_the_shared_cli_endpoint() {
+    fn allows_only_explicit_phone_video_stop_cleanup_on_the_shared_cli_endpoint() {
         let publish = r#"{"command":"phone:publish","confirmed":true}"#;
         let read = r#"{"command":"phone:agent","args":["history"]}"#;
         let desktop = r#"{"command":"desktop:agent","args":["status"]}"#;
+        let video_stop = r#"{"command":"phone:video","args":["stop","--device-id","phone-a","--json"],"confirmed":true}"#;
+        let video_stop_equals =
+            r#"{"command":"phone:video","args":["--device-id=phone-a","stop"],"confirmed":true}"#;
+        let video_stop_without_target =
+            r#"{"command":"phone:video","args":["stop","--json"],"confirmed":true}"#;
+        let video_start = r#"{"command":"phone:video","args":["start","--device-id","phone-a"],"confirmed":true}"#;
+        let video_stop_with_direct_url = r#"{"command":"phone:video","args":["stop","--device-id","phone-a","--phone-url","http://127.0.0.1:9527"],"confirmed":true}"#;
+        let video_stop_alias = r#"{"command":"loom:phone:video","args":["stop","--device-id","phone-a"],"confirmed":true}"#;
 
         assert_eq!(
-            protected_feature_for_request("/api/cli/run", Some(publish)),
+            protected_feature_for_request("/api/cli/run", "POST", Some(publish)),
             Some("matrix.devices")
         );
         assert_eq!(
-            protected_feature_for_request("/api/cli/run", Some(read)),
+            protected_feature_for_request("/api/cli/run", "POST", Some(read)),
             Some("matrix.devices")
         );
         assert_eq!(
-            protected_feature_for_request("/api/cli/run", Some(desktop)),
+            protected_feature_for_request("/api/cli/run", "POST", Some(desktop)),
             None
         );
         assert_eq!(
-            protected_feature_for_request("/api/cli/run", Some("not-json")),
+            protected_feature_for_request("/api/cli/run", "POST", Some(video_stop)),
             None
         );
+        assert_eq!(
+            protected_feature_for_request("/api/cli/run", "POST", Some(video_stop_equals)),
+            None
+        );
+        for body in [
+            video_stop_without_target,
+            video_start,
+            video_stop_with_direct_url,
+            video_stop_alias,
+        ] {
+            assert_eq!(
+                protected_feature_for_request("/api/cli/run", "POST", Some(body)),
+                Some("matrix.devices"),
+                "body={body}"
+            );
+        }
+        assert_eq!(
+            protected_feature_for_request("/api/cli/run", "POST", Some("not-json")),
+            None
+        );
+    }
+
+    #[test]
+    fn allows_only_method_scoped_cleanup_requests_without_commercial_access() {
+        for (method, path) in [
+            ("DELETE", "/api/phone/config/device/phone-a"),
+            ("POST", "/api/phone/usb/disconnect"),
+            ("POST", "/api/phone/daemon/stop"),
+            ("POST", "/api/phone/events/stop"),
+            ("DELETE", "/api/matrix/devices/phone-a/lease"),
+            ("DELETE", "/api/phone-stream/devices/phone-a/session"),
+            ("POST", "/api/matrix/tasks/task-a/pause"),
+        ] {
+            assert_eq!(
+                protected_feature_for_request(path, method, None),
+                None,
+                "{method} {path}"
+            );
+        }
+
+        for (method, path) in [
+            ("GET", "/api/phone/config/device/phone-a"),
+            ("POST", "/api/phone/usb/connect"),
+            ("POST", "/api/phone/daemon/start"),
+            ("POST", "/api/phone/events/start"),
+            ("POST", "/api/matrix/devices/phone-a/lease"),
+            ("POST", "/api/matrix/tasks/task-a/resume"),
+        ] {
+            assert_eq!(
+                protected_feature_for_request(path, method, None),
+                Some("matrix.devices"),
+                "{method} {path}"
+            );
+        }
     }
 }
 
@@ -866,20 +1201,61 @@ async fn install_distribution_layer(app: tauri::AppHandle, layer_id: String) -> 
     if layer_id.is_empty() {
         return Err("distribution layer id is empty".to_string());
     }
-    let root = bootstrap::install_root()?;
+    let root = match bootstrap::install_root() {
+        Ok(root) => root,
+        Err(error) => {
+            bootstrap::record_setup_error(&app, error.clone());
+            return Err(error);
+        }
+    };
     bootstrap::install_layer_by_id(app, root, layer_id).await
+}
+
+fn read_distribution_setup_snapshot(
+    state: &bootstrap::DistributionSetupState,
+) -> bootstrap::DistributionSetupSnapshot {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn get_distribution_setup_snapshot(
+    state: tauri::State<'_, bootstrap::DistributionSetupState>,
+) -> bootstrap::DistributionSetupSnapshot {
+    read_distribution_setup_snapshot(state.inner())
 }
 
 #[tauri::command]
 async fn retry_distribution_setup(app: tauri::AppHandle) -> Result<String, String> {
     clear_bridge_startup_error();
-    let root = bootstrap::install_root()?;
+    let root = match bootstrap::install_root() {
+        Ok(root) => root,
+        Err(error) => {
+            bootstrap::record_setup_error(&app, error.clone());
+            return Err(error);
+        }
+    };
     if let Err(error) = bootstrap::ensure_layers(app.clone(), root).await {
         let message = format!("运行组件补全失败：{error}");
         set_bridge_startup_error(message.clone());
         return Err(message);
     }
     start_bridge(app).await
+}
+
+#[cfg(test)]
+mod distribution_setup_snapshot_command_tests {
+    use super::{bootstrap, read_distribution_setup_snapshot};
+
+    #[test]
+    fn snapshot_query_is_a_read_only_clone() {
+        let state = bootstrap::DistributionSetupState::default();
+
+        let first = read_distribution_setup_snapshot(&state);
+        let second = read_distribution_setup_snapshot(&state);
+
+        assert_eq!(first, second);
+        assert_eq!(state.snapshot(), first);
+    }
 }
 
 #[tauri::command]
@@ -889,7 +1265,7 @@ async fn proxy_request(
     method: String,
     body: Option<String>,
 ) -> Result<String, String> {
-    if let Some(feature) = protected_feature_for_request(&path, body.as_deref()) {
+    if let Some(feature) = protected_feature_for_request(&path, &method, body.as_deref()) {
         let base_dir = portable_base_dir()?;
         license::ensure_authorized(&base_dir, Some(feature))?;
     }
@@ -1012,7 +1388,10 @@ async fn open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -> Result<String, String> {
+async fn prepare_update_install(
+    app: tauri::AppHandle,
+    installer_path: String,
+) -> Result<String, String> {
     #[cfg(not(windows))]
     {
         let _ = (app, installer_path);
@@ -1042,8 +1421,8 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
             .ok_or_else(|| "LOCALAPPDATA 不可用，无法创建安全更新目录".to_string())?;
         let update_state_root = local_app_data.join(update_recovery_dir_name());
         let cache_root = update_state_root.join("updates");
-        let canonical_cache = std::fs::canonicalize(&cache_root)
-            .map_err(|e| format!("更新缓存目录不可用: {e}"))?;
+        let canonical_cache =
+            std::fs::canonicalize(&cache_root).map_err(|e| format!("更新缓存目录不可用: {e}"))?;
         if !installer.starts_with(&canonical_cache) {
             return Err(format!(
                 "拒绝启动更新：安装包不在 {BRAND_DISPLAY_NAME} 外部更新缓存中"
@@ -1063,9 +1442,9 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
             .ok_or_else(|| "拒绝启动更新：无法从安装包名称读取目标版本".to_string())?;
         let version_parts = target_version.split('.').collect::<Vec<_>>();
         if version_parts.len() != 3
-            || version_parts
-                .iter()
-                .any(|part| part.is_empty() || !part.chars().all(|character| character.is_ascii_digit()))
+            || version_parts.iter().any(|part| {
+                part.is_empty() || !part.chars().all(|character| character.is_ascii_digit())
+            })
         {
             return Err("拒绝启动更新：目标版本格式无效".to_string());
         }
@@ -1088,6 +1467,7 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
         let marker_path = update_state_root.join("update-pending.json");
         let script_path = recovery_root.join("update-handoff.ps1");
         let ready_path = recovery_root.join("handoff-ready.json");
+        let launch_log_path = recovery_root.join("update-handoff-launch.log");
         let script = include_str!("../installer/update-handoff.ps1");
         std::fs::write(&script_path, script.as_bytes())
             .map_err(|e| format!("无法写入升级交接脚本: {e}"))?;
@@ -1100,62 +1480,66 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
-        let mut command = Command::new(powershell);
-        command.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ]);
-        command.arg(&script_path);
-        command.arg("-Installer").arg(&installer);
-        command.arg("-InstallRoot").arg(&install_root);
-        command.arg("-AppExe").arg(&app_exe);
-        command.arg("-RecoveryRoot").arg(&recovery_root);
-        command.arg("-MarkerPath").arg(&marker_path);
-        command.arg("-ReadyPath").arg(&ready_path);
-        command.arg("-ParentPid").arg(std::process::id().to_string());
-        command.arg("-Version").arg(&target_version);
-        command.arg("-BrandId").arg(BRAND_ID);
-        command.arg("-BrandDisplayName").arg(BRAND_DISPLAY_NAME);
-        let test_mode = std::env::var("LOOM_UPDATE_TEST_MODE").ok().as_deref() == Some("1");
-        if test_mode {
-            command.arg("-TestMode");
-        }
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        let mut handoff_process = command
-            .spawn()
-            .map_err(|e| format!("无法启动升级交接进程: {e}"))?;
+        // Test mode is a debug-build contract only. A machine-level environment
+        // variable must never disable shutdown in a production updater.
+        let test_mode = update_test_mode_enabled();
+        let handoff_args = UpdateHandoffArgs {
+            powershell: &powershell,
+            script: &script_path,
+            installer: &installer,
+            install_root: &install_root,
+            app_exe: &app_exe,
+            recovery_root: &recovery_root,
+            marker_path: &marker_path,
+            ready_path: &ready_path,
+            target_version: &target_version,
+            test_mode,
+            launch_log: &launch_log_path,
+        };
+        let mut handoff_process = spawn_update_handoff(&handoff_args)?;
 
         if !test_mode {
-            let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut compatibility_retry_used = false;
             loop {
                 if ready_path.is_file() {
                     break;
                 }
                 match handoff_process.try_wait() {
                     Ok(Some(status)) => {
+                        if status.success() && !compatibility_retry_used {
+                            compatibility_retry_used = true;
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&launch_log_path)
+                                .and_then(|mut log| {
+                                    writeln!(log, "primary -File handoff exited before ready; retrying with -EncodedCommand")
+                                });
+                            handoff_process = spawn_update_handoff_encoded(&handoff_args)?;
+                            ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+                            continue;
+                        }
                         return Err(format!(
-                            "升级交接进程提前退出（{status}），当前版本未关闭。请导出诊断日志后重试。"
+                            "升级交接进程提前退出（{status}），当前版本未关闭。启动日志: {}",
+                            launch_log_path.to_string_lossy()
                         ));
                     }
                     Ok(None) => {}
                     Err(error) => {
                         return Err(format!(
-                            "无法确认升级交接进程状态: {error}。当前版本未关闭。"
+                            "无法确认升级交接进程状态: {error}。当前版本未关闭。启动日志: {}",
+                            launch_log_path.to_string_lossy()
                         ));
                     }
                 }
                 if std::time::Instant::now() >= ready_deadline {
                     let _ = handoff_process.kill();
                     return Err(
-                        "升级交接进程未在 5 秒内就绪，当前版本未关闭。请检查安全软件或 PowerShell 策略。"
-                            .to_string(),
+                        format!(
+                            "升级交接进程未在 5 秒内就绪，当前版本未关闭。启动日志: {}",
+                            launch_log_path.to_string_lossy()
+                        ),
                     );
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -1164,12 +1548,18 @@ async fn prepare_update_install(app: tauri::AppHandle, installer_path: String) -
             handoff_guard.reset_on_drop = false;
             std::mem::forget(system_mutex);
 
-            // Exit only after the Bridge has drained Agent work and released
-            // packaged runtimes, so the detached installer can replace them.
+            // Drain the Bridge first, while an independent deadline guarantees
+            // the detached installer gets enough of its parent-wait window.
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 shutdown_backend().await;
                 app_handle.exit(0);
+            });
+            let forced_exit_app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(6));
+                terminate_bridge_process_tree();
+                forced_exit_app.exit(0);
             });
         }
         Ok(recovery_root.to_string_lossy().to_string())
@@ -1293,6 +1683,7 @@ fn chrono_like_timestamp() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(bootstrap::DistributionSetupState::default())
         .setup(|app| {
             configure_media_asset_scope(app)?;
             if cfg!(debug_assertions) {
@@ -1314,7 +1705,10 @@ pub fn run() {
                             set_bridge_startup_error(format!("运行时组件下载失败：{}", e));
                         }
                     }
-                    Err(e) => eprintln!("[Bootstrap] install root unresolved: {}", e),
+                    Err(e) => {
+                        bootstrap::record_setup_error(&app_handle, e.clone());
+                        eprintln!("[Bootstrap] install root unresolved: {}", e);
+                    }
                 }
                 if let Err(e) = start_bridge(app_handle.clone()).await {
                     eprintln!("[Bridge startup error] {}", e);
@@ -1346,6 +1740,7 @@ pub fn run() {
             verify_license,
             start_bridge,
             install_distribution_layer,
+            get_distribution_setup_snapshot,
             retry_distribution_setup,
             proxy_request,
             export_log,

@@ -66,14 +66,21 @@ class NsisSmokeScriptContractTests(unittest.TestCase):
             "api.fastapi_routes.__file__",
             "/api/agent/bootstrap",
             "from services.agent_service import AgentService",
+            "class PackagedProbeRuntime:",
+            "runtime=PackagedProbeRuntime()",
             "agent_service.bootstrap()",
             'agent_bootstrap.get("defaultRuntimeProfileId") != "loom-native"',
             'len(agent_bootstrap.get("capabilities", [])) <= 0',
+            "from core.newapi_account_manager import NewApiAccountManager",
+            "NewApiAccountManager.__new__",
+            "/api/openclaw/account/subscription",
+            '"accountSubscriptionBearer": True',
             "/api/matrix/devices/{device_id}/screen",
             'packagedRouteModules = "protected"',
             "upgradeDataPreserved",
         ):
             self.assertIn(marker, source)
+        self.assertNotIn("agent_service = AgentService(AppPaths(state_root))", source)
 
     def test_smoke_script_does_not_print_bridge_token(self) -> None:
         with open(SCRIPT_PATH, "r", encoding="utf-8") as handle:

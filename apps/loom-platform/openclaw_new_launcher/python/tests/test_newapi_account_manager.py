@@ -4,8 +4,11 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
+import urllib.request
+from unittest.mock import Mock, patch
 
 
 PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +37,463 @@ from core.storage import read_json
 
 
 class NewApiAccountManagerTests(unittest.TestCase):
+    def test_current_migrates_session_from_exact_legacy_product_sibling_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            legacy_root = os.path.join(
+                temp_dir,
+                "Luming AI Matrix Acquisition Workbench",
+            )
+            current_root = os.path.join(temp_dir, "麓鸣")
+            legacy_manager = NewApiAccountManager(AppPaths(legacy_root))
+            legacy_manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:legacy",
+                "memberToken": "sk-legacy-session-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "legacy"},
+            })
+            manager = NewApiAccountManager(AppPaths(current_root))
+
+            self.assertFalse(os.path.exists(manager.session_path))
+            migrated = manager.current()
+
+            self.assertIsNotNone(migrated)
+            self.assertEqual("newapi:legacy", migrated["memberId"])
+            self.assertTrue(os.path.isfile(manager.session_path))
+            self.assertTrue(os.path.isfile(legacy_manager.session_path))
+
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:current",
+                "memberToken": "sk-current-session-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "current"},
+            })
+            legacy_manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:changed-legacy",
+                "memberToken": "sk-changed-legacy-session-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "changed-legacy"},
+            })
+
+            self.assertEqual("newapi:current", manager.current()["memberId"])
+
+    def test_payment_requests_use_current_session_token_and_never_send_account_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = PaymentFakeManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "42"},
+            })
+
+            catalog = manager.payment_plans()
+            order = manager.create_payment_order(
+                "monthly", "alipay", "payment-click-001"
+            )
+            status = manager.payment_order_status("order-1", reconcile=True)
+
+            self.assertEqual("monthly", catalog["plans"][0]["planKey"])
+            self.assertEqual("order-1", order["order"]["orderId"])
+            self.assertEqual("pending", status["order"]["status"])
+            self.assertEqual(
+                [
+                    "/api/openclaw/payments/plans",
+                    "/api/openclaw/payments/orders/create",
+                    "/api/openclaw/payments/orders/status",
+                ],
+                [request["path"] for request in manager.requests],
+            )
+            self.assertTrue(all(
+                request["headers"]["Authorization"]
+                == "Bearer sk-account-token-not-real"
+                for request in manager.requests
+            ))
+            self.assertTrue(all(
+                request["hasCookieProcessor"] is False
+                for request in manager.requests
+            ))
+            self.assertTrue(all(
+                "accountId" not in request["body"] for request in manager.requests
+            ))
+            self.assertTrue(manager.requests[-1]["body"]["reconcile"])
+
+    def test_payment_plans_normalize_legacy_single_channel_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            class LegacyChannelPaymentManager(PaymentFakeManager):
+                def _request_json(self, *args, **kwargs):
+                    response = super()._request_json(*args, **kwargs)
+                    if str(args[1]).endswith("/payments/plans"):
+                        response["data"]["payment"]["channels"] = "alipay"
+                    return response
+
+            manager = LegacyChannelPaymentManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "42"},
+            })
+
+            catalog = manager.payment_plans()
+
+            self.assertEqual(["alipay"], catalog["payment"]["channels"])
+
+    def test_late_payment_response_cannot_cross_an_account_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            started = threading.Event()
+            release = threading.Event()
+
+            class BlockingPaymentManager(PaymentFakeManager):
+                def _request_json(self, *args, **kwargs):
+                    started.set()
+                    release.wait(2)
+                    return super()._request_json(*args, **kwargs)
+
+            manager = BlockingPaymentManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:old",
+                "memberToken": "sk-old-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "old"},
+            })
+            errors: list[Exception] = []
+
+            def load_plans() -> None:
+                try:
+                    manager.payment_plans()
+                except Exception as error:
+                    errors.append(error)
+
+            thread = threading.Thread(target=load_plans)
+            thread.start()
+            self.assertTrue(started.wait(1))
+            manager._persist_authenticated_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:new",
+                "memberToken": "sk-new-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "new"},
+            }, sync_runtime=False)
+            release.set()
+            thread.join(2)
+
+            self.assertEqual(1, len(errors))
+            self.assertIsInstance(errors[0], NewApiAccountError)
+            self.assertEqual("account_session_changed", errors[0].code)
+
+    def test_background_sync_rejects_account_session_without_stable_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = NewApiAccountManager(AppPaths(temp_dir))
+            unresolved_session = {
+                "source": ACCOUNT_SOURCE,
+                "newApi": {"baseUrl": DEFAULT_BASE_URL},
+            }
+            manager._write_session(unresolved_session)
+
+            with self.assertRaises(NewApiAccountError) as raised:
+                manager.sync_targets(unresolved_session)
+
+            self.assertEqual(raised.exception.code, "account_session_changed")
+
+    def test_late_background_sync_cannot_restore_replaced_account_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = NewApiAccountManager(AppPaths(temp_dir))
+            old_session = {
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:old",
+                "memberToken": "sk-old-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "old"},
+            }
+            new_session = {
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:new",
+                "memberToken": "sk-new-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "new"},
+            }
+            manager._write_session(old_session)
+            sync_started = threading.Event()
+            release_sync = threading.Event()
+
+            class BlockingWireService:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def sync_from_session(self, _session, *, targets):
+                    del targets
+                    sync_started.set()
+                    release_sync.wait(2)
+                    return {"syncResults": [{"target": "wire", "ok": True}]}
+
+            with patch.object(account_module, "WireService", BlockingWireService):
+                old_sync = threading.Thread(target=manager.sync_targets, args=(old_session,))
+                old_sync.start()
+                self.assertTrue(sync_started.wait(1))
+                new_write_completed = threading.Event()
+
+                def write_new_session() -> None:
+                    manager._persist_authenticated_session(new_session, sync_runtime=False)
+                    new_write_completed.set()
+
+                new_write = threading.Thread(target=write_new_session)
+                new_write.start()
+                new_write_completed.wait(0.1)
+                release_sync.set()
+                old_sync.join(2)
+                new_write.join(2)
+
+            self.assertEqual(manager.current()["memberId"], "newapi:new")
+
+    def test_late_entitlement_redemption_cannot_persist_into_replaced_account(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            request_started = threading.Event()
+            release_request = threading.Event()
+
+            class BlockingRedeemManager(EntitlementRedeemFakeManager):
+                def _request_json(self, *args, **kwargs):
+                    request_started.set()
+                    release_request.wait(2)
+                    return super()._request_json(*args, **kwargs)
+
+            manager = BlockingRedeemManager(paths)
+            old_session = {
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:old",
+                "memberToken": "sk-old-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "old"},
+            }
+            new_session = {
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:new",
+                "memberToken": "sk-new-account-token",
+                "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "new"},
+            }
+            manager._write_session(old_session)
+            manager.account_entitlement.accept_lease = Mock(return_value={
+                "features": ["matrix.devices"],
+                "limits": {"devices": 5},
+                "plan": "pro",
+                "expiresAt": 1_900_000_000,
+                "offlineGraceUntil": 1_900_259_200,
+                "entitlementVersion": 7,
+            })
+            errors: list[Exception] = []
+
+            def redeem() -> None:
+                try:
+                    manager.redeem_entitlement_code("LM-PRO-OLD")
+                except Exception as exc:
+                    errors.append(exc)
+
+            redemption = threading.Thread(target=redeem)
+            redemption.start()
+            self.assertTrue(request_started.wait(1))
+            manager._persist_authenticated_session(new_session, sync_runtime=False)
+            release_request.set()
+            redemption.join(2)
+
+            self.assertEqual(manager.current()["memberId"], "newapi:new")
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], NewApiAccountError)
+            self.assertEqual(getattr(errors[0], "code", ""), "account_session_changed")
+
+    def test_redeem_entitlement_code_requires_login_and_never_persists_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            manager = EntitlementRedeemFakeManager(paths)
+
+            with self.assertRaisesRegex(NewApiAccountError, "尚未登录"):
+                manager.redeem_entitlement_code("LM-PRO-UNUSED")
+
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberName": "user@example.invalid",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "42",
+                    "account": "user@example.invalid",
+                },
+            })
+            manager.account_entitlement.accept_lease = Mock(return_value={
+                "features": ["matrix.devices", "matrix.tasks"],
+                "limits": {"devices": 5, "concurrentTasks": 3},
+                "plan": "pro",
+                "expiresAt": 1_900_000_000,
+                "offlineGraceUntil": 1_900_259_200,
+                "entitlementVersion": 7,
+            })
+
+            session = manager.redeem_entitlement_code("  LM-PRO-UNUSED  ")
+
+            self.assertEqual(session["accountEntitlement"]["plan"], "pro")
+            self.assertEqual(session["accountEntitlement"]["limits"]["devices"], 5)
+            request = manager.requests[-1]
+            self.assertTrue(request["url"].endswith("/api/openclaw/entitlements/redeem"))
+            self.assertEqual(request["body"]["code"], "LM-PRO-UNUSED")
+            self.assertEqual(request["body"]["installId"], manager.license_mgr.get_install_id())
+            self.assertEqual(
+                request["headers"]["Authorization"],
+                "Bearer sk-account-token-not-real",
+            )
+            self.assertEqual(
+                request["timeout"],
+                account_module.ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
+            )
+            self.assertGreater(
+                request["timeout"],
+                account_module.FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+            )
+            self.assertNotIn("LM-PRO-UNUSED", repr(read_json(paths.member_session_file, {})))
+            self.assertEqual(
+                manager.public_session()["accountEntitlement"]["limits"]["devices"],
+                5,
+            )
+
+    def test_redeem_entitlement_code_rejects_blank_or_oversized_codes_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = EntitlementRedeemFakeManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {"baseUrl": "https://api.heang.top", "userId": "42"},
+            })
+
+            for value in ("", " " * 4, "A" * 257):
+                with self.subTest(value_length=len(value)):
+                    with self.assertRaises(NewApiAccountError):
+                        manager.redeem_entitlement_code(value)
+
+            self.assertEqual(manager.requests, [])
+
+    def test_manual_legacy_migration_requires_original_authorization_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            manager = EntitlementRedeemFakeManager(paths)
+            proof = {
+                "schema": "loom.license.v1",
+                "licenseId": "legacy-license-id",
+                "licensee": "Legacy Customer",
+                "installId": "legacy-install",
+                "deviceId": "legacy-device",
+                "expires": "2030-01-01",
+                "features": ["matrix.devices"],
+                "signature": "legacy-signature-do-not-persist",
+            }
+            manager.license_mgr.legacy_migration_proof = Mock(return_value=proof)
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberName": "user@example.invalid",
+                "memberToken": "sk-account-token-not-real",
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "42",
+                },
+                "accountEntitlement": {
+                    "source": "authorization_required",
+                    "plan": "inactive",
+                    "features": [],
+                    "limits": {"devices": 0, "concurrentTasks": 0},
+                },
+            })
+
+            with self.assertRaisesRegex(
+                NewApiAccountError,
+                "输入原授权码",
+            ):
+                manager.migrate_legacy_entitlement()
+
+            self.assertEqual([], manager.requests)
+            persisted = repr(read_json(paths.member_session_file, {}))
+            self.assertNotIn(proof["signature"], persisted)
+            self.assertNotIn("legacyLicense", persisted)
+
+    def test_login_never_automatically_migrates_legacy_license(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = EntitlementRedeemFakeManager(AppPaths(temp_dir))
+            manager.license_mgr.legacy_migration_proof = Mock(return_value={
+                "schema": "loom.license.v1",
+                "licenseId": "legacy-license-id",
+                "licensee": "Legacy Customer",
+                "installId": "legacy-install",
+                "deviceId": "legacy-device",
+                "expires": "2030-01-01",
+                "features": ["matrix.devices"],
+                "signature": "legacy-signature",
+            })
+            session = manager._persist_authenticated_session(
+                {
+                    "source": ACCOUNT_SOURCE,
+                    "memberId": "newapi:42",
+                    "memberName": "user@example.invalid",
+                    "memberToken": "sk-account-token-not-real",
+                    "newApi": {
+                        "baseUrl": "https://api.heang.top",
+                        "userId": "42",
+                    },
+                    "_accountEntitlement": {
+                        "source": "authorization_required",
+                        "plan": "inactive",
+                    },
+                },
+                sync_runtime=False,
+            )
+
+            self.assertEqual("authorization_required", session["accountEntitlement"]["source"])
+            self.assertEqual([], manager.requests)
+
+    def test_missing_legacy_proof_does_not_block_login_or_send_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = EntitlementRedeemFakeManager(AppPaths(temp_dir))
+            manager.license_mgr.legacy_migration_proof = Mock(return_value=None)
+
+            session = manager._persist_authenticated_session(
+                {
+                    "source": ACCOUNT_SOURCE,
+                    "memberId": "newapi:42",
+                    "memberToken": "sk-account-token-not-real",
+                    "newApi": {
+                        "baseUrl": "https://api.heang.top",
+                        "userId": "42",
+                    },
+                    "_accountEntitlement": {
+                        "source": "authorization_required",
+                        "plan": "inactive",
+                    },
+                },
+                sync_runtime=False,
+            )
+
+            self.assertEqual("inactive", session["accountEntitlement"]["plan"])
+            self.assertEqual([], manager.requests)
+
+    def test_legacy_migration_proof_returns_exact_verified_file_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            manager = LicenseManager(paths)
+            proof = {
+                "schema": "loom.license.v1",
+                "licenseId": "legacy-license-id",
+                "licensee": "Legacy Customer",
+                "installId": "legacy-install",
+                "deviceId": "legacy-device",
+                "expires": "2030-01-01",
+                "features": ["matrix.devices"],
+                "signature": "signed-proof",
+            }
+            os.makedirs(os.path.dirname(paths.license_file), exist_ok=True)
+            with open(paths.license_file, "w", encoding="utf-8") as file:
+                json.dump(proof, file, ensure_ascii=False)
+            manager.verify = Mock(return_value=True)
+
+            result = manager.legacy_migration_proof()
+            result["licenseId"] = "changed-locally"
+
+            self.assertEqual(proof, read_json(paths.license_file, {}))
+            manager.verify.assert_called_once_with(proof)
+
     def test_launcher_permission_contract_accepts_only_the_account_routing_group(self) -> None:
         base = {
             "tokenKind": "launcher",
@@ -974,6 +1434,8 @@ class NewApiAccountManagerTests(unittest.TestCase):
                     "baseUrl": "https://api.heang.top",
                     "userId": "u_123",
                     "account": "user@example.invalid",
+                    "offline": True,
+                    "stale": True,
                 },
                 "lease": {"tokenSource": "existing_launcher"},
                 "phoneAgent": {
@@ -990,6 +1452,137 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertIn("gpt-4o", public_session["models"]["text"])
             self.assertNotIn("agnes-video-v2.0", public_session["models"]["text"])
             self.assertEqual(refreshed["lease"]["tokenSource"], "created_launcher_after_refresh_model_check")
+            self.assertFalse(refreshed["newApi"]["offline"])
+            self.assertFalse(refreshed["newApi"]["stale"])
+            self.assertFalse(public_session["offline"])
+            self.assertFalse(public_session["stale"])
+
+    def test_missing_subscription_data_never_invents_a_default_plan(self) -> None:
+        snapshot = account_module._extract_subscription_snapshot(
+            {},
+            base_url="https://api.heang.top",
+            fallback={},
+        )
+
+        self.assertEqual(snapshot["plan"], "")
+        self.assertEqual(snapshot["balance"], "")
+        self.assertEqual(snapshot["usage"]["usedQuota"], "")
+
+    def test_refresh_clears_local_lease_when_server_returns_inactive_entitlement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LauncherTokenFakeManager(
+                AppPaths(temp_dir),
+                tokens=[],
+                entitlement_payload={
+                    "success": True,
+                    "data": {
+                        "entitlement": {
+                            "source": "authorization_required",
+                            "plan": "inactive",
+                            "features": [],
+                            "limits": {
+                                "devices": 0,
+                                "concurrentTasks": 0,
+                                "unlimitedDevices": False,
+                            },
+                        },
+                    },
+                },
+                model_by_token={
+                    "fake-old-token-not-real": ["glm-5.2-coding"],
+                },
+            )
+            manager.account_entitlement.clear_active = Mock()
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberToken": "fake-old-token-not-real",
+                "gatewayDefaultModel": "glm-5.2-coding",
+                "gatewayModels": ["glm-5.2-coding"],
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "u_123",
+                    "account": "user@example.invalid",
+                },
+                "accountEntitlement": {
+                    "source": "signed_lease",
+                    "plan": "matrix_pro",
+                    "features": ["matrix.devices", "matrix.tasks"],
+                    "limits": {
+                        "devices": 1000,
+                        "concurrentTasks": 3,
+                        "unlimitedDevices": True,
+                    },
+                },
+            })
+
+            refreshed = manager.refresh_current()
+
+            entitlement_request = next(
+                request
+                for request in manager.requests
+                if request["url"].endswith("/api/openclaw/entitlements/refresh")
+            )
+            self.assertEqual(
+                entitlement_request["timeout"],
+                account_module.ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
+            )
+
+            manager.account_entitlement.clear_active.assert_called_once_with()
+            self.assertEqual(
+                refreshed["accountEntitlement"]["source"],
+                "authorization_required",
+            )
+            self.assertEqual(refreshed["accountEntitlement"]["plan"], "inactive")
+            self.assertEqual(
+                refreshed["accountEntitlement"]["limits"]["devices"],
+                0,
+            )
+
+    def test_refresh_preserves_local_lease_during_transient_authorization_outage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LauncherTokenFakeManager(
+                AppPaths(temp_dir),
+                tokens=[],
+                entitlement_error=NewApiAccountError(
+                    "授权服务暂时不可用",
+                    status_code=503,
+                    code="authorization_service_unavailable",
+                    details={"offlineLeasePreserved": True},
+                ),
+                model_by_token={
+                    "fake-old-token-not-real": ["glm-5.2-coding"],
+                },
+            )
+            manager.account_entitlement.clear_active = Mock()
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberToken": "fake-old-token-not-real",
+                "gatewayDefaultModel": "glm-5.2-coding",
+                "gatewayModels": ["glm-5.2-coding"],
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "u_123",
+                    "account": "user@example.invalid",
+                },
+                "accountEntitlement": {
+                    "source": "signed_lease",
+                    "plan": "matrix_pro",
+                    "features": ["matrix.devices", "matrix.tasks"],
+                    "limits": {
+                        "devices": 1000,
+                        "concurrentTasks": 3,
+                        "unlimitedDevices": True,
+                    },
+                },
+            })
+
+            refreshed = manager.refresh_current()
+
+            manager.account_entitlement.clear_active.assert_not_called()
+            self.assertEqual(refreshed["accountEntitlement"]["plan"], "matrix_pro")
+            self.assertTrue(
+                refreshed["accountEntitlement"]["limits"]["unlimitedDevices"]
+            )
 
     def test_register_with_email_code_builds_session_without_persisting_password(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1122,6 +1715,116 @@ class NewApiAccountManagerTests(unittest.TestCase):
             self.assertEqual(snapshot["usage"]["usedQuota"], "12")
             self.assertEqual(snapshot["purchaseUrl"], "https://api.heang.top/wallet")
 
+    def test_subscription_snapshot_prefers_bearer_authenticated_managed_contract(self) -> None:
+        class ManagedSubscriptionManager(NewApiAccountManager):
+            def __init__(self, paths: AppPaths):
+                super().__init__(paths)
+                self.requests: list[dict] = []
+
+            def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
+                self.requests.append({
+                    "url": url,
+                    "headers": dict(headers or {}),
+                })
+                if url.endswith("/api/openclaw/account/subscription"):
+                    return {
+                        "success": True,
+                        "data": {
+                            "subscription": {
+                                "plan": "matrix_basic",
+                                "balance": 8800,
+                                "expiresAt": 2_000_000_000,
+                                "purchaseUrl": "https://api.heang.top/wallet",
+                            },
+                            "usage": {
+                                "used_quota": 1200,
+                                "request_count": 34,
+                            },
+                            "aff_code": "AFF42",
+                        },
+                    }
+                raise NewApiAccountError("http_404", status_code=404)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ManagedSubscriptionManager(AppPaths(temp_dir))
+            manager._write_session({
+                "source": ACCOUNT_SOURCE,
+                "memberId": "newapi:42",
+                "memberName": "user@example.invalid",
+                "memberToken": "managed-subscription-test-token",
+                "newApi": {
+                    "baseUrl": "https://api.heang.top",
+                    "userId": "42",
+                    "account": "user@example.invalid",
+                },
+            })
+
+            snapshot = manager.subscription_snapshot()
+
+            self.assertEqual(
+                manager.requests[0]["url"],
+                "https://api.heang.top/api/openclaw/account/subscription",
+            )
+            self.assertEqual(
+                manager.requests[0]["headers"]["Authorization"],
+                "Bearer managed-subscription-test-token",
+            )
+            self.assertEqual(snapshot["balance"], "8800")
+            self.assertEqual(snapshot["usage"]["usedQuota"], "1200")
+            self.assertEqual(snapshot["usage"]["requestCount"], "34")
+            self.assertEqual(snapshot["inviteCode"], "AFF42")
+            self.assertFalse(snapshot["offline"])
+
+    def test_subscription_snapshot_has_one_bounded_request_budget(self) -> None:
+        class OfflineSubscriptionManager(NewApiAccountManager):
+            def __init__(self, paths: AppPaths):
+                super().__init__(paths)
+                self.timeouts: list[float] = []
+
+            def current(self) -> dict:
+                return {
+                    "source": ACCOUNT_SOURCE,
+                    "plan": "cached-plan",
+                    "memberToken": "sk-offline-test-not-real",
+                    "newApi": {"baseUrl": DEFAULT_BASE_URL},
+                }
+
+            def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
+                del opener, url, method, body, headers
+                self.timeouts.append(timeout)
+                raise NewApiAccountError("network unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = OfflineSubscriptionManager(AppPaths(temp_dir))
+            with patch.object(account_module.time, "monotonic", side_effect=[0.0, 0.0, 2.2, 3.1]):
+                snapshot = manager.subscription_snapshot()
+
+            self.assertEqual(len(manager.timeouts), 2)
+            self.assertLessEqual(max(manager.timeouts), 3.0)
+            self.assertTrue(snapshot["offline"])
+            self.assertEqual(snapshot["plan"], "cached-plan")
+
+    def test_password_bridge_does_not_treat_launcher_token_limit_as_account_balance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = NewApiAccountManager(AppPaths(temp_dir))
+
+            session = manager._build_bridge_session(
+                "https://api.heang.top",
+                "user@example.invalid",
+                "sk-launcher-not-real",
+                {
+                    "account": "user@example.invalid",
+                    "userId": "42",
+                    "group": "default",
+                    "remainQuota": 0,
+                    "models": ["glm-5.2-coding"],
+                    "apiBaseUrl": "https://api.heang.top/v1",
+                },
+                account_module.http.cookiejar.CookieJar(),
+            )
+
+            self.assertIsNone(session["usage"]["quota"])
+
     def test_session_file_protects_secret_fields_on_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = NewApiAccountManager(AppPaths(temp_dir))
@@ -1172,6 +1875,7 @@ class NewApiAccountManagerTests(unittest.TestCase):
                     "model": "agnes-2.0-flash",
                 },
             }
+            manager._write_session(session)
 
             results = manager.sync_targets(session)
 
@@ -1357,7 +2061,12 @@ class NewApiAccountManagerTests(unittest.TestCase):
 
             try:
                 account_module.WireService = FakeWireService
-                results = manager.sync_targets({"source": ACCOUNT_SOURCE}, targets=("image",))
+                session = {
+                    "source": ACCOUNT_SOURCE,
+                    "memberId": "newapi:redaction-test",
+                }
+                manager._write_session(session)
+                results = manager.sync_targets(session, targets=("image",))
             finally:
                 account_module.WireService = original_wire_service
             dumped = repr(results) + repr(logs)
@@ -1379,6 +2088,8 @@ class LauncherTokenFakeManager(NewApiAccountManager):
         bridge_error: NewApiAccountError | None = None,
         bridge_api_base_url: str = "",
         model_by_token: dict[str, list[str]] | None = None,
+        entitlement_payload: dict | None = None,
+        entitlement_error: NewApiAccountError | None = None,
     ):
         super().__init__(paths)
         self.tokens = list(tokens)
@@ -1389,6 +2100,8 @@ class LauncherTokenFakeManager(NewApiAccountManager):
         self.bridge_error = bridge_error
         self.bridge_api_base_url = bridge_api_base_url
         self.model_by_token = model_by_token or {}
+        self.entitlement_payload = entitlement_payload
+        self.entitlement_error = entitlement_error
         self.requests: list[dict] = []
         self.synced_targets: tuple[str, ...] | None = None
 
@@ -1436,6 +2149,12 @@ class LauncherTokenFakeManager(NewApiAccountManager):
                     },
                 }
             raise NewApiAccountError("http_404")
+        if url.endswith("/api/openclaw/entitlements/refresh"):
+            if self.entitlement_error is not None:
+                raise self.entitlement_error
+            if self.entitlement_payload is not None:
+                return self.entitlement_payload
+            raise NewApiAccountError("http_404")
         if url.endswith("/api/user/self"):
             return {
                 "success": True,
@@ -1476,6 +2195,95 @@ class LauncherTokenFakeManager(NewApiAccountManager):
         self.synced_targets = targets
         session["lastSyncResults"] = [{"target": "openclaw", "ok": True}]
         return session["lastSyncResults"]
+
+
+class EntitlementRedeemFakeManager(NewApiAccountManager):
+    def __init__(self, paths: AppPaths):
+        super().__init__(paths)
+        self.requests: list[dict] = []
+
+    def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
+        del opener
+        self.requests.append({
+            "url": url,
+            "method": method,
+            "body": body or {},
+            "headers": headers or {},
+            "timeout": timeout,
+        })
+        if url.endswith("/api/openclaw/entitlements/redeem"):
+            return {
+                "success": True,
+                "data": {
+                    "entitlement": {
+                        "plan": "pro",
+                        "limits": {"devices": 5, "concurrentTasks": 3},
+                    },
+                    "entitlementLease": {
+                        "schema": "loom.entitlement_lease.v1",
+                        "accountId": "42",
+                        "signature": "test-signature",
+                    },
+                },
+            }
+        if url.endswith("/api/openclaw/entitlements/migrate-legacy"):
+            return {
+                "success": True,
+                "data": {
+                    "entitlement": {
+                        "plan": "matrix_pro",
+                        "limits": {
+                            "devices": 1000,
+                            "concurrentTasks": 3,
+                            "unlimitedDevices": True,
+                        },
+                    },
+                    "entitlementLease": {
+                        "schema": "loom.entitlement_lease.v1",
+                        "accountId": "42",
+                        "signature": "test-migration-signature",
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected request: {url}")
+
+
+class PaymentFakeManager(NewApiAccountManager):
+    def __init__(self, paths: AppPaths):
+        super().__init__(paths)
+        self.requests: list[dict] = []
+
+    def _request_json(self, opener, url, *, method="GET", body=None, headers=None, timeout=20):
+        del method, timeout
+        path = url.split("api.heang.top", 1)[-1]
+        self.requests.append({
+            "hasCookieProcessor": any(
+                isinstance(handler, urllib.request.HTTPCookieProcessor)
+                for handler in opener.handlers
+            ),
+            "path": path,
+            "body": dict(body or {}),
+            "headers": dict(headers or {}),
+        })
+        if path.endswith("/payments/plans"):
+            return {
+                "success": True,
+                "data": {
+                    "plans": [{"planKey": "monthly", "amountMinor": 9900}],
+                    "payment": {"configured": True, "channels": ["alipay"]},
+                },
+            }
+        if path.endswith("/payments/orders/create"):
+            return {
+                "success": True,
+                "data": {"order": {"orderId": "order-1", "status": "pending"}},
+            }
+        if path.endswith("/payments/orders/status"):
+            return {
+                "success": True,
+                "data": {"order": {"orderId": "order-1", "status": "pending"}},
+            }
+        raise AssertionError(f"unexpected request: {url}")
 
 
 class EmailCodeFakeManager(NewApiAccountManager):

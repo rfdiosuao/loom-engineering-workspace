@@ -24,6 +24,12 @@ from typing import Any, Callable, Dict
 
 from core.paths import AppPaths
 from core.feishu_integration import FeishuAcquisitionIntegration
+from core.acquisition_templates import (
+    AcquisitionTemplateLibrary,
+    TemplateDisabled,
+    TemplateNotFound,
+    TemplateVersionConflict,
+)
 
 
 Json = Dict[str, Any]
@@ -35,10 +41,29 @@ MATRIX_RUNTIME_DEDUPE_WINDOW_MS = 15_000
 MATRIX_PRESENCE_UNSTABLE_MS = 7_500
 MATRIX_PRESENCE_OFFLINE_MS = 15_000
 MATRIX_DISPATCH_SCHEMA = "loom.matrix.dispatch.v2"
+MATRIX_DISPATCH_SCHEMA_V3 = "loom.matrix.dispatch.v3"
+MATRIX_DISPATCH_SCHEMAS = frozenset({MATRIX_DISPATCH_SCHEMA, MATRIX_DISPATCH_SCHEMA_V3})
 MATRIX_CANONICAL_MAX_CONCURRENCY = 8
 MATRIX_CANONICAL_MAX_RETRY_BUDGET = 10
 MATRIX_LEASE_TTL_SECONDS = 30
 MATRIX_CONTROL_COMMAND_LIMIT = 500
+
+_MATRIX_V3_SHARED_TEMPLATE_REFERENCE_FIELDS = frozenset({"templateId", "version"})
+_MATRIX_V3_SHARED_TEMPLATE_RESOLVED_FIELDS = frozenset(
+    {
+        "templateId",
+        "version",
+        "name",
+        "industry",
+        "platforms",
+        "targetCustomer",
+        "keywords",
+        "leadRules",
+        "replyStyle",
+        "safetyPolicy",
+        "feishuMapping",
+    }
+)
 
 _CANONICAL_TEMPLATE_EXECUTION = {
     "screen_read_v1": ("read-screen", "Read the current screen and return a structured result."),
@@ -226,12 +251,52 @@ class MatrixTargetError(Exception):
 
 
 class MatrixControlPlane:
-    def __init__(self, paths: AppPaths):
+    def __init__(
+        self,
+        paths: AppPaths,
+        *,
+        phone_authorizer: Callable[[list[str], str], Any] | None = None,
+        owner_account_id: str = "",
+        owner_account_binding: str = "",
+    ):
         self.paths = paths
+        self._phone_authorizer = phone_authorizer
+        self._owner_account_id = str(owner_account_id or "").strip()
+        self._owner_account_binding = str(owner_account_binding or "").strip()
+
+    def _materialize_acquisition_request(self, raw: Json) -> Json:
+        try:
+            return AcquisitionTemplateLibrary(self.paths).materialize_request(raw)
+        except TemplateNotFound as exc:
+            raise MatrixTargetError("matrix_template_not_found", str(exc)) from exc
+        except TemplateDisabled as exc:
+            raise MatrixTargetError("matrix_template_disabled", str(exc)) from exc
+        except TemplateVersionConflict as exc:
+            raise MatrixTargetError("matrix_template_version_conflict", str(exc)) from exc
+
+    def _scoped_state_path(self, stem: str, suffix: str) -> str:
+        if not self._owner_account_binding:
+            raise MatrixSafetyError(
+                "matrix_owner_required",
+                "无法确认当前模型账号，已拒绝访问未归属的矩阵状态",
+            )
+        return os.path.join(
+            self.paths.launcher_dir,
+            f"{stem}-{self._owner_account_binding[:24]}{suffix}",
+        )
+
+    def _authorize_phone_devices(self, device_ids: list[str], operation: str) -> None:
+        if self._phone_authorizer is None:
+            raise MatrixSafetyError(
+                "matrix_authorizer_required",
+                "矩阵手机授权器未配置，已拒绝设备操作",
+            )
+        normalized = sorted({_device_id(value) for value in device_ids if str(value or "").strip()})
+        self._phone_authorizer(normalized, operation)
 
     @property
     def devices_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-devices.json")
+        return self._scoped_state_path("matrix-devices", ".json")
 
     @property
     def phone_devices_path(self) -> str:
@@ -239,40 +304,41 @@ class MatrixControlPlane:
 
     @property
     def tasks_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-tasks.json")
+        return self._scoped_state_path("matrix-tasks", ".json")
 
     @property
     def events_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-events.jsonl")
+        return self._scoped_state_path("matrix-events", ".jsonl")
 
     @property
     def event_sequence_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-event-sequence.json")
+        return self._scoped_state_path("matrix-event-sequence", ".json")
 
     @property
     def experience_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-experience.jsonl")
+        return self._scoped_state_path("matrix-experience", ".jsonl")
 
     @property
     def leads_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-leads.jsonl")
+        return self._scoped_state_path("matrix-leads", ".jsonl")
 
     @property
     def acquisition_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-acquisition.json")
+        return self._scoped_state_path("matrix-acquisition", ".json")
 
     @property
     def leases_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-device-leases.json")
+        return self._scoped_state_path("matrix-device-leases", ".json")
 
     @property
     def control_commands_path(self) -> str:
-        return os.path.join(self.paths.launcher_dir, "matrix-control-commands.json")
+        return self._scoped_state_path("matrix-control-commands", ".json")
 
     @_matrix_state_guard
     def register_device(self, raw: Json) -> Json:
-        devices = self._load_registered_devices()
         device_id = _device_id(raw.get("deviceId") or raw.get("id") or raw.get("name") or "phone-1")
+        self._authorize_phone_devices([device_id], "matrix.device.claim")
+        devices = self._load_registered_devices()
         existing = next((item for item in devices if item.get("deviceId") == device_id), {})
         raw_groups = raw.get("groups") if isinstance(raw.get("groups"), list) else None
         groups = raw_groups if raw_groups is not None else list(existing.get("groups") or [])
@@ -432,6 +498,10 @@ class MatrixControlPlane:
         action = _direct_action(raw.get("action") or raw.get("directAction"), prompt)
         layer = _execution_layer(mode=mode, action=action, template=template, prompt=prompt)
         devices = self._target_devices(target)
+        self._authorize_phone_devices(
+            [str(device.get("deviceId") or "") for device in devices],
+            "matrix.task.start",
+        )
         now = _now_iso()
         campaign_id = f"campaign_{uuid.uuid4().hex[:12]}"
         mission_id = f"mission_{uuid.uuid4().hex[:12]}"
@@ -501,19 +571,32 @@ class MatrixControlPlane:
             "deviceAssignments",
         }
         extra_request_keys = sorted(set(raw) - allowed_request_keys)
-        if raw.get("schema") != MATRIX_DISPATCH_SCHEMA or extra_request_keys:
+        request_schema = raw.get("schema")
+        if request_schema not in MATRIX_DISPATCH_SCHEMAS or extra_request_keys:
             detail = f": {', '.join(extra_request_keys)}" if extra_request_keys else ""
             raise MatrixTargetError(
                 "matrix_invalid_dispatch",
-                f"Canonical Matrix dispatch requires the exact {MATRIX_DISPATCH_SCHEMA} schema{detail}",
+                "Canonical Matrix dispatch requires a supported versioned schema"
+                f"{detail}",
             )
 
-        campaign_id = _canonical_id(raw.get("campaignId"), field="campaignId")
-        concurrency = _canonical_int(
-            raw.get("concurrency"),
-            field="concurrency",
-            minimum=1,
-            maximum=MATRIX_CANONICAL_MAX_CONCURRENCY,
+        canonical_id = _canonical_required_id if request_schema == MATRIX_DISPATCH_SCHEMA_V3 else _canonical_id
+        campaign_id = canonical_id(raw.get("campaignId"), field="campaignId")
+        concurrency = (
+            _canonical_v2_adapted_int(
+                raw.get("concurrency"),
+                field="concurrency",
+                schema_minimum=1,
+                consumer_minimum=1,
+                consumer_maximum=MATRIX_CANONICAL_MAX_CONCURRENCY,
+            )
+            if request_schema == MATRIX_DISPATCH_SCHEMA
+            else _canonical_int(
+                raw.get("concurrency"),
+                field="concurrency",
+                minimum=1,
+                maximum=MATRIX_CANONICAL_MAX_CONCURRENCY,
+            )
         )
         mode = _canonical_choice(raw.get("mode"), field="mode", default="safe", values={"observe", "safe", "full"})
         profile = _canonical_choice(
@@ -549,8 +632,14 @@ class MatrixControlPlane:
                     "matrix_invalid_dispatch",
                     f"deviceAssignments[{index}] has unsupported fields: {', '.join(extra_assignment_keys)}",
                 )
-            assignment_id = _canonical_id(raw_assignment.get("assignmentId"), field=f"deviceAssignments[{index}].assignmentId")
-            device_id = _canonical_id(raw_assignment.get("deviceId"), field=f"deviceAssignments[{index}].deviceId")
+            assignment_id = canonical_id(
+                raw_assignment.get("assignmentId"),
+                field=f"deviceAssignments[{index}].assignmentId",
+            )
+            device_id = canonical_id(
+                raw_assignment.get("deviceId"),
+                field=f"deviceAssignments[{index}].deviceId",
+            )
             if assignment_id in assignment_ids:
                 raise MatrixTargetError("matrix_invalid_dispatch", f"Duplicate assignmentId: {assignment_id}")
             if device_id in device_ids:
@@ -568,33 +657,88 @@ class MatrixControlPlane:
                 field=f"deviceAssignments[{index}].templateId",
                 maximum=80,
             )
-            if not prompt and not template_id:
-                raise MatrixTargetError(
-                    "matrix_invalid_dispatch",
-                    f"deviceAssignments[{index}] requires prompt or templateId",
-                )
-            execution_template = ""
-            if template_id:
-                template_contract = _CANONICAL_TEMPLATE_EXECUTION.get(template_id)
-                if not template_contract:
-                    raise MatrixTargetError(
-                        "matrix_unsupported_assignment",
-                        f"Unsupported canonical templateId: {template_id}",
-                    )
-                execution_template, template_prompt = template_contract
-                if not prompt:
-                    prompt = template_prompt
             input_value = raw_assignment.get("input")
             if not isinstance(input_value, dict):
                 raise MatrixTargetError(
                     "matrix_invalid_dispatch",
                     f"deviceAssignments[{index}].input must be an object",
                 )
-            timeout_sec = _canonical_int(
-                raw_assignment.get("timeoutSec"),
-                field=f"deviceAssignments[{index}].timeoutSec",
-                minimum=30,
-                maximum=1200,
+            input_value = dict(input_value)
+            if not prompt and not template_id:
+                raise MatrixTargetError(
+                    "matrix_invalid_dispatch",
+                    f"deviceAssignments[{index}] requires prompt or templateId",
+                )
+            shared_reference = input_value.get("sharedTemplate")
+            if (
+                request_schema == MATRIX_DISPATCH_SCHEMA_V3
+                and "sharedTemplate" in input_value
+            ):
+                _validate_matrix_v3_shared_template(
+                    shared_reference,
+                    field=f"deviceAssignments[{index}].input.sharedTemplate",
+                )
+            if shared_reference is not None and not isinstance(shared_reference, dict):
+                raise MatrixTargetError(
+                    "matrix_invalid_dispatch",
+                    f"deviceAssignments[{index}].input.sharedTemplate must be an object",
+                )
+            if isinstance(shared_reference, dict):
+                referenced_template_id = _canonical_optional_text(
+                    shared_reference.get("templateId"),
+                    field=f"deviceAssignments[{index}].input.sharedTemplate.templateId",
+                    maximum=80,
+                )
+                if referenced_template_id and referenced_template_id != template_id:
+                    raise MatrixTargetError(
+                        "matrix_invalid_dispatch",
+                        f"deviceAssignments[{index}] templateId must match input.sharedTemplate.templateId",
+                    )
+            execution_template = ""
+            if template_id:
+                template_contract = _CANONICAL_TEMPLATE_EXECUTION.get(template_id)
+                if template_contract:
+                    execution_template, template_prompt = template_contract
+                    if not prompt:
+                        prompt = template_prompt
+                elif isinstance(shared_reference, dict):
+                    template_request: Json = {"templateId": template_id}
+                    if "version" in shared_reference:
+                        template_request["templateVersion"] = shared_reference.get("version")
+                    try:
+                        materialized = self._materialize_acquisition_request(template_request)
+                    except MatrixTargetError as exc:
+                        if exc.code == "matrix_template_not_found":
+                            raise MatrixTargetError(
+                                "matrix_unsupported_assignment",
+                                f"Unsupported canonical templateId: {template_id}",
+                            ) from exc
+                        raise
+                    if not prompt:
+                        prompt = str(materialized.get("prompt") or "")
+                    resolved_reference = materialized.get("sharedTemplate")
+                    if isinstance(resolved_reference, dict):
+                        input_value["sharedTemplate"] = resolved_reference
+                elif not prompt:
+                    raise MatrixTargetError(
+                        "matrix_unsupported_assignment",
+                        f"Unsupported canonical templateId: {template_id}",
+                    )
+            timeout_sec = (
+                _canonical_v2_adapted_int(
+                    raw_assignment.get("timeoutSec"),
+                    field=f"deviceAssignments[{index}].timeoutSec",
+                    schema_minimum=1,
+                    consumer_minimum=30,
+                    consumer_maximum=1200,
+                )
+                if request_schema == MATRIX_DISPATCH_SCHEMA
+                else _canonical_int(
+                    raw_assignment.get("timeoutSec"),
+                    field=f"deviceAssignments[{index}].timeoutSec",
+                    minimum=30,
+                    maximum=1200,
+                )
             )
             retry_budget = _canonical_int(
                 raw_assignment.get("retryBudget"),
@@ -622,7 +766,13 @@ class MatrixControlPlane:
         campaigns = tasks.get("campaigns") if isinstance(tasks.get("campaigns"), list) else []
         if any(str(item.get("campaignId") or "") == campaign_id for item in campaigns if isinstance(item, dict)):
             raise MatrixTargetError("matrix_campaign_exists", f"campaignId already exists: {campaign_id}")
-        self._exact_canonical_devices([assignment["deviceId"] for assignment in assignments])
+        exact_devices = self._exact_canonical_devices(
+            [assignment["deviceId"] for assignment in assignments]
+        )
+        self._authorize_phone_devices(
+            [str(device.get("deviceId") or "") for device in exact_devices],
+            "matrix.task.start",
+        )
 
         now = _now_iso()
         mission_id = f"mission_{uuid.uuid4().hex[:12]}"
@@ -669,7 +819,7 @@ class MatrixControlPlane:
 
         title_seed = str(device_tasks[0].get("prompt") or device_tasks[0].get("templateId") or campaign_id)
         campaign = {
-            "requestSchema": MATRIX_DISPATCH_SCHEMA,
+            "requestSchema": request_schema,
             "campaignId": campaign_id,
             "title": _clip(title_seed, 120),
             "status": "queued",
@@ -766,9 +916,10 @@ class MatrixControlPlane:
             }
             for item in failed
         ]
-        if campaign.get("requestSchema") == MATRIX_DISPATCH_SCHEMA:
+        request_schema = str(campaign.get("requestSchema") or "")
+        if request_schema in MATRIX_DISPATCH_SCHEMAS:
             retry_payload: Json = {
-                "schema": MATRIX_DISPATCH_SCHEMA,
+                "schema": request_schema,
                 "campaignId": f"retry_{uuid.uuid4().hex[:16]}",
                 "concurrency": max(
                     1,
@@ -899,6 +1050,8 @@ class MatrixControlPlane:
         )
 
     def create_acquisition_demo_flow(self, raw: Json) -> Json:
+        raw = self._materialize_acquisition_request(raw)
+        template_meta = _acquisition_template_metadata(raw)
         state = self._load_acquisition_state()
         now = _now_iso()
         topic = _clip(raw.get("topic") or "AI 矩阵获客内容", 120)
@@ -910,6 +1063,7 @@ class MatrixControlPlane:
             limit=320,
         )
         content_task = {
+            **template_meta,
             "taskId": f"content_{uuid.uuid4().hex[:10]}",
             "createdAt": now,
             "title": topic,
@@ -922,6 +1076,7 @@ class MatrixControlPlane:
             ],
         }
         lead = {
+            **template_meta,
             "leadId": f"lead_{uuid.uuid4().hex[:12]}",
             "createdAt": now,
             "updatedAt": now,
@@ -934,6 +1089,7 @@ class MatrixControlPlane:
             "tags": ["mvp-demo", channel, platform],
         }
         customer = {
+            **template_meta,
             "customerId": f"customer_{uuid.uuid4().hex[:12]}",
             "createdAt": now,
             "updatedAt": now,
@@ -944,6 +1100,7 @@ class MatrixControlPlane:
             "allowedChannels": [channel],
         }
         draft = {
+            **template_meta,
             "draftId": f"draft_{uuid.uuid4().hex[:12]}",
             "createdAt": now,
             "updatedAt": now,
@@ -962,7 +1119,7 @@ class MatrixControlPlane:
         sync = FeishuAcquisitionIntegration(self.paths).sync_lead(
             {
                 **lead,
-                "sourceTask": content_task["title"],
+                "sourceTask": _acquisition_source_task(content_task["title"], raw),
                 "draft": draft["body"],
                 "recommendedAction": "人工确认后跟进",
                 "logId": lead["leadId"],
@@ -989,6 +1146,8 @@ class MatrixControlPlane:
 
     @_matrix_state_guard
     def import_acquisition_leads(self, raw: Json) -> Json:
+        raw = self._materialize_acquisition_request(raw)
+        template_meta = _acquisition_template_metadata(raw)
         state = self._load_acquisition_state()
         now = _now_iso()
         topic = _clip(raw.get("topic") or "真实线索导入", 120)
@@ -1008,6 +1167,7 @@ class MatrixControlPlane:
         }
         seen: set[str] = set()
         content_task = {
+            **template_meta,
             "taskId": f"content_{uuid.uuid4().hex[:10]}",
             "createdAt": now,
             "title": topic,
@@ -1041,11 +1201,12 @@ class MatrixControlPlane:
             seen.add(dedupe_key)
             qualification = _qualify_acquisition_lead(summary, topic=topic, target=raw.get("target") or raw.get("targetCustomer"))
             lead = {
+                **template_meta,
                 "leadId": f"lead_{uuid.uuid4().hex[:12]}",
                 "createdAt": now,
                 "updatedAt": now,
                 "source": source,
-                "sourceTask": content_task["title"],
+                "sourceTask": _acquisition_source_task(content_task["title"], raw),
                 "agentTaskId": agent_task_id,
                 "deviceId": device_id,
                 "actionStatus": action_status,
@@ -1069,6 +1230,7 @@ class MatrixControlPlane:
                 "tags": ["real-import", safe_channel, safe_platform, qualification["intentLevel"]],
             }
             customer = {
+                **template_meta,
                 "customerId": f"customer_{uuid.uuid4().hex[:12]}",
                 "createdAt": now,
                 "updatedAt": now,
@@ -1082,6 +1244,7 @@ class MatrixControlPlane:
             }
             draft_body = _safe_lead_summary(row.get("draftBody"), limit=500) or _build_acquisition_followup_draft(lead, knowledge)
             draft = {
+                **template_meta,
                 "draftId": f"draft_{uuid.uuid4().hex[:12]}",
                 "createdAt": now,
                 "updatedAt": now,
@@ -1137,6 +1300,7 @@ class MatrixControlPlane:
         )
 
     def run_acquisition_agent_task(self, raw: Json) -> Json:
+        raw = self._materialize_acquisition_request(raw)
         dry_run = _truthy(raw.get("dryRun", True))
         if not dry_run and not _truthy(raw.get("confirmed")):
             return _redact_json(
@@ -1161,6 +1325,7 @@ class MatrixControlPlane:
                 "summary": "手机 Agent 任务已生成，等待真实回传入库",
             }
         agent_run = {
+            **_acquisition_template_metadata(raw),
             "schema": "loom.acquisition.agent_run.v1",
             "dryRun": dry_run,
             "taskId": _clip(agent_result.get("taskId") or raw.get("taskId") or f"agent_task_{uuid.uuid4().hex[:10]}", 80),
@@ -1186,7 +1351,11 @@ class MatrixControlPlane:
         return _redact_json({"agentRun": agent_run, "ingest": ingest, "snapshot": self.acquisition_snapshot()})
 
     def ingest_acquisition_agent_result(self, agent_result: Json, raw: Json | None = None) -> Json:
-        body = raw if isinstance(raw, dict) else {}
+        body = dict(raw) if isinstance(raw, dict) else {}
+        for key in ("templateId", "templateVersion"):
+            if key not in body and key in agent_result:
+                body[key] = agent_result.get(key)
+        body = self._materialize_acquisition_request(body)
         task_id = _clip(agent_result.get("taskId") or body.get("taskId") or f"agent_task_{uuid.uuid4().hex[:10]}", 80)
         device_id = _clip(agent_result.get("deviceId") or body.get("deviceId") or "", 80)
         platform = _acquisition_platform(agent_result.get("platform") or body.get("platform"))
@@ -1209,6 +1378,7 @@ class MatrixControlPlane:
             )
         ingest = self.import_acquisition_leads(
             {
+                **_acquisition_template_metadata(body),
                 "topic": body.get("topic") or f"{platform} 手机 Agent 获客任务",
                 "platform": platform,
                 "channel": draft.get("channel") or body.get("channel") or "comment",
@@ -1464,7 +1634,13 @@ class MatrixControlPlane:
         }
 
     @_matrix_state_guard
-    def release_lease(self, device_id: str, lease_id: str) -> Json:
+    def release_lease(
+        self,
+        device_id: str,
+        lease_id: str,
+        *,
+        resume_paused_task: bool = True,
+    ) -> Json:
         safe_device_id = _device_id(device_id)
         safe_lease_id = _clip(lease_id, 100)
         state = self._load_leases()
@@ -1497,7 +1673,7 @@ class MatrixControlPlane:
         paused_task_id = ""
         if isinstance(released_lease, dict) and released_lease.get("holderType") == "human":
             paused_task_id = _clip(released_lease.get("pausedDeviceTaskId"), 200)
-        if paused_task_id:
+        if paused_task_id and resume_paused_task:
             tasks = self._load_tasks()
             found = self._find_device_task(paused_task_id, tasks=tasks)
             if (
@@ -2724,6 +2900,13 @@ class MatrixControlPlane:
         for index, item in enumerate(devices, start=1):
             if not isinstance(item, dict):
                 continue
+            owner_account_id = str(item.get("ownerAccountId") or "").strip()
+            if (
+                self._owner_account_id
+                and owner_account_id
+                and owner_account_id != self._owner_account_id
+            ):
+                continue
             device_id = _device_id(item.get("id") or item.get("deviceId") or item.get("name") or f"phone-{index}")
             name = _clip(item.get("name") or item.get("id") or device_id, 80)
             last_seen = _clip(item.get("lastSeenAt") or item.get("lastCheckedAt") or "", 64)
@@ -3239,6 +3422,7 @@ def _acquisition_source(value: Any) -> str:
 
 
 def _acquisition_phone_task_payload(raw: Json, agent_run: Json) -> Json:
+    template_meta = _acquisition_template_metadata(raw)
     device_id = _clip(agent_run.get("deviceId") or raw.get("deviceId") or raw.get("device") or "phone-1", 80) or "phone-1"
     platform = _acquisition_platform(agent_run.get("platform") or raw.get("platform"))
     topic = _clip(raw.get("topic") or f"{platform} 手机 Agent 获客任务", 120)
@@ -3250,6 +3434,7 @@ def _acquisition_phone_task_payload(raw: Json, agent_run: Json) -> Json:
         limit=900,
     )
     payload = {
+        **template_meta,
         "schema": "loom.acquisition.phone_task.v1",
         "taskId": agent_run.get("taskId"),
         "platform": platform,
@@ -3276,6 +3461,7 @@ def _acquisition_phone_bridge_dispatch(phone_task: Json, device_id: str) -> Json
         "method": "POST",
         "endpoint": "/api/phone/task",
         "body": {
+            **_acquisition_template_metadata(phone_task),
             "taskId": phone_task.get("taskId") or "",
             "prompt": phone_task.get("prompt") or "",
             "mode": "safe",
@@ -3294,6 +3480,29 @@ def _acquisition_phone_bridge_dispatch(phone_task: Json, device_id: str) -> Json
             },
         },
     }
+
+
+def _acquisition_template_metadata(raw: Json) -> Json:
+    template_id = _clip(raw.get("templateId"), 100) if isinstance(raw, dict) else ""
+    if not template_id:
+        return {}
+    version = max(1, _int(raw.get("templateVersion"), 1))
+    return {
+        "templateId": template_id,
+        "templateVersion": version,
+        "templateName": _clip(raw.get("templateName") or template_id, 120),
+    }
+
+
+def _acquisition_source_task(title: Any, raw: Json) -> str:
+    safe_title = _clip(title, 120)
+    metadata = _acquisition_template_metadata(raw)
+    if not metadata:
+        return safe_title
+    return _clip(
+        f"{safe_title} · {metadata['templateId']}@v{metadata['templateVersion']}",
+        220,
+    )
 
 def _mode(value: Any) -> str:
     text = str(value or "safe").strip().lower()
@@ -3320,6 +3529,57 @@ def _canonical_id(value: Any, *, field: str) -> str:
     return _canonical_optional_text(value, field=field, maximum=200)
 
 
+def _canonical_required_id(value: Any, *, field: str) -> str:
+    result = _canonical_id(value, field=field)
+    if not result:
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be a non-empty string")
+    return result
+
+
+def _validate_matrix_v3_shared_template(value: Any, *, field: str) -> None:
+    if value is None:
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be an object")
+    if not isinstance(value, dict):
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be an object")
+
+    fields = frozenset(value)
+    if fields not in {
+        _MATRIX_V3_SHARED_TEMPLATE_REFERENCE_FIELDS,
+        _MATRIX_V3_SHARED_TEMPLATE_RESOLVED_FIELDS,
+    }:
+        raise MatrixTargetError(
+            "matrix_invalid_dispatch",
+            f"{field} must be an exact reference or resolved template DTO",
+        )
+    if not _canonical_optional_text(
+        value.get("templateId"),
+        field=f"{field}.templateId",
+        maximum=80,
+    ):
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.templateId must be a non-empty string")
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.version must be an integer of at least 1")
+    if fields == _MATRIX_V3_SHARED_TEMPLATE_REFERENCE_FIELDS:
+        return
+
+    for name in ("name", "industry", "targetCustomer", "replyStyle"):
+        item = value.get(name)
+        if not isinstance(item, str) or not item:
+            raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.{name} must be a non-empty string")
+    for name, require_item in (("platforms", True), ("keywords", False), ("leadRules", False)):
+        items = value.get(name)
+        if (
+            not isinstance(items, list)
+            or (require_item and not items)
+            or any(not isinstance(item, str) for item in items)
+        ):
+            raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.{name} must be a string array")
+    for name in ("safetyPolicy", "feishuMapping"):
+        if not isinstance(value.get(name), dict):
+            raise MatrixTargetError("matrix_invalid_dispatch", f"{field}.{name} must be an object")
+
+
 def _canonical_int(value: Any, *, field: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be an integer")
@@ -3328,6 +3588,24 @@ def _canonical_int(value: Any, *, field: str, minimum: int, maximum: int) -> int
     if value > maximum:
         raise MatrixTargetError("matrix_unsupported_assignment", f"{field} exceeds the supported maximum of {maximum}")
     return value
+
+
+def _canonical_v2_adapted_int(
+    value: Any,
+    *,
+    field: str,
+    schema_minimum: int,
+    consumer_minimum: int,
+    consumer_maximum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MatrixTargetError("matrix_invalid_dispatch", f"{field} must be an integer")
+    if value < schema_minimum:
+        raise MatrixTargetError(
+            "matrix_invalid_dispatch",
+            f"{field} must be at least {schema_minimum}",
+        )
+    return max(consumer_minimum, min(value, consumer_maximum))
 
 
 def _canonical_choice(value: Any, *, field: str, default: str, values: set[str]) -> str:
@@ -3514,6 +3792,8 @@ def _redact_json(value: Any) -> Any:
     if isinstance(value, dict):
         safe: Json = {}
         for key, item in value.items():
+            if str(key).startswith("_"):
+                continue
             lowered = str(key).lower()
             if str(key) in SENSITIVE_KEYS or any(mark in lowered for mark in ("token", "secret", "password", "apikey", "api_key")):
                 continue

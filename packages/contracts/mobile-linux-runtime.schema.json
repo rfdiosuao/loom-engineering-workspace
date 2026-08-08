@@ -1,0 +1,397 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.mobile-linux-runtime.v1",
+  "title": "LOOM Optional Mobile Linux Runtime v1",
+  "description": "Clean-room contract for an optional, separately reviewed Linux companion. It exposes closed entrypoint identifiers only and forbids host shells, command strings, privileged binders, readable credentials, and bundled unreviewed root filesystems.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtime",
+    "scope",
+    "resources",
+    "workspace",
+    "network",
+    "entrypoints",
+    "nativeInterop",
+    "trace",
+    "cleanup",
+    "performanceClaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.mobile-linux-runtime.v1"
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "scope": {
+      "$ref": "#/$defs/scope"
+    },
+    "resources": {
+      "$ref": "#/$defs/resources"
+    },
+    "workspace": {
+      "$ref": "#/$defs/workspace"
+    },
+    "network": {
+      "$ref": "#/$defs/network"
+    },
+    "entrypoints": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/entrypoint"
+      }
+    },
+    "nativeInterop": {
+      "$ref": "#/$defs/nativeInterop"
+    },
+    "trace": {
+      "$ref": "#/$defs/trace"
+    },
+    "cleanup": {
+      "$ref": "#/$defs/cleanup"
+    },
+    "performanceClaims": {
+      "$ref": "#/$defs/performanceClaims"
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accountId", "customerId", "workspaceId"],
+      "properties": {
+        "accountId": {
+          "$ref": "#/$defs/safeId"
+        },
+        "customerId": {
+          "$ref": "#/$defs/safeId"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/safeId"
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "delivery",
+        "state",
+        "userEnabled",
+        "artifactDigest",
+        "sbomDigest",
+        "bundledInApk",
+        "rootfsBundled"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/safeId"
+        },
+        "delivery": {
+          "const": "optional_companion"
+        },
+        "state": {
+          "enum": [
+            "missing",
+            "ready",
+            "damaged",
+            "disabled",
+            "out_of_space",
+            "oom",
+            "timed_out",
+            "stopped",
+            "unhealthy"
+          ]
+        },
+        "userEnabled": {
+          "type": "boolean"
+        },
+        "artifactDigest": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sbomDigest": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bundledInApk": {
+          "const": false
+        },
+        "rootfsBundled": {
+          "const": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "ready"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "userEnabled": {
+                "const": true
+              },
+              "artifactDigest": {
+                "$ref": "#/$defs/digest"
+              },
+              "sbomDigest": {
+                "$ref": "#/$defs/digest"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryMiB",
+        "storageMiB",
+        "maxProcesses",
+        "maxInputBytes",
+        "maxOutputBytes",
+        "taskTimeoutMs"
+      ],
+      "properties": {
+        "memoryMiB": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 4096
+        },
+        "storageMiB": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 16384
+        },
+        "maxProcesses": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "maxInputBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "maxOutputBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "taskTimeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rootHandle",
+        "inputMount",
+        "outputMount",
+        "credentialHandlesOnly",
+        "allowAppPrivateData",
+        "allowSystemPaths",
+        "allowOtherAccountWorkspaces",
+        "allowHostSockets"
+      ],
+      "properties": {
+        "rootHandle": {
+          "type": "string",
+          "pattern": "^workspace:[A-Za-z0-9_.:-]{8,160}$"
+        },
+        "inputMount": {
+          "const": "read_only"
+        },
+        "outputMount": {
+          "const": "isolated"
+        },
+        "credentialHandlesOnly": {
+          "const": true
+        },
+        "allowAppPrivateData": {
+          "const": false
+        },
+        "allowSystemPaths": {
+          "const": false
+        },
+        "allowOtherAccountWorkspaces": {
+          "const": false
+        },
+        "allowHostSockets": {
+          "const": false
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultDeny",
+        "allowedProviderDomains",
+        "credentialInjection",
+        "credentialReadable"
+      ],
+      "properties": {
+        "defaultDeny": {
+          "const": true
+        },
+        "allowedProviderDomains": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "format": "hostname",
+            "pattern": "^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z][a-z0-9-]{1,62}$"
+          }
+        },
+        "credentialInjection": {
+          "const": "one_time_vault_handle"
+        },
+        "credentialReadable": {
+          "const": false
+        }
+      }
+    },
+    "entrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sourceDigest", "inputMode", "outputMode", "arbitraryArguments"],
+      "properties": {
+        "id": {
+          "enum": [
+            "workspace.text.batch",
+            "workspace.jsonl.transform",
+            "agent.cli.batch"
+          ]
+        },
+        "sourceDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "inputMode": {
+          "const": "workspace_handle"
+        },
+        "outputMode": {
+          "const": "isolated_artifact_handle"
+        },
+        "arbitraryArguments": {
+          "const": false
+        }
+      }
+    },
+    "nativeInterop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "typedGatewayOnly",
+        "allowShizukuBinder",
+        "allowRish",
+        "allowRootShell",
+        "allowArbitraryCommands"
+      ],
+      "properties": {
+        "typedGatewayOnly": {
+          "const": true
+        },
+        "allowShizukuBinder": {
+          "const": false
+        },
+        "allowRish": {
+          "const": false
+        },
+        "allowRootShell": {
+          "const": false
+        },
+        "allowArbitraryCommands": {
+          "const": false
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxOutputChars", "includeCredentialValues", "includeUserContent", "digestIdentifiers"],
+      "properties": {
+        "maxOutputChars": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16384
+        },
+        "includeCredentialValues": {
+          "const": false
+        },
+        "includeUserContent": {
+          "const": false
+        },
+        "digestIdentifiers": {
+          "const": true
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nativeFallback", "preserveUserFiles", "deleteRegenerableOnly"],
+      "properties": {
+        "nativeFallback": {
+          "const": true
+        },
+        "preserveUserFiles": {
+          "const": true
+        },
+        "deleteRegenerableOnly": {
+          "const": true
+        }
+      }
+    },
+    "performanceClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entityBenchmarkRequired", "syntheticResultMayClaimSpeedup"],
+      "properties": {
+        "entityBenchmarkRequired": {
+          "const": true
+        },
+        "syntheticResultMayClaimSpeedup": {
+          "const": false
+        }
+      }
+    }
+  }
+}

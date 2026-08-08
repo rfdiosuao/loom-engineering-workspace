@@ -18,6 +18,11 @@ class ResponseMixin:
         return self.facade.json.loads(data.decode("utf-8-sig"))
 
     def send_cors_headers(self) -> None:
+        path = self.facade.urlparse(self.path).path
+        if path.startswith("/api/service/") or path.startswith("/api/payments/"):
+            # These routes are server-to-server Bearer APIs or provider callbacks.
+            # They must never become browser-callable through permissive CORS.
+            return
         origin = str(self.headers.get("Origin") or "").strip()
         if self.facade.is_admin_request_path(self.path):
             if origin and self.facade.admin_cors_origin_allowed(origin):
@@ -33,6 +38,13 @@ class ResponseMixin:
 
     def send_security_headers(self, *, cache_control: str | None = None) -> None:
         path = self.facade.urlparse(self.path).path
+        default_cache_control = (
+            "no-store, private"
+            if path.startswith("/api/service/account-entitlements/")
+            or path.startswith("/api/service/payments/")
+            or path.startswith("/api/payments/")
+            else ("no-store" if path.startswith("/admin") else "no-cache")
+        )
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; "
@@ -50,7 +62,7 @@ class ResponseMixin:
         )
         self.send_header(
             "Cache-Control",
-            cache_control or ("no-store" if path.startswith("/admin") else "no-cache"),
+            cache_control or default_cache_control,
         )
 
     def _send_bytes(
@@ -112,6 +124,16 @@ class ResponseMixin:
             "text/html; charset=utf-8",
             None,
             write_body=write_body,
+        )
+
+    def send_text(self, status: int, text: str, *, write_body: bool = True) -> None:
+        self._send_bytes(
+            status,
+            str(text).encode("utf-8"),
+            "text/plain; charset=utf-8",
+            None,
+            write_body=write_body,
+            cache_control="no-store, private",
         )
 
     def send_file(

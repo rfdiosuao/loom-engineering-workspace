@@ -81,6 +81,9 @@ def plan_row_public(
     default_features: list[str],
     load_json_value_fn: Callable[[Any, Any], Any] = load_json_value,
 ) -> dict[str, Any]:
+    payment_benefits = load_json_value_fn(row["payment_benefits_json"], [])
+    if not isinstance(payment_benefits, list):
+        payment_benefits = []
     return {
         "planKey": row["plan_key"],
         "displayName": row["display_name"],
@@ -97,6 +100,14 @@ def plan_row_public(
         "gatewayVideoModel": row["gateway_video_model"],
         "gatewayModels": load_json_value_fn(row["gateway_models_json"], []),
         "quotas": load_json_value_fn(row["quotas_json"], {}),
+        "paymentEnabled": bool(row["payment_enabled"]),
+        "priceMinor": int(row["price_minor"] or 0),
+        "currency": str(row["currency"] or "CNY").upper(),
+        "paymentDescription": str(row["payment_description"] or ""),
+        "paymentBenefits": [
+            str(item) for item in payment_benefits if isinstance(item, str)
+        ],
+        "paymentSort": int(row["payment_sort"] or 0),
         "disabled": bool(row["disabled"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -436,7 +447,9 @@ def upsert_plan_record(
     with (connect_fn or _missing_connect)() as conn:
         existing = conn.execute(
             """select gateway_image_base_url, gateway_video_base_url, gateway_token, gateway_image_token,
-               gateway_video_token, gateway_image_model, gateway_video_model, created_at
+               gateway_video_token, gateway_image_model, gateway_video_model, created_at,
+               payment_enabled, price_minor, currency, payment_description,
+               payment_benefits_json, payment_sort
                from plans where plan_key = ?""",
             (plan_key,),
         ).fetchone()
@@ -454,6 +467,100 @@ def upsert_plan_record(
             gateway_image_model = str(existing["gateway_image_model"] or "")
         if existing and not gateway_video_model:
             gateway_video_model = str(existing["gateway_video_model"] or "")
+
+        def provided(*names: str) -> bool:
+            return any(name in body for name in names)
+
+        if provided("paymentEnabled", "payment_enabled"):
+            raw_payment_enabled = body.get(
+                "paymentEnabled", body.get("payment_enabled")
+            )
+            if not isinstance(raw_payment_enabled, bool):
+                raise ActivationError("支付启用状态必须为布尔值")
+            payment_enabled = 1 if raw_payment_enabled else 0
+        else:
+            payment_enabled = int(existing["payment_enabled"] or 0) if existing else 0
+
+        if provided("priceMinor", "price_minor"):
+            raw_price_minor = body.get("priceMinor", body.get("price_minor"))
+            if isinstance(raw_price_minor, bool):
+                raise ActivationError("套餐价格必须为整数分")
+            try:
+                price_minor = int(raw_price_minor)
+            except (TypeError, ValueError) as error:
+                raise ActivationError("套餐价格必须为整数分") from error
+            if str(raw_price_minor).strip() != str(price_minor):
+                raise ActivationError("套餐价格必须为整数分")
+        else:
+            price_minor = int(existing["price_minor"] or 0) if existing else 0
+        if price_minor < 0 or price_minor > 1_000_000_000:
+            raise ActivationError("套餐价格超出允许范围")
+
+        if provided("currency"):
+            currency = str(body.get("currency") or "").strip().upper()
+        else:
+            currency = str(existing["currency"] or "CNY").upper() if existing else "CNY"
+        if currency != "CNY":
+            raise ActivationError("当前支付通道仅支持人民币 CNY")
+
+        if provided("paymentDescription", "payment_description"):
+            payment_description = str(
+                body.get("paymentDescription", body.get("payment_description")) or ""
+            ).strip()
+        else:
+            payment_description = (
+                str(existing["payment_description"] or "") if existing else ""
+            )
+        if len(payment_description) > 240:
+            raise ActivationError("套餐说明不能超过 240 个字符")
+
+        if provided("paymentBenefits", "payment_benefits"):
+            raw_benefits = body.get(
+                "paymentBenefits", body.get("payment_benefits")
+            )
+            if isinstance(raw_benefits, str):
+                try:
+                    raw_benefits = json.loads(raw_benefits)
+                except json.JSONDecodeError as error:
+                    raise ActivationError("套餐卖点必须为 JSON 字符串数组") from error
+            if not isinstance(raw_benefits, list) or any(
+                not isinstance(item, str) for item in raw_benefits
+            ):
+                raise ActivationError("套餐卖点必须为字符串数组")
+            payment_benefits = list(
+                dict.fromkeys(item.strip() for item in raw_benefits if item.strip())
+            )
+            if len(payment_benefits) > 12 or any(
+                len(item) > 120 for item in payment_benefits
+            ):
+                raise ActivationError("套餐卖点最多 12 项且每项不超过 120 个字符")
+            payment_benefits_json = json.dumps(
+                payment_benefits, ensure_ascii=False
+            )
+        else:
+            payment_benefits_json = (
+                str(existing["payment_benefits_json"] or "[]")
+                if existing
+                else "[]"
+            )
+
+        if provided("paymentSort", "payment_sort"):
+            raw_payment_sort = body.get("paymentSort", body.get("payment_sort"))
+            if isinstance(raw_payment_sort, bool):
+                raise ActivationError("套餐排序必须为整数")
+            try:
+                payment_sort = int(raw_payment_sort)
+            except (TypeError, ValueError) as error:
+                raise ActivationError("套餐排序必须为整数") from error
+            if str(raw_payment_sort).strip() != str(payment_sort):
+                raise ActivationError("套餐排序必须为整数")
+        else:
+            payment_sort = int(existing["payment_sort"] or 0) if existing else 0
+        if payment_sort < -10_000 or payment_sort > 10_000:
+            raise ActivationError("套餐排序超出允许范围")
+        if payment_enabled and price_minor <= 0:
+            raise ActivationError("启用在线购买前必须配置大于 0 的套餐价格")
+
         created_at = str(existing["created_at"]) if existing else now
         conn.execute(
             """
@@ -461,8 +568,10 @@ def upsert_plan_record(
                 plan_key, display_name, duration_days, features_json, gateway_base_url,
                 gateway_image_base_url, gateway_video_base_url, gateway_token, gateway_image_token,
                 gateway_video_token, gateway_default_model, gateway_image_model, gateway_video_model,
-                gateway_models_json, quotas_json, disabled, created_at, updated_at
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                gateway_models_json, quotas_json, payment_enabled, price_minor, currency,
+                payment_description, payment_benefits_json, payment_sort,
+                disabled, created_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             on conflict(plan_key) do update set
                 display_name = excluded.display_name, duration_days = excluded.duration_days,
                 features_json = excluded.features_json, gateway_base_url = excluded.gateway_base_url,
@@ -471,12 +580,19 @@ def upsert_plan_record(
                 gateway_image_token = excluded.gateway_image_token, gateway_video_token = excluded.gateway_video_token,
                 gateway_default_model = excluded.gateway_default_model, gateway_image_model = excluded.gateway_image_model,
                 gateway_video_model = excluded.gateway_video_model, gateway_models_json = excluded.gateway_models_json,
-                quotas_json = excluded.quotas_json, disabled = excluded.disabled, updated_at = excluded.updated_at
+                quotas_json = excluded.quotas_json, payment_enabled = excluded.payment_enabled,
+                price_minor = excluded.price_minor, currency = excluded.currency,
+                payment_description = excluded.payment_description,
+                payment_benefits_json = excluded.payment_benefits_json,
+                payment_sort = excluded.payment_sort,
+                disabled = excluded.disabled, updated_at = excluded.updated_at
             """,
             (plan_key, display_name, duration_days, json.dumps(features, ensure_ascii=False), gateway_base_url,
              gateway_image_base_url, gateway_video_base_url, gateway_token, gateway_image_token, gateway_video_token,
              gateway_default_model, gateway_image_model, gateway_video_model, json.dumps(gateway_models or [], ensure_ascii=False),
-             json.dumps(quotas or {}, ensure_ascii=False), disabled, created_at, now),
+             json.dumps(quotas or {}, ensure_ascii=False), payment_enabled, price_minor,
+             currency, payment_description, payment_benefits_json, payment_sort,
+             disabled, created_at, now),
         )
         conn.commit()
     row = (get_plan_row_fn or _missing_plan_row)(plan_key)

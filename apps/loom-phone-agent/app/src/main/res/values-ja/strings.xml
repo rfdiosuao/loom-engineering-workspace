@@ -72,6 +72,7 @@
     <!-- 設定 -->
     <string name="settings_title">設定</string>
     <string name="settings_group_channel">チャネル</string>
+    <string name="settings_group_connection">LOOM に接続</string>
     <string name="settings_group_model">モデル</string>
     <string name="settings_group_display">表示</string>
 
@@ -136,15 +137,27 @@
     <string name="menu_discord">Discord</string>
     <string name="menu_telegram">Telegram</string>
     <string name="menu_wechat">WeChat</string>
-    <string name="menu_lan_config">LAN設定</string>
+    <string name="menu_lan_config">接続方法と LAN</string>
+    <string name="menu_connection_diagnostics">接続診断</string>
     <string name="menu_floating_circle_size">フローティングボールサイズ</string>
     <string name="menu_floating_click_enabled">フローティングウィンドウのクリックと移動</string>
     <string name="floating_size_small">小</string>
     <string name="floating_size_medium">中</string>
     <string name="floating_size_large">大</string>
     <string name="floating_size_saved">フローティングボールサイズ: %s</string>
-    <string name="lan_config_stopped">オフ</string>
+    <string name="lan_config_stopped">サービス停止</string>
+    <string name="lan_config_starting">起動中…</string>
+    <string name="lan_config_stopping">停止中…</string>
+    <string name="lan_config_error">サービスエラー。再試行してください。</string>
+    <string name="lan_config_switching">切り替え中…</string>
+    <string name="lan_config_usb_ready">USB 利用可能</string>
+    <string name="lan_config_lan_ready">LAN 利用可能: %1$s</string>
+    <string name="lan_config_hotspot_ready">ホットスポット利用可能: %1$s</string>
     <string name="lan_config_no_wifi">Wi-Fiに接続するか、スマートフォンのテザリングを有効にしてください</string>
+    <string name="connection_diagnostics_title">接続診断</string>
+    <string name="connection_diagnostics_action">表示</string>
+    <string name="connection_diagnostics_no_lan">LAN 候補なし。USB 転送は単独で利用できます</string>
+    <string name="connection_diagnostics_summary">ペアリング: %1$s\nサービス: %2$s\nネットワークモード: %3$s\n候補:\n%4$s</string>
 
     <!-- プロトコル -->
     <string name="protocol_agree_title">個人情報保護について</string>
@@ -272,4 +285,33 @@
     <string name="input_dialog_need_more">%d文字以上入力してください</string>
     <string name="input_dialog_need_less">%d文字以内で入力してください</string>
     <string name="input_dialog_no_zero">ゼロ以外の値を入力してください</string>
+
+    <!-- オプションの拡張デバイス機能 -->
+    <string name="settings_group_enhanced_capabilities">拡張デバイス機能</string>
+    <string name="menu_enhanced_capability">Shizuku 拡張機能</string>
+    <string name="enhanced_status_not_installed">未インストール・標準モード</string>
+    <string name="enhanced_status_disabled">オフ・標準モード</string>
+    <string name="enhanced_status_service_stopped">サービス停止・標準モード</string>
+    <string name="enhanced_status_permission_required">認証が必要</string>
+    <string name="enhanced_status_permission_denied">認証不可・標準モード</string>
+    <string name="enhanced_status_ready">準備完了</string>
+    <string name="enhanced_status_root_disabled">Root/Sui は無効</string>
+    <string name="enhanced_status_standard">標準モード</string>
+    <string name="enhanced_dialog_title">Shizuku 拡張デバイス機能</string>
+    <string name="enhanced_not_installed_message">Shizuku がインストールされていません。LumiAgent は標準モードのまま正常に利用できます。必要な場合は Shizuku の公式ガイドを開いてください。</string>
+    <string name="enhanced_open_official_guide">公式ガイドを開く</string>
+    <string name="enhanced_keep_standard">標準モードを維持</string>
+    <string name="enhanced_enable_message">この端末で Shizuku の検出と認証を有効にしますか？自動で権限が付与されることはなく、いつでも標準モードに戻せます。</string>
+    <string name="enhanced_enable_action">検出を有効化</string>
+    <string name="enhanced_service_stopped_message">Shizuku サービスが停止しているか Binder が利用できません。Shizuku を起動してから戻ってください。LumiAgent は標準モードにフォールバック済みです。</string>
+    <string name="enhanced_open_shizuku">Shizuku を開く</string>
+    <string name="enhanced_permission_message">Shizuku は動作中ですが、LumiAgent は未認証です。Android が公式の認証ダイアログを表示します。</string>
+    <string name="enhanced_request_permission">認証を要求</string>
+    <string name="enhanced_request_failed">Shizuku の認証を要求できません</string>
+    <string name="enhanced_permission_denied_message">Shizuku の認証が利用できないか拒否されました。Shizuku で確認するか、標準モードを継続してください。</string>
+    <string name="enhanced_ready_message">Shizuku の認証は準備完了です。明示的に許可された型付き機能のみが利用でき、任意の Shell やリモートコマンド実行は公開しません。</string>
+    <string name="enhanced_disable_action">無効化して標準モードを使用</string>
+    <string name="enhanced_root_disabled_message">Root/Sui の識別情報を検出しました。このリリースでは Root/Sui 統合を無効化しているため、標準モードを維持します。</string>
+    <string name="enhanced_standard_message">LumiAgent は標準モードを使用中です。拡張機能の障害によってペアリング、LAN/USB 接続、通常の Agent タスクが妨げられることはありません。</string>
+    <string name="enhanced_open_failed">Shizuku または公式ガイドを開けません</string>
 </resources>

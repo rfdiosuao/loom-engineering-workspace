@@ -3,7 +3,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readLauncherPhoneConfigByDevice, uploadImageBuffer } from './openclaw-phone-secure.mjs';
+import {
+  hasLauncherPhoneRuntimeConfig,
+  readLauncherPhoneConfigByDevice,
+  resolveLauncherPhoneConnection,
+  uploadImageBuffer,
+} from './openclaw-phone-secure.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,7 +16,8 @@ const resourceRoot = path.resolve(__dirname, '..');
 const PROJECT_ROOT = path.basename(resourceRoot) === '_up_' ? path.dirname(resourceRoot) : resourceRoot;
 const DEFAULT_IMAGE_MODEL = 'gpt-image-2';
 const DEFAULT_SIZE = '1024x1024';
-const DEFAULT_ALBUM = process.env.OPENCLAW_PHONE_ALBUM || 'OpenClaw';
+const FALLBACK_ALBUM = 'OpenClaw';
+const DEFAULT_ALBUM = process.env.OPENCLAW_PHONE_ALBUM || FALLBACK_ALBUM;
 const DEFAULT_OUT_DIR = path.join(PROJECT_ROOT, 'data', 'generated-images');
 const MAX_COUNT = 4;
 const REQUEST_TIMEOUT_MS = 180_000;
@@ -47,8 +53,6 @@ Options:
   --count <n>                  Number of images to generate. Default: 1, max: ${MAX_COUNT}
   --out-dir <path>             Directory for generated images. Default: data/generated-images
   --device-id <id>             Optional. Select one configured APKClaw device from launcher
-  --phone-url <url>            Optional. Defaults to launcher Phone Control config, then env
-  --phone-token <token>        Optional. Defaults to launcher Phone Control config, then env
   --album <name>               Phone gallery album. Default: ${DEFAULT_ALBUM}
   --filename <name>            Filename to use on phone when uploading one image
   --no-upload                  Generate/save locally but do not upload to phone
@@ -78,6 +82,7 @@ function parseArgs(argv) {
     phoneUrl: '',
     phoneToken: '',
     album: DEFAULT_ALBUM,
+    albumProvided: false,
     filename: '',
     upload: true,
     json: false,
@@ -154,6 +159,7 @@ function parseArgs(argv) {
         break;
       case '--album':
         args.album = next();
+        args.albumProvided = true;
         break;
       case '--filename':
         args.filename = next();
@@ -196,6 +202,7 @@ async function readJsonIfExists(filePath) {
 }
 
 async function resolveConfig(args) {
+  const bridgeRuntime = hasLauncherPhoneRuntimeConfig();
   const imageConfig = await readJsonIfExists(path.join(PROJECT_ROOT, 'imgapi_config.json'));
   const launcherPhone = await readLauncherPhoneConfigByDevice(args.deviceId);
   return {
@@ -213,9 +220,10 @@ async function resolveConfig(args) {
       imageConfig.apiKey
     ),
     imageModel: firstNonEmpty(args.imageModel, process.env.OPENCLAW_IMAGE_MODEL, imageConfig.model, DEFAULT_IMAGE_MODEL),
-    phoneUrl: firstNonEmpty(args.phoneUrl, process.env.OPENCLAW_PHONE_BASE_URL, process.env.APKCLAW_BASE_URL, launcherPhone.phoneUrl),
-    phoneToken: firstNonEmpty(args.phoneToken, process.env.OPENCLAW_PHONE_TOKEN, process.env.APKCLAW_TOKEN, launcherPhone.phoneToken),
-    deviceId: args.deviceId || launcherPhone.id || '',
+    ...resolveLauncherPhoneConnection(args, launcherPhone, {}, { includeStandalonePairing: false }),
+    album: bridgeRuntime
+      ? firstNonEmpty(args.albumProvided ? args.album : '', launcherPhone.album, FALLBACK_ALBUM)
+      : args.album,
   };
 }
 
@@ -384,8 +392,8 @@ async function saveGeneratedImages(buffers, config) {
 }
 
 async function uploadImage(filePath, config, index = 0) {
-  if (!config.phoneUrl) throw new Error('Missing phone URL. Use --phone-url or OPENCLAW_PHONE_BASE_URL.');
-  if (!config.phoneToken) throw new Error('Missing phone token. Use --phone-token or OPENCLAW_PHONE_TOKEN.');
+  if (!config.phoneUrl) throw new Error('Missing phone URL. Complete pairing in the LOOM Phone Connection page.');
+  if (!config.phoneToken) throw new Error('Missing phone token. Complete pairing in the LOOM Phone Connection page.');
 
   const filename = config.filename && index === 0 ? sanitizeFilename(config.filename) : path.basename(filePath);
   const data = await fs.readFile(filePath);

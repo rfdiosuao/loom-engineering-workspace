@@ -43,6 +43,7 @@ test('every visible sidebar control navigates through the application handler', 
     ['创作', 'creative'],
     ['获客', 'acquisition'],
     ['工作台', 'workbench'],
+    ['Skill', 'skills'],
     ['模型账户', 'license'],
     ['Agent 接入', 'agentAccess'],
     ['系统设置', 'settings'],
@@ -347,7 +348,7 @@ for (const [controlName, key] of settingsDataDestinations) {
 test('settings about tab is an intentionally read-only surface', async ({ audit, page }) => {
   await navigateTo(audit, 'settings');
   await appMain(page).getByRole('button', { name: '关于', exact: true }).click();
-  await expect(appMain(page).getByText('麓鸣AI矩阵获客工作台', { exact: true }).first()).toBeVisible();
+  await expect(appMain(page).getByText('麓鸣', { exact: true }).first()).toBeVisible();
   await expect(appMain(page).getByRole('button')).toHaveCount(4);
 });
 

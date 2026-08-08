@@ -8,6 +8,8 @@ import threading
 import unittest
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 
 PYTHON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PYTHON_DIR not in sys.path:
@@ -209,10 +211,36 @@ class AgentRuntimeReliabilityTests(unittest.TestCase):
         )
 
         contract_root = Path(PYTHON_DIR).parents[3] / "packages" / "contracts"
-        schema = json.loads((contract_root / "schemas" / "agent-run.v1.schema.json").read_text(encoding="utf-8"))
-        fixture = json.loads((contract_root / "fixtures" / "agent-run.v1.json").read_text(encoding="utf-8"))
-        self.assertIn("executionState", schema["required"])
+        v1_schema = json.loads(
+            (contract_root / "schemas" / "agent-run.v1.schema.json").read_text(encoding="utf-8")
+        )
+        historical_v1 = json.loads(
+            (contract_root / "fixtures" / "compat" / "agent-run.v1.initial.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        v2_schema = json.loads(
+            (contract_root / "schemas" / "agent-run.v2.schema.json").read_text(encoding="utf-8")
+        )
+        fixture = json.loads(
+            (contract_root / "fixtures" / "agent-run.v2.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("executionState", v1_schema["required"])
+        self.assertEqual(list(Draft202012Validator(v1_schema).iter_errors(historical_v1)), [])
+        self.assertIn("executionState", v2_schema["required"])
         self.assertEqual(fixture["executionState"]["phase"], "planning")
+        self.assertEqual(list(Draft202012Validator(v2_schema).iter_errors(fixture)), [])
+        v2_without_execution_state = dict(fixture)
+        v2_without_execution_state.pop("executionState")
+        self.assertTrue(
+            any(
+                error.validator == "required"
+                and "executionState" in error.message
+                for error in Draft202012Validator(v2_schema).iter_errors(
+                    v2_without_execution_state
+                )
+            )
+        )
 
 
 if __name__ == "__main__":

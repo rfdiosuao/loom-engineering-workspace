@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -24,7 +25,24 @@ StatusCallback = Callable[[str, str], None]
 
 
 class VideoApiError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        phase: str = "",
+        task_id: str = "",
+        request_key: str = "",
+        retry_after: str = "",
+        outcome_indeterminate: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.phase = phase
+        self.task_id = task_id
+        self.request_key = request_key
+        self.retry_after = retry_after
+        self.outcome_indeterminate = outcome_indeterminate
 
 
 def _http_error_message(error: urllib.error.HTTPError) -> str:
@@ -113,7 +131,9 @@ class DashScopeVideoClient:
             raise
         except PippitVideoError as error:
             raise VideoApiError(str(error)) from error
-        except VideoApiError:
+        except VideoApiError as error:
+            if request_key and not error.request_key:
+                error.request_key = request_key
             raise
         except urllib.error.HTTPError as error:
             raise VideoApiError(_http_error_message(error)) from error
@@ -214,8 +234,7 @@ class DashScopeVideoClient:
                 "Authorization": f"Bearer {api_key}",
             },
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = self._request_json(request, 60, phase="submit")
         task_id = str(data.get("task_id") or data.get("id") or "").strip()
         video_id = str(data.get("video_id") or "").strip()
         if not task_id and not video_id:
@@ -242,10 +261,15 @@ class DashScopeVideoClient:
             time.sleep(4)
             request = urllib.request.Request(poll_url, headers={"Authorization": f"Bearer {api_key}"})
             try:
-                with urllib.request.urlopen(request, timeout=30) as response:
-                    data = json.loads(response.read().decode("utf-8"))
-            except urllib.error.HTTPError as error:
-                if error.code in (404, 405) and not using_legacy and legacy_url:
+                data = self._request_json(
+                    request,
+                    30,
+                    phase="poll",
+                    task_id=video_id or task_id,
+                    retries=2,
+                )
+            except VideoApiError as error:
+                if error.status_code in (404, 405) and not using_legacy and legacy_url:
                     poll_url = legacy_url
                     using_legacy = True
                     continue
@@ -266,14 +290,23 @@ class DashScopeVideoClient:
                     )
                 if on_status:
                     on_status("正在下载 Agnes 视频...", "accent")
-                return self._download_video(video_url)
+                try:
+                    return self._download_video(video_url)
+                except VideoApiError as error:
+                    error.task_id = error.task_id or video_id or task_id
+                    raise
             if status in ("failed", "error", "canceled", "cancelled"):
                 raise VideoApiError(_api_error_message(data, "Agnes 视频生成失败"))
             if on_status:
                 progress = data.get("progress")
                 suffix = f" {progress}%" if progress is not None else ""
                 on_status(f"Agnes 状态：{status or 'running'}{suffix}", "accent")
-        raise VideoApiError("Agnes 视频生成超时，请稍后重试")
+        raise VideoApiError(
+            "Agnes 视频生成超时，远端任务可能仍在运行",
+            phase="poll",
+            task_id=video_id or task_id,
+            outcome_indeterminate=True,
+        )
 
     def _response_shape(self, value: object) -> str:
         entries: list[str] = []
@@ -355,8 +388,7 @@ class DashScopeVideoClient:
                 "X-DashScope-Async": "enable",
             },
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = self._request_json(request, 60, phase="submit")
         task_id = data.get("output", {}).get("task_id")
         if not task_id:
             raise VideoApiError(data.get("message", "任务提交失败"))
@@ -373,8 +405,13 @@ class DashScopeVideoClient:
         for attempt in range(120):
             time.sleep(5)
             request = urllib.request.Request(poll_url, headers={"Authorization": f"Bearer {dash_key}"})
-            with urllib.request.urlopen(request, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = self._request_json(
+                request,
+                30,
+                phase="poll",
+                task_id=task_id,
+                retries=2,
+            )
             output = data.get("output", {})
             status = output.get("task_status", "")
             if status == "SUCCEEDED":
@@ -383,12 +420,21 @@ class DashScopeVideoClient:
                     raise VideoApiError("未获取到视频地址")
                 if on_status:
                     on_status("正在下载视频...", "accent")
-                return self._download_video(video_url)
+                try:
+                    return self._download_video(video_url)
+                except VideoApiError as error:
+                    error.task_id = error.task_id or task_id
+                    raise
             if status == "FAILED":
                 raise VideoApiError(output.get("message", "生成失败"))
             if on_status:
                 on_status(f"状态：{status or 'RUNNING'}... ({(attempt + 1) * 5}s)", "accent")
-        raise VideoApiError("生成超时，请稍后重试")
+        raise VideoApiError(
+            "生成超时，远端任务可能仍在运行",
+            phase="poll",
+            task_id=task_id,
+            outcome_indeterminate=True,
+        )
 
     def _generate_seedance_compatible(
         self,
@@ -474,8 +520,7 @@ class DashScopeVideoClient:
                 "Authorization": f"Bearer {api_key}",
             },
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = self._request_json(request, 60, phase="submit")
         task_id = data.get("id") or data.get("task_id") or data.get("output", {}).get("task_id")
         if not task_id:
             raise VideoApiError(_api_error_message(data, "Seedance 任务提交失败"))
@@ -492,8 +537,13 @@ class DashScopeVideoClient:
         for attempt in range(180):
             time.sleep(4)
             request = urllib.request.Request(poll_url, headers={"Authorization": f"Bearer {api_key}"})
-            with urllib.request.urlopen(request, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = self._request_json(
+                request,
+                30,
+                phase="poll",
+                task_id=task_id,
+                retries=2,
+            )
             status = str(data.get("status") or data.get("task_status") or data.get("output", {}).get("task_status") or "").lower()
             if status in ("succeeded", "success", "completed", "done"):
                 video_url = self._extract_seedance_video_url(data)
@@ -501,12 +551,21 @@ class DashScopeVideoClient:
                     raise VideoApiError("Seedance 未返回视频地址")
                 if on_status:
                     on_status("正在下载 Seedance 视频...", "accent")
-                return self._download_video(video_url)
+                try:
+                    return self._download_video(video_url)
+                except VideoApiError as error:
+                    error.task_id = error.task_id or task_id
+                    raise
             if status in ("failed", "error", "canceled", "cancelled"):
                 raise VideoApiError(_api_error_message(data, "Seedance 生成失败"))
             if on_status:
                 on_status(f"Seedance 状态：{status or 'running'}... ({(attempt + 1) * 4}s)", "accent")
-        raise VideoApiError("Seedance 生成超时，请稍后重试")
+        raise VideoApiError(
+            "Seedance 生成超时，远端任务可能仍在运行",
+            phase="poll",
+            task_id=task_id,
+            outcome_indeterminate=True,
+        )
 
     def _extract_seedance_video_url(self, data: dict) -> str | None:
         direct_keys = (
@@ -594,18 +653,101 @@ class DashScopeVideoClient:
 
     def _download_video(self, video_url: str) -> bytes:
         request = urllib.request.Request(video_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(request, timeout=180) as response:
-            content_type = response.headers.get("Content-Type", "")
-            data = response.read()
+        content_type = ""
+        data = b""
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    content_type = response.headers.get("Content-Type", "")
+                    data = response.read()
+                break
+            except urllib.error.HTTPError as error:
+                if attempt < 2 and self._retryable_status(error.code):
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise VideoApiError(
+                    _http_error_message(error),
+                    status_code=error.code,
+                    phase="download",
+                    retry_after=self._retry_after(error),
+                ) from error
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as error:
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise VideoApiError(str(error), phase="download") from error
         if not data:
-            raise VideoApiError("视频下载结果为空")
+            raise VideoApiError("视频下载结果为空", phase="download")
         if not self._looks_like_video(data, content_type):
             preview = data[:160].decode("utf-8", errors="replace").replace("\n", " ")
             raise VideoApiError(
                 f"视频下载结果不是可播放的 MP4：content-type={content_type or 'unknown'}, "
-                f"size={len(data)}, preview={preview[:100]}"
+                f"size={len(data)}, preview={preview[:100]}",
+                phase="download",
             )
         return data
+
+    def _request_json(
+        self,
+        request: urllib.request.Request,
+        timeout: int,
+        *,
+        phase: str,
+        task_id: str = "",
+        retries: int = 0,
+    ) -> dict:
+        for attempt in range(max(0, retries) + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise VideoApiError(
+                    "视频服务返回了损坏的 HTTP 200 JSON 回执",
+                    phase=phase,
+                    task_id=task_id,
+                    outcome_indeterminate=phase in {"submit", "poll"},
+                ) from error
+            except urllib.error.HTTPError as error:
+                if attempt < retries and self._retryable_status(error.code):
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise VideoApiError(
+                    _http_error_message(error),
+                    status_code=error.code,
+                    phase=phase,
+                    task_id=task_id,
+                    retry_after=self._retry_after(error),
+                    outcome_indeterminate=(
+                        phase == "poll"
+                        or (phase == "submit" and self._submission_indeterminate_status(error.code))
+                    ),
+                ) from error
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as error:
+                if attempt < retries:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise VideoApiError(
+                    str(error),
+                    phase=phase,
+                    task_id=task_id,
+                    outcome_indeterminate=phase in {"submit", "poll"},
+                ) from error
+        raise VideoApiError(
+            "视频服务请求失败",
+            phase=phase,
+            task_id=task_id,
+            outcome_indeterminate=phase in {"submit", "poll"},
+        )
+
+    def _retry_after(self, error: urllib.error.HTTPError) -> str:
+        headers = getattr(error, "headers", None)
+        return str(headers.get("Retry-After") or "").strip() if headers else ""
+
+    def _retryable_status(self, status_code: int) -> bool:
+        return status_code in {408, 429, 500, 502, 503, 504} or 520 <= status_code <= 524
+
+    def _submission_indeterminate_status(self, status_code: int) -> bool:
+        return status_code in {408, 500, 502, 503, 504} or 520 <= status_code <= 524
 
     def _looks_like_video(self, data: bytes, content_type: str) -> bool:
         lower_type = (content_type or "").lower()

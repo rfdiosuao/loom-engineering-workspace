@@ -13,16 +13,29 @@ function sha256Hex(value) {
   return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
 }
 
-export async function createRuntimeState(port) {
+export async function createRuntimeState(port, identity = {}) {
+  const accountId = String(identity.accountId || '').trim();
+  const configDigest = String(identity.configDigest || '').trim();
+  if (!accountId || !/^[a-f0-9]{64}$/i.test(configDigest)) {
+    const error = new Error('phone_daemon_runtime_authorization_required');
+    error.code = 'phone_daemon_runtime_authorization_required';
+    throw error;
+  }
   const runtime = {
     schema: 'loom.phone_daemon.runtime.v1',
     pid: process.pid,
     port,
     token: crypto.randomBytes(32).toString('base64url'),
+    accountId,
+    configDigest: configDigest.toLowerCase(),
     startedAt: new Date().toISOString(),
   };
   await fs.mkdir(path.dirname(RUNTIME_PATH), { recursive: true });
-  await fs.writeFile(RUNTIME_PATH, `${JSON.stringify(runtime, null, 2)}\n`, 'utf8');
+  await fs.writeFile(
+    RUNTIME_PATH,
+    `${JSON.stringify(runtime, null, 2)}\n`,
+    { encoding: 'utf8', mode: 0o600 },
+  );
   return runtime;
 }
 
@@ -47,7 +60,69 @@ export function daemonAuthHeaders(runtime) {
 
 export function isAuthorized(request, runtime) {
   if (!runtime?.token) return false;
-  return request?.headers?.['x-loom-phone-daemon-token'] === runtime.token;
+  const provided = request?.headers?.['x-loom-phone-daemon-token'];
+  if (typeof provided !== 'string') return false;
+  const expectedBytes = Buffer.from(runtime.token, 'utf8');
+  const providedBytes = Buffer.from(provided, 'utf8');
+  return (
+    expectedBytes.length === providedBytes.length
+    && crypto.timingSafeEqual(expectedBytes, providedBytes)
+  );
+}
+
+export function authorizedConfigForRequest(requestConfig, authorizedStore) {
+  const request = requestConfig && typeof requestConfig === 'object'
+    ? { ...requestConfig }
+    : {};
+  const devices = Array.isArray(authorizedStore?.devices) ? authorizedStore.devices : [];
+  const requestedDeviceId = String(
+    request.deviceId
+    || authorizedStore?.selectedDeviceId
+    || (devices.length === 1 ? devices[0]?.id : '')
+    || '',
+  ).trim();
+  const authorizedDevice = devices.find((device) => (
+    String(device?.id || '').trim() === requestedDeviceId
+  ));
+  if (!authorizedDevice) {
+    const error = new Error('phone_daemon_device_unauthorized');
+    error.code = 'phone_daemon_device_unauthorized';
+    error.errorCode = error.code;
+    error.retryable = false;
+    error.details = { deviceId: requestedDeviceId };
+    throw error;
+  }
+
+  for (const key of [
+    'id',
+    'baseUrl',
+    'phoneUrl',
+    'token',
+    'phoneToken',
+    'launcherId',
+    'lumiLauncherId',
+    'launcherSecret',
+    'lumiLauncherSecret',
+    'album',
+    'tags',
+    'priority',
+    'source',
+  ]) {
+    delete request[key];
+  }
+  return {
+    ...request,
+    id: authorizedDevice.id,
+    deviceId: authorizedDevice.id,
+    phoneUrl: authorizedDevice.phoneUrl,
+    phoneToken: authorizedDevice.phoneToken,
+    lumiLauncherId: authorizedDevice.lumiLauncherId || '',
+    lumiLauncherSecret: authorizedDevice.lumiLauncherSecret || '',
+    album: authorizedDevice.album || '',
+    tags: Array.isArray(authorizedDevice.tags) ? [...authorizedDevice.tags] : [],
+    priority: Number(authorizedDevice.priority || 0),
+    source: 'bridge-runtime',
+  };
 }
 
 export function deviceKeyFromConfig(config) {

@@ -1,6 +1,7 @@
 package com.apk.claw.android.server
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,6 +17,8 @@ class ReleaseSigningSourceContractTest {
         assertTrue(source.contains("KEY_ALIAS"))
         assertTrue(source.contains("KEY_PASSWORD"))
         assertTrue(source.contains("startParameter.taskNames"))
-        assertTrue(source.contains("contains(\"Release\", ignoreCase = true)"))
+        assertTrue(source.contains("substringAfterLast(':')"))
+        assertTrue(source.contains("^(assemble|bundle|package).*release.*$"))
+        assertFalse(source.contains("contains(\"Release\", ignoreCase = true)"))
     }
 }

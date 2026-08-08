@@ -112,3 +112,29 @@ test('parseErrorText localizes managed model login failures', () => {
     '请先在“模型账号”完成登录，然后返回当前页面重试。',
   );
 });
+
+test('parseErrorText never exposes raw Agent resource errors', () => {
+  assert.equal(
+    apiModule.parseErrorText('{"error":"agent resource not found","code":"AGENT_NOT_FOUND"}'),
+    '当前智能体资源已不存在，请刷新会话列表后重试。',
+  );
+  assert.equal(
+    apiModule.parseErrorText('{"error":"模型账号已切换，智能体需要重新连接，请刷新后重试。","code":"AGENT_ACCOUNT_CONTEXT_CHANGED"}'),
+    '模型账号已切换，智能体需要重新连接，请刷新后重试。',
+  );
+});
+
+test('parseErrorText localizes entitlement errors in every known backend shape', () => {
+  const expected = '商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。';
+  const messages = [
+    'AGENT_ENTITLEMENT_REQUIRED: account entitlement is inactive',
+    '{"error":"AGENT_ENTITLEMENT_REQUIRED: account entitlement is inactive","code":"AGENT_ENTITLEMENT_REQUIRED"}',
+    '{"error":"商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。","code":"AGENT_ENTITLEMENT_REQUIRED"}',
+  ];
+
+  for (const message of messages) {
+    const localized = apiModule.parseErrorText(message);
+    assert.equal(localized, expected);
+    assert.doesNotMatch(localized, /AGENT_ENTITLEMENT_REQUIRED|account_entitlement|account entitlement|inactive/i);
+  }
+});

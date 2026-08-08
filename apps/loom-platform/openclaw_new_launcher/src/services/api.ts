@@ -130,6 +130,18 @@ function friendlyErrorText(text: string): string {
   if (/managed model account must be signed in again|agent_account_relogin_required/i.test(text)) {
     return '模型账号登录已失效，请重新登录后再重试。';
   }
+  if (/agent_entitlement_required|account[_ ]entitlement.*inactive/i.test(text)) {
+    return '商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。';
+  }
+  if (/agent resource not found|agent_not_found/i.test(text)) {
+    return '当前智能体资源已不存在，请刷新会话列表后重试。';
+  }
+  if (/central agent service is not initialized|agent_service_unavailable/i.test(text)) {
+    return '智能体服务尚未就绪，请重启麓鸣后重试。';
+  }
+  if (/agent operation failed|agent_operation_failed/i.test(text)) {
+    return '智能体操作没有完成，请刷新状态后重试。';
+  }
   if (/not_logged_in/i.test(text)) {
     return '尚未登录模型账号';
   }
@@ -217,6 +229,11 @@ export async function ensureBridgeReadyForStreaming(): Promise<string> {
   const port = await invoke<number>('get_bridge_port');
   rememberBridgePort(port);
   return bridgeStreamUrl('');
+}
+
+export async function resolveBridgeStreamUrl(path: string): Promise<string> {
+  await ensureBridgeReadyForStreaming();
+  return bridgeStreamUrl(path);
 }
 
 async function proxyRequest(path: string, method: string = 'GET', body?: unknown) {
@@ -793,6 +810,21 @@ export const diagnosticsApi = {
 };
 
 // === Account / NewAPI ===
+export interface AccountEntitlementSnapshot {
+  source?: string;
+  accountId?: string;
+  plan?: string;
+  features?: string[];
+  limits?: {
+    devices?: number;
+    concurrentTasks?: number;
+    [key: string]: unknown;
+  };
+  expiresAt?: string | number | null;
+  offlineGraceUntil?: string | number | null;
+  entitlementVersion?: number;
+}
+
 export interface AccountSnapshot {
   loggedIn: boolean;
   source?: string;
@@ -819,6 +851,7 @@ export interface AccountSnapshot {
   lastOnlineAt?: string;
   graceExpiresAt?: string;
   subscription?: AccountSubscriptionSnapshot;
+  accountEntitlement?: AccountEntitlementSnapshot;
   purchaseUrl?: string;
   syncResults?: Array<{ target?: string; ok?: boolean; error?: string }>;
 }
@@ -854,6 +887,51 @@ export interface AccountAuthCapabilities {
   emailConfigured?: boolean;
 }
 
+export interface AccountPaymentPlan {
+  planKey: string;
+  displayName: string;
+  description?: string;
+  durationDays: number;
+  amountMinor: number;
+  amount: string;
+  currency: string;
+  sourceCurrency?: string;
+  pricingRule?: 'nominal_1_to_1' | string;
+  benefits?: string[];
+  features?: string[];
+}
+
+export interface AccountPaymentCatalog {
+  plans: AccountPaymentPlan[];
+  payment: {
+    provider?: string;
+    configured?: boolean;
+    reconciliationConfigured?: boolean;
+    channels?: Array<'alipay' | 'wxpay' | string>;
+    reasonCode?: string;
+    message?: string;
+  };
+}
+
+export interface AccountPaymentOrder {
+  orderId: string;
+  outTradeNo?: string;
+  planKey?: string;
+  displayName?: string;
+  paymentType?: 'alipay' | 'wxpay' | string;
+  amountMinor?: number;
+  amount?: string;
+  currency?: string;
+  status: 'pending' | 'paid' | 'expired' | 'creation_uncertain' | 'failed' | string;
+  providerOrderReference?: string;
+  qrcode?: string;
+  payUrl?: string;
+  expiresAt?: string;
+  paidAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface AccountLoginResponse {
   account: AccountSnapshot;
   syncResults?: Array<{ target?: string; ok?: boolean; error?: string }>;
@@ -875,6 +953,14 @@ export const accountApi = {
     api('/api/account/bind-ticket', 'POST', params),
   sync: (): Promise<{ account: AccountSnapshot; syncResults?: Array<{ target?: string; ok?: boolean; error?: string }> }> => api('/api/account/sync', 'POST'),
   subscription: (): Promise<{ subscription: AccountSubscriptionSnapshot }> => api('/api/account/subscription'),
+  redeemEntitlement: (params: { code: string }): Promise<AccountLoginResponse> =>
+    api('/api/account/entitlement/redeem', 'POST', params),
+  paymentPlans: (): Promise<AccountPaymentCatalog> =>
+    api('/api/account/payments/plans'),
+  createPaymentOrder: (params: { planKey: string; paymentType: 'alipay' | 'wxpay'; requestId: string }): Promise<{ order: AccountPaymentOrder }> =>
+    api('/api/account/payments/order', 'POST', params),
+  paymentOrderStatus: (params: { orderId: string; reconcile?: boolean }): Promise<{ order: AccountPaymentOrder; account?: AccountSnapshot; subscriptionSyncPending?: boolean }> =>
+    api('/api/account/payments/order/status', 'POST', params),
   selectModels: (params: { textModel?: string; imageModel?: string; videoModel?: string }): Promise<{ account: AccountSnapshot; syncResults?: Array<{ target?: string; ok?: boolean; error?: string }> }> =>
     api('/api/account/models/select', 'POST', params),
   logout: (): Promise<{ account: AccountSnapshot; loggedOut?: boolean }> => api('/api/account/logout', 'POST'),
@@ -941,6 +1027,24 @@ export async function waitForJob<T = unknown>(
 }
 
 // === Components / Agent installer ===
+export interface ComponentDetectionItem {
+  kind: string;
+  label: string;
+  value: string;
+  status: string;
+}
+
+export interface ComponentDetectionEvidence {
+  identity: string;
+  identityLabel?: string;
+  source?: string;
+  available: boolean;
+  healthy: boolean;
+  reason: string;
+  nextAction: string;
+  items: ComponentDetectionItem[];
+}
+
 export interface ComponentSummary {
   id: string;
   name: string;
@@ -965,6 +1069,14 @@ export interface ComponentSummary {
   updatedAt?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
+  detection?: ComponentDetectionEvidence | null;
+  installLocked?: boolean;
+  installMode?: 'managed_npm' | 'official_manual' | 'detect_only' | string;
+  providerConfigMode?: 'verified_schema' | 'probe_required' | 'official_only' | 'unsupported' | string;
+  compatibility?: string;
+  sandbox?: boolean;
+  priority?: string;
+  sourceUrl?: string;
 }
 
 export interface ComponentSnapshot {
@@ -1016,6 +1128,7 @@ export interface AgentModelConfigStatus {
     toolCallsVerified?: boolean;
     verifiedAt?: string;
   };
+  providerCompatibility?: ProviderCompatibilityProbe;
   officialAuthUnchanged?: boolean;
   sessionPreservation?: {
     supported: boolean;
@@ -1033,6 +1146,22 @@ export interface AgentModelConfigStatus {
   };
   updatedAt?: string;
   componentStatus?: string;
+}
+
+export interface ProviderCompatibilityProbe {
+  reachable: boolean;
+  protocols: Array<'responses' | 'chat_completions' | string>;
+  toolCall: boolean;
+  toolCallProtocols?: string[];
+  streaming: boolean;
+  streamingProtocols?: string[];
+  selectedModel: string;
+  availableModelCount?: number;
+  latencyMs?: number;
+  source: 'live-probe' | string;
+  fallbackUsed: boolean;
+  baseUrl?: string;
+  probedAt?: string;
 }
 
 function sanitizeComponentSnapshot(snapshot: ComponentSnapshot): ComponentSnapshot {
@@ -1068,6 +1197,8 @@ export const componentApi = {
     api('/api/components/model-config/apply', 'POST', { ...params, confirmed: true }),
   applyCustomModelConfig: (params: { componentId: string; provider: string; baseUrl: string; apiKey: string; model: string }): Promise<{ status: AgentModelConfigStatus }> =>
     api('/api/components/model-config/apply-custom', 'POST', { ...params, confirmed: true }),
+  probeProviderCompatibility: (params: { provider: string; baseUrl: string; apiKey: string; preferredModel?: string }): Promise<{ probe: ProviderCompatibilityProbe }> =>
+    api('/api/components/model-config/probe-provider', 'POST', params),
   rollbackModelConfig: (componentId: string): Promise<{ status: AgentModelConfigStatus }> =>
     api('/api/components/model-config/rollback', 'POST', { componentId, confirmed: true }),
   disableModelConfig: (componentId: string): Promise<{ status: AgentModelConfigStatus }> =>
@@ -1395,6 +1526,21 @@ export interface MatrixEmergencyStopResponse {
   affected: MatrixEmergencyStopAffectedTask[];
 }
 
+export interface PhoneVideoStreamSession {
+  schema: 'luming.phone.stream.session.v1';
+  state: 'active' | 'permission_required' | 'error' | 'unavailable' | string;
+  transport: 'usb-forward' | 'lan' | string;
+  fallback: 'none' | 'snapshot';
+  requiresUserConsent: boolean;
+  codec: string;
+  width: number;
+  height: number;
+  fps: number;
+  message: string;
+  ticket?: string;
+  streamUrl?: string;
+}
+
 export const matrixApi = {
   status: (): Promise<MatrixStatusSnapshot> => api('/api/matrix/status'),
   ensureStreamReady: (): Promise<string> => ensureBridgeReadyForStreaming(),
@@ -1426,6 +1572,15 @@ export const matrixApi = {
   },
   screens: (requests: MatrixScreenBatchRequest[]): Promise<MatrixScreenBatchResponse> =>
     api('/api/matrix/screens', 'POST', { requests }),
+  startPhoneStream: (deviceId: string, params: {
+    clientSessionId: string;
+    fps?: number;
+    maxLongSide?: number;
+    bitRate?: number;
+  }): Promise<PhoneVideoStreamSession> =>
+    api(`/api/phone-stream/devices/${encodeURIComponent(deviceId)}/session`, 'POST', params),
+  stopPhoneStream: (deviceId: string): Promise<{ stopped: boolean; fallback: 'snapshot' }> =>
+    api(`/api/phone-stream/devices/${encodeURIComponent(deviceId)}/session`, 'DELETE'),
   timeline: (deviceId: string, limit = 100): Promise<{ events: MatrixEvent[] }> =>
     api(`/api/matrix/devices/${encodeURIComponent(deviceId)}/timeline?limit=${Math.max(1, limit)}`),
   lease: (deviceId: string): Promise<{ lease: MatrixDeviceLease | null }> =>
@@ -1567,10 +1722,14 @@ export interface AcquisitionTemplateSummary {
   schema?: string;
   templateId: string;
   version?: number;
+  enabled?: boolean;
   name: string;
   industry?: string;
   platforms?: string[];
   targetCustomer?: string;
+  keywords?: string[];
+  leadRules?: string[];
+  replyStyle?: string;
   uploadStatus?: 'pending_upload' | 'upload_failed' | 'uploaded' | string;
   uploadError?: string;
   remote?: {
@@ -1581,6 +1740,7 @@ export interface AcquisitionTemplateSummary {
     serverUrl?: string;
   };
   updatedAt?: string;
+  createdAt?: string;
 }
 
 export interface AcquisitionTemplateStatus {
@@ -1595,6 +1755,7 @@ export interface AcquisitionTemplateStatus {
   };
   stats?: {
     total?: number;
+    enabled?: number;
     pendingUpload?: number;
     uploaded?: number;
   };
@@ -1654,6 +1815,9 @@ export const acquisitionApi = {
     api('/api/matrix/acquisition/draft/manual-send', 'POST', { ...params, operator: 'launcher-user' }),
   templates: (): Promise<AcquisitionTemplateStatus> => api('/api/matrix/acquisition/templates'),
   saveTemplate: (params: {
+    templateId?: string;
+    expectedVersion?: number;
+    enabled?: boolean;
     name?: string;
     topic?: string;
     industry?: string;
@@ -1673,6 +1837,82 @@ export const acquisitionApi = {
     api('/api/matrix/acquisition/templates/cloud-consent', 'POST', { enabled, retryPending }),
   retryTemplates: (): Promise<Record<string, unknown>> =>
     api('/api/matrix/acquisition/templates/retry', 'POST'),
+  setTemplateEnabled: (templateId: string, enabled: boolean, expectedVersion?: number): Promise<{ template: AcquisitionTemplateSummary; status?: AcquisitionTemplateStatus }> =>
+    api('/api/matrix/acquisition/templates/enable', 'POST', { templateId, enabled, expectedVersion }),
+  deleteTemplate: (templateId: string, expectedVersion?: number): Promise<{ status: string; templateId: string; version?: number }> =>
+    api('/api/matrix/acquisition/templates/delete', 'POST', { templateId, expectedVersion }),
+};
+
+export interface SkillTemplateBinding {
+  templateId: string;
+  version: number;
+  name?: string;
+}
+
+export interface SkillSummary {
+  id: string;
+  name: string;
+  version?: string;
+  description?: string;
+  category?: string;
+  runtime?: string;
+  icon?: string;
+  applicableAgents?: string[];
+  source?: string;
+  sourceLabel?: string;
+  enabled?: boolean;
+  writable?: boolean;
+  hasReadme?: boolean;
+  invocationCount?: number;
+  successfulInvocations?: number;
+  failureCount?: number;
+  lastUsedAt?: string | null;
+  lastFailureAt?: string | null;
+  lastDurationMs?: number;
+  lastAgent?: string;
+  linkedTemplateIds?: string[];
+  linkedTemplates?: SkillTemplateBinding[];
+}
+
+export interface SkillListResponse {
+  skills: SkillSummary[];
+  directories?: Array<{ key?: string; label?: string; path?: string; writable?: boolean }>;
+  sites?: Array<{ name?: string; url?: string }>;
+}
+
+export const skillsApi = {
+  list: (): Promise<SkillListResponse> => api('/api/skills/list'),
+  installZip: (filename: string, data: string): Promise<{ skill: SkillSummary }> =>
+    api('/api/skills/install_zip', 'POST', { filename, data }),
+  setEnabled: (id: string, enabled: boolean): Promise<{ skill: SkillSummary }> =>
+    api('/api/skills/enable', 'POST', { id, enabled }),
+  uninstall: (id: string): Promise<{ status: string; id: string }> =>
+    api('/api/skills/uninstall', 'POST', { id }),
+  readme: (id: string): Promise<{ id: string; path?: string; content: string }> =>
+    api('/api/skills/readme', 'POST', { id }),
+  exportZip: (id: string): Promise<{ id: string; filename: string; mimeType: string; size: number; data: string }> =>
+    api('/api/skills/export', 'POST', { id }),
+  learn: (params: {
+    id?: string;
+    name: string;
+    summary: string;
+    steps: string[];
+    applicableAgents?: string[];
+    confirmed: boolean;
+    verifiedSuccess: boolean;
+    deterministic: boolean;
+    sideEffects: boolean;
+    templateId?: string;
+    templateVersion?: number;
+  }): Promise<{ skill: SkillSummary }> => api('/api/skills/learn', 'POST', params),
+  setTemplateBinding: (params: { id: string; templateId: string; templateVersion: number; linked: boolean }): Promise<{ skill: SkillSummary }> => api('/api/skills/template', 'POST', params),
+  recordInvocation: (params: {
+    id: string;
+    success: boolean;
+    durationMs?: number;
+    agentId?: string;
+    templateId?: string;
+  }): Promise<{ skill: SkillSummary }> => api('/api/skills/invocation', 'POST', params),
 };
 
 export interface FeishuStatus {

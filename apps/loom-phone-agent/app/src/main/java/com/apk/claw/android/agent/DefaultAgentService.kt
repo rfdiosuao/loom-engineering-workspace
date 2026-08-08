@@ -710,6 +710,15 @@ class DefaultAgentService : AgentService {
 
             // 如果没有工具调用，Agent 认为完成了
             if (!llmResponse.hasToolExecutionRequests()) {
+                if (cancelled.get()) {
+                    callback.onTerminal(
+                        iterations,
+                        ClawApplication.instance.getString(R.string.agent_task_cancel),
+                        totalTokens,
+                        successful = false
+                    )
+                    return
+                }
                 val finalAnswer = llmResponse.text ?: ClawApplication.instance.getString(R.string.agent_task_completed)
                 callback.onTerminal(iterations, finalAnswer, totalTokens, successful = true)
                 return
@@ -749,6 +758,19 @@ class DefaultAgentService : AgentService {
                     oldPostconditionAbsent = runCatching { options.oldPostconditionAbsent() }.getOrDefault(false),
                     toolName = toolName
                 )
+                val externalBlockedReason = if (
+                    replayAllowed
+                    && guard.blockedReason.isNullOrBlank()
+                    && (allowedTools == null || allowedTools.contains(toolName))
+                ) {
+                    try {
+                        options.beforeToolDispatch(toolName, params)
+                    } catch (error: Exception) {
+                        "External action authorization failed: ${error.message ?: "unknown error"}"
+                    }
+                } else {
+                    null
+                }
                 val result = if (!replayAllowed) {
                     ToolResult.error(
                         "Reconciliation blocked action replay until the old postcondition is proven absent. " +
@@ -763,6 +785,14 @@ class DefaultAgentService : AgentService {
                         "Tool policy '${options.toolPolicy.wireName}' blocked tool '$toolName'. Allowed tools: " +
                             allowedTools.joinToString(", ") +
                             ". Call finish with a summary instead."
+                    )
+                } else if (!externalBlockedReason.isNullOrBlank()) {
+                    ToolResult.error(
+                        "$externalBlockedReason. Observe the current state and finish without retrying the blocked action."
+                    )
+                } else if (cancelled.get()) {
+                    ToolResult.error(
+                        "Task cancellation was observed after external authorization; the action was not dispatched."
                     )
                 } else {
                     ToolRegistry.getInstance().executeTool(toolName, params)

@@ -43,6 +43,14 @@ if ((Test-Path -LiteralPath $PublicKeyPath) -and -not $Force) {
 }
 
 $pythonPath = Join-Path $Root "openclaw_new_launcher\python"
+$bundledPython = Join-Path $Root "openclaw_new_launcher\python-runtime\python.exe"
+if (Test-Path -LiteralPath $bundledPython -PathType Leaf) {
+    $pythonExecutable = $bundledPython
+} elseif (-not [string]::IsNullOrWhiteSpace($env:PYTHON) -and (Test-Path -LiteralPath $env:PYTHON -PathType Leaf)) {
+    $pythonExecutable = [System.IO.Path]::GetFullPath($env:PYTHON)
+} else {
+    $pythonExecutable = (Get-Command python -ErrorAction Stop).Source
+}
 $previousPythonPath = $env:PYTHONPATH
 $previousPrivateKey = $env:LOOM_RELEASE_MANIFEST_PRIVATE_KEY
 $previousSpecPath = $env:LOOM_RELEASE_MANIFEST_SPEC_PATH
@@ -242,7 +250,7 @@ try {
     $env:LOOM_RELEASE_MANIFEST_OUTPUT_PATH = $OutputPath
     $env:LOOM_RELEASE_MANIFEST_PUBLIC_KEY_OUTPUT_PATH = $PublicKeyPath
 
-    $pythonScript | python -
+    $pythonScript | & $pythonExecutable -
     if ($LASTEXITCODE -ne 0) {
         throw "Release manifest generation failed with exit code $LASTEXITCODE"
     }
