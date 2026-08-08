@@ -29,6 +29,10 @@ class ConfigServer(
         private const val MIME_JSON = "application/json"
         private const val SECRET_REDACTED = "********"
         private const val SECRET_REDACTED_FALLBACK = "########"
+        private val CHANNEL_SECRET_FIELDS = setOf("dingtalkAppSecret", "feishuAppSecret", "qqAppSecret", "discordBotToken", "telegramBotToken")
+        private val LLM_SECRET_FIELDS = setOf("llmApiKey")
+        private val CHANNEL_CONFIG_FIELDS = setOf("dingtalkAppKey", "dingtalkAppSecret", "feishuAppId", "feishuAppSecret", "qqAppId", "qqAppSecret", "discordBotToken", "telegramBotToken")
+        private val LLM_CONFIG_FIELDS = setOf("llmApiKey", "llmBaseUrl", "llmModelName")
     }
 
     private val gson = Gson()
@@ -420,6 +424,17 @@ class ConfigServer(
                 )
             )
         }
+        val replaceSecrets = try {
+            validateStringFields(json, CHANNEL_CONFIG_FIELDS)
+            parseReplaceSecrets(json, CHANNEL_SECRET_FIELDS)
+        } catch (_: IllegalArgumentException) {
+            return corsResponse(
+                newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST, MIME_JSON,
+                    """{"code":-1,"message":"invalid configuration"}"""
+                )
+            )
+        }
 
         var reinitDingtalk = false
         var reinitFeishu = false
@@ -436,7 +451,7 @@ class ConfigServer(
         if (json.has("dingtalkAppSecret")) {
             val value = json.get("dingtalkAppSecret").asString
             // 如果是脱敏值则跳过
-            if (!isMaskedValue(value, KVUtils.getDingtalkAppSecret())) {
+            if ("dingtalkAppSecret" in replaceSecrets || !isMaskedValue(value, KVUtils.getDingtalkAppSecret())) {
                 KVUtils.setDingtalkAppSecret(value)
                 reinitDingtalk = true
             }
@@ -450,7 +465,7 @@ class ConfigServer(
         }
         if (json.has("feishuAppSecret")) {
             val value = json.get("feishuAppSecret").asString
-            if (!isMaskedValue(value, KVUtils.getFeishuAppSecret())) {
+            if ("feishuAppSecret" in replaceSecrets || !isMaskedValue(value, KVUtils.getFeishuAppSecret())) {
                 KVUtils.setFeishuAppSecret(value)
                 reinitFeishu = true
             }
@@ -464,7 +479,7 @@ class ConfigServer(
         }
         if (json.has("qqAppSecret")) {
             val value = json.get("qqAppSecret").asString
-            if (!isMaskedValue(value, KVUtils.getQqAppSecret())) {
+            if ("qqAppSecret" in replaceSecrets || !isMaskedValue(value, KVUtils.getQqAppSecret())) {
                 KVUtils.setQqAppSecret(value)
                 reinitQQ = true
             }
@@ -473,7 +488,7 @@ class ConfigServer(
         // Discord 配置
         if (json.has("discordBotToken")) {
             val value = json.get("discordBotToken").asString
-            if (!isMaskedValue(value, KVUtils.getDiscordBotToken())) {
+            if ("discordBotToken" in replaceSecrets || !isMaskedValue(value, KVUtils.getDiscordBotToken())) {
                 KVUtils.setDiscordBotToken(value)
                 reinitDiscord = true
             }
@@ -482,7 +497,7 @@ class ConfigServer(
         // Telegram 配置
         if (json.has("telegramBotToken")) {
             val value = json.get("telegramBotToken").asString
-            if (!isMaskedValue(value, KVUtils.getTelegramBotToken())) {
+            if ("telegramBotToken" in replaceSecrets || !isMaskedValue(value, KVUtils.getTelegramBotToken())) {
                 KVUtils.setTelegramBotToken(value)
                 reinitTelegram = true
             }
@@ -548,10 +563,21 @@ class ConfigServer(
                 )
             )
         }
+        val replaceSecrets = try {
+            validateStringFields(json, LLM_CONFIG_FIELDS)
+            parseReplaceSecrets(json, LLM_SECRET_FIELDS)
+        } catch (_: IllegalArgumentException) {
+            return corsResponse(
+                newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST, MIME_JSON,
+                    """{"code":-1,"message":"invalid configuration"}"""
+                )
+            )
+        }
 
         if (json.has("llmApiKey")) {
             val value = json.get("llmApiKey").asString
-            if (!isMaskedValue(value, KVUtils.getLlmApiKey())) {
+            if ("llmApiKey" in replaceSecrets || !isMaskedValue(value, KVUtils.getLlmApiKey())) {
                 KVUtils.setLlmApiKey(value)
             }
         }
@@ -727,6 +753,39 @@ class ConfigServer(
      */
     private fun isMaskedValue(value: String, currentSecret: String): Boolean {
         return value == maskSecret(currentSecret)
+    }
+
+    private fun parseReplaceSecrets(json: JsonObject, allowedFields: Set<String>): Set<String> {
+        if (!json.has("replaceSecrets")) return emptySet()
+        val intent = json.get("replaceSecrets")
+        require(intent.isJsonArray) { "replaceSecrets must be an array" }
+
+        val replacements = linkedSetOf<String>()
+        intent.asJsonArray.forEach { entry ->
+            require(entry.isJsonPrimitive && entry.asJsonPrimitive.isString) {
+                "replaceSecrets entries must be strings"
+            }
+            val field = entry.asString
+            require(field in allowedFields) { "replaceSecrets contains an unsupported field" }
+            require(replacements.add(field)) { "replaceSecrets contains a duplicate field" }
+            require(json.has(field)) { "replaceSecrets field is missing its value" }
+            val value = json.get(field)
+            require(value.isJsonPrimitive && value.asJsonPrimitive.isString) {
+                "replaceSecrets field values must be strings"
+            }
+        }
+        return replacements
+    }
+
+    private fun validateStringFields(json: JsonObject, allowedFields: Set<String>) {
+        allowedFields.forEach { field ->
+            if (json.has(field)) {
+                val value = json.get(field)
+                require(value.isJsonPrimitive && value.asJsonPrimitive.isString) {
+                    "$field must be a string"
+                }
+            }
+        }
     }
 
     private fun corsResponse(response: Response): Response {

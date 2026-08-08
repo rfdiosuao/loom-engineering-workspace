@@ -1,10 +1,13 @@
 package com.apk.claw.android.server
 
 import android.content.ContextWrapper
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.lang.reflect.Field
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Proxy
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
@@ -126,9 +129,124 @@ class ConfigServerSecurityTest {
         ).forEach { currentGetter ->
             assertTrue(
                 "$currentGetter is not bound to contextual marker validation",
-                source.contains("if (!isMaskedValue(value, $currentGetter))"),
+                source.contains("!isMaskedValue(value, $currentGetter)"),
             )
         }
+    }
+
+    @Test
+    fun replace_secrets_parser_enforces_route_whitelist_string_values_and_complete_intent() {
+        val server = allocateConfigServerWithoutAndroidRuntime()
+        val channelFields = setOf(
+            "dingtalkAppSecret",
+            "feishuAppSecret",
+            "qqAppSecret",
+            "discordBotToken",
+            "telegramBotToken",
+        )
+        val llmFields = setOf("llmApiKey")
+
+        assertEquals(emptySet<String>(), invokeParseReplaceSecrets(server, json("{}"), channelFields))
+        assertEquals(
+            setOf("dingtalkAppSecret", "telegramBotToken"),
+            invokeParseReplaceSecrets(
+                server,
+                json(
+                    """{
+                        "replaceSecrets":["dingtalkAppSecret","telegramBotToken"],
+                        "dingtalkAppSecret":"********",
+                        "telegramBotToken":"########"
+                    }""",
+                ),
+                channelFields,
+            ),
+        )
+        assertEquals(
+            setOf("llmApiKey"),
+            invokeParseReplaceSecrets(
+                server,
+                json("""{"replaceSecrets":["llmApiKey"],"llmApiKey":"********"}"""),
+                llmFields,
+            ),
+        )
+
+        listOf(
+            """{"replaceSecrets":"dingtalkAppSecret","dingtalkAppSecret":"x"}""",
+            """{"replaceSecrets":[1],"dingtalkAppSecret":"x"}""",
+            """{"replaceSecrets":["llmApiKey"],"llmApiKey":"x"}""",
+            """{"replaceSecrets":["dingtalkAppSecret"]}""",
+            """{"replaceSecrets":["dingtalkAppSecret"],"dingtalkAppSecret":1}""",
+            """{"replaceSecrets":["unknown"],"unknown":"x"}""",
+            """{"replaceSecrets":["dingtalkAppSecret","dingtalkAppSecret"],"dingtalkAppSecret":"x"}""",
+        ).forEach { malformed ->
+            assertReplaceSecretsRejected(server, json(malformed), channelFields)
+        }
+    }
+
+    @Test
+    fun replace_secrets_whitelists_are_route_local_and_validated_before_any_write() {
+        val source = configServerSource()
+        assertTrue(
+            source.contains(
+                "private val CHANNEL_SECRET_FIELDS = setOf(\"dingtalkAppSecret\", \"feishuAppSecret\", \"qqAppSecret\", \"discordBotToken\", \"telegramBotToken\")",
+            ),
+        )
+        assertTrue(source.contains("private val LLM_SECRET_FIELDS = setOf(\"llmApiKey\")"))
+
+        val channels = source.substringAfter("private fun handlePostChannels")
+            .substringBefore("private fun handleGetLlm")
+        val llm = source.substringAfter("private fun handlePostLlm")
+            .substringBefore("// ==================== Debug")
+        assertTrue(channels.contains("parseReplaceSecrets(json, CHANNEL_SECRET_FIELDS)"))
+        assertTrue(llm.contains("parseReplaceSecrets(json, LLM_SECRET_FIELDS)"))
+        assertTrue(channels.indexOf("parseReplaceSecrets") < channels.indexOf("KVUtils.setDingtalkAppKey"))
+        assertTrue(llm.indexOf("parseReplaceSecrets") < llm.indexOf("KVUtils.setLlmApiKey"))
+    }
+
+    @Test
+    fun supported_post_fields_are_validated_as_strings_before_any_write() {
+        val server = allocateConfigServerWithoutAndroidRuntime()
+        val channelFields = setOf(
+            "dingtalkAppKey",
+            "dingtalkAppSecret",
+            "feishuAppId",
+            "feishuAppSecret",
+            "qqAppId",
+            "qqAppSecret",
+            "discordBotToken",
+            "telegramBotToken",
+        )
+        val llmFields = setOf("llmApiKey", "llmBaseUrl", "llmModelName")
+
+        invokeValidateStringFields(server, json("{}"), channelFields)
+        invokeValidateStringFields(
+            server,
+            json("""{"dingtalkAppKey":"changed","unknown":{"ignored":true}}"""),
+            channelFields,
+        )
+        listOf(
+            json("""{"dingtalkAppKey":"changed","feishuAppSecret":{}}"""),
+            json(
+                """{"replaceSecrets":["dingtalkAppSecret"],"dingtalkAppSecret":"new","feishuAppSecret":{}}""",
+            ),
+        ).forEach { malformed ->
+            assertStringFieldsRejected(server, malformed, channelFields)
+        }
+        assertStringFieldsRejected(
+            server,
+            json("""{"llmApiKey":"changed","llmBaseUrl":{}}"""),
+            llmFields,
+        )
+
+        val source = configServerSource()
+        val channels = source.substringAfter("private fun handlePostChannels")
+            .substringBefore("private fun handleGetLlm")
+        val llm = source.substringAfter("private fun handlePostLlm")
+            .substringBefore("// ==================== Debug")
+        assertTrue(channels.contains("validateStringFields(json, CHANNEL_CONFIG_FIELDS)"))
+        assertTrue(llm.contains("validateStringFields(json, LLM_CONFIG_FIELDS)"))
+        assertTrue(channels.indexOf("validateStringFields") < channels.indexOf("KVUtils.setDingtalkAppKey"))
+        assertTrue(llm.indexOf("validateStringFields") < llm.indexOf("KVUtils.setLlmApiKey"))
     }
 
     @Test
@@ -197,6 +315,73 @@ class ConfigServerSecurityTest {
         method.isAccessible = true
         return method.invoke(server, value, currentSecret) as Boolean
     }
+
+    private fun invokeParseReplaceSecrets(
+        server: ConfigServer,
+        json: JsonObject,
+        allowedFields: Set<String>,
+    ): Set<String> {
+        val method = try {
+            ConfigServer::class.java.getDeclaredMethod(
+                "parseReplaceSecrets",
+                JsonObject::class.java,
+                Set::class.java,
+            )
+        } catch (_: NoSuchMethodException) {
+            fail("ConfigServer must parse and validate replaceSecrets before applying any POST field")
+            throw AssertionError("unreachable")
+        }
+        method.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        return method.invoke(server, json, allowedFields) as Set<String>
+    }
+
+    private fun assertReplaceSecretsRejected(
+        server: ConfigServer,
+        json: JsonObject,
+        allowedFields: Set<String>,
+    ) {
+        try {
+            invokeParseReplaceSecrets(server, json, allowedFields)
+            fail("malformed replaceSecrets was accepted: $json")
+        } catch (error: InvocationTargetException) {
+            assertTrue(error.cause is IllegalArgumentException)
+        }
+    }
+
+    private fun invokeValidateStringFields(
+        server: ConfigServer,
+        json: JsonObject,
+        allowedFields: Set<String>,
+    ) {
+        val method = try {
+            ConfigServer::class.java.getDeclaredMethod(
+                "validateStringFields",
+                JsonObject::class.java,
+                Set::class.java,
+            )
+        } catch (_: NoSuchMethodException) {
+            fail("ConfigServer must validate every supported POST field before applying any field")
+            throw AssertionError("unreachable")
+        }
+        method.isAccessible = true
+        method.invoke(server, json, allowedFields)
+    }
+
+    private fun assertStringFieldsRejected(
+        server: ConfigServer,
+        json: JsonObject,
+        allowedFields: Set<String>,
+    ) {
+        try {
+            invokeValidateStringFields(server, json, allowedFields)
+            fail("non-string supported field was accepted: $json")
+        } catch (error: InvocationTargetException) {
+            assertTrue(error.cause is IllegalArgumentException)
+        }
+    }
+
+    private fun json(raw: String): JsonObject = JsonParser.parseString(raw).asJsonObject
 
     private fun allocateConfigServerWithoutAndroidRuntime(): ConfigServer {
         return unsafe().allocateInstance(ConfigServer::class.java) as ConfigServer
