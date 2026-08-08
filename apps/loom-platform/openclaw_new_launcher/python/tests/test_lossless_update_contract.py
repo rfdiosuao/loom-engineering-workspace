@@ -452,6 +452,10 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("[System.IO.FileMode]::CreateNew", migration)
         self.assertNotIn("Copy-Item", migration)
         self.assertIn("migrate-legacy-product-data.ps1", hooks)
+        self.assertIn(
+            '"${__FILEDIR__}\\..\\..\\..\\..\\installer\\migrate-legacy-product-data.ps1"',
+            hooks,
+        )
         self.assertIn("NSIS_HOOK_POSTINSTALL", hooks)
 
     def test_tauri_update_handoff_stops_bridge_and_uses_external_recovery_backup(self) -> None:

@@ -38,7 +38,7 @@
   ; the source intact; the migration script rejects reparse points.
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
-  File "/oname=loom-migrate-legacy-product-data.ps1" "${__FILEDIR__}\migrate-legacy-product-data.ps1"
+  File "/oname=loom-migrate-legacy-product-data.ps1" "${__FILEDIR__}\..\..\..\..\installer\migrate-legacy-product-data.ps1"
   SetOutPath "$INSTDIR"
   StrCpy $1 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
   IfFileExists "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" 0 loom_legacy_migration_shell_ready
