@@ -1201,20 +1201,61 @@ async fn install_distribution_layer(app: tauri::AppHandle, layer_id: String) -> 
     if layer_id.is_empty() {
         return Err("distribution layer id is empty".to_string());
     }
-    let root = bootstrap::install_root()?;
+    let root = match bootstrap::install_root() {
+        Ok(root) => root,
+        Err(error) => {
+            bootstrap::record_setup_error(&app, error.clone());
+            return Err(error);
+        }
+    };
     bootstrap::install_layer_by_id(app, root, layer_id).await
+}
+
+fn read_distribution_setup_snapshot(
+    state: &bootstrap::DistributionSetupState,
+) -> bootstrap::DistributionSetupSnapshot {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn get_distribution_setup_snapshot(
+    state: tauri::State<'_, bootstrap::DistributionSetupState>,
+) -> bootstrap::DistributionSetupSnapshot {
+    read_distribution_setup_snapshot(state.inner())
 }
 
 #[tauri::command]
 async fn retry_distribution_setup(app: tauri::AppHandle) -> Result<String, String> {
     clear_bridge_startup_error();
-    let root = bootstrap::install_root()?;
+    let root = match bootstrap::install_root() {
+        Ok(root) => root,
+        Err(error) => {
+            bootstrap::record_setup_error(&app, error.clone());
+            return Err(error);
+        }
+    };
     if let Err(error) = bootstrap::ensure_layers(app.clone(), root).await {
         let message = format!("运行组件补全失败：{error}");
         set_bridge_startup_error(message.clone());
         return Err(message);
     }
     start_bridge(app).await
+}
+
+#[cfg(test)]
+mod distribution_setup_snapshot_command_tests {
+    use super::{bootstrap, read_distribution_setup_snapshot};
+
+    #[test]
+    fn snapshot_query_is_a_read_only_clone() {
+        let state = bootstrap::DistributionSetupState::default();
+
+        let first = read_distribution_setup_snapshot(&state);
+        let second = read_distribution_setup_snapshot(&state);
+
+        assert_eq!(first, second);
+        assert_eq!(state.snapshot(), first);
+    }
 }
 
 #[tauri::command]
@@ -1642,6 +1683,7 @@ fn chrono_like_timestamp() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(bootstrap::DistributionSetupState::default())
         .setup(|app| {
             configure_media_asset_scope(app)?;
             if cfg!(debug_assertions) {
@@ -1663,7 +1705,10 @@ pub fn run() {
                             set_bridge_startup_error(format!("运行时组件下载失败：{}", e));
                         }
                     }
-                    Err(e) => eprintln!("[Bootstrap] install root unresolved: {}", e),
+                    Err(e) => {
+                        bootstrap::record_setup_error(&app_handle, e.clone());
+                        eprintln!("[Bootstrap] install root unresolved: {}", e);
+                    }
                 }
                 if let Err(e) = start_bridge(app_handle.clone()).await {
                     eprintln!("[Bridge startup error] {}", e);
@@ -1695,6 +1740,7 @@ pub fn run() {
             verify_license,
             start_bridge,
             install_distribution_layer,
+            get_distribution_setup_snapshot,
             retry_distribution_setup,
             proxy_request,
             export_log,
