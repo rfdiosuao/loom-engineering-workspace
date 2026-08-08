@@ -1,0 +1,15 @@
+{
+  "schema": "loom.agent.run.v1",
+  "runId": "run_initial_private_001",
+  "sessionId": "session_initial_private_001",
+  "status": "queued",
+  "checkpoint": "",
+  "campaignIds": [],
+  "ownerAccountId": "account_private_001",
+  "request": {
+    "prompt": "Private runtime request must not cross the public contract boundary.",
+    "runtimeProfileId": "default"
+  },
+  "modelId": "claude-sonnet-4-5",
+  "modelSource": "session"
+}
