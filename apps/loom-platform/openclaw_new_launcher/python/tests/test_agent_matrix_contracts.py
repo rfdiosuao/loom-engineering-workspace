@@ -149,6 +149,21 @@ class AgentMatrixContractTests(unittest.TestCase):
         v3_fixture = json.loads(
             (CANONICAL_CONTRACT_ROOT / "fixtures" / "matrix-dispatch.v3.json").read_text(encoding="utf-8")
         )
+        compatibility = json.loads(
+            (CANONICAL_CONTRACT_ROOT / "consumer-compatibility.v1.json").read_text(encoding="utf-8")
+        )
+        v2_consumer = next(
+            entry
+            for entry in compatibility["contracts"]
+            if entry["schemaId"] == "loom.matrix.dispatch.v2"
+        )
+
+        self.assertEqual(v2_consumer["status"], "supported")
+        self.assertEqual(
+            v2_consumer["compatibilityFixture"],
+            "fixtures/compat/matrix-dispatch.v2.consumer-gap.json",
+        )
+        self.assertEqual(v2_consumer["limits"]["retryBudget"], {"maximum": 10})
 
         v2_cases = [v2_fixture]
         v2_published_min = copy.deepcopy(v2_fixture)

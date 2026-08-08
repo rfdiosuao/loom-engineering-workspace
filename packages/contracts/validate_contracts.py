@@ -396,8 +396,8 @@ def _validate_compatibility_manifest(
             continue
         schema_id = entry.get("schemaId")
         replacement_id = entry.get("replacementSchemaId")
-        if entry.get("status") != "adapter-required":
-            errors.append(f"{prefix}: status must be adapter-required")
+        if entry.get("status") not in {"adapter-required", "supported"}:
+            errors.append(f"{prefix}: status must be adapter-required or supported")
         if schema_id not in schemas_by_id:
             errors.append(f"{prefix}: no canonical schema for {schema_id}")
             continue
