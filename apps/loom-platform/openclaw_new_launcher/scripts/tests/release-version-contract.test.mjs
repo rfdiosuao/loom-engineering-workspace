@@ -6,13 +6,13 @@ import path from "node:path";
 
 const testsDir = path.dirname(fileURLToPath(import.meta.url));
 const launcherRoot = path.resolve(testsDir, "../..");
-const releaseNotesPath = path.join(launcherRoot, "docs", "RELEASE_NOTES_2.4.11.md");
+const releaseNotesPath = path.join(launcherRoot, "docs", "RELEASE_NOTES_2.4.12.md");
 
 async function readJson(relativePath) {
   return JSON.parse(await readFile(path.join(launcherRoot, relativePath), "utf8"));
 }
 
-test("Desktop 2.4.11 has one consistent version and the exact 麓鸣 product name", async () => {
+test("Desktop 2.4.12 has one consistent version and the exact 麓鸣 product name", async () => {
   const [packageJson, packageLock, tauriConfig, cargoToml, cargoLock] = await Promise.all([
     readJson("package.json"),
     readJson("package-lock.json"),
@@ -21,26 +21,25 @@ test("Desktop 2.4.11 has one consistent version and the exact 麓鸣 product nam
     readFile(path.join(launcherRoot, "src-tauri", "Cargo.lock"), "utf8"),
   ]);
 
-  assert.equal(packageJson.version, "2.4.11");
-  assert.equal(packageLock.version, "2.4.11");
-  assert.equal(packageLock.packages[""].version, "2.4.11");
-  assert.equal(tauriConfig.version, "2.4.11");
+  assert.equal(packageJson.version, "2.4.12");
+  assert.equal(packageLock.version, "2.4.12");
+  assert.equal(packageLock.packages[""].version, "2.4.12");
+  assert.equal(tauriConfig.version, "2.4.12");
   assert.equal(tauriConfig.productName, "麓鸣");
   assert.equal(tauriConfig.app.windows[0].title, "麓鸣");
-  assert.match(cargoToml, /^version = "2\.4\.11"$/m);
-  assert.match(cargoLock, /\[\[package\]\]\s+name = "app"\s+version = "2\.4\.11"/m);
+  assert.match(cargoToml, /^version = "2\.4\.12"$/m);
+  assert.match(cargoLock, /\[\[package\]\]\s+name = "app"\s+version = "2\.4\.12"/m);
 });
 
-test("2.4.11 release notes state desktop fixes and preserve the phone boundary", async () => {
+test("2.4.12 release notes state desktop fixes and preserve the phone boundary", async () => {
   const notes = await readFile(releaseNotesPath, "utf8");
 
-  assert.match(notes, /麓鸣 Desktop `2\.4\.11`/);
+  assert.match(notes, /麓鸣 Desktop `2\.4\.12`/);
   assert.match(notes, /LumiAgent `6\.67-stability`/);
   assert.match(notes, /versionCode `936`/);
-  assert.match(notes, /本 Desktop 发布说明不声明或发布新的 Phone 构建；当前 2\.4\.11 集成线包含 Phone 源码变化，但尚无 current-SHA APK 或真机验证证据。/);
+  assert.match(notes, /本 Desktop 发布说明不声明或发布新的 Phone 构建/);
   assert.doesNotMatch(notes, /不修改或重新构建手机端/);
-  assert.match(notes, /退出登录/);
-  assert.match(notes, /identityChanged/);
-  assert.match(notes, /DeepSeek/);
-  assert.match(notes, /Responses API/);
+  assert.match(notes, /matrix\.devices/);
+  assert.match(notes, /自动刷新/);
+  assert.match(notes, /安全快照/);
 });
