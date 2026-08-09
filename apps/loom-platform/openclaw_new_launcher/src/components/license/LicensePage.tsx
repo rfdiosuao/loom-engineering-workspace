@@ -285,7 +285,6 @@ export const LicensePage: React.FC = () => {
 
   const loggedIn = Boolean(account?.loggedIn);
   const accountWritable = loggedIn && !usingCachedAccount;
-  const subscriptionIsCached = Boolean(subscription?.offline || subscription?.stale);
   const paymentWritable = loggedIn
     && paymentCatalog?.payment.configured === true
     && Boolean(paymentCatalog.payment.channels?.length);
@@ -404,7 +403,7 @@ export const LicensePage: React.FC = () => {
       setSubscription(resp.subscription || null);
       if (!quiet) {
         if (resp.subscription?.offline || resp.subscription?.stale) {
-          const message = resp.subscription?.message || '余额与套餐显示上次快照；服务恢复后可重新刷新。';
+          const message = resp.subscription?.message || '余额与套餐暂时无法更新，请稍后再试。';
           setStatusText(message);
           showToast(message, 'info');
         } else {
@@ -732,7 +731,7 @@ export const LicensePage: React.FC = () => {
 
   const syncModels = async () => {
     if (!accountWritable) {
-      const message = '当前显示上次安全快照，请先重试在线验证后再同步模型。';
+      const message = '账户状态正在自动更新，请稍后再同步模型。';
       setStatusText(message);
       showToast(message, 'info');
       return;
@@ -884,14 +883,6 @@ export const LicensePage: React.FC = () => {
             <div className="flex flex-wrap gap-3">
               <button
                 type="button"
-                onClick={() => void refresh()}
-                disabled={loading || busy}
-                className="h-10 rounded-[8px] border border-border bg-surface-alt px-4 text-sm font-black text-text transition hover:border-accent/50 disabled:opacity-55"
-              >
-                {usingCachedAccount ? '重试在线验证' : '刷新账号'}
-              </button>
-              <button
-                type="button"
                 onClick={() => setCurrentPage('models')}
                 className="h-10 rounded-[8px] bg-accent px-4 text-sm font-black text-accent-ink transition hover:bg-accent-hover"
               >
@@ -900,27 +891,6 @@ export const LicensePage: React.FC = () => {
             </div>
           </div>
         </header>
-
-        {usingCachedAccount ? (
-          <div
-            data-account-cache-warning
-            role="status"
-            className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-status-warning bg-status-warning-soft px-6 py-3 text-sm text-status-warning-ink xl:px-8"
-          >
-            <div>
-              <span className="font-black">当前显示上次安全快照，账号待在线验证。</span>
-              <span className="ml-2">余额和套餐状态仅供参考；授权码仍可提交在线验证。</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => void refresh()}
-              disabled={loading || busy}
-              className="h-8 rounded-[8px] border border-status-warning px-3 text-xs font-black disabled:opacity-55"
-            >
-              重试在线验证
-            </button>
-          </div>
-        ) : null}
 
         <main className="loom-account-main min-h-0 flex-1 overflow-y-auto px-6 py-6 xl:px-8">
           <div className="loom-account-layout mx-auto grid w-full max-w-[1320px] gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
@@ -1046,14 +1016,6 @@ export const LicensePage: React.FC = () => {
                   <p className="mt-1 text-xs leading-5 text-text-muted">充值、消耗记录、API 密钥和模型订阅均由服务端同步；订阅可在麓鸣内扫码购买。</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span
-                    className={subscriptionIsCached
-                      ? 'rounded-full bg-status-warning-soft px-3 py-1 text-xs font-black text-status-warning-ink'
-                      : 'rounded-full bg-accent/10 px-3 py-1 text-xs font-black text-accent'}
-                    data-subscription-provenance
-                  >
-                    {subscriptionIsCached ? '上次快照' : '在线数据'}
-                  </span>
                   <button
                     type="button"
                     onClick={() => loadSubscription(false)}

@@ -243,7 +243,7 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertNotIn("await checkLicense();", paid_block)
         self.assertNotIn("await loadSubscription(true);", paid_block)
 
-    def test_account_page_uses_cached_safe_snapshot_before_manual_refresh(self) -> None:
+    def test_account_page_uses_cached_safe_snapshot_before_automatic_refresh(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             page_source = handle.read()
         with open(STARTUP_CACHE_FILE, "r", encoding="utf-8") as handle:
@@ -260,11 +260,14 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("delete entitlement.licenseCode", cache_source)
         self.assertIn("delete entitlement.redeemCode", cache_source)
         self.assertIn("usingCachedAccount", page_source)
-        self.assertIn("当前显示上次安全快照", page_source)
-        self.assertIn("待在线验证", page_source)
+        self.assertIn("void refresh({ background: true });", page_source)
+        self.assertNotIn("data-account-cache-warning", page_source)
+        self.assertNotIn("当前显示上次安全快照", page_source)
+        self.assertNotIn("data-subscription-provenance", page_source)
+        self.assertNotIn("上次快照' : '在线数据", page_source)
         self.assertNotIn("LoggedInPanel", page_source)
 
-    def test_account_refresh_verifies_logged_in_accounts_online_and_labels_subscription_cache(self) -> None:
+    def test_account_refresh_verifies_logged_in_accounts_online_without_exposing_cache_provenance(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
@@ -272,9 +275,8 @@ class AccountUiContractTests(unittest.TestCase):
         subscription_block = source.split("const loadSubscription =", 1)[1].split("const sendEmailCode =", 1)[0]
         self.assertIn("accountApi.sync()", refresh_block)
         self.assertIn("accountApi.current()", refresh_block)
-        self.assertIn("subscriptionIsCached", source)
-        self.assertIn("上次快照", source)
-        self.assertIn("在线数据", source)
+        self.assertNotIn("subscriptionIsCached", source)
+        self.assertNotIn("data-subscription-provenance", source)
         self.assertIn("resp.subscription?.offline || resp.subscription?.stale", subscription_block)
         self.assertNotIn("showToast('订阅信息已更新', 'success')", subscription_block)
 
@@ -290,6 +292,10 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn('授权码将直接提交给在线授权服务验证', logged_in)
         self.assertNotIn('<InfoPanel label="购买入口"', logged_in)
         self.assertNotIn('accent />', logged_in)
+        header = logged_in.split("</header>", 1)[0]
+        self.assertNotIn("onClick={() => void refresh()}", header)
+        self.assertNotIn("重试在线验证", header)
+        self.assertIn("模型选择", header)
 
     def test_logged_in_account_page_localizes_internal_subscription_values(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
