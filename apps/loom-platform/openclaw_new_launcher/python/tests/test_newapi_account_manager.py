@@ -64,13 +64,13 @@ class NewApiAccountManagerTests(unittest.TestCase):
             manager._write_session({
                 "source": ACCOUNT_SOURCE,
                 "memberId": "newapi:current",
-                "memberToken": "sk-current-session-not-real",
+                "memberToken": "sk-current-not-real",
                 "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "current"},
             })
             legacy_manager._write_session({
                 "source": ACCOUNT_SOURCE,
                 "memberId": "newapi:changed-legacy",
-                "memberToken": "sk-changed-legacy-session-not-real",
+                "memberToken": "sk-changed-not-real",
                 "newApi": {"baseUrl": DEFAULT_BASE_URL, "userId": "changed-legacy"},
             })
 
