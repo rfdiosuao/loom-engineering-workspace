@@ -1,7 +1,7 @@
 import type { AgentBootstrapResponse, AgentRun } from '../../types/agent';
 import { APP_NATIVE_AGENT_NAME } from '../../version';
 import { LoomAgentMark } from '../brand/LoomBrand';
-import { userFacingAgentError } from './agentViewModel';
+import { agentExecutionGate, userFacingAgentError } from './agentViewModel';
 
 interface AgentHeaderProps {
   bootstrap: AgentBootstrapResponse | null;
@@ -34,14 +34,22 @@ export function AgentHeader({
   targetCount,
   streamStatus,
 }: AgentHeaderProps) {
+  const executionGate = agentExecutionGate(bootstrap);
   const nativeProfile = bootstrap?.runtimeProfiles.find((profile) => profile.runtimeProfileId === 'loom-native');
-  const nativeState = nativeProfile?.available
-    ? '模型已就绪'
-    : nativeProfile?.error
-      ? userFacingAgentError({ error: nativeProfile.error }).title
-      : '等待模型账号';
+  const nativeState = executionGate.blocked
+    ? executionGate.title
+    : nativeProfile?.available
+      ? '模型已就绪'
+      : nativeProfile?.error
+        ? userFacingAgentError({ error: nativeProfile.error }).title
+        : '等待模型账号';
   const availableCapabilities = bootstrap?.capabilities.filter((capability) => capability.available).length || 0;
   const permissionCount = Object.values(bootstrap?.permissions || {}).filter(Boolean).length;
+  const capabilityLabel = !bootstrap
+    ? '能力加载中'
+    : executionGate.blocked
+      ? `${availableCapabilities} 项能力（授权后可用）`
+      : `${availableCapabilities} 项能力`;
   const executing = run?.status === 'queued' || run?.status === 'running';
 
   return (
@@ -59,8 +67,8 @@ export function AgentHeader({
             <span aria-hidden="true">/</span>
             <span className="truncate">{nativeState}</span>
             <span aria-hidden="true">/</span>
-            <span className="shrink-0">{availableCapabilities} 项能力</span>
-            {permissionCount > 0 ? <span className="shrink-0">/ {permissionCount} 项授权</span> : null}
+            <span className="shrink-0">{capabilityLabel}</span>
+            {!executionGate.blocked && permissionCount > 0 ? <span className="shrink-0">/ {permissionCount} 项授权</span> : null}
           </div>
         </div>
       </div>

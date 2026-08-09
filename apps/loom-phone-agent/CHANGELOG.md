@@ -1,5 +1,23 @@
 # 更新日志
 
+## v6.67 - 2026-08-03
+
+- Skill 中心可从麓鸣生产服务下载独立的 `Lumi Linux Runtime` companion，并在安装前校验 HTTPS、APK SHA256、包名、最低版本与签名证书。
+- 修复主 APK 未内置 Linux 运行时时只返回 `companion_missing`、没有可操作安装流程的问题；安装完成返回 Skill 中心后会自动初始化并自检。
+- PRoot/Alpine 仍保持独立 companion 边界，主 APK 不直接打包 GPLv3 组合代码，companion 不申请网络权限且只开放白名单 Skill。
+- Android 默认版更新为 `6.67-stability`，Android 7 兼容版更新为 `6.67-stability-android7`，versionCode 更新为 `936`，与麓鸣 Desktop 2.4.6 配套。
+
+## v6.66 - 2026-08-02
+
+### Skill 与 Linux 运行时候选
+- 保留首屏 Skill 中心、成功流程沉淀与第二次确定性快速复用能力。
+- 保留独立安装的 PRoot/Alpine companion；主 APK 不内置 rootfs，也不开放任意 Shell 或脚本执行。
+- 固定 Skill ID、签名级 IPC、工作区隔离、哈希/SBOM 校验和失败回滚边界保持不变。
+
+### 版本
+- Android 默认版更新为 `6.66-stability`，Android 7 兼容版更新为 `6.66-stability-android7`，versionCode 更新为 `935`。
+- 本版为与麓鸣 Desktop 2.4.5 配套的本地发布候选，不代表 PRoot companion 已通过商业发行或实体机性能门禁。
+
 ## v6.63 - 2026-07-29
 
 ### One-time Pairing

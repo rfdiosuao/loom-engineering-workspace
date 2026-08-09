@@ -1,5 +1,11 @@
 package com.apk.claw.android.server
 
+enum class PairingTransportMode {
+    AUTO,
+    USB,
+    LAN
+}
+
 object PcPairingReadinessPolicy {
     data class Result(
         val ready: Boolean,
@@ -13,7 +19,8 @@ object PcPairingReadinessPolicy {
     fun evaluate(
         lanIp: String?,
         serverRunning: Boolean,
-        serverPort: Int?
+        serverPort: Int?,
+        transportMode: PairingTransportMode = PairingTransportMode.AUTO
     ): Result {
         if (!serverRunning || serverPort == null) {
             return Result(
@@ -26,7 +33,23 @@ object PcPairingReadinessPolicy {
             )
         }
         val ip = lanIp.orEmpty().trim()
-        val transport = if (ip.isBlank()) "usb" else "lan"
+        val transport = when (transportMode) {
+            PairingTransportMode.USB -> "usb"
+            PairingTransportMode.LAN -> {
+                if (ip.isBlank()) {
+                    return Result(
+                        ready = false,
+                        baseUrl = "",
+                        transportHint = "lan",
+                        errorCode = "config_lan_unavailable",
+                        message = "当前没有可用的局域网地址，请改用 USB 配对或检查网络后重试。",
+                        retryable = true
+                    )
+                }
+                "lan"
+            }
+            PairingTransportMode.AUTO -> if (ip.isBlank()) "usb" else "lan"
+        }
         val host = if (transport == "usb") "127.0.0.1" else ip
         return Result(
             ready = true,

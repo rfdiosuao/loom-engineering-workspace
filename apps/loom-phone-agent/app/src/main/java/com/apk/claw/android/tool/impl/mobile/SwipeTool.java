@@ -58,6 +58,11 @@ public class SwipeTool extends BaseTool {
         if (boundsError != null) return ToolResult.error(boundsError);
         boundsError = validateCoordinates(endX, endY);
         if (boundsError != null) return ToolResult.error(boundsError);
+        long deltaX = (long) endX - startX;
+        long deltaY = (long) endY - startY;
+        if (deltaX * deltaX + deltaY * deltaY < 24L * 24L) {
+            return ToolResult.error("Swipe distance is too short; use tap or long_press for point actions");
+        }
         long duration = optionalLong(params, "duration_ms", 500);
         boolean success = service.performSwipe(startX, startY, endX, endY, duration);
         return success ? ToolResult.success("Swiped from (" + startX + ", " + startY + ") to (" + endX + ", " + endY + ")")

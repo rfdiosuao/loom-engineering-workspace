@@ -516,6 +516,52 @@ def activate_code(body: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def account_redeem_service_configured() -> bool:
+    return account_entitlements.account_redeem_service_configured(settings=SETTINGS)
+
+
+def account_redeem_service_token_valid(headers: Any) -> bool:
+    return account_entitlements.account_redeem_service_token_valid(
+        headers,
+        settings=SETTINGS,
+    )
+
+
+def redeem_account_entitlement(
+    body: dict[str, Any],
+    *,
+    request_ip: str = "",
+) -> dict[str, Any]:
+    return account_entitlements.redeem_account_entitlement(
+        body,
+        connect_fn=connect,
+        code_hash_fn=code_hash,
+        request_ip=request_ip,
+        utc_now_fn=utc_now,
+    )
+
+
+def current_account_entitlement(account_id: Any) -> dict[str, Any]:
+    return account_entitlements.current_account_entitlement(
+        account_id,
+        connect_fn=connect,
+    )
+
+
+def migrate_legacy_account_entitlement(
+    body: dict[str, Any],
+    *,
+    request_ip: str = "",
+) -> dict[str, Any]:
+    return account_entitlements.migrate_legacy_account_entitlement(
+        body,
+        connect_fn=connect,
+        request_ip=request_ip,
+        settings=SETTINGS,
+        utc_now_fn=utc_now,
+    )
+
+
 __all__ = [
     "beta_today",
     "get_beta_config",
@@ -569,4 +615,9 @@ __all__ = [
     "member_response",
     "find_member_license",
     "activate_code",
+    "account_redeem_service_configured",
+    "account_redeem_service_token_valid",
+    "redeem_account_entitlement",
+    "current_account_entitlement",
+    "migrate_legacy_account_entitlement",
 ]

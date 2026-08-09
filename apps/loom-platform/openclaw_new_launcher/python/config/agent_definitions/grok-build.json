@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "grok-build",
+  "name": "Grok Build",
+  "description": "xAI 官方终端编程智能体；Windows 安装脚本无固定哈希，麓鸣仅做身份探测并引导官方安装。",
+  "officialUrl": "https://docs.x.ai/build/overview",
+  "sourceUrl": "https://github.com/xai-org/grok-build",
+  "installMode": "official_manual",
+  "providerConfigMode": "verified_schema",
+  "installCommand": [],
+  "uninstallCommand": [],
+  "commandNames": ["grok"],
+  "compatibility": "官方支持 Windows；自定义模型需在写入前完成 OpenAI 兼容协议与工具调用探测",
+  "sandbox": true,
+  "priority": "P1"
+}

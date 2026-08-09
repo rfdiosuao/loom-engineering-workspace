@@ -145,7 +145,7 @@ class PhoneFastPathContractTests(unittest.TestCase):
         self.assertGreaterEqual(routes_source.count("timeout_sec=_PHONE_OBSERVE_TIMEOUT_SEC"), 2)
         self.assertGreaterEqual(routes_source.count("step_timeout_sec=_PHONE_OBSERVE_STEP_TIMEOUT_SEC"), 2)
         self.assertGreaterEqual(routes_source.count("exact_timeout=True"), 2)
-        self.assertIn("env=phone_process_env(ctx)", process_source)
+        self.assertIn("env=phone_process_env(ctx, allowed_device_ids)", process_source)
         self.assertEqual(routes_phone._PHONE_RUNTIME_CONFIG_ENV, "LOOM_PHONE_RUNTIME_CONFIG_JSON")
 
 

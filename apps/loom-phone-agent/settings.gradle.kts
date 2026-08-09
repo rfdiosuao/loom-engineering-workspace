@@ -28,3 +28,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AgentPhone"
 include(":app")
+include(":linux-runtime")

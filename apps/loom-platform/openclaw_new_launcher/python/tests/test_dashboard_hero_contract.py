@@ -27,7 +27,10 @@ class DashboardHeroContractTests(unittest.TestCase):
         self.assertNotIn("restoredVerificationReady", source)
         self.assertNotIn("useState<ComponentSnapshot | null>(null)", source)
         self.assertIn('aria-label="开始配置"', source)
-        self.assertIn('aria-label="查看可做的事"', source)
+        self.assertIn('aria-label="连接手机"', source)
+        self.assertIn("onClick={() => setCurrentPage('phone')}", source)
+        self.assertIn('aria-label="打开矩阵工作台"', source)
+        self.assertIn("onClick={() => setCurrentPage('workbench')}", source)
         self.assertIn("让 AI 带着手机干活", source)
 
         self.assertTrue(os.path.exists(HERO_ASSET))

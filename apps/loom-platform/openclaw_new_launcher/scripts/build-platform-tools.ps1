@@ -63,8 +63,13 @@ $legacyChineseDisplayName = "*" +
   [string][char]0x9E93 + [char]0x9E23 + "AI" +
   [char]0x77E9 + [char]0x9635 + [char]0x83B7 + [char]0x5BA2 +
   [char]0x5DE5 + [char]0x4F5C + [char]0x53F0 + "*"
+$currentChineseDisplayName = "*" + [string][char]0x9E93 + [char]0x9E23 + "*"
 foreach ($entry in @(Get-ItemProperty $uninstallRoots -ErrorAction SilentlyContinue)) {
-  if ($entry.DisplayName -notlike "*Luming AI Matrix Acquisition Workbench*" -and $entry.DisplayName -notlike $legacyChineseDisplayName) {
+  if (
+    $entry.DisplayName -notlike $currentChineseDisplayName -and
+    $entry.DisplayName -notlike "*Luming AI Matrix Acquisition Workbench*" -and
+    $entry.DisplayName -notlike $legacyChineseDisplayName
+  ) {
     continue
   }
   $installLocation = [string]$entry.InstallLocation

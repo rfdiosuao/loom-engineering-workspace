@@ -112,7 +112,7 @@ export const AUDIT_FEISHU_STATUS = {
 };
 
 const COMPONENT_NAMES: Record<string, [string, string]> = {
-  'codex-desktop': ['ChatGPT Codex 原版', 'OpenAI 官方 ChatGPT 桌面应用，内含 Codex，由 Microsoft Store 安装和更新'],
+  'codex-desktop': ['Codex Desktop', 'OpenAI 官方 Codex 桌面应用，由 Microsoft Store 安装和更新'],
   'claude-code': ['Claude Code', 'Anthropic 命令行编程智能体'],
   opencode: ['opencode', '终端优先的 AI 编程工具'],
   'openclaw-companion': ['OpenClaw', '多智能体编程工作台'],

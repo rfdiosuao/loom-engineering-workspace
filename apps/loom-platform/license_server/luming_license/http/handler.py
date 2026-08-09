@@ -4,7 +4,14 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable
 
 from .responses import ResponseMixin
-from . import routes_admin, routes_auth, routes_public, routes_relay
+from . import (
+    routes_admin,
+    routes_auth,
+    routes_payments,
+    routes_public,
+    routes_relay,
+    routes_service,
+)
 
 
 Route = Callable[[Any, Any], None]
@@ -25,12 +32,16 @@ GET_ROUTES = _merge_route_tables(
     routes_auth.GET_ROUTES,
     routes_admin.GET_ROUTES,
     routes_relay.GET_ROUTES,
+    routes_service.GET_ROUTES,
+    routes_payments.GET_ROUTES,
 )
 POST_ROUTES = _merge_route_tables(
     routes_public.POST_ROUTES,
     routes_auth.POST_ROUTES,
     routes_admin.POST_ROUTES,
     routes_relay.POST_ROUTES,
+    routes_service.POST_ROUTES,
+    routes_payments.POST_ROUTES,
 )
 HEAD_ROUTES = _merge_route_tables(routes_public.HEAD_ROUTES)
 ROUTE_INVENTORY = frozenset(GET_ROUTES) | frozenset(POST_ROUTES)
@@ -178,5 +189,18 @@ class Handler(ResponseMixin, BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, fmt: str, *args: Any) -> None:
+        # BaseHTTPRequestHandler passes the full request target to this method.
+        # Access-log only the path: payment callbacks carry signatures, nonces and
+        # provider transaction identifiers in their query string.
+        safe_args = list(args)
+        if safe_args and isinstance(safe_args[0], str):
+            request_line = safe_args[0]
+            parts = request_line.split(" ", 2)
+            if len(parts) == 3 and parts[0].isalpha():
+                parsed = self.facade.urlparse(parts[1])
+                safe_args[0] = f"{parts[0]} {parsed.path or '/'} {parts[2]}"
         printer = getattr(self.facade, "print", print)
-        printer(f"[{self.facade.utc_now()}] {self.address_string()} {fmt % args}")
+        printer(
+            f"[{self.facade.utc_now()}] {self.address_string()} "
+            f"{fmt % tuple(safe_args)}"
+        )

@@ -121,9 +121,23 @@ class ModelCatalogTests(unittest.TestCase):
     def test_model_catalog_errors_are_structured_localized_and_retryable_when_safe(self) -> None:
         expected = {
             "selected_model_not_listed": ("selected_model_not_listed", False, None),
+            "http_401": ("provider_authentication_failed", False, 401),
+            "http_403": ("provider_permission_denied", False, 403),
             "http_404": ("protocol_endpoint_not_found", False, 404),
+            "http_408": ("upstream_request_timeout", True, 408),
+            "http_429": ("upstream_rate_limited", True, 429),
+            "http_500": ("upstream_internal_error", True, 500),
+            "http_502": ("upstream_bad_gateway", True, 502),
             "http_503": ("upstream_temporarily_unavailable", True, 503),
+            "http_504": ("upstream_gateway_timeout", True, 504),
+            "http_520": ("upstream_gateway_unknown_error", True, 520),
+            "http_521": ("upstream_origin_unreachable", True, 521),
+            "http_522": ("upstream_connection_timeout", True, 522),
+            "http_523": ("upstream_origin_dns_failed", True, 523),
             "http_524": ("upstream_response_timeout", True, 524),
+            "network_error: getaddrinfo failed": ("provider_dns_failed", True, None),
+            "network_error: certificate verify failed": ("provider_tls_failed", False, None),
+            "network_error: connection reset by peer": ("provider_connection_reset", True, None),
         }
 
         for raw, (code, retryable, status_code) in expected.items():

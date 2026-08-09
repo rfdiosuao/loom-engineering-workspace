@@ -5,116 +5,255 @@ REMOTE_DIR="${LICENSE_REMOTE_DIR:-/opt/openclaw-license}"
 SERVICE_NAME="${LICENSE_SERVICE_NAME:-openclaw-license}"
 SERVICE_USER="${LICENSE_SERVICE_USER:-openclaw-license}"
 SERVER_UPLOAD="${LICENSE_SERVER_UPLOAD:-/tmp/openclaw-license-server.py}"
+PACKAGE_UPLOAD="${LICENSE_PACKAGE_UPLOAD:-/tmp/openclaw-license-luming_license}"
+DEPLOY_ENV_HELPER="${LICENSE_DEPLOY_ENV_HELPER:-$PACKAGE_UPLOAD/deploy_env.py}" # luming_license/deploy_env.py
 ADMIN_HTML_UPLOAD="${LICENSE_ADMIN_HTML_UPLOAD:-/tmp/openclaw-license-admin_console.html}"
 RELAY_ENV_FILE="${LICENSE_RELAY_ENV_FILE:-$REMOTE_DIR/openclaw-license.env}"
+LICENSE_DB_PATH="${LICENSE_DB:-$REMOTE_DIR/license.db}"
 LOCAL_BASE_URL="${LICENSE_LOCAL_BASE_URL:-http://127.0.0.1:18791}"
 RELAY_TOKEN="${OPENCLAW_PUBLISH_RELAY_TOKEN:-${PUBLISH_RELAY_TOKEN:-}}"
+HEALTH_RETRY_ATTEMPTS="${LICENSE_HEALTH_RETRY_ATTEMPTS:-30}"
+HEALTH_RETRY_DELAY_SEC="${LICENSE_HEALTH_RETRY_DELAY_SEC:-1}"
+REQUIRE_ZPAY_READY="${LICENSE_REQUIRE_ZPAY_READY:-0}"
+dropin_dir="${LICENSE_SYSTEMD_DROPIN_DIR:-/etc/systemd/system/${SERVICE_NAME}.service.d}"
 
-echo "======================================"
-echo "OpenClaw license server deploy"
-echo "======================================"
-echo ""
-
-cd "$REMOTE_DIR"
-
-if ! id "$SERVICE_USER" >/dev/null 2>&1; then
-  useradd --system --home-dir "$REMOTE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
-fi
-
-ts="$(date -u +%Y%m%d%H%M%S)"
-
-echo "[1/7] Backup current files"
-cp server.py "server.py.bak-$ts"
-if [ -f admin_console.html ]; then
-  cp admin_console.html "admin_console.html.bak-$ts"
-fi
-echo "backup=server.py.bak-$ts"
-echo ""
-
-echo "[2/7] Validate upload"
-if [ ! -f "$SERVER_UPLOAD" ]; then
-  echo "missing upload: $SERVER_UPLOAD" >&2
-  echo "copy the new server.py to that path or set LICENSE_SERVER_UPLOAD" >&2
+case "$REMOTE_DIR" in
+  /*) ;;
+  *) echo "LICENSE_REMOTE_DIR must be absolute" >&2; exit 1 ;;
+esac
+if [ "$REMOTE_DIR" = "/" ]; then
+  echo "refusing to deploy into filesystem root" >&2
   exit 1
 fi
-sha256sum "$SERVER_UPLOAD"
-python3 -m py_compile "$SERVER_UPLOAD"
-echo ""
-
-echo "[3/7] Install server files"
-install -m 0644 "$SERVER_UPLOAD" "$REMOTE_DIR/server.py"
-if [ -f "$ADMIN_HTML_UPLOAD" ]; then
-  install -m 0644 "$ADMIN_HTML_UPLOAD" "$REMOTE_DIR/admin_console.html"
-else
-  echo "admin html upload not found, skipped: $ADMIN_HTML_UPLOAD"
+case "$dropin_dir" in
+  /*) ;;
+  *) echo "LICENSE_SYSTEMD_DROPIN_DIR must be absolute" >&2; exit 1 ;;
+esac
+if [ "$dropin_dir" = "/" ]; then
+  echo "refusing to use filesystem root as systemd drop-in directory" >&2
+  exit 1
 fi
-echo ""
+if ! [[ "$HEALTH_RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "LICENSE_HEALTH_RETRY_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$HEALTH_RETRY_DELAY_SEC" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "LICENSE_HEALTH_RETRY_DELAY_SEC must be a non-negative number" >&2
+  exit 1
+fi
+if [ "$REQUIRE_ZPAY_READY" != "0" ] && [ "$REQUIRE_ZPAY_READY" != "1" ]; then
+  echo "LICENSE_REQUIRE_ZPAY_READY must be 0 or 1" >&2
+  exit 1
+fi
 
-echo "[4/7] Configure publish relay environment"
-dropin_dir="/etc/systemd/system/${SERVICE_NAME}.service.d"
+echo "======================================"
+echo "OpenClaw license server guarded deploy"
+echo "======================================"
+
+service_user_ready=0
+if id "$SERVICE_USER" >/dev/null 2>&1; then
+  service_user_ready=1
+elif command -v useradd >/dev/null 2>&1; then
+  useradd --system --home-dir "$REMOTE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
+  service_user_ready=1
+else
+  echo "useradd unavailable; preserving existing ownership in this environment"
+fi
+
+cd "$REMOTE_DIR"
+ts="$(date -u +%Y%m%d%H%M%S)"
+backup_dir="$REMOTE_DIR/backups/deploy-$ts"
+cache="$(mktemp -d)"
+next=""
+switched=0
+relay_updated=0
+env_existed=0
+admin_switched=0
+
+wait_for_health() {
+  attempt=1
+  while [ "$attempt" -le "$HEALTH_RETRY_ATTEMPTS" ]; do
+    if curl -fsS "$LOCAL_BASE_URL/health" > "$cache/health.json"; then
+      echo "health=ready attempts=$attempt"
+      return 0
+    fi
+    if [ "$attempt" -eq "$HEALTH_RETRY_ATTEMPTS" ]; then
+      return 1
+    fi
+    sleep "$HEALTH_RETRY_DELAY_SEC"
+    attempt=$((attempt + 1))
+  done
+}
+
+finish() {
+  status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$relay_updated" -eq 1 ]; then
+    if [ "$env_existed" -eq 1 ] && [ -f "$backup_dir/openclaw-license.env" ]; then
+      install -m 0600 "$backup_dir/openclaw-license.env" "$RELAY_ENV_FILE"
+    else
+      rm -f -- "$RELAY_ENV_FILE"
+    fi
+    systemctl daemon-reload || true
+  fi
+  if [ "$status" -ne 0 ] && [ "$switched" -eq 1 ]; then
+    systemctl stop "$SERVICE_NAME" || true
+    if [ -f "$REMOTE_DIR/.server.py.pre-deploy" ]; then
+      rm -f -- "$REMOTE_DIR/server.py"
+      mv "$REMOTE_DIR/.server.py.pre-deploy" "$REMOTE_DIR/server.py"
+    fi
+    if [ -d "$REMOTE_DIR/.luming_license.pre-deploy" ]; then
+      rm -rf -- "$REMOTE_DIR/luming_license"
+      mv "$REMOTE_DIR/.luming_license.pre-deploy" "$REMOTE_DIR/luming_license"
+    fi
+    if [ "$admin_switched" -eq 1 ] && [ -f "$REMOTE_DIR/.admin_console.html.pre-deploy" ]; then
+      rm -f -- "$REMOTE_DIR/admin_console.html"
+      mv "$REMOTE_DIR/.admin_console.html.pre-deploy" "$REMOTE_DIR/admin_console.html"
+    fi
+    systemctl start "$SERVICE_NAME" || true
+  fi
+  rm -rf -- "$cache"
+  if [ -n "$next" ] && [ -d "$next" ]; then
+    rm -rf -- "$next"
+  fi
+  exit "$status"
+}
+trap finish EXIT
+
+echo "[1/8] Validate current paths and create protected backup"
+test -f "$REMOTE_DIR/server.py"
+test -d "$REMOTE_DIR/luming_license"
+test -f "$LICENSE_DB_PATH"
+install -d -m 0700 "$backup_dir"
+cp -a "$REMOTE_DIR/server.py" "$backup_dir/server.py"
+cp -a "$REMOTE_DIR/luming_license" "$backup_dir/luming_license"
+if [ -f "$REMOTE_DIR/admin_console.html" ]; then
+  cp -a "$REMOTE_DIR/admin_console.html" "$backup_dir/admin_console.html"
+fi
+if [ -f "$RELAY_ENV_FILE" ]; then
+  env_existed=1
+  install -m 0600 "$RELAY_ENV_FILE" "$backup_dir/openclaw-license.env"
+fi
+DEPLOY_DB_SOURCE="$LICENSE_DB_PATH" DEPLOY_DB_BACKUP="$backup_dir/license.db" python3 - <<'PY'
+import os
+import sqlite3
+
+source = sqlite3.connect(os.environ["DEPLOY_DB_SOURCE"])
+target = sqlite3.connect(os.environ["DEPLOY_DB_BACKUP"])
+try:
+    source.backup(target)
+finally:
+    target.close()
+    source.close()
+PY
+chmod 0600 "$backup_dir/license.db"
+echo "backup=$backup_dir"
+
+echo "[2/8] Validate complete modular upload"
+test -f "$SERVER_UPLOAD"
+test -d "$PACKAGE_UPLOAD"
+test -f "$PACKAGE_UPLOAD/__init__.py"
+test -f "$DEPLOY_ENV_HELPER"
+test -f "$PACKAGE_UPLOAD/http/routes_payments.py"
+mapfile -d '' package_files < <(find "$PACKAGE_UPLOAD" -type f -name '*.py' -print0)
+test "${#package_files[@]}" -gt 0
+PYTHONPYCACHEPREFIX="$cache" python3 -m py_compile "$SERVER_UPLOAD" "${package_files[@]}"
+sha256sum "$SERVER_UPLOAD"
+echo "package_python_files=${#package_files[@]}"
+
+echo "[3/8] Build same-filesystem staging tree"
+next="$(mktemp -d "$REMOTE_DIR/.deploy-next.XXXXXX")"
+install -m 0644 "$SERVER_UPLOAD" "$next/server.py"
+cp -a "$PACKAGE_UPLOAD" "$next/luming_license"
+find "$next/luming_license" -type d -exec chmod 0755 {} +
+find "$next/luming_license" -type f -exec chmod 0644 {} +
+if [ -f "$ADMIN_HTML_UPLOAD" ]; then
+  install -m 0644 "$ADMIN_HTML_UPLOAD" "$next/admin_console.html"
+fi
+
+echo "[4/8] Preserve environment and verify entitlement credential"
 mkdir -p "$dropin_dir"
-cat > "$dropin_dir/publish-relay.conf" <<EOF
+cat > "$dropin_dir/runtime-env.conf" <<EOF
 [Service]
 EnvironmentFile=-$RELAY_ENV_FILE
 EOF
-
 if [ -n "$RELAY_TOKEN" ]; then
-  export RELAY_ENV_FILE RELAY_TOKEN
-  umask 077
-  python3 - <<'PY'
-import os
-
-
-def env_line(name, value):
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("$", "\\$")
-        .replace("`", "\\`")
-        .replace("\r", "")
-        .replace("\n", "")
-    )
-    return f'{name}="{escaped}"\n'
-
-with open(os.environ["RELAY_ENV_FILE"], "w", encoding="utf-8") as file:
-    file.write("# Generated by deploy.sh.\n")
-    file.write(env_line("OPENCLAW_PUBLISH_RELAY_TOKEN", os.environ["RELAY_TOKEN"]))
-PY
-  chmod 600 "$RELAY_ENV_FILE"
+  DEPLOY_ENV_FILE="$RELAY_ENV_FILE" \
+  DEPLOY_ENV_NAME="OPENCLAW_PUBLISH_RELAY_TOKEN" \
+  DEPLOY_ENV_VALUE="$RELAY_TOKEN" \
+    python3 "$DEPLOY_ENV_HELPER"
+  relay_updated=1
   echo "relay_token=configured"
-else
-  echo "relay_token=not configured; relay endpoints will remain fail-closed"
 fi
-chown -R "$SERVICE_USER:$SERVICE_USER" "$REMOTE_DIR"
+DEPLOY_ENV_FILE="$RELAY_ENV_FILE" \
+DEPLOY_ENV_REQUIRE_NAME="LICENSE_ACCOUNT_REDEEM_SERVICE_TOKEN" \
+  python3 "$DEPLOY_ENV_HELPER"
+echo "entitlement_service_token=configured"
+if [ "$REQUIRE_ZPAY_READY" = "1" ]; then
+  DEPLOY_ENV_FILE="$RELAY_ENV_FILE" \
+  DEPLOY_ENV_VALIDATE_ZPAY="1" \
+    python3 "$DEPLOY_ENV_HELPER"
+  echo "zpay=configured"
+fi
 systemctl daemon-reload
-echo ""
 
-echo "[5/7] Restart service"
-systemctl restart "$SERVICE_NAME"
-sleep 2
-systemctl is-active "$SERVICE_NAME"
-echo ""
+echo "[5/8] Guarded atomic program switch"
+systemctl stop "$SERVICE_NAME"
+switched=1
+mv "$REMOTE_DIR/server.py" "$REMOTE_DIR/.server.py.pre-deploy"
+mv "$REMOTE_DIR/luming_license" "$REMOTE_DIR/.luming_license.pre-deploy"
+mv "$next/server.py" "$REMOTE_DIR/server.py"
+mv "$next/luming_license" "$REMOTE_DIR/luming_license"
+if [ -f "$next/admin_console.html" ]; then
+  if [ -f "$REMOTE_DIR/admin_console.html" ]; then
+    mv "$REMOTE_DIR/admin_console.html" "$REMOTE_DIR/.admin_console.html.pre-deploy"
+  fi
+  mv "$next/admin_console.html" "$REMOTE_DIR/admin_console.html"
+  admin_switched=1
+fi
+if [ "$service_user_ready" -eq 1 ]; then
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$REMOTE_DIR"
+fi
+systemctl start "$SERVICE_NAME"
+systemctl is-active --quiet "$SERVICE_NAME"
 
-echo "[6/7] Smoke test"
-curl -fsS "$LOCAL_BASE_URL/health"
-echo ""
-curl -sS -X POST "$LOCAL_BASE_URL/api/member/activate" \
-  -H 'Content-Type: application/json' \
-  -d '{"code":"INVALID-SMOKE","installId":"smoke","deviceId":"smoke"}'
-echo ""
+echo "[6/8] Read-only health, database and route smoke"
+wait_for_health
+DEPLOY_DB_SOURCE="$LICENSE_DB_PATH" python3 - <<'PY'
+import os
+import sqlite3
+
+with sqlite3.connect(os.environ["DEPLOY_DB_SOURCE"]) as connection:
+    result = connection.execute("pragma quick_check").fetchone()
+if not result or result[0] != "ok":
+    raise SystemExit(1)
+PY
+route_status="$(curl -sS -o "$cache/entitlement-route.json" -w '%{http_code}' \
+  -X POST "$LOCAL_BASE_URL/api/service/account-entitlements/current" \
+  -H 'Content-Type: application/json' -d '{}')"
+test "$route_status" = "401"
+echo "entitlement_route=ready"
+payment_route_status="$(curl -sS -o "$cache/payment-route.json" -w '%{http_code}' \
+  -X POST "$LOCAL_BASE_URL/api/service/payments/plans" \
+  -H 'Content-Type: application/json' -d '{}')"
+test "$payment_route_status" = "401"
+echo "payment_route=ready"
 if [ -n "$RELAY_TOKEN" ]; then
   curl -fsS "$LOCAL_BASE_URL/api/lumi/relay/health" \
-    -H "Authorization: Bearer $RELAY_TOKEN"
-  echo ""
+    -H "Authorization: Bearer $RELAY_TOKEN" >/dev/null
 fi
-echo ""
 
-echo "[7/7] Key files"
-echo "license.db: $( [ -f license.db ] && echo present || echo missing )"
-echo "private_key.b64: $( [ -f private_key.b64 ] && echo present || echo missing )"
-echo "admin_token.txt: $( [ -f admin_token.txt ] && echo present || echo missing )"
-echo "relay env: $( [ -f "$RELAY_ENV_FILE" ] && echo present || echo missing )"
-echo ""
-echo "======================================"
+echo "[7/8] Disarm rollback and clean superseded program paths"
+switched=0
+trap - EXIT
+rm -f -- "$REMOTE_DIR/.server.py.pre-deploy"
+rm -rf -- "$REMOTE_DIR/.luming_license.pre-deploy"
+rm -f -- "$REMOTE_DIR/.admin_console.html.pre-deploy"
+rm -rf -- "$next" "$cache"
+
+echo "[8/8] Final status"
+echo "service=active"
+echo "database_quick_check=ok"
+echo "program_files=server.py+luming_license"
+echo "backup=$backup_dir"
 echo "Deploy complete"
-echo "======================================"

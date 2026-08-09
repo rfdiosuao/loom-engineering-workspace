@@ -1,0 +1,73 @@
+{
+  "schema": "loom.mobile-linux-runtime.v1",
+  "runtime": {
+    "componentId": "lumi-linux-companion",
+    "delivery": "optional_companion",
+    "state": "ready",
+    "userEnabled": true,
+    "artifactDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "sbomDigest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    "bundledInApk": false,
+    "rootfsBundled": false
+  },
+  "scope": {
+    "accountId": "account-a",
+    "customerId": "customer-a",
+    "workspaceId": "workspace-a"
+  },
+  "resources": {
+    "memoryMiB": 384,
+    "storageMiB": 1024,
+    "maxProcesses": 8,
+    "maxInputBytes": 1048576,
+    "maxOutputBytes": 2097152,
+    "taskTimeoutMs": 60000
+  },
+  "workspace": {
+    "rootHandle": "workspace:account-a.customer-a.workspace-a",
+    "inputMount": "read_only",
+    "outputMount": "isolated",
+    "credentialHandlesOnly": true,
+    "allowAppPrivateData": false,
+    "allowSystemPaths": false,
+    "allowOtherAccountWorkspaces": false,
+    "allowHostSockets": false
+  },
+  "network": {
+    "defaultDeny": true,
+    "allowedProviderDomains": ["api.example.com"],
+    "credentialInjection": "one_time_vault_handle",
+    "credentialReadable": false
+  },
+  "entrypoints": [
+    {
+      "id": "workspace.text.batch",
+      "sourceDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "inputMode": "workspace_handle",
+      "outputMode": "isolated_artifact_handle",
+      "arbitraryArguments": false
+    }
+  ],
+  "nativeInterop": {
+    "typedGatewayOnly": true,
+    "allowShizukuBinder": false,
+    "allowRish": false,
+    "allowRootShell": false,
+    "allowArbitraryCommands": false
+  },
+  "trace": {
+    "maxOutputChars": 2048,
+    "includeCredentialValues": false,
+    "includeUserContent": false,
+    "digestIdentifiers": true
+  },
+  "cleanup": {
+    "nativeFallback": true,
+    "preserveUserFiles": true,
+    "deleteRegenerableOnly": true
+  },
+  "performanceClaims": {
+    "entityBenchmarkRequired": true,
+    "syntheticResultMayClaimSpeedup": false
+  }
+}

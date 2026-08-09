@@ -41,4 +41,28 @@ class ConfigServerStatusBuilderTest {
         assertTrue(target["configServerPort"].isJsonNull)
         assertEquals(9527, target["serverPort"].asInt)
     }
+
+    @Test
+    fun running_status_exposes_all_network_candidates_and_primary_mode() {
+        val target = JsonObject()
+
+        ConfigServerStatusBuilder.addTo(
+            target = target,
+            running = true,
+            address = "192.168.43.1:9527",
+            actualPort = 9527,
+            defaultPort = 9527,
+            candidates = listOf(
+                PhoneNetworkCandidate("ap0", "192.168.43.1", PhoneNetworkMode.HOTSPOT_HOST),
+                PhoneNetworkCandidate("wlan0", "192.168.1.9", PhoneNetworkMode.WIFI_CLIENT)
+            )
+        )
+
+        assertEquals("hotspot-host", target["networkMode"].asString)
+        assertTrue(target["usbLoopbackAvailable"].asBoolean)
+        val candidates = target["networkCandidates"].asJsonArray
+        assertEquals(2, candidates.size())
+        assertEquals("http://192.168.43.1:9527", candidates[0].asJsonObject["baseUrl"].asString)
+        assertEquals("wifi-client", candidates[1].asJsonObject["mode"].asString)
+    }
 }

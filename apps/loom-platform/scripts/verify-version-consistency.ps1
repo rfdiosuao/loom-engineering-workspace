@@ -1,8 +1,12 @@
+[CmdletBinding()]
 param(
-    [string]$TagName = ""
+    [string]$TagName = "",
+    [string]$ExpectedVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
+$hasTagName = $PSBoundParameters.ContainsKey("TagName")
+$hasExpectedVersion = $PSBoundParameters.ContainsKey("ExpectedVersion")
 
 $Root = Split-Path -Parent $PSScriptRoot
 
@@ -22,30 +26,79 @@ function Resolve-LauncherDir {
 
 $LauncherDir = Resolve-LauncherDir
 $TauriDir = Join-Path $LauncherDir "src-tauri"
+$JsonEmptyPropertyName = "__LOOM_JSON_EMPTY_PROPERTY__"
 
-function Read-JsonVersion {
+function Read-JsonDocument {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
         throw "Missing file: $Path"
     }
+
     $text = Get-Content -LiteralPath $Path -Raw
-    if ($text -match '"version"\s*:\s*"(?<version>[^"]+)"') {
-        return $Matches["version"]
+    $reservedToken = '"' + $JsonEmptyPropertyName + '"'
+    if ($text.Contains($reservedToken)) {
+        throw "Reserved JSON property name '$JsonEmptyPropertyName' appears in $Path"
     }
-    throw "Unable to read version from $Path"
+
+    $normalizedText = [regex]::Replace(
+        $text,
+        '""(?=\s*:)',
+        $reservedToken
+    )
+    try {
+        return ConvertFrom-Json -InputObject $normalizedText -ErrorAction Stop
+    } catch {
+        throw "Unable to parse JSON from ${Path}: $($_.Exception.Message)"
+    }
+}
+
+function Get-RequiredJsonPropertyValue {
+    param(
+        [object]$Document,
+        [string]$Name,
+        [string]$Context
+    )
+
+    if ($null -eq $Document) {
+        throw "Missing JSON property '$Name' in $Context"
+    }
+    $lookupName = if ($Name -ceq "") { $JsonEmptyPropertyName } else { $Name }
+    $properties = @(
+        $Document.PSObject.Properties |
+            Where-Object { $_.Name -ceq $lookupName }
+    )
+    if ($properties.Count -ne 1) {
+        throw "Missing JSON property '$Name' in $Context"
+    }
+    return $properties[0].Value
+}
+
+function Get-RequiredJsonStringProperty {
+    param(
+        [object]$Document,
+        [string]$Name,
+        [string]$Context
+    )
+
+    $value = Get-RequiredJsonPropertyValue -Document $Document -Name $Name -Context $Context
+    if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) {
+        throw "JSON property '$Name' in $Context must be a non-empty string"
+    }
+    return $value
+}
+
+function Read-JsonVersion {
+    param([string]$Path)
+    $document = Read-JsonDocument -Path $Path
+    return Get-RequiredJsonStringProperty -Document $document -Name "version" -Context $Path
 }
 
 function Read-PackageLockRootPackageVersion {
     param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) {
-        throw "Missing file: $Path"
-    }
-    $text = Get-Content -LiteralPath $Path -Raw
-    $matches = [regex]::Matches($text, '"version"\s*:\s*"([^"]+)"')
-    if ($matches.Count -lt 2) {
-        throw "Unable to read root package version from $Path"
-    }
-    return $matches[1].Groups[1].Value
+    $document = Read-JsonDocument -Path $Path
+    $packages = Get-RequiredJsonPropertyValue -Document $document -Name "packages" -Context $Path
+    $rootPackage = Get-RequiredJsonPropertyValue -Document $packages -Name "" -Context "$Path packages"
+    return Get-RequiredJsonStringProperty -Document $rootPackage -Name "version" -Context "$Path packages['']"
 }
 
 function Read-CargoPackageVersion {
@@ -81,34 +134,39 @@ function Read-CargoLockPackageVersion {
     }
 
     $inPackage = $false
-    $matchedName = $false
-    $version = ""
-    foreach ($line in Get-Content -LiteralPath $Path) {
+    $currentName = ""
+    $currentVersion = ""
+    $matchedVersions = @()
+    $lines = @(Get-Content -LiteralPath $Path) + "[[package]]"
+    foreach ($line in $lines) {
         if ($line -match '^\[\[package\]\]\s*$') {
-            if ($inPackage -and $matchedName -and -not [string]::IsNullOrWhiteSpace($version)) {
-                return $version
+            if ($inPackage -and $currentName -ceq $PackageName) {
+                $matchedVersions += [string]$currentVersion
             }
             $inPackage = $true
-            $matchedName = $false
-            $version = ""
+            $currentName = ""
+            $currentVersion = ""
             continue
         }
         if (-not $inPackage) {
             continue
         }
         if ($line -match '^name\s*=\s*"(?<name>[^"]+)"') {
-            $matchedName = $Matches["name"] -eq $PackageName
+            $currentName = $Matches["name"]
             continue
         }
         if ($line -match '^version\s*=\s*"(?<version>[^"]+)"') {
-            $version = $Matches["version"]
+            $currentVersion = $Matches["version"]
         }
     }
 
-    if ($inPackage -and $matchedName -and -not [string]::IsNullOrWhiteSpace($version)) {
-        return $version
+    if ($matchedVersions.Count -ne 1) {
+        throw "Expected exactly one Cargo.lock package named '$PackageName' in $Path; found $($matchedVersions.Count)"
     }
-    throw "Unable to read Cargo.lock package version for $PackageName from $Path"
+    if ([string]::IsNullOrWhiteSpace($matchedVersions[0])) {
+        throw "Cargo.lock package '$PackageName' in $Path has an empty version"
+    }
+    return $matchedVersions[0]
 }
 
 $packageJsonVersion = Read-JsonVersion (Join-Path $LauncherDir "package.json")
@@ -137,11 +195,12 @@ foreach ($entry in $versions.GetEnumerator()) {
     }
 }
 
-if (-not [string]::IsNullOrWhiteSpace($TagName)) {
-    $tagVersion = $TagName -replace '^v', ''
-    if ($tagVersion -ne $expected) {
-        $mismatches += "tag=$TagName, expected v$expected"
-    }
+if ($hasExpectedVersion -and $ExpectedVersion -cne $expected) {
+    $mismatches += "expected-version=$ExpectedVersion, package.json=$expected"
+}
+
+if ($hasTagName -and $TagName -cne "v$expected") {
+    $mismatches += "tag=$TagName, expected v$expected"
 }
 
 if ($mismatches.Count -gt 0) {

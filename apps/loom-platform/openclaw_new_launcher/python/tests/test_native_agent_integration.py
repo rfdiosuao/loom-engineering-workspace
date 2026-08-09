@@ -98,7 +98,8 @@ class NativeAgentIntegrationTests(unittest.TestCase):
             mcp_provider=lambda: [],
             cli_catalog_provider=lambda: {"domains": []},
         )
-        client = LoomModelClient(FakeAccount(managed_session()), transport=transport)
+        account = FakeAccount(managed_session())
+        client = LoomModelClient(account, transport=transport)
         model_results: list[dict] = []
         complete = client.complete
 
@@ -111,7 +112,12 @@ class NativeAgentIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             with patch.object(subprocess, "Popen") as popen, patch.object(subprocess, "run") as run_process:
-                service = AgentService(AppPaths(root), model_client=client, capabilities=registry)
+                service = AgentService(
+                    AppPaths(root),
+                    account_manager=account,
+                    model_client=client,
+                    capabilities=registry,
+                )
                 try:
                     self.assertIsInstance(service.runtime, LoomNativeRuntimeAdapter)
                     session = service.create_session({"title": "Native"})

@@ -176,6 +176,71 @@ def classify_model_catalog_error(error: Any, *, status_code: int | None = None) 
             "当前账号没有返回可用的模型目录，请检查账号分组或上游配置。",
             retryable=False,
         )
+    status_errors = {
+        401: (
+            "provider_authentication_failed",
+            "Provider 拒绝了当前 API Key，请检查密钥或账号登录状态。",
+            False,
+        ),
+        403: (
+            "provider_permission_denied",
+            "当前账号没有访问该模型或协议的权限，请检查账号分组与模型授权。",
+            False,
+        ),
+        408: (
+            "upstream_request_timeout",
+            "Provider 接收请求超时，请检查网络或稍后重试。",
+            True,
+        ),
+        429: (
+            "upstream_rate_limited",
+            "Provider 当前限流，请稍后重试并检查账号额度或并发限制。",
+            True,
+        ),
+        500: (
+            "upstream_internal_error",
+            "上游模型服务内部异常，请稍后重试；持续出现时请联系服务方。",
+            True,
+        ),
+        502: (
+            "upstream_bad_gateway",
+            "Provider 网关未收到有效的上游响应，请稍后重试或切换服务节点。",
+            True,
+        ),
+        504: (
+            "upstream_gateway_timeout",
+            "Provider 网关等待上游超时，请稍后重试或切换服务节点。",
+            True,
+        ),
+        520: (
+            "upstream_gateway_unknown_error",
+            "Provider 网关收到未知上游错误，请稍后重试或联系服务方。",
+            True,
+        ),
+        521: (
+            "upstream_origin_unreachable",
+            "Provider 的源站拒绝连接，请稍后重试或切换服务节点。",
+            True,
+        ),
+        522: (
+            "upstream_connection_timeout",
+            "Provider 网关连接源站超时，请稍后重试或切换服务节点。",
+            True,
+        ),
+        523: (
+            "upstream_origin_dns_failed",
+            "Provider 网关无法解析或到达源站，请检查服务域名或联系服务方。",
+            True,
+        ),
+    }
+    if status in status_errors:
+        code, message, retryable = status_errors[status]
+        return _error(
+            code,
+            message,
+            retryable=retryable,
+            status_code=status,
+        )
     if status == 404:
         return _error(
             "protocol_endpoint_not_found",
@@ -203,6 +268,41 @@ def classify_model_catalog_error(error: Any, *, status_code: int | None = None) 
             "上游模型服务异常，请稍后重试。",
             retryable=True,
             status_code=status,
+        )
+    if any(marker in raw for marker in (
+        "getaddrinfo failed",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+        "dns_error",
+    )):
+        return _error(
+            "provider_dns_failed",
+            "无法解析 Provider 域名，请检查 Base URL、DNS 或代理设置。",
+            retryable=True,
+        )
+    if any(marker in raw for marker in (
+        "certificate verify failed",
+        "certificate_verify_failed",
+        "ssl_error",
+        "tls_error",
+        "wrong version number",
+    )):
+        return _error(
+            "provider_tls_failed",
+            "Provider 的 TLS 证书或加密连接校验失败，请检查系统时间、证书链和 HTTPS 地址。",
+            retryable=False,
+        )
+    if any(marker in raw for marker in (
+        "connection reset",
+        "connectionreseterror",
+        "winerror 10054",
+        "errno 104",
+    )):
+        return _error(
+            "provider_connection_reset",
+            "Provider 重置了连接，请检查代理与防火墙后重试。",
+            retryable=True,
         )
     if "network_error" in raw or "timeout" in raw:
         return _error(

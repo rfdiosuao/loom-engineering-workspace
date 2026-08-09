@@ -12,6 +12,7 @@ import com.apk.claw.android.utils.XLog
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import com.apk.claw.android.skill.FirstRunSkillPromotionPolicy
 
 /**
  * 工作流模板管理器
@@ -651,6 +652,26 @@ object WorkflowTemplateManager {
             saveTemplates()
         }
         return draft
+    }
+
+    /**
+     * Stores a learned Skill. A deterministic read-only source run may become active immediately;
+     * all other trajectories are persisted as drafts and keep the strict validation lifecycle.
+     */
+    fun saveLearnedSkill(template: WorkflowTemplate): WorkflowTemplate? {
+        val promoted = FirstRunSkillPromotionPolicy.promoteIfEligible(template)
+        if (promoted.status == TemplateStatus.DRAFT) return saveDraft(promoted)
+        if (promoted.status != TemplateStatus.ACTIVE || promoted.executionMode != HYBRID_EXECUTION_MODE ||
+            promoted.id.isBlank() || promoted.revision <= 0 || promoted.targetPackage.isBlank() ||
+            !DeviceProfileProvider.isTrustedProfileId(promoted.targetProfileId)
+        ) return null
+        initialize()
+        synchronized(lifecycleLock) {
+            if (templates.containsKey(promoted.id)) return null
+            templates[promoted.id] = promoted
+            saveTemplates()
+        }
+        return promoted
     }
 
     fun canRunHybridFastPath(template: WorkflowTemplate, freshProfileId: String): Boolean =

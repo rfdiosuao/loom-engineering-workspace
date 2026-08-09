@@ -18,6 +18,8 @@ if PYTHON_DIR not in sys.path:
 
 REPO_ROOT = os.path.dirname(PYTHON_DIR)
 
+from tests.matrix_test_support import matrix_for_test
+
 
 class FeishuAcquisitionIntegrationContractTests(unittest.TestCase):
     def test_doctor_reports_missing_cli_without_installing(self) -> None:
@@ -594,7 +596,7 @@ class FeishuAcquisitionIntegrationContractTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             flow = matrix.create_acquisition_demo_flow({"topic": "飞书线索", "leadSummary": "用户需要报价"})
             snapshot = matrix.acquisition_snapshot()
 

@@ -13,9 +13,14 @@ if PYTHON_DIR not in sys.path:
 
 
 from core.paths import AppPaths
+from core.account_entitlement import AccountEntitlementError
 from core.agent_policy import AgentPolicyEngine
-from core.phone_matrix import MatrixControlPlane
 from services.agent_service import AgentService
+from tests.matrix_test_support import (
+    MatrixTestEntitlement,
+    matrix_context_for_test,
+    matrix_for_test,
+)
 
 
 class MatrixDispatchRuntime:
@@ -57,16 +62,49 @@ class EscapingPhoneRuntime:
 
 
 class AgentMatrixIntegrationTests(unittest.TestCase):
+    def test_default_agent_matrix_factory_enforces_account_phone_entitlement(self) -> None:
+        class LimitedEntitlement(MatrixTestEntitlement):
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                if "phone-b" in device_ids:
+                    raise AccountEntitlementError(
+                        "当前账号绑定的手机数量超过系统安全上限。",
+                        code="device_limit_exceeded",
+                        action="contact_support",
+                    )
+                return {"authorized": True}
+
+        with tempfile.TemporaryDirectory() as root:
+            paths = AppPaths(root)
+            entitlement = LimitedEntitlement(paths)
+            context = matrix_context_for_test(paths, entitlement=entitlement)
+            service = AgentService(
+                paths,
+                runtime=MatrixDispatchRuntime(),
+                context_factory=lambda: context,
+            )
+            try:
+                matrix = service._matrix_factory()
+                matrix.register_device({"deviceId": "phone-a", "online": True})
+                with self.assertRaisesRegex(
+                    AccountEntitlementError,
+                    "当前账号绑定的手机数量超过系统安全上限",
+                ):
+                    matrix.register_device({"deviceId": "phone-b", "online": True})
+            finally:
+                service.shutdown()
+
     def test_agent_dispatch_creates_real_campaign_and_replayable_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             paths = AppPaths(root)
-            matrix = MatrixControlPlane(paths)
+            matrix = matrix_for_test(paths)
             matrix.register_device({"deviceId": "phone-a", "online": True, "group": "recruiting"})
             matrix.register_device({"deviceId": "phone-b", "online": True, "group": "recruiting"})
+            context = matrix_context_for_test(paths)
             service = AgentService(
                 paths,
                 runtime=MatrixDispatchRuntime(),
                 policy=AgentPolicyEngine(approval_mode="strong"),
+                context_factory=lambda: context,
             )
             try:
                 session = service.create_session({"title": "Recruiting Matrix"})
@@ -136,8 +174,13 @@ class AgentMatrixIntegrationTests(unittest.TestCase):
     def test_native_phone_tool_cannot_escape_the_agent_request_scope(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             paths = AppPaths(root)
-            MatrixControlPlane(paths).register_device({"deviceId": "phone-a", "online": True})
-            service = AgentService(paths, runtime=EscapingPhoneRuntime())
+            matrix_for_test(paths).register_device({"deviceId": "phone-a", "online": True})
+            context = matrix_context_for_test(paths)
+            service = AgentService(
+                paths,
+                runtime=EscapingPhoneRuntime(),
+                context_factory=lambda: context,
+            )
             try:
                 session = service.create_session({"title": "Phone scope"})
                 response = service.send_message(session["sessionId"], {

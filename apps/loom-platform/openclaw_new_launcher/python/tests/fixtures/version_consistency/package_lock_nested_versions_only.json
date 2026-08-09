@@ -1,0 +1,12 @@
+{
+  "name": "loom-launcher",
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/first": {
+      "version": "2.4.11"
+    },
+    "node_modules/second": {
+      "version": "2.4.11"
+    }
+  }
+}

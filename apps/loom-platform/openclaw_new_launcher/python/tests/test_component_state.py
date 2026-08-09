@@ -16,6 +16,23 @@ from core.component_state import ComponentStateStore
 
 
 class ComponentStateStoreTests(unittest.TestCase):
+    def test_detection_evidence_round_trips_without_losing_nested_items(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ComponentStateStore(os.path.join(temp_dir, "components-state.json"))
+            evidence = {
+                "identity": "codex-desktop",
+                "available": True,
+                "healthy": True,
+                "reason": "精确 Store 包与入口均通过",
+                "nextAction": "可以启动",
+                "items": [{"kind": "package", "label": "Store 包", "value": "OpenAI.Codex", "status": "ok"}],
+            }
+
+            store.mark("codex-desktop", "ready", version="26.721.4979.0", detection=evidence)
+
+            loaded = store.load()["codex-desktop"]
+            self.assertEqual(loaded.detection, evidence)
+
     def test_write_falls_back_when_windows_replace_is_denied(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "components-state.json")

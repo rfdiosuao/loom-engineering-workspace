@@ -6,6 +6,7 @@ import {
   markCalls,
   navigateTo,
   proxyIntents,
+  waitForProxyIntent,
 } from './support/control-audit';
 import { AUDIT_MATRIX_WITH_DEVICE } from './support/control-audit-data';
 
@@ -20,6 +21,8 @@ const NATIVE_AGENT_BOOTSTRAP = {
   ],
   defaultModelId: 'glm-5',
   capabilities: [],
+  executionAccess: { authorized: true, code: 'ok', message: '' },
+  permissions: { read: true, control: true, outbound: true, critical: false },
 };
 
 const SESSION = {
@@ -193,6 +196,34 @@ async function registerMatrixDeepLinkRoutes(audit: AuditHarness) {
 
 test.beforeEach(async ({ audit }) => {
   await audit.openAuthorizedShell();
+});
+
+test('agent startup failure blocks new conversations and reconnects without exposing backend English', async ({ audit, page }, testInfo) => {
+  await audit.registerRoute('GET', '/api/agent/bootstrap', {
+    error: 'agent resource not found',
+  });
+  await audit.registerRoute('GET', '/api/agent/sessions?limit=100', {
+    error: 'agent resource not found',
+  });
+  await expect(page.locator('[data-loom-splash]')).toBeHidden({ timeout: 12_000 });
+
+  await navigateTo(audit, 'agent');
+  const main = appMain(page);
+  const unavailable = main.getByRole('alert').filter({ hasText: '智能体暂不可用' });
+  await expect(unavailable).toBeVisible();
+  await expect(unavailable).toContainText('当前智能体资源已不存在');
+  await expect(main.getByText('agent resource not found', { exact: true })).toHaveCount(0);
+  await expect(main.getByRole('button', { name: /暂不能新建对话/ })).toBeDisabled();
+  await page.screenshot({ path: testInfo.outputPath('agent-startup-recovery.png'), fullPage: false });
+
+  await audit.registerRoute('GET', '/api/agent/bootstrap', { value: NATIVE_AGENT_BOOTSTRAP });
+  await audit.registerRoute('GET', '/api/agent/sessions?limit=100', { value: { sessions: [] } });
+  await unavailable.getByRole('button', { name: '重新连接' }).click();
+
+  await expect(unavailable).toBeHidden();
+  await expect(main.getByRole('button', { name: '新建对话', exact: true })).toBeEnabled();
+  await expect(main.getByText('连接失败', { exact: true })).toHaveCount(0);
+  await expect(main.getByText('未连接', { exact: true })).toBeVisible();
 });
 
 test('central agent debugs runs, resolves approvals, manages sessions, and deep-links to the exact phone', async ({ audit, page }) => {
@@ -603,18 +634,25 @@ test('matrix confirmation is scoped to the current dispatch inputs and supported
 
   const beforeDispatch = await markCalls(audit);
   await main.getByRole('button', { name: '下发任务' }).click();
-  await expectProxyIntent(audit, beforeDispatch, {
-    method: 'POST',
-    path: '/api/matrix/dispatch',
-    body: {
+  const dispatchIntent = await waitForProxyIntent(audit, beforeDispatch, 'POST', '/api/matrix/dispatch');
+  const dispatchBody = dispatchIntent.body as { campaignId: string; deviceAssignments: Array<{ assignmentId: string }> };
+  expect(dispatchBody).toEqual({
+    schema: 'loom.matrix.dispatch.v2',
+    campaignId: expect.stringMatching(/^campaign_ui_\d+_[0-9a-f]+$/),
+    concurrency: 1,
+    mode: 'full',
+    profile: 'deep',
+    deviceAssignments: [{
+      assignmentId: expect.any(String),
+      deviceId: 'phone-audit-1',
       prompt: '发布更新后的审核任务',
       templateId: 'template-two',
-      target: { deviceIds: ['phone-audit-1'] },
-      mode: 'full',
-      profile: 'deep',
-      confirmed: true,
-    },
+      input: { sharedTemplate: { templateId: 'template-two' } },
+      timeoutSec: 180,
+      retryBudget: 1,
+    }],
   });
+  expect(dispatchBody.deviceAssignments[0].assignmentId).toBe(`${dispatchBody.campaignId}_assignment_1`);
   await main.getByRole('button', { name: '高级参数' }).click();
   await expect(confirmation).not.toBeChecked();
 });

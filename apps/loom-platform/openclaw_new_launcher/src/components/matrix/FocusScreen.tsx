@@ -3,10 +3,12 @@ import React from 'react';
 import type { MatrixScreenFrame } from './screenScheduler';
 import type { MatrixManualAction } from './ManualControls';
 import { normalizeObjectContainPoint } from './matrixViewModel';
+import type { PhoneVideoStreamView } from './usePhoneVideoStream';
 
 interface FocusScreenProps {
   deviceName: string;
   frame?: MatrixScreenFrame;
+  video?: PhoneVideoStreamView;
   manualEnabled: boolean;
   controlsEnabled: boolean;
   error?: string;
@@ -21,12 +23,19 @@ interface PointerStart {
   at: number;
 }
 
-function normalizedPoint(event: React.PointerEvent<HTMLDivElement>, frame?: MatrixScreenFrame) {
-  if (!frame) return null;
+function normalizedPoint(
+  event: React.PointerEvent<HTMLDivElement>,
+  frame?: MatrixScreenFrame,
+  video?: PhoneVideoStreamView,
+) {
+  const media = video?.status === 'active' && video.width > 0 && video.height > 0
+    ? { width: video.width, height: video.height }
+    : frame;
+  if (!media) return null;
   const bounds = event.currentTarget.getBoundingClientRect();
   return normalizeObjectContainPoint(
     { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height },
-    { width: frame.width, height: frame.height },
+    { width: media.width, height: media.height },
     { x: event.clientX, y: event.clientY },
   );
 }
@@ -34,6 +43,7 @@ function normalizedPoint(event: React.PointerEvent<HTMLDivElement>, frame?: Matr
 export const FocusScreen: React.FC<FocusScreenProps> = ({
   deviceName,
   frame,
+  video,
   manualEnabled,
   controlsEnabled,
   error,
@@ -55,7 +65,7 @@ export const FocusScreen: React.FC<FocusScreenProps> = ({
       onPointerDown={(event) => {
         onSelect();
         if (!controlsEnabled) return;
-        const point = normalizedPoint(event, frame);
+        const point = normalizedPoint(event, frame, video);
         if (!point) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         pointerStart.current = { ...point, at: Date.now() };
@@ -63,7 +73,7 @@ export const FocusScreen: React.FC<FocusScreenProps> = ({
       onPointerUp={(event) => {
         if (!controlsEnabled || !pointerStart.current) return;
         const start = pointerStart.current;
-        const end = normalizedPoint(event, frame);
+        const end = normalizedPoint(event, frame, video);
         pointerStart.current = null;
         if (!end) return;
         const distance = Math.hypot(end.x - start.x, end.y - start.y);
@@ -72,7 +82,9 @@ export const FocusScreen: React.FC<FocusScreenProps> = ({
       }}
       onPointerCancel={() => { pointerStart.current = null; }}
     >
-      {frame ? (
+      {video?.status === 'active' ? (
+        <canvas ref={video.canvasRef} aria-label={`${deviceName} 低延迟画面`} className="h-full w-full select-none object-contain" />
+      ) : frame ? (
         <img src={frame.url} alt={`${deviceName} 聚焦画面`} draggable={false} className="h-full w-full select-none object-contain" />
       ) : (
         <div className="flex h-full items-center justify-center px-5 text-center text-[11px] text-white/55" role="status">等待设备返回聚焦画面</div>
@@ -107,6 +119,15 @@ export const FocusScreen: React.FC<FocusScreenProps> = ({
           >
             重试
           </button>
+        </div>
+      ) : null}
+      {video && video.status !== 'idle' ? (
+        <div
+          data-phone-video-state={video.status}
+          className={`pointer-events-none absolute inset-x-1 bottom-1 z-20 truncate rounded-[5px] px-2 py-1 text-[9px] ${video.status === 'active' ? 'bg-status-success-soft text-status-success-ink' : 'bg-status-warning-soft text-status-warning-ink'}`}
+          role="status"
+        >
+          {video.message || (video.status === 'active' ? '低延迟视频已连接' : '当前使用截图画面')}
         </div>
       ) : null}
       <div

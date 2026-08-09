@@ -88,6 +88,7 @@
     <!-- 设置 -->
     <string name="settings_title">设置</string>
     <string name="settings_group_channel">通道</string>
+    <string name="settings_group_connection">连接 LOOM</string>
     <string name="settings_group_model">模型</string>
     <string name="settings_group_display">显示</string>
     <string name="settings_group_publish">发布</string>
@@ -153,8 +154,9 @@
     <string name="menu_discord">Discord</string>
     <string name="menu_telegram">Telegram</string>
     <string name="menu_wechat">微信</string>
-    <string name="menu_lan_config">局域网配置</string>
+    <string name="menu_lan_config">连接方式与局域网</string>
     <string name="menu_pc_pairing">与 LOOM 配对</string>
+    <string name="menu_connection_diagnostics">连接诊断</string>
     <string name="menu_publish_relay">发布中转</string>
     <string name="menu_floating_circle_size">悬浮球大小</string>
     <string name="menu_floating_click_enabled">悬浮窗可点击和拖动</string>
@@ -164,13 +166,27 @@
     <string name="floating_size_medium">中</string>
     <string name="floating_size_large">大</string>
     <string name="floating_size_saved">悬浮球大小：%s</string>
-    <string name="lan_config_stopped">已关闭</string>
+    <string name="lan_config_stopped">服务已关闭</string>
+    <string name="lan_config_starting">正在启动…</string>
+    <string name="lan_config_stopping">正在关闭…</string>
+    <string name="lan_config_error">服务异常，请重试</string>
+    <string name="lan_config_switching">正在切换…</string>
+    <string name="lan_config_usb_ready">USB 可用</string>
+    <string name="lan_config_lan_ready">局域网可用：%1$s</string>
+    <string name="lan_config_hotspot_ready">热点可用：%1$s</string>
     <string name="lan_config_no_wifi">请连接 WiFi 或开启手机热点</string>
+    <string name="connection_diagnostics_title">连接诊断</string>
+    <string name="connection_diagnostics_action">查看</string>
+    <string name="connection_diagnostics_no_lan">没有局域网候选地址；USB 转发仍可独立使用</string>
+    <string name="connection_diagnostics_summary">配对：%1$s\n服务：%2$s\n网络模式：%3$s\n候选地址：\n%4$s</string>
 
     <!-- LOOM 配对 -->
     <string name="pc_pairing_title">与 LOOM 配对</string>
     <string name="pc_pairing_tip_usb">USB 配对可在电脑 LOOM 输入下面的 6 位码，也可以复制完整配对信息。长期凭据不会显示。</string>
     <string name="pc_pairing_tip_lan">局域网配对请在电脑 LOOM 扫码或粘贴完整配对信息。6 位码仅限 USB，长期凭据不会显示。</string>
+    <string name="pc_pairing_tip_lan_unavailable">当前无法使用局域网配对。请切换到 USB 配对，或检查网络后重试。</string>
+    <string name="pc_pairing_transport_usb">USB</string>
+    <string name="pc_pairing_transport_lan">局域网</string>
     <string name="pc_pairing_code">仅 USB：6 位配对码</string>
     <string name="pc_pairing_expiry">%1$d 秒后失效</string>
     <string name="pc_pairing_refresh">刷新配对信息</string>
@@ -180,6 +196,7 @@
     <string name="pc_pairing_server_failed">手机连接服务启动失败，请返回后重试。</string>
     <string name="pc_pairing_usb_ready">USB 配对已准备好，请连接电脑后在 LOOM 输入配对码。</string>
     <string name="pc_pairing_lan_ready">局域网配对已准备好，请在 LOOM 扫码或粘贴配对信息。</string>
+    <string name="pc_pairing_lan_unavailable">当前没有可用的局域网地址。请切换到 USB 配对，或检查网络后重试。</string>
     <string name="pc_pairing_status_paired">已配对</string>
     <string name="pc_pairing_status_unpaired">未配对</string>
 
@@ -329,4 +346,68 @@
     <string name="input_dialog_need_more">至少输入%d个字符</string>
     <string name="input_dialog_need_less">最多输入%d个字符</string>
     <string name="input_dialog_no_zero">请输入非零数值</string>
+
+    <!-- 可选增强设备能力 -->
+    <string name="settings_group_enhanced_capabilities">增强设备能力</string>
+    <string name="menu_enhanced_capability">Shizuku 增强能力</string>
+    <string name="enhanced_status_not_installed">未安装 · 标准模式</string>
+    <string name="enhanced_status_disabled">未开启 · 标准模式</string>
+    <string name="enhanced_status_service_stopped">服务未运行 · 标准模式</string>
+    <string name="enhanced_status_permission_required">需要授权</string>
+    <string name="enhanced_status_permission_denied">授权不可用 · 标准模式</string>
+    <string name="enhanced_status_ready">已就绪</string>
+    <string name="enhanced_status_root_disabled">Root/Sui 已禁用</string>
+    <string name="enhanced_status_standard">标准模式</string>
+    <string name="enhanced_dialog_title">Shizuku 增强设备能力</string>
+    <string name="enhanced_not_installed_message">尚未安装 Shizuku。LumiAgent 会保持标准模式并可正常使用；如需增强能力，可打开 Shizuku 官方指引安装。</string>
+    <string name="enhanced_open_official_guide">打开官方指引</string>
+    <string name="enhanced_keep_standard">保持标准模式</string>
+    <string name="enhanced_enable_message">是否开启本机 Shizuku 检测与授权？开启不会自动获得权限，且始终可以退回标准模式。</string>
+    <string name="enhanced_enable_action">开启检测</string>
+    <string name="enhanced_service_stopped_message">Shizuku 服务未启动或 Binder 已断开。请启动 Shizuku 后返回；LumiAgent 已自动降级到标准模式。</string>
+    <string name="enhanced_open_shizuku">打开 Shizuku</string>
+    <string name="enhanced_permission_message">Shizuku 已运行，但尚未授权 LumiAgent。下一步将由 Android 显示 Shizuku 官方授权弹窗。</string>
+    <string name="enhanced_request_permission">申请授权</string>
+    <string name="enhanced_request_failed">无法发起 Shizuku 授权</string>
+    <string name="enhanced_permission_denied_message">Shizuku 授权不可用或已被拒绝。可前往 Shizuku 检查，也可继续保持标准模式。</string>
+    <string name="enhanced_ready_message">Shizuku 授权已就绪。仅允许经过白名单和审批的类型化能力使用，不开放任意 Shell 或远程命令执行。</string>
+    <string name="enhanced_disable_action">关闭并使用标准模式</string>
+    <string name="enhanced_root_disabled_message">检测到 Root/Sui 身份。此版本默认禁用 Root/Sui 集成，LumiAgent 将保持标准模式。</string>
+    <string name="enhanced_standard_message">LumiAgent 正在使用标准模式。增强能力失败不会阻断配对、局域网/USB 连接或普通 Agent 任务。</string>
+    <string name="enhanced_open_failed">无法打开 Shizuku 或官方指引</string>
+
+    <!-- Skill 中心与可选 Linux 伴随运行时 -->
+    <string name="menu_skill_center">Skill 中心</string>
+    <string name="skill_center_title">Skill 中心</string>
+    <string name="skill_center_count">%1$d 个 Skill</string>
+    <string name="skill_center_intro">Agent 会把成功的确定性任务沉淀为可复用 Skill。只读、直接动作可在第二次快速调用；涉及副作用的流程仍需严格验证。</string>
+    <string name="skill_center_summary">%2$d 个 Skill，已有 %1$d 个可调用</string>
+    <string name="skill_runtime_title">Linux 运行时</string>
+    <string name="skill_runtime_checking">正在检查伴随组件和运行时完整性…</string>
+    <string name="skill_runtime_ready">PRoot 5.1.107.89 + Alpine 3.22.5 已就绪 · 默认禁止联网</string>
+    <string name="skill_runtime_installing">正在安装并执行离线健康检查…</string>
+    <string name="skill_runtime_downloading">正在下载并校验已签名的 Linux 伴随组件…</string>
+    <string name="skill_runtime_missing">尚未安装或初始化可选 Linux 伴随组件</string>
+    <string name="skill_runtime_damaged">运行时完整性检查失败，需要重新安装</string>
+    <string name="skill_runtime_disabled">Linux 运行时已停用；标准 Agent 能力不受影响</string>
+    <string name="skill_runtime_install">安装并自检 Linux 运行时</string>
+    <string name="skill_runtime_recheck">重新自检 Linux 运行时</string>
+    <string name="skill_runtime_install_success">Linux 运行时已就绪</string>
+    <string name="skill_runtime_install_failed">Linux 运行时安装失败：%1$s</string>
+    <string name="skill_runtime_unknown_sources">请允许 Lumi Agent Phone 安装已验证的伴随组件，然后返回这里继续。</string>
+    <string name="skill_runtime_confirm_install">Linux 伴随组件已通过包名、哈希和签名校验，请在 Android 系统界面确认安装。</string>
+    <string name="skill_runtime_install_cancelled">Linux 伴随组件没有完成安装，运行时未发生变更。</string>
+    <string name="skill_status_ready">已就绪 · Agent 可调用</string>
+    <string name="skill_status_needs_validation">已学习 · 完成验证后可自动复用</string>
+    <string name="skill_status_degraded">检测到运行差异，已暂停</string>
+    <string name="skill_status_disabled">已停用</string>
+    <string name="skill_status_runtime_required">需要 Linux 伴随组件</string>
+    <string name="skill_test_action">测试这个 Skill</string>
+    <string name="skill_agent_callable">Agent 可自动调用</string>
+    <string name="skill_test_result_title">Skill 测试结果</string>
+    <string name="skill_test_result_success">运行时：%1$s\n耗时：%2$d 毫秒\n\n%3$s</string>
+    <string name="skill_test_result_failed">测试失败：%1$s</string>
+    <string name="skill_delete_title">删除已学习的 Skill？</string>
+    <string name="skill_delete_message">确定删除“%1$s”吗？删除后无法恢复。</string>
+    <string name="skill_delete_action">删除</string>
 </resources>

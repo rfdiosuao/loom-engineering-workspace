@@ -20,6 +20,9 @@ TAURI_LIB = os.path.join(ROOT, "src-tauri", "src", "lib.rs")
 INSTALLER_HOOKS = os.path.join(ROOT, "src-tauri", "installer", "upgrade-hooks.nsh")
 HANDOFF_SCRIPT = os.path.join(ROOT, "src-tauri", "installer", "update-handoff.ps1")
 INSTALLER_PROCESS_CLEANUP = os.path.join(ROOT, "src-tauri", "installer", "stop-owned-install-processes.ps1")
+LEGACY_PRODUCT_MIGRATION = os.path.join(
+    ROOT, "src-tauri", "installer", "migrate-legacy-product-data.ps1"
+)
 UPDATE_RELEASE_SCRIPT = os.path.join(ROOT, "scripts", "prepare-desktop-update-release.ps1")
 UPDATE_SIGNER_SCRIPT = os.path.join(ROOT, "scripts", "sign-desktop-update.py")
 UPDATE_BRAND_CONFIG_SCRIPT = os.path.join(
@@ -382,6 +385,79 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertNotIn("$LOCALAPPDATA\\LOOM", source)
         self.assertNotIn("RMDir /r \"$INSTDIR\\data\"", source)
 
+    def test_direct_installer_migrates_legacy_product_data_without_overwrite(self) -> None:
+        self.assertIsNotNone(POWERSHELL_HOST)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            legacy_data = os.path.join(
+                temp_dir, "Luming AI Matrix Acquisition Workbench", "data"
+            )
+            install_root = os.path.join(temp_dir, "麓鸣")
+            os.makedirs(os.path.join(legacy_data, ".openclaw", "launcher"))
+            os.makedirs(os.path.join(install_root, "data", ".openclaw", "launcher"))
+            source_session = os.path.join(
+                legacy_data, ".openclaw", "launcher", "member-session.json"
+            )
+            target_session = os.path.join(
+                install_root, "data", ".openclaw", "launcher", "member-session.json"
+            )
+            source_config = os.path.join(legacy_data, ".openclaw", "openclaw.json")
+            os.makedirs(os.path.dirname(source_config), exist_ok=True)
+            with open(source_session, "w", encoding="utf-8") as handle:
+                handle.write("legacy-session")
+            with open(target_session, "w", encoding="utf-8") as handle:
+                handle.write("current-session")
+            with open(source_config, "w", encoding="utf-8") as handle:
+                handle.write("legacy-config")
+
+            result = subprocess.run(
+                [
+                    POWERSHELL_HOST,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    LEGACY_PRODUCT_MIGRATION,
+                    "-InstallRoot",
+                    install_root,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr or result.stdout)
+            with open(target_session, "r", encoding="utf-8") as handle:
+                self.assertEqual("current-session", handle.read())
+            with open(
+                os.path.join(install_root, "data", ".openclaw", "openclaw.json"),
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                self.assertEqual("legacy-config", handle.read())
+            self.assertTrue(os.path.isfile(source_session))
+            self.assertIn("copied=1", result.stdout)
+            self.assertIn("preserved=1", result.stdout)
+
+    def test_legacy_product_migration_is_exact_scoped_and_reparse_safe(self) -> None:
+        with open(LEGACY_PRODUCT_MIGRATION, "r", encoding="utf-8") as handle:
+            migration = handle.read()
+        with open(INSTALLER_HOOKS, "r", encoding="utf-8") as handle:
+            hooks = handle.read()
+
+        self.assertIn('"Luming AI Matrix Acquisition Workbench"', migration)
+        self.assertIn("[System.IO.Path]::GetFullPath", migration)
+        self.assertIn("ReparsePoint", migration)
+        self.assertIn("[System.IO.FileMode]::CreateNew", migration)
+        self.assertNotIn("Copy-Item", migration)
+        self.assertIn("migrate-legacy-product-data.ps1", hooks)
+        self.assertIn(
+            '"${__FILEDIR__}\\..\\..\\..\\..\\installer\\migrate-legacy-product-data.ps1"',
+            hooks,
+        )
+        self.assertIn("NSIS_HOOK_POSTINSTALL", hooks)
+
     def test_tauri_update_handoff_stops_bridge_and_uses_external_recovery_backup(self) -> None:
         with open(TAURI_LIB, "r", encoding="utf-8") as handle:
             source = handle.read()
@@ -390,11 +466,28 @@ class LosslessUpdateContractTests(unittest.TestCase):
 
         self.assertIn("prepare_update_install", source)
         self.assertIn("shutdown_backend().await", source)
-        self.assertIn('post_bridge_shutdown("/api/agent/shutdown").await;', source)
-        self.assertLess(
-            source.index('post_bridge_shutdown("/api/agent/shutdown").await;'),
-            source.index('post_bridge_shutdown("/api/process/stop").await;'),
+        self.assertIn(
+            'tauri::async_runtime::spawn(post_bridge_shutdown("/api/agent/shutdown"))',
+            source,
         )
+        self.assertIn(
+            'tauri::async_runtime::spawn(post_bridge_shutdown("/api/process/stop"))',
+            source,
+        )
+        self.assertIn(
+            'tauri::async_runtime::spawn(post_bridge_shutdown("/api/desktop-agent/stop"))',
+            source,
+        )
+        self.assertNotIn(
+            'post_bridge_shutdown("/api/agent/shutdown").await;',
+            source,
+        )
+        self.assertIn("Duration::from_secs(4)", source)
+        self.assertIn("fn update_test_mode_enabled()", source)
+        self.assertIn("#[cfg(debug_assertions)]", source)
+        self.assertIn("#[cfg(not(debug_assertions))]", source)
+        self.assertIn(".spawn();", source)
+        self.assertNotIn("let _ = command.output();", source)
         self.assertIn("upgrade-backups", source)
         self.assertIn('None => "LOOM"', source)
         self.assertIn("update_recovery_dir_name()", source)
@@ -430,6 +523,7 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("withdrew health confirmation", handoff)
         self.assertIn("ReparsePoint", handoff)
         self.assertIn("update-success.json", handoff)
+
         self.assertIn("update-failed.json", handoff)
         self.assertIn("acknowledge_update_health", source)
         self.assertNotIn('command.arg("-ManagedProcessIds")', source)
@@ -444,8 +538,8 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn('format!("{UPDATE_FILE_PREFIX}-")', source)
         self.assertIn("strip_prefix(&expected_prefix)", source)
         self.assertIn('strip_suffix("-setup.exe")', source)
-        self.assertIn('command.arg("-Version").arg(&target_version)', source)
-        self.assertIn('command.arg("-ReadyPath").arg(&ready_path)', source)
+        self.assertIn('command.arg("-Version").arg(args.target_version)', source)
+        self.assertIn('command.arg("-ReadyPath").arg(args.ready_path)', source)
         self.assertIn(
             "command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)",
             source,
@@ -453,11 +547,14 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("if ready_path.is_file()", source)
         self.assertIn("handoff_process.try_wait()", source)
         self.assertIn("app_handle.exit(0)", source)
-        self.assertNotIn("Duration::from_millis(1200)", source)
         self.assertIn(
             "shutdown_backend().await;\n                app_handle.exit(0);",
             source,
         )
+        self.assertIn("let forced_exit_app = app.clone();", source)
+        self.assertIn("std::thread::spawn(move ||", source)
+        self.assertIn("std::thread::sleep(Duration::from_secs(6));", source)
+        self.assertIn("forced_exit_app.exit(0);", source)
         self.assertLess(
             source.index("if ready_path.is_file()"),
             source.index("shutdown_backend().await"),
@@ -467,6 +564,16 @@ class LosslessUpdateContractTests(unittest.TestCase):
         self.assertIn("-PassThru", handoff)
         self.assertIn("$setupProcess.WaitForExit()", handoff)
         self.assertIn("$setupProcess.ExitCode", handoff)
+
+    def test_tauri_retries_zero_exit_handoff_through_encoded_command(self) -> None:
+        with open(TAURI_LIB, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        prepare = source.split("async fn prepare_update_install", 1)[1].split("Ok(recovery_root", 1)[0]
+        self.assertIn("spawn_update_handoff", prepare)
+        self.assertIn("spawn_update_handoff_encoded", prepare)
+        self.assertIn("status.success()", prepare)
+        self.assertIn("update-handoff-launch.log", prepare)
 
     def test_installer_hooks_never_kill_processes_by_global_image_name(self) -> None:
         with open(INSTALLER_HOOKS, "r", encoding="utf-8") as handle:

@@ -25,6 +25,7 @@ export const PAGE_REGISTRY: RegistryEntry[] = [
   { key: 'acquisition', readySelector: '[data-acquisition-workbench]' },
   { key: 'phone', readySelector: 'main h1:has-text("手机控制")' },
   { key: 'workbench', readySelector: '[data-matrix-command-bar]' },
+  { key: 'skills', readySelector: '[data-shared-skill-center]' },
   { key: 'agent', readySelector: '[data-agent-workbench]' },
   { key: 'license', readySelector: '[data-account-subscription-page]' },
   { key: 'agentAccess', readySelector: 'main h1:has-text("Agent 接入")' },

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
+import os
 import random
 import re
 import socket
@@ -606,6 +608,56 @@ def _conversation_history_content(item: Mapping[str, Any]) -> str:
     return "\n\n".join(text_blocks)
 
 
+def _user_attachment_content(request: Mapping[str, Any], prompt: str) -> str | list[dict[str, Any]]:
+    raw_attachments = request.get("attachments")
+    if not isinstance(raw_attachments, list) or not raw_attachments:
+        return redact_text(prompt)[:12000]
+
+    text_parts = [redact_text(prompt).strip()] if prompt.strip() else []
+    image_parts: list[dict[str, Any]] = []
+    for item in raw_attachments[:8]:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or "attachment")[:160]
+        kind = str(item.get("kind") or "").strip().lower()
+        mime = str(item.get("mime") or item.get("type") or "").strip().lower()
+        if kind == "text":
+            content = str(item.get("content") or "").strip()
+            if content:
+                text_parts.append(f"附件 {name}:\n{redact_text(content)}")
+            continue
+        if kind != "image" or mime not in {"image/gif", "image/jpeg", "image/png", "image/webp"}:
+            continue
+        path = os.path.abspath(str(item.get("path") or "").strip())
+        if not path or not os.path.isfile(path):
+            text_parts.append(f"附件 {name} 无法读取。")
+            continue
+        try:
+            if os.path.getsize(path) > 8 * 1024 * 1024:
+                text_parts.append(f"附件 {name} 超过模型输入限制。")
+                continue
+            with open(path, "rb") as handle:
+                encoded = base64.b64encode(handle.read()).decode("ascii")
+        except OSError:
+            text_parts.append(f"附件 {name} 无法读取。")
+            continue
+        image_parts.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{mime};base64,{encoded}",
+                "detail": "auto",
+            },
+        })
+
+    text = "\n\n".join(part for part in text_parts if part).strip()
+    if not image_parts:
+        return text[:12000]
+    return [
+        {"type": "text", "text": text[:12000] or "请分析所附图片。"},
+        *image_parts[:4],
+    ]
+
+
 def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) -> dict[str, Any]:
     capabilities = request.get("capabilities")
     canonical_to_alias, _alias_to_canonical = _model_tool_alias_maps(capabilities)
@@ -656,8 +708,12 @@ def build_chat_payload(profile: LoomModelProfile, request: Mapping[str, Any]) ->
             messages.append({"role": role, "content": redact_text(content)[:12000]})
 
     prompt = request.get("prompt")
-    if isinstance(prompt, str) and prompt.strip():
-        messages.append({"role": "user", "content": redact_text(prompt)[:12000]})
+    prompt_text = prompt if isinstance(prompt, str) else ""
+    if prompt_text.strip() or request.get("attachments"):
+        messages.append({
+            "role": "user",
+            "content": _user_attachment_content(request, prompt_text),
+        })
 
     tool_results = request.get("toolResults")
     if isinstance(tool_results, list) and tool_results:

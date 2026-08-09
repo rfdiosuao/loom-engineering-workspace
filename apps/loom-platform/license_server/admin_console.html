@@ -1734,6 +1734,37 @@
         <div class="hint">勾选下面的功能会自动写入上面的输入框，也可以直接手动编辑。</div>
         <div class="feature-list" data-feature-picker="planFeatures"></div>
       </div>
+      <div class="section-title">应用内扫码购买</div>
+      <div class="row3">
+        <div class="field">
+          <label for="planPaymentEnabled">扫码购买状态</label>
+          <select id="planPaymentEnabled"><option value="false">不展示</option><option value="true">展示并允许下单</option></select>
+        </div>
+        <div class="field">
+          <label for="planPriceMinor">扫码售价（分）</label>
+          <input id="planPriceMinor" type="number" min="0" step="1" value="0" inputmode="numeric" />
+          <div class="hint">使用人民币分，例如 9900 表示 ¥99.00。</div>
+        </div>
+        <div class="field">
+          <label for="planCurrency">币种</label>
+          <select id="planCurrency"><option value="CNY">人民币（CNY）</option></select>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label for="planPaymentDescription">购买说明</label>
+          <input id="planPaymentDescription" placeholder="适合个人使用的矩阵基础套餐" />
+        </div>
+        <div class="field">
+          <label for="planPaymentSort">展示排序</label>
+          <input id="planPaymentSort" type="number" step="1" value="0" inputmode="numeric" />
+        </div>
+      </div>
+      <div class="field">
+        <label for="planPaymentBenefits">套餐权益（每行一项）</label>
+        <textarea id="planPaymentBenefits" rows="4" placeholder="手机矩阵与基础获客&#10;共享模板中心&#10;Skill 中心"></textarea>
+        <div class="hint">启用后必须设置大于 0 的整数分价格，并在服务端配置支付商。套餐只会在异步回调验签成功后发放。</div>
+      </div>
       <div class="section-title">网关配置（Token 留空保留原值）</div>
       <div class="field"><label for="planGatewayBaseUrl">通用 Base URL</label><input id="planGatewayBaseUrl" /></div>
       <div class="row2">
@@ -1963,6 +1994,12 @@
         displayName: plan.displayName || plan.planKey,
         durationDays: plan.durationDays || 31,
         features: asArray(plan.features).join(","),
+        paymentEnabled: !!plan.paymentEnabled,
+        priceMinor: Number(plan.priceMinor || 0),
+        currency: plan.currency || "CNY",
+        paymentDescription: plan.paymentDescription || "",
+        paymentBenefits: asArray(plan.paymentBenefits),
+        paymentSort: Number(plan.paymentSort || 0),
         gatewayBaseUrl: plan.gatewayBaseUrl || "",
         gatewayImageBaseUrl: plan.gatewayImageBaseUrl || "",
         gatewayVideoBaseUrl: plan.gatewayVideoBaseUrl || "",
@@ -2409,6 +2446,7 @@
                 <h3>${escapeHtml(plan.displayName || plan.planKey)}</h3>
                 <div class="plan-meta">
                   <code>${escapeHtml(plan.planKey)}</code> / ${Number(plan.durationDays || 0)} 天<br>
+                  扫码售价：${plan.paymentEnabled ? `¥${(Number(plan.priceMinor || 0) / 100).toFixed(2)} ${escapeHtml(plan.currency || "CNY")}` : "未启用"}<br>
                   通用 ${plan.gatewayConfigured ? "已配置" : "未配置"} / 图像 ${plan.gatewayImageConfigured ? "可用" : "未配置"} / 视频 ${plan.gatewayVideoConfigured ? "可用" : "未配置"}<br>
                   默认: ${escapeHtml(plan.gatewayDefaultModel || "-")} / 图像: ${escapeHtml(plan.gatewayImageModel || "-")} / 视频: ${escapeHtml(plan.gatewayVideoModel || "-")}
                 </div>
@@ -2931,6 +2969,12 @@
       setValue("planDurationDays", plan?.durationDays || 31);
       $("planDisabled").value = plan?.disabled ? "true" : "false";
       setValue("planFeatures", asArray(plan?.features || ["openclaw", "image", "video", "storyboard"]).join(","));
+      $("planPaymentEnabled").value = plan?.paymentEnabled ? "true" : "false";
+      setValue("planPriceMinor", Number(plan?.priceMinor || 0));
+      setValue("planCurrency", plan?.currency || "CNY");
+      setValue("planPaymentDescription", plan?.paymentDescription || "");
+      setValue("planPaymentBenefits", asArray(plan?.paymentBenefits || []).join("\n"));
+      setValue("planPaymentSort", Number(plan?.paymentSort || 0));
       setValue("planGatewayBaseUrl", plan?.gatewayBaseUrl || "");
       setValue("planGatewayImageBaseUrl", plan?.gatewayImageBaseUrl || "");
       setValue("planGatewayVideoBaseUrl", plan?.gatewayVideoBaseUrl || "");
@@ -2949,6 +2993,12 @@
         displayName: getValue("planDisplayName") || getValue("planKey"),
         durationDays: Number(getValue("planDurationDays") || 31),
         features: getValue("planFeatures"),
+        paymentEnabled: $("planPaymentEnabled").value === "true",
+        priceMinor: Number.parseInt(getValue("planPriceMinor") || "0", 10),
+        currency: getValue("planCurrency") || "CNY",
+        paymentDescription: getValue("planPaymentDescription"),
+        paymentBenefits: [...new Set(getValue("planPaymentBenefits").split(/\r?\n/).map(item => item.trim()).filter(Boolean))],
+        paymentSort: Number.parseInt(getValue("planPaymentSort") || "0", 10),
         gatewayBaseUrl: getValue("planGatewayBaseUrl"),
         gatewayImageBaseUrl: getValue("planGatewayImageBaseUrl"),
         gatewayVideoBaseUrl: getValue("planGatewayVideoBaseUrl"),

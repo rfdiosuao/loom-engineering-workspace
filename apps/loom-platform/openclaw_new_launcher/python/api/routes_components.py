@@ -7,32 +7,57 @@ import threading
 from fastapi import Request
 from starlette.concurrency import run_in_threadpool
 
+from core.agent_catalog import AgentCatalog
 from core.component_catalog import ComponentCatalog, default_component_state_path, default_manifest_path, load_installable_manifest
 from core.component_installer import ComponentInstallError, ComponentInstaller
 from core.component_state import ComponentState, ComponentStateStore
 from core.newapi_account_manager import ACCOUNT_SOURCE, NewApiAccountError
-from core.official_codex import official_codex_component
+from core.official_codex import (
+    CODEX_CLI_COMPONENT_ID,
+    CODEX_DESKTOP_COMPONENT_ID,
+    virtual_openai_component,
+)
 from core.release_manifest import ReleaseComponent, default_release_manifest_public_key, load_release_manifest_file
 from core.wire_config import WireConfigError
 
 
 RUNNING_JOB_STATUSES = {"queued", "running"}
+DECLARATIVE_AGENT_CATALOG = AgentCatalog()
 
 SIMULATION_COMPONENTS: dict[str, ReleaseComponent] = {
     "codex-desktop": ReleaseComponent(
         component_id="codex-desktop",
-        name="ChatGPT Codex 原版",
+        name="Codex Desktop",
         version="Microsoft Store",
         platform="windows",
         arch="x64",
         archive_type="msstore",
-        size=1,
+        size=0,
         sha256="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        urls=(),
+        urls=("https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi",),
         install_path="agents/codex-desktop",
         entry=None,
         category="agent",
-        description="OpenAI 官方 ChatGPT 桌面应用，内含 Codex，由 Microsoft Store 安装和更新",
+        official_url="https://openai.com/codex/",
+        description="OpenAI 官方 Codex 桌面应用，由 Microsoft Store 安装和更新",
+    ),
+    "codex-cli": ReleaseComponent(
+        component_id="codex-cli",
+        name="Codex CLI",
+        version="待正式清单",
+        platform="windows",
+        arch="x64",
+        archive_type="tgz",
+        size=1,
+        sha256="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        urls=(),
+        install_path="agents/codex-cli",
+        entry="package/bin/codex.js",
+        category="agent",
+        official_url="https://developers.openai.com/codex/cli/",
+        description="OpenAI 官方 Codex 命令行智能体；与桌面应用独立检测和安装",
+        install_command=("npm", "install", "-g", "@openai/codex"),
+        uninstall_command=("npm", "uninstall", "-g", "@openai/codex"),
     ),
     "claude-code": ReleaseComponent(
         component_id="claude-code",
@@ -103,18 +128,26 @@ def _resolve_component_for_action(
     *,
     allow_fallback: bool,
 ) -> tuple[ReleaseComponent | None, str | None]:
+    definition = DECLARATIVE_AGENT_CATALOG.by_id(component_id)
+    if definition is not None:
+        return definition.to_release_component(), None
     try:
         manifest, _manifest_warning = load_installable_manifest(manifest_path)
-        component = manifest.component_by_id(component_id)
+        source_id = CODEX_DESKTOP_COMPONENT_ID if component_id in {
+            CODEX_DESKTOP_COMPONENT_ID,
+            CODEX_CLI_COMPONENT_ID,
+        } else component_id
+        component = manifest.component_by_id(source_id)
         if component is None:
             return None, f"Unknown component: {component_id}"
-        component = official_codex_component(component)
+        component = virtual_openai_component(component, component_id)
+        if component is None:
+            return None, f"Unknown component: {component_id}"
         return component, None
     except Exception as manifest_error:
         if allow_fallback:
             component = SIMULATION_COMPONENTS.get(component_id)
             if component is not None:
-                component = official_codex_component(component)
                 return component, f"正式组件清单未就绪：release-manifest.json：{manifest_error}"
         return None, f"正式安装需要 release-manifest.json：{manifest_error}"
 
@@ -133,6 +166,12 @@ def _truthy(value: object) -> bool:
 
 def _model_config_error_payload(error: Exception, *, custom_provider: bool = False) -> dict[str, str]:
     detail = str(error or "").strip()
+    if detail.startswith("selected_model_not_listed"):
+        return {
+            "error": "所选模型已不在当前账号最新的可用目录中，配置未写入。模型目录已刷新，请重新选择后再试。",
+            "code": "selected_model_not_listed",
+            "action": "choose_compatible_model",
+        }
     if "responses_tool_call_missing" in detail:
         return {
             "error": "该模型能够返回文字，但不能返回 Codex 所需的原生工具调用，配置没有写入。请选择支持 Responses API 与 function_call 的模型。",
@@ -228,6 +267,27 @@ def _model_config_error_text(error: Exception) -> str:
     return _model_config_error_payload(error)["error"]
 
 
+def _provider_probe_error_payload(error: WireConfigError) -> tuple[dict, int]:
+    detail = error.to_dict()
+    code = str(detail.get("code") or "provider_probe_failed")
+    status_code = detail.get("statusCode")
+    if type(status_code) is not int or not 400 <= status_code <= 599:
+        status_code = 503 if detail.get("retryable") is True else 400
+    if code in {"authentication_failed", "provider_auth_failed"}:
+        action = "review_api_key"
+    elif code in {"protocol_endpoint_not_found", "selected_model_not_listed"}:
+        action = "review_provider_settings"
+    else:
+        action = "retry_provider_probe"
+    return ({
+        "error": str(detail.get("messageZh") or "Provider 兼容性探测失败，请检查配置后重试。"),
+        "code": code,
+        "action": action,
+        "retryable": detail.get("retryable") is True,
+        "statusCode": detail.get("statusCode"),
+    }, status_code)
+
+
 def _log_model_config_failure(ctx, component_id: str, error: Exception) -> None:
     append_log = getattr(ctx, "append_log", None)
     if callable(append_log):
@@ -255,6 +315,36 @@ def register_component_routes(app, ctx) -> None:
         status = _model_config_status(ctx, component_id)
         return ctx.fastapi_json({"status": status})
 
+    @app.post("/api/components/model-config/probe-provider")
+    async def components_model_config_probe_provider(request: Request):
+        if error := ctx.auth_error(request):
+            return error
+        body = await ctx.body(request)
+        provider = str(body.get("provider") or "").strip()
+        base_url = str(body.get("baseUrl") or "").strip()
+        api_key = str(body.get("apiKey") or "").strip()
+        preferred_model = str(
+            body.get("preferredModel") or body.get("model") or ""
+        ).strip()
+        if not base_url or not api_key:
+            return ctx.fastapi_json({
+                "error": "请填写 Provider Base URL 和 API Key。",
+                "code": "provider_probe_input_required",
+                "action": "review_provider_settings",
+            }, 400)
+        try:
+            probe = await run_in_threadpool(
+                ctx.get_wire_svc().probe_provider_compatibility,
+                provider=provider,
+                base_url=base_url,
+                api_key=api_key,
+                preferred_model=preferred_model,
+            )
+        except WireConfigError as exc:
+            payload, status_code = _provider_probe_error_payload(exc)
+            return ctx.fastapi_json(payload, status_code)
+        return ctx.fastapi_json({"probe": probe})
+
     @app.post("/api/components/model-config/apply")
     async def components_model_config_apply(request: Request):
         if error := ctx.auth_error(request):
@@ -275,12 +365,42 @@ def register_component_routes(app, ctx) -> None:
                 account_manager = account_manager_getter()
                 account_session = account_manager.current()
                 if isinstance(account_session, dict) and account_session.get("source") == ACCOUNT_SOURCE:
-                    await run_in_threadpool(account_manager.ensure_launcher_token)
+                    await run_in_threadpool(
+                        account_manager.ensure_launcher_token,
+                        force_refresh=True,
+                    )
+                    current = _model_config_status(ctx, component_id)
+                    available_models = [
+                        str(item).strip()
+                        for item in current.get("availableModels", [])
+                        if str(item).strip()
+                    ]
+                    if model and available_models:
+                        matched_model = next(
+                            (
+                                item
+                                for item in available_models
+                                if item.casefold() == model.casefold()
+                            ),
+                            "",
+                        )
+                        if not matched_model:
+                            return ctx.fastapi_json({
+                                "error": (
+                                    "所选模型已不在当前账号最新的可用目录中，配置未写入。"
+                                    "模型目录已刷新，请重新选择后再试。"
+                                ),
+                                "code": "selected_model_not_listed",
+                                "action": "choose_compatible_model",
+                                "status": current,
+                            }, 409)
+                        model = matched_model
             except NewApiAccountError as exc:
                 append_log = getattr(ctx, "append_log", None)
                 if callable(append_log):
                     append_log(f"[ModelConfig] launcher API Key preparation failed: {exc}\n")
                 error_text = str(exc or "").strip().lower()
+                upstream_status = getattr(exc, "status_code", None)
                 relogin_required = any(token in error_text for token in (
                     "requires re-login",
                     "permission_contract_invalid",
@@ -288,24 +408,74 @@ def register_component_routes(app, ctx) -> None:
                     "missing_api_token",
                     "http_401",
                     "http_403",
-                )) or getattr(exc, "status_code", None) in {401, 403}
-                return ctx.fastapi_json({
-                    "error": (
-                        "模型账号登录状态已过期或版本过旧，配置未写入。请重新登录模型账号后再试"
-                        if relogin_required
-                        else "无法自动创建可用 API Key，配置未写入。请检查模型账号后重试"
+                )) or upstream_status in {401, 403}
+                rate_limited = upstream_status == 429 or "http_429" in error_text
+                upstream_unavailable = (
+                    upstream_status in {502, 503, 504}
+                    or any(token in error_text for token in (
+                        "http_502",
+                        "http_503",
+                        "http_504",
+                        "network_error",
+                        "timed out",
+                        "timeout",
+                    ))
+                )
+                cached_models = [
+                    str(item).strip()
+                    for item in current.get("availableModels", [])
+                    if str(item).strip()
+                ]
+                cached_model = next(
+                    (
+                        item
+                        for item in cached_models
+                        if model and item.casefold() == model.casefold()
                     ),
-                    "code": "account_relogin_required" if relogin_required else "api_key_unavailable",
-                    "action": "open_model_account" if relogin_required else "retry_model_config",
-                    "status": current,
-                }, 400)
+                    "",
+                )
+                use_cached_catalog = bool(upstream_unavailable and cached_model)
+                if use_cached_catalog:
+                    model = cached_model
+                    if callable(append_log):
+                        append_log(
+                            "[ModelConfig] transient catalog refresh failure; "
+                            f"validating cached model remotely: {model}\n"
+                        )
+                if rate_limited:
+                    response_error = "模型目录刷新受到限流，原配置未修改。请稍后重试。"
+                    response_code = "model_catalog_rate_limited"
+                    response_action = "retry_model_config"
+                    response_status = 429
+                elif upstream_unavailable:
+                    response_error = "模型站或上游服务暂时不可用，模型目录无法刷新，原配置未修改。请稍后重试。"
+                    response_code = "model_catalog_refresh_unavailable"
+                    response_action = "retry_model_config"
+                    response_status = 503
+                elif relogin_required:
+                    response_error = "模型账号登录状态已过期或版本过旧，配置未写入。请重新登录模型账号后再试"
+                    response_code = "account_relogin_required"
+                    response_action = "open_model_account"
+                    response_status = 400
+                else:
+                    response_error = "无法自动创建可用 API Key，配置未写入。请检查模型账号后重试"
+                    response_code = "api_key_unavailable"
+                    response_action = "retry_model_config"
+                    response_status = 400
+                if not use_cached_catalog:
+                    return ctx.fastapi_json({
+                        "error": response_error,
+                        "code": response_code,
+                        "action": response_action,
+                        "status": current,
+                    }, response_status)
         try:
             wire_service = ctx.get_wire_svc()
             status = await run_in_threadpool(
                 wire_service.sync_agent_model_config,
                 component_id,
                 model=model,
-                validate_remote=component_id == "codex-desktop",
+                validate_remote=component_id in {"codex-desktop", "pi", "grok-build"},
             )
         except WireConfigError as exc:
             error_payload = _model_config_error_payload(exc)
@@ -435,6 +605,18 @@ def register_component_routes(app, ctx) -> None:
             )
             if component is None:
                 return ctx.fastapi_json({"error": manifest_error or f"Unknown component: {component_id}"}, _component_error_status(manifest_error))
+
+            definition = DECLARATIVE_AGENT_CATALOG.by_id(component_id)
+            if not simulate and definition is not None and definition.install_locked:
+                return ctx.fastapi_json(
+                    {
+                        "error": f"{definition.name} 当前仅支持安全探测；请通过官方入口完成安装后重新检测。",
+                        "code": "official_manual_install_required",
+                        "officialUrl": definition.official_url,
+                        "catalog": _component_catalog(ctx).status(),
+                    },
+                    409,
+                )
 
             if not simulate:
                 state_store.mark(component.component_id, "resolving_manifest", version=component.version)

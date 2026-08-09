@@ -13,6 +13,8 @@ PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PYTHON_DIR not in sys.path:
     sys.path.insert(0, PYTHON_DIR)
 
+from tests.matrix_test_support import matrix_for_test
+
 
 class MatrixDeviceLeaseTests(unittest.TestCase):
     def test_lease_is_exclusive_renewable_and_releasable(self) -> None:
@@ -20,7 +22,7 @@ class MatrixDeviceLeaseTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
 
             first = matrix.acquire_lease(
@@ -60,7 +62,7 @@ class MatrixDeviceLeaseTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             first = matrix.acquire_lease(
                 "phone-a",
@@ -89,7 +91,7 @@ class MatrixDeviceLeaseTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             for device_id in ("phone-a", "phone-b", "phone-c"):
                 matrix.register_device({"deviceId": device_id, "online": True})
             matrix.acquire_lease("phone-a", {"holderType": "agent", "holderId": "run-a"})
@@ -113,7 +115,7 @@ class MatrixDeviceLeaseTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             with open(matrix.leases_path, "w", encoding="utf-8") as handle:
                 handle.write("{corrupt")
@@ -135,7 +137,7 @@ class MatrixDeviceLeaseTests(unittest.TestCase):
         from core.phone_matrix import MatrixControlPlane, MatrixTargetError
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            matrix = MatrixControlPlane(AppPaths(base_path=temp_dir))
+            matrix = matrix_for_test(AppPaths(base_path=temp_dir))
             matrix.register_device({"deviceId": "phone-a", "online": True})
             lease = matrix.acquire_lease(
                 "phone-a", {"holderType": "human", "holderId": "operator-1"}

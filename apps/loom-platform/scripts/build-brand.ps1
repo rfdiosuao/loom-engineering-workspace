@@ -24,7 +24,14 @@ $PortableBuilder = Join-Path $PSScriptRoot "build-portable.ps1"
 $ProtectedTauriConfig = Join-Path $LauncherDir "src-tauri\tauri.protected.conf.json"
 $PrepareUpdateScript = Join-Path $LauncherDir "scripts\prepare-desktop-update-release.ps1"
 $PrepareUpdateConfigScript = Join-Path $LauncherDir "scripts\prepare-brand-update-config.py"
-$Python = (Get-Command python -ErrorAction Stop).Source
+$BundledPython = Join-Path $LauncherDir "python-runtime\python.exe"
+if (Test-Path -LiteralPath $BundledPython -PathType Leaf) {
+    $Python = $BundledPython
+} elseif (-not [string]::IsNullOrWhiteSpace($env:PYTHON) -and (Test-Path -LiteralPath $env:PYTHON -PathType Leaf)) {
+    $Python = [System.IO.Path]::GetFullPath($env:PYTHON)
+} else {
+    $Python = (Get-Command python -ErrorAction Stop).Source
+}
 
 function Invoke-Checked {
     param(

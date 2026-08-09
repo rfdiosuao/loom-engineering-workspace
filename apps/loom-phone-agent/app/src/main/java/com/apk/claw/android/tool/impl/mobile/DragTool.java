@@ -58,6 +58,11 @@ public class DragTool extends BaseTool {
         if (boundsError != null) return ToolResult.error(boundsError);
         boundsError = validateCoordinates(endX, endY);
         if (boundsError != null) return ToolResult.error(boundsError);
+        long deltaX = (long) endX - startX;
+        long deltaY = (long) endY - startY;
+        if (deltaX * deltaX + deltaY * deltaY < 24L * 24L) {
+            return ToolResult.error("Drag distance is too short; use tap or long_press for point actions");
+        }
 
         long holdMs = clamp(optionalLong(params, "hold_ms", 350), 80, 2000);
         long durationMs = clamp(optionalLong(params, "duration_ms", 700), 120, 3000);

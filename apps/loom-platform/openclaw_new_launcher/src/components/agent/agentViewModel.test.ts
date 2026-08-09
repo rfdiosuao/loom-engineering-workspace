@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import type { AgentMessage } from '../../types/agent.ts';
+import type { AgentBootstrapResponse, AgentMessage } from '../../types/agent.ts';
 import type { LoomRealtimeEvent } from '../../types/realtime.ts';
 import {
   createAgentEventState,
@@ -150,6 +150,53 @@ test('model selection distinguishes the account default from a session override'
   });
   assert.deepEqual(viewModel.agentModelUpdateRequest?.(undefined), { modelId: '' });
   assert.deepEqual(viewModel.agentModelUpdateRequest?.('qwen3.7-plus'), { modelId: 'qwen3.7-plus' });
+});
+
+test('execution gate fails closed and gives novices one concrete recovery action', () => {
+  const executionGate = (agentViewModel as typeof agentViewModel & {
+    agentExecutionGate?: (bootstrap: AgentBootstrapResponse | null) => {
+      blocked: boolean;
+      title: string;
+      message: string;
+      actionLabel: string;
+    };
+  }).agentExecutionGate;
+  assert.equal(typeof executionGate, 'function');
+
+  assert.deepEqual(executionGate?.(null), {
+    blocked: true,
+    title: '智能体正在连接',
+    message: '正在读取模型账号与商业矩阵授权，请稍候。',
+    actionLabel: '',
+  });
+
+  const inactive = {
+    runtimeProfiles: [],
+    capabilities: [],
+    permissions: { read: true, control: false, outbound: false, critical: false },
+    executionAccess: {
+      authorized: false,
+      code: 'AGENT_ENTITLEMENT_REQUIRED',
+      message: '商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。',
+      action: 'open_account_entitlement',
+    },
+  } satisfies AgentBootstrapResponse;
+  assert.deepEqual(executionGate?.(inactive), {
+    blocked: true,
+    title: '需要激活商业矩阵授权',
+    message: '商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。',
+    actionLabel: '前往模型账号',
+  });
+
+  const active = {
+    ...inactive,
+    executionAccess: {
+      authorized: true,
+      code: 'ok',
+      message: '',
+    },
+  } satisfies AgentBootstrapResponse;
+  assert.equal(executionGate?.(active).blocked, false);
 });
 
 test('tool summaries use capability-specific copy for every lifecycle state', () => {

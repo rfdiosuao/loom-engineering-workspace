@@ -79,7 +79,8 @@ export const AUDIT_AGENT_BOOTSTRAP = {
     { name: 'loom.matrix.dispatch', source: 'internal', permission: 'control_safe', risk: 'safe', available: true },
     { name: 'audit.crm.lookup', source: 'mcp', permission: 'read', risk: 'safe', available: true },
   ],
-  permissions: { matrix: true, mcp: true },
+  executionAccess: { authorized: true, code: 'ok', message: '' },
+  permissions: { read: true, control: true, outbound: true, critical: false, matrix: true, mcp: true },
 };
 
 export function createBaselineSeed(): TauriMockSeed {
@@ -87,6 +88,16 @@ export function createBaselineSeed(): TauriMockSeed {
     commands: {
       get_bridge_port: { value: 18_791 },
       get_portable_base_path: { value: 'C:\\LOOM\\playwright-audit' },
+      get_distribution_setup_snapshot: {
+        value: {
+          revision: 0,
+          runId: 0,
+          status: 'idle',
+          layers: [],
+          progress: null,
+          error: null,
+        },
+      },
       'plugin:event|listen': { value: 1 },
       'plugin:event|unlisten': { value: null },
       'plugin:window|close': { value: null },
@@ -136,6 +147,13 @@ export function createBaselineSeed(): TauriMockSeed {
       },
       'GET /api/theme/current': { value: { theme: null, isCustom: false, merchantId: null } },
       'GET /api/account/current': { value: { account: AUDIT_ACCOUNT } },
+      'POST /api/account/sync': { value: { account: AUDIT_ACCOUNT, syncResults: [] } },
+      'GET /api/account/payments/plans': {
+        value: {
+          plans: [],
+          payment: { provider: 'zpay', configured: false, channels: [] },
+        },
+      },
       'GET /api/account/capabilities': {
         value: {
           capabilities: {
@@ -236,9 +254,55 @@ export function createBaselineSeed(): TauriMockSeed {
           },
         },
       },
+      'GET /api/skills/list': {
+        value: { skills: [], directories: [], sites: [] },
+      },
+      'GET /api/matrix/acquisition/templates': {
+        value: {
+          schema: 'loom.acquisition.templates.v1',
+          updatedAt: '2026-07-15T00:00:00.000Z',
+          cloud: { configured: false, consentGranted: false, uploadEnabled: false },
+          stats: { total: 0, enabled: 0, pendingUpload: 0, uploaded: 0 },
+          templates: [],
+        },
+      },
       'GET /api/matrix/status': { value: AUDIT_MATRIX_STATUS },
       'POST /api/matrix/screens': {
         value: { schema: 'loom.matrix.screens.v1', screens: [], errors: [] },
+      },
+      'POST /api/phone-stream/devices/phone-audit-1/session': {
+        value: {
+          schema: 'luming.phone.stream.session.v1',
+          state: 'unavailable',
+          transport: 'lan',
+          fallback: 'snapshot',
+          requiresUserConsent: false,
+          codec: 'avc1.42E01F',
+          width: 0,
+          height: 0,
+          fps: 0,
+          message: '隔离审计使用截图回退',
+        },
+      },
+      'DELETE /api/phone-stream/devices/phone-audit-1/session': {
+        value: { stopped: true, fallback: 'snapshot' },
+      },
+      'POST /api/phone-stream/devices/phone-audit-2/session': {
+        value: {
+          schema: 'luming.phone.stream.session.v1',
+          state: 'unavailable',
+          transport: 'lan',
+          fallback: 'snapshot',
+          requiresUserConsent: false,
+          codec: 'avc1.42E01F',
+          width: 0,
+          height: 0,
+          fps: 0,
+          message: '隔离审计使用截图回退',
+        },
+      },
+      'DELETE /api/phone-stream/devices/phone-audit-2/session': {
+        value: { stopped: true, fallback: 'snapshot' },
       },
       'POST /api/realtime/tickets': {
         value: {

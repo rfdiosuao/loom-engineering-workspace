@@ -75,7 +75,14 @@ test('clearing a sent draft restores all composer fields', () => {
   const store = useAgentStore.getState();
   store.updateDraft('session_1', {
     text: 'Send me',
-    attachments: [{ name: 'brief.pdf', size: 42, type: 'application/pdf', lastModified: 1 }],
+    attachments: [{
+      name: 'brief.txt',
+      size: 42,
+      type: 'text/plain',
+      kind: 'text',
+      lastModified: 1,
+      content: 'brief',
+    }],
     scopeMode: 'manual',
     scope: { deviceIds: [], groups: ['招聘一组'], allOnline: false },
     runtimeProfileId: 'runtime_1',

@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import hashlib
+import json
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
+import urllib.parse
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import bcrypt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
 
 
 MODULE_PATH = Path(__file__).with_name("openclaw_newapi_bridge.py")
@@ -34,6 +44,50 @@ class BindTicketTests(unittest.TestCase):
         self.original_authenticate_user = self.bridge.authenticate_user
         self.original_auth_failure_limit = self.bridge.AUTH_FAILURE_RATE_LIMIT
         self.original_public_api_base = self.bridge.PUBLIC_API_BASE
+        self.original_entitlement_private_key_b64 = getattr(self.bridge, "ENTITLEMENT_PRIVATE_KEY_B64", "")
+        self.original_entitlement_key_id = getattr(self.bridge, "ENTITLEMENT_KEY_ID", "")
+        self.original_trusted_entitlement_key_id = self.bridge.TRUSTED_ENTITLEMENT_KEY_ID
+        self.original_trusted_entitlement_public_key_b64 = (
+            self.bridge.TRUSTED_ENTITLEMENT_PUBLIC_KEY_B64
+        )
+        self.original_lease_ttl = getattr(self.bridge, "ENTITLEMENT_LEASE_TTL_SEC", 0)
+        self.original_offline_grace = getattr(self.bridge, "ENTITLEMENT_OFFLINE_GRACE_SEC", 0)
+        self.original_authorization_refresh_ttl = getattr(
+            self.bridge,
+            "ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC",
+            0,
+        )
+        self.original_license_service_base = self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE
+        self.original_license_service_token = self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN
+        self.original_current_entitlement = (
+            self.bridge.current_authorization_entitlement_from_license_server
+        )
+        self.original_redeem_code = getattr(
+            self.bridge,
+            "redeem_authorization_code_with_license_server",
+            None,
+        )
+        private_key = Ed25519PrivateKey.generate()
+        private_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        self.signing_public_key = private_key.public_key()
+        self.bridge.ENTITLEMENT_PRIVATE_KEY_B64 = base64.b64encode(private_bytes).decode("ascii")
+        self.bridge.ENTITLEMENT_KEY_ID = "test-ed25519-v1"
+        self.bridge.TRUSTED_ENTITLEMENT_KEY_ID = "test-ed25519-v1"
+        self.bridge.TRUSTED_ENTITLEMENT_PUBLIC_KEY_B64 = base64.b64encode(
+            private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+        self.bridge.ENTITLEMENT_LEASE_TTL_SEC = 3600
+        self.bridge.ENTITLEMENT_OFFLINE_GRACE_SEC = 72 * 3600
+        if hasattr(self.bridge, "_ENTITLEMENT_AUTHORIZATION_REFRESHED_AT"):
+            self.bridge._ENTITLEMENT_AUTHORIZATION_REFRESHED_AT.clear()
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = ""
         self._init_newapi_db()
 
     def tearDown(self) -> None:
@@ -44,7 +98,123 @@ class BindTicketTests(unittest.TestCase):
         self.bridge.authenticate_user = self.original_authenticate_user
         self.bridge.AUTH_FAILURE_RATE_LIMIT = self.original_auth_failure_limit
         self.bridge.PUBLIC_API_BASE = self.original_public_api_base
+        self.bridge.ENTITLEMENT_PRIVATE_KEY_B64 = self.original_entitlement_private_key_b64
+        self.bridge.ENTITLEMENT_KEY_ID = self.original_entitlement_key_id
+        self.bridge.TRUSTED_ENTITLEMENT_KEY_ID = self.original_trusted_entitlement_key_id
+        self.bridge.TRUSTED_ENTITLEMENT_PUBLIC_KEY_B64 = (
+            self.original_trusted_entitlement_public_key_b64
+        )
+        self.bridge.ENTITLEMENT_LEASE_TTL_SEC = self.original_lease_ttl
+        self.bridge.ENTITLEMENT_OFFLINE_GRACE_SEC = self.original_offline_grace
+        if hasattr(self.bridge, "ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC"):
+            self.bridge.ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC = (
+                self.original_authorization_refresh_ttl
+            )
+        if hasattr(self.bridge, "_ENTITLEMENT_AUTHORIZATION_REFRESHED_AT"):
+            self.bridge._ENTITLEMENT_AUTHORIZATION_REFRESHED_AT.clear()
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = self.original_license_service_base
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = self.original_license_service_token
+        self.bridge.current_authorization_entitlement_from_license_server = (
+            self.original_current_entitlement
+        )
+        if self.original_redeem_code is not None:
+            self.bridge.redeem_authorization_code_with_license_server = self.original_redeem_code
         self.tmp.cleanup()
+
+    def verify_lease_signature(self, lease):
+        signature = base64.b64decode(lease["signature"])
+        signed = dict(lease)
+        signed.pop("signature")
+        self.signing_public_key.verify(
+            signature,
+            self.bridge.canonical_json(signed).encode("utf-8"),
+        )
+
+    def resign_lease(self, lease):
+        signed = dict(lease)
+        signed.pop("signature", None)
+        signed["signature"] = self.bridge.sign_entitlement_payload(signed)
+        return signed
+
+    def test_raw_entitlement_signing_key_preserves_whitespace_bytes(self):
+        private_bytes = b" " + bytes(range(1, 31)) + b"\n"
+        private_key = Ed25519PrivateKey.from_private_bytes(private_bytes)
+        self.bridge.ENTITLEMENT_PRIVATE_KEY_B64 = base64.b64encode(private_bytes).decode("ascii")
+        self.bridge.TRUSTED_ENTITLEMENT_PUBLIC_KEY_B64 = base64.b64encode(
+            private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+
+        payload = {"schema": "loom.entitlement_test.v1", "accountId": "42"}
+        signature = base64.b64decode(self.bridge.sign_entitlement_payload(payload))
+
+        private_key.public_key().verify(
+            signature,
+            self.bridge.canonical_json(payload).encode("utf-8"),
+        )
+
+    def test_base64_private_key_file_matches_license_server_format(self):
+        private_key = Ed25519PrivateKey.generate()
+        private_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+
+        loaded = self.bridge._private_key_from_bytes(
+            base64.b64encode(private_bytes) + b"\n"
+        )
+
+        self.assertEqual(
+            loaded.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            ),
+            private_bytes,
+        )
+
+    def test_signer_mismatch_fails_before_minting_any_lease(self):
+        self.bridge.TRUSTED_ENTITLEMENT_PUBLIC_KEY_B64 = base64.b64encode(
+            b"\0" * 32
+        ).decode("ascii")
+
+        with self.assertRaisesRegex(RuntimeError, "trust anchor"):
+            self.bridge.sign_entitlement_payload(
+                {"schema": "loom.entitlement_test.v1", "accountId": "42"}
+            )
+
+    def test_deployment_sample_matches_desktop_entitlement_trust_anchor(self):
+        platform_root = MODULE_PATH.parents[1]
+        env_text = MODULE_PATH.with_name(
+            "openclaw-newapi-bridge.env.example"
+        ).read_text(encoding="utf-8")
+        rust_text = (
+            platform_root
+            / "openclaw_new_launcher"
+            / "src-tauri"
+            / "src"
+            / "license.rs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "OPENCLAW_ENTITLEMENT_KEY_ID=openclaw-ed25519-v1",
+            env_text,
+        )
+        self.assertIn(
+            "OPENCLAW_ENTITLEMENT_PRIVATE_KEY_FILE=/opt/openclaw-license/private_key.b64",
+            env_text,
+        )
+        self.assertIn(
+            'const ACCOUNT_ENTITLEMENT_KEY_ID: &str = "openclaw-ed25519-v1";',
+            rust_text,
+        )
+        self.assertIn(
+            self.original_trusted_entitlement_public_key_b64,
+            rust_text,
+        )
 
     def _init_newapi_db(self) -> None:
         connection = sqlite3.connect(self.bridge.DB_PATH)
@@ -60,6 +230,11 @@ class BindTicketTests(unittest.TestCase):
                     status integer,
                     email text,
                     "group" text,
+                    quota integer default 0,
+                    used_quota integer default 0,
+                    request_count integer default 0,
+                    aff_code text default '',
+                    access_token char(32),
                     deleted_at datetime
                 );
                 create table tokens (
@@ -85,6 +260,41 @@ class BindTicketTests(unittest.TestCase):
                     key text primary key,
                     value text
                 );
+                create table subscription_plans (
+                    id integer primary key,
+                    title text not null,
+                    subtitle text default '',
+                    price_amount numeric not null,
+                    currency text not null,
+                    duration_unit text not null,
+                    duration_value integer not null,
+                    custom_seconds integer default 0,
+                    enabled numeric default 1,
+                    sort_order integer default 0,
+                    allow_balance_pay numeric default 1,
+                    allow_wallet_overflow numeric default 1,
+                    max_purchase_per_user integer default 0,
+                    upgrade_group text default '',
+                    downgrade_group text default '',
+                    total_amount integer default 0,
+                    quota_reset_period text default 'never',
+                    quota_reset_custom_seconds integer default 0,
+                    created_at integer default 0,
+                    updated_at integer default 0
+                );
+                create table subscription_orders (
+                    id integer primary key autoincrement,
+                    user_id integer not null,
+                    plan_id integer not null,
+                    money numeric not null,
+                    trade_no text not null unique,
+                    payment_method text not null,
+                    payment_provider text not null,
+                    status text not null,
+                    create_time integer not null,
+                    complete_time integer default 0,
+                    provider_payload text default ''
+                );
                 """
             )
             password_hash = bcrypt.hashpw(b"password-not-real", bcrypt.gensalt(rounds=4)).decode("utf-8")
@@ -95,6 +305,16 @@ class BindTicketTests(unittest.TestCase):
             connection.execute(
                 'insert into tokens(user_id, key, status, name, created_time, expired_time, remain_quota, unlimited_quota, model_limits_enabled, model_limits, "group", deleted_at) values(42, ?, 1, ?, 1, -1, 0, 1, 0, "", "default", null)',
                 ("sk-test-secret-value", "LOOM test token"),
+            )
+            connection.execute(
+                """
+                insert into subscription_plans(
+                    id, title, subtitle, price_amount, currency,
+                    duration_unit, duration_value, enabled, sort_order,
+                    max_purchase_per_user, total_amount, quota_reset_period
+                ) values(1, '基础套餐', '模型服务基础订阅', 50, 'USD',
+                         'month', 1, 1, 100, 0, 100000000, 'daily')
+                """
             )
             connection.commit()
         finally:
@@ -120,13 +340,24 @@ class BindTicketTests(unittest.TestCase):
 
         status, payload = self.bridge.handle_bind_start({"username": "user@example.com", "password": "pw"})
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 200, payload)
         data = payload["data"]
         self.assertTrue(data["ticket"].startswith("ocb_"))
         self.assertEqual(data["account"], "user@example.com")
         self.assertEqual(data["tokenMasked"], "sk-t***alue")
         self.assertIn("models", data)
         self.assertNotIn("key", data)
+
+    def test_bind_ticket_database_never_contains_plain_api_token(self):
+        self.bridge.handle_launcher_token = self.stub_launcher_token
+
+        status, payload = self.bridge.handle_bind_start(
+            {"username": "user@example.com", "password": "pw"}
+        )
+
+        self.assertEqual(status, 200, payload)
+        raw_database = Path(self.bridge.BIND_DB_PATH).read_bytes()
+        self.assertNotIn(b"sk-test-secret-value", raw_database)
 
     def test_launcher_payload_does_not_reuse_limited_historical_token(self):
         connection = sqlite3.connect(self.bridge.DB_PATH)
@@ -144,7 +375,7 @@ class BindTicketTests(unittest.TestCase):
         self.assertIsNone(self.bridge.select_token("42"))
         status, payload = self.bridge.build_launcher_payload(user_id="42", account="user@example.com", group="default")
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 200, payload)
         data = payload["data"]
         self.assertEqual(data["source"], "created")
         self.assertTrue(data["tokenName"].startswith("LOOM Launcher "))
@@ -220,6 +451,1772 @@ class BindTicketTests(unittest.TestCase):
         self.assertEqual(token["group"], "pro")
         self.assertEqual(token["cross_group_retry"], 0)
         self.assertEqual(payload["data"]["tokenGroup"], "pro")
+
+    def test_unactivated_launcher_payload_blocks_matrix_without_signed_lease(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+
+        status, payload = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="default",
+            install_id="install-a",
+            device_id="host-a",
+        )
+
+        self.assertEqual(status, 200)
+        data = payload["data"]
+        self.assertNotIn("entitlementLease", data)
+        self.assertNotIn("entitlementKey", data)
+        self.assertEqual(data["entitlement"]["source"], "authorization_required")
+        self.assertEqual(data["entitlement"]["features"], [])
+        self.assertEqual(data["entitlement"]["limits"]["devices"], 0)
+        self.assertEqual(data["entitlement"]["limits"]["concurrentTasks"], 0)
+
+    def test_unactivated_account_can_login_on_multiple_hosts_without_phone_access(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        for index in range(3):
+            status, payload = self.bridge.build_launcher_payload(
+                user_id="42",
+                account="user@example.com",
+                group="default",
+                install_id=f"install-{index}",
+                device_id=f"host-{index}",
+            )
+            self.assertEqual(status, 200)
+            self.assertNotIn("entitlementLease", payload["data"])
+            self.assertEqual(
+                payload["data"]["entitlement"]["source"],
+                "authorization_required",
+            )
+
+    def test_account_subscription_requires_a_valid_launcher_token(self):
+        status, payload = self.bridge.handle_account_subscription("")
+
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["code"], "subscription_auth_required")
+
+    def test_account_subscription_returns_authoritative_user_metrics(self):
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        try:
+            connection.execute(
+                """
+                update users
+                set quota = ?, used_quota = ?, request_count = ?, aff_code = ?
+                where id = ?
+                """,
+                (8800, 1200, 34, "AFF42", 42),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            {
+                "source": "authorization_code",
+                "plan": "matrix_basic",
+                "features": [
+                    "matrix.devices",
+                    "matrix.tasks",
+                    "matrix.diagnostics",
+                ],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 3,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": 2_000_000_000,
+                "codeLabel": "LM-BASIC-****-TEST",
+            },
+            action="test_subscription_seed",
+        )
+
+        status, payload = self.bridge.handle_account_subscription(
+            "Bearer sk-test-secret-value"
+        )
+
+        self.assertEqual(status, 200, payload)
+        data = payload["data"]
+        self.assertEqual(data["subscription"]["plan"], "matrix_basic")
+        self.assertEqual(data["subscription"]["balance"], 8800)
+        self.assertEqual(data["subscription"]["expiresAt"], 2_000_000_000)
+        self.assertEqual(data["subscription"]["inviteCode"], "AFF42")
+        self.assertEqual(data["usage"]["usedQuota"], 1200)
+        self.assertEqual(data["usage"]["requestCount"], 34)
+        self.assertNotIn("key", repr(payload).lower())
+
+    def test_account_subscription_is_available_through_the_managed_get_route(self):
+        server = self.bridge.ThreadingHTTPServer(("127.0.0.1", 0), self.bridge.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = self.bridge.urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/openclaw/account/subscription",
+                headers={"Authorization": "Bearer sk-test-secret-value"},
+                method="GET",
+            )
+            with self.bridge.urllib.request.urlopen(request, timeout=5) as response:
+                payload = self.bridge.json.loads(response.read().decode("utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["data"]["subscription"]["plan"], "default")
+
+    def test_legacy_plan_default_grant_cannot_activate_phone_access(self):
+        now = int(time.time())
+        connection = self.bridge._bind_connection()
+        try:
+            connection.execute(
+                """
+                insert into entitlement_account_grants(
+                    account_id, plan, features_json, limits_json, expires_at,
+                    source, code_label, updated_at, revoked_at
+                )
+                values(?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    "42",
+                    "pro",
+                    '["matrix.devices", "matrix.tasks", "matrix.diagnostics"]',
+                    '{"devices": 5, "concurrentTasks": 3}',
+                    now + 86400,
+                    "plan_defaults",
+                    "",
+                    now,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        policy = self.bridge.effective_entitlement_policy("42", "pro")
+
+        self.assertEqual(policy["source"], "authorization_required")
+        self.assertEqual(policy["features"], [])
+        self.assertEqual(policy["limits"]["devices"], 0)
+        self.assertFalse(policy["limits"]["unlimitedDevices"])
+
+    def _activated_lease(self, *, install_id="install-a", host_device_id="host-a"):
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            {
+                "source": "authorization_code",
+                "plan": "activated",
+                "features": [
+                    "matrix.devices",
+                    "matrix.tasks",
+                    "matrix.parallel_tasks",
+                    "matrix.diagnostics",
+                ],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 8,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": int(time.time()) + 86400,
+                "codeLabel": "LM-ACTIVE-****-TEST",
+            },
+            action="test_seed",
+        )
+        status, payload = self.bridge.issue_entitlement_lease(
+            account_id="42",
+            group="default",
+            install_id=install_id,
+            device_id=host_device_id,
+            session_token="sk-test-secret-value",
+            source_verified=True,
+        )
+        self.assertEqual(status, 200, payload)
+        return payload["entitlementLease"]
+
+    def test_activated_account_can_claim_multiple_phones(self):
+        lease = self._activated_lease()
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease,
+            "matrix.device.claim",
+            ["phone-a"],
+        )
+        self.assertEqual(status, 200)
+
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease,
+            "matrix.device.claim",
+            ["phone-b"],
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(
+            payload["phoneSeatLease"]["phoneDeviceIds"],
+            ["phone-a", "phone-b"],
+        )
+        self.assertEqual(
+            self.bridge.entitlement_audit_events("42")[-1]["code"],
+            "ok",
+        )
+
+    def test_unlimited_entitlement_does_not_apply_numeric_phone_limit(self):
+        lease = self._activated_lease()
+        lease = self.resign_lease(
+            {
+                **lease,
+                "limits": {
+                    "devices": 1,
+                    "concurrentTasks": 1,
+                    "unlimitedDevices": True,
+                },
+            }
+        )
+
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease,
+            "matrix.device.claim",
+            ["phone-a", "phone-b"],
+        )
+
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(
+            payload["phoneSeatLease"]["phoneDeviceIds"],
+            ["phone-a", "phone-b"],
+        )
+
+    def test_license_service_requires_explicit_success_marker(self):
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = "https://license.example"
+        expires_at = int(time.time()) + 86400
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return self.bridge_payload
+
+        response = Response()
+        response.bridge_payload = self.bridge.json.dumps(
+            {
+                "entitlement": {
+                    "source": "authorization_code",
+                    "plan": "activated",
+                    "features": ["matrix.devices", "matrix.tasks"],
+                    "limits": {
+                        "devices": 1000,
+                        "concurrentTasks": 8,
+                        "unlimitedDevices": True,
+                    },
+                    "expiresAt": expires_at,
+                    "codeLabel": "LM-ACTIVE-****-TEST",
+                }
+            }
+        ).encode("utf-8")
+
+        with patch.object(
+            self.bridge.urllib.request,
+            "urlopen",
+            return_value=response,
+        ), self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge._license_service_json(
+                "/api/service/account-entitlements/current",
+                {"accountId": "42"},
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_license_service_request_identifies_bridge_and_accepts_json(self):
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = "https://license.example"
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b'{"ok": true, "entitlement": {}}'
+
+        def fake_urlopen(request, *, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return Response()
+
+        with patch.object(
+            self.bridge.urllib.request,
+            "urlopen",
+            side_effect=fake_urlopen,
+        ):
+            self.bridge._license_service_json(
+                "/api/service/account-entitlements/current",
+                {"accountId": "42"},
+            )
+
+        request = captured["request"]
+        self.assertTrue(
+            str(request.get_header("User-agent") or "").startswith(
+                "LOOM-Entitlement-Bridge/"
+            )
+        )
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(captured["timeout"], 12)
+
+    def test_license_service_malformed_success_body_is_protocol_error(self):
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = "https://license.example"
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b'{"ok": true, "entitlement":'
+
+        with patch.object(
+            self.bridge.urllib.request,
+            "urlopen",
+            return_value=Response(),
+        ), self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge._license_service_json(
+                "/api/service/account-entitlements/current",
+                {"accountId": "42"},
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_license_service_success_without_complete_entitlement_fails_closed(self):
+        with patch.object(
+            self.bridge,
+            "_license_service_json",
+            return_value={"ok": True, "entitlement": {}},
+        ), self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge.current_authorization_entitlement_from_license_server("42")
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_strict_license_service_response_requires_entitlement_envelope(self):
+        expires_at = int(time.time()) + 86400
+        payload = {
+            "ok": True,
+            "source": "authorization_code",
+            "plan": "activated",
+            "features": ["matrix.devices", "matrix.tasks"],
+            "limits": {
+                "devices": 1000,
+                "concurrentTasks": 8,
+                "unlimitedDevices": True,
+            },
+            "expiresAt": expires_at,
+            "codeLabel": "LM-ACTIVE-****-TEST",
+        }
+
+        with self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge.normalize_authorization_entitlement(
+                payload,
+                strict_service=True,
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_strict_license_service_response_rejects_empty_features(self):
+        expires_at = int(time.time()) + 86400
+        payload = {
+            "ok": True,
+            "entitlement": {
+                "source": "authorization_code",
+                "plan": "activated",
+                "features": [],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 8,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": expires_at,
+                "codeLabel": "LM-ACTIVE-****-TEST",
+            },
+        }
+
+        with self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge.normalize_authorization_entitlement(
+                payload,
+                strict_service=True,
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_strict_license_service_response_rejects_empty_code_label(self):
+        expires_at = int(time.time()) + 86400
+        payload = {
+            "ok": True,
+            "entitlement": {
+                "source": "authorization_code",
+                "plan": "activated",
+                "features": ["matrix.devices", "matrix.tasks"],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 8,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": expires_at,
+                "codeLabel": "",
+            },
+        }
+
+        with self.assertRaises(self.bridge.BridgeUpstreamError) as invalid:
+            self.bridge.normalize_authorization_entitlement(
+                payload,
+                strict_service=True,
+            )
+
+        self.assertEqual(invalid.exception.code, "ENTITLEMENT_SERVICE_INVALID_RESPONSE")
+        self.assertEqual(invalid.exception.status_code, 502)
+
+    def test_current_protocol_error_preserves_cached_entitlement(self):
+        entitlement = {
+            "source": "authorization_code",
+            "plan": "activated",
+            "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+            "limits": {
+                "devices": 1000,
+                "concurrentTasks": 8,
+                "unlimitedDevices": True,
+            },
+            "expiresAt": int(time.time()) + 86400,
+            "codeLabel": "LM-ACTIVE-****-TEST",
+        }
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            entitlement,
+            action="test_seed",
+        )
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC = 0
+
+        with patch.object(
+            self.bridge,
+            "current_authorization_entitlement_from_license_server",
+            side_effect=self.bridge._invalid_entitlement_service_response(
+                "授权服务返回的权益字段不完整或类型无效。",
+            ),
+        ):
+            self.bridge.refresh_account_entitlement_authorization("42")
+
+        policy = self.bridge.effective_entitlement_policy("42", "default")
+        self.assertEqual(policy["source"], "authorization_code")
+        self.assertEqual(policy["plan"], "activated")
+        self.assertTrue(policy["limits"]["unlimitedDevices"])
+
+    def test_server_rejects_signed_malformed_entitlement_lease_metadata(self):
+        lease = self._activated_lease()
+        issued_at = int(lease["issuedAt"])
+        cases = (
+            ({"schema": "loom.entitlement_lease.v0"}, "lease_schema_unsupported"),
+            ({"keyId": "untrusted-key"}, "lease_key_unknown"),
+            ({"hostDeviceId": "other-host"}, "lease_host_mismatch"),
+            ({"issuedAt": False}, "lease_malformed"),
+            ({"expiresAt": issued_at}, "lease_time_window_invalid"),
+            (
+                {"offlineGraceUntil": issued_at + (9 * 24 * 3600)},
+                "lease_time_window_invalid",
+            ),
+            ({"features": {"matrix.devices": True}}, "lease_malformed"),
+            (
+                {
+                    "limits": {
+                        "devices": "1000",
+                        "concurrentTasks": 8,
+                        "unlimitedDevices": True,
+                    }
+                },
+                "lease_malformed",
+            ),
+        )
+
+        for override, expected_code in cases:
+            with self.subTest(override=override):
+                candidate = self.resign_lease({**lease, **override})
+                status, payload = self.bridge.verify_entitlement_lease(candidate)
+                self.assertEqual(status, 401)
+                self.assertEqual(payload["code"], expected_code)
+
+    def test_activated_account_phone_claim_is_idempotent_and_release_allows_replacement(self):
+        lease = self._activated_lease()
+
+        for _ in range(3):
+            status, payload = self.bridge.authorize_entitlement_operation(
+                lease,
+                "matrix.task.start",
+                ["phone-a"],
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["claimedPhoneDeviceIds"], ["phone-a"])
+            seat_lease = payload["phoneSeatLease"]
+            self.assertEqual(seat_lease["schema"], "loom.phone_seat_lease.v1")
+            self.assertEqual(seat_lease["accountId"], "42")
+            self.assertEqual(seat_lease["hostDeviceId"], "host-a")
+            self.assertEqual(seat_lease["phoneDeviceIds"], ["phone-a"])
+            self.verify_lease_signature(seat_lease)
+
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease,
+            "matrix.device.release",
+            ["phone-a"],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["releasedPhoneDeviceIds"], ["phone-a"])
+        self.assertEqual(payload["phoneSeatLease"]["phoneDeviceIds"], [])
+        self.verify_lease_signature(payload["phoneSeatLease"])
+
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease,
+            "matrix.device.claim",
+            ["phone-b"],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["claimedPhoneDeviceIds"], ["phone-b"])
+
+    def test_phone_identity_cannot_be_claimed_by_two_accounts_without_repair(self):
+        first_lease = self._activated_lease()
+        status, payload = self.bridge.authorize_entitlement_operation(
+            first_lease,
+            "matrix.device.claim",
+            ["physical-phone-a"],
+        )
+        self.assertEqual(status, 200, payload)
+
+        self.bridge.persist_account_entitlement_grant(
+            "43",
+            {
+                "source": "authorization_code",
+                "plan": "activated",
+                "features": [
+                    "matrix.devices",
+                    "matrix.tasks",
+                    "matrix.parallel_tasks",
+                    "matrix.diagnostics",
+                ],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 8,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": int(time.time()) + 86400,
+                "codeLabel": "LM-ACTIVE-****-OTHER",
+            },
+            action="test_seed",
+        )
+        status, second_payload = self.bridge.issue_entitlement_lease(
+            account_id="43",
+            group="default",
+            install_id="install-b",
+            device_id="host-b",
+            session_token="sk-other-secret-value",
+            source_verified=True,
+        )
+        self.assertEqual(status, 200, second_payload)
+        second_lease = second_payload["entitlementLease"]
+
+        denied_status, denied = self.bridge.authorize_entitlement_operation(
+            second_lease,
+            "matrix.device.claim",
+            ["physical-phone-a"],
+        )
+
+        self.assertEqual(denied_status, 409)
+        self.assertEqual(denied["code"], "phone_owned_by_another_account")
+        self.assertEqual(denied["action"], "repair_phone")
+
+    def test_direct_reclaim_requires_a_server_verified_transfer_authorization(self):
+        first_lease = self._activated_lease()
+        status, payload = self.bridge.authorize_entitlement_operation(
+            first_lease,
+            "matrix.device.claim",
+            ["physical-phone-a"],
+        )
+        self.assertEqual(status, 200, payload)
+
+        self.bridge.persist_account_entitlement_grant(
+            "43",
+            {
+                "source": "authorization_code",
+                "plan": "activated",
+                "features": [
+                    "matrix.devices",
+                    "matrix.tasks",
+                    "matrix.parallel_tasks",
+                    "matrix.diagnostics",
+                ],
+                "limits": {
+                    "devices": 1000,
+                    "concurrentTasks": 8,
+                    "unlimitedDevices": True,
+                },
+                "expiresAt": int(time.time()) + 86400,
+                "codeLabel": "LM-ACTIVE-****-OTHER",
+            },
+            action="test_seed",
+        )
+        status, second_payload = self.bridge.issue_entitlement_lease(
+            account_id="43",
+            group="default",
+            install_id="install-b",
+            device_id="host-b",
+            session_token="sk-other-secret-value",
+            source_verified=True,
+        )
+        self.assertEqual(status, 200, second_payload)
+        second_lease = second_payload["entitlementLease"]
+
+        transfer_status, transferred = self.bridge.authorize_entitlement_operation(
+            second_lease,
+            "matrix.device.reclaim",
+            ["physical-phone-a"],
+        )
+        self.assertEqual(transfer_status, 403, transferred)
+        self.assertEqual(
+            transferred["code"],
+            "phone_transfer_authorization_required",
+        )
+        self.assertEqual(transferred["action"], "release_from_previous_account")
+
+        old_status, old_payload = self.bridge.authorize_entitlement_operation(
+            first_lease,
+            "matrix.task.start",
+            ["physical-phone-a"],
+        )
+        self.assertEqual(old_status, 200, old_payload)
+
+    def test_entitlement_check_requires_token_owned_by_lease_account(self):
+        lease = self._activated_lease()
+
+        status, payload = self.bridge.handle_entitlement_check(
+            {
+                "entitlementLease": lease,
+                "operation": "matrix.device.claim",
+                "phoneDeviceIds": ["phone-a"],
+            },
+            "",
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["code"], "account_token_required")
+
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        try:
+            connection.execute(
+                'insert into users(id, username, password, status, email, "group", deleted_at) values(43, ?, ?, 1, ?, ?, null)',
+                ("other@example.com", "unused", "other@example.com", "default"),
+            )
+            connection.execute(
+                'insert into tokens(user_id, key, status, name, created_time, expired_time, remain_quota, unlimited_quota, model_limits_enabled, model_limits, "group", deleted_at) values(43, ?, 1, ?, 1, -1, 0, 1, 0, "", "default", null)',
+                ("sk-other-secret-value", "LOOM other token"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        status, payload = self.bridge.handle_entitlement_check(
+            {
+                "entitlementLease": lease,
+                "operation": "matrix.device.claim",
+                "phoneDeviceIds": ["phone-a"],
+            },
+            "Bearer sk-other-secret-value",
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["code"], "account_mismatch")
+
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        try:
+            account_tokens = [
+                str(row[0])
+                for row in connection.execute(
+                    "select key from tokens where user_id = 42"
+                ).fetchall()
+            ]
+        finally:
+            connection.close()
+        bound_token = next(
+            token
+            for token in account_tokens
+            if self.bridge.entitlement_session_binding(token) == lease["sessionBinding"]
+        )
+        status, payload = self.bridge.handle_entitlement_check(
+            {
+                "entitlementLease": lease,
+                "operation": "matrix.device.claim",
+                "phoneDeviceIds": ["phone-a"],
+            },
+            f"Bearer {bound_token}",
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["success"])
+
+    def test_entitlement_check_rejects_different_token_from_same_account(self):
+        lease = self._activated_lease()
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        try:
+            connection.execute(
+                'insert into tokens(user_id, key, status, name, created_time, expired_time, remain_quota, unlimited_quota, model_limits_enabled, model_limits, "group", deleted_at) values(42, ?, 1, ?, 2, -1, 0, 1, 0, "", "default", null)',
+                ("sk-second-session-token", "LOOM second session"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        status, payload = self.bridge.handle_entitlement_check(
+            {
+                "entitlementLease": lease,
+                "operation": "matrix.device.claim",
+                "phoneDeviceIds": ["phone-a"],
+            },
+            "Bearer sk-second-session-token",
+        )
+
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["code"], "account_session_mismatch")
+
+    def test_model_service_group_does_not_silently_upgrade_matrix_entitlement(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+
+        status, payload = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="svip",
+            install_id="install-a",
+            device_id="phone-a",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("entitlementLease", payload["data"])
+        self.assertEqual(
+            payload["data"]["entitlement"]["source"],
+            "authorization_required",
+        )
+        self.assertEqual(payload["data"]["entitlement"]["limits"]["devices"], 0)
+
+    def test_cached_paid_grant_cannot_mint_fresh_lease_without_license_service(self):
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            {
+                "source": "authorization_code",
+                "plan": "matrix_pro",
+                "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+                "limits": {"devices": 4, "concurrentTasks": 2},
+                "expiresAt": int(time.time()) + 86400,
+                "codeLabel": "OC-PRO-****-ZZ99",
+            },
+            action="test_seed",
+        )
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = ""
+
+        status, payload = self.bridge.issue_entitlement_lease(
+            account_id="42",
+            group="default",
+            install_id="install-a",
+            device_id="host-a",
+            session_token="sk-test-secret-value",
+        )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "authorization_service_unavailable")
+        self.assertNotIn("entitlementLease", payload)
+
+    def test_fresh_lease_syncs_permanent_revocation_and_blocks_phone_access(self):
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            {
+                "source": "authorization_code",
+                "plan": "matrix_pro",
+                "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+                "limits": {"devices": 4, "concurrentTasks": 2},
+                "expiresAt": int(time.time()) + 86400,
+                "codeLabel": "OC-PRO-****-ZZ99",
+            },
+            action="test_seed",
+        )
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+
+        def revoked(_account_id):
+            raise self.bridge.BridgeUpstreamError(
+                "Authorization code was revoked",
+                status_code=410,
+                code="ACCOUNT_ENTITLEMENT_REVOKED",
+            )
+
+        self.bridge.current_authorization_entitlement_from_license_server = revoked
+
+        status, payload = self.bridge.issue_entitlement_lease(
+            account_id="42",
+            group="default",
+            install_id="install-a",
+            device_id="host-a",
+            session_token="sk-test-secret-value",
+        )
+
+        self.assertEqual(status, 403, payload)
+        self.assertEqual(payload["code"], "authorization_required")
+        self.assertEqual(payload["entitlement"]["source"], "authorization_required")
+        self.assertEqual(payload["entitlement"]["limits"]["devices"], 0)
+
+    def test_license_service_rejects_non_https_endpoint_before_network_call(self):
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_BASE = "http://license.example"
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        original_urlopen = self.bridge.urllib.request.urlopen
+        self.bridge.urllib.request.urlopen = lambda *_args, **_kwargs: self.fail(
+            "insecure license request reached the network"
+        )
+        try:
+            with self.assertRaises(self.bridge.BridgeUpstreamError) as raised:
+                self.bridge.current_authorization_entitlement_from_license_server("42")
+        finally:
+            self.bridge.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(raised.exception.code, "ENTITLEMENT_SERVICE_INSECURE")
+
+    def test_paid_offline_grace_never_extends_past_authorization_expiry(self):
+        now = int(time.time())
+        grant_expires_at = now + 1800
+
+        lease = self.bridge.signed_entitlement_lease(
+            account_id="42",
+            session_token="sk-test-secret-value",
+            install_id="install-a",
+            device_id="host-a",
+            policy={
+                "plan": "matrix_pro",
+                "source": "authorization_code",
+                "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+                "limits": {"devices": 4, "concurrentTasks": 2},
+                "expiresAt": grant_expires_at,
+            },
+            entitlement_version=1,
+            now=now,
+        )
+
+        self.assertEqual(lease["expiresAt"], grant_expires_at)
+        self.assertEqual(lease["offlineGraceUntil"], grant_expires_at)
+
+    def test_redeemed_authorization_code_upgrades_account_and_survives_refresh(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        seen = []
+        entitlement = {
+            "source": "authorization_code",
+            "plan": "pro",
+            "features": [
+                "matrix.devices",
+                "matrix.tasks",
+                "matrix.parallel_tasks",
+                "matrix.diagnostics",
+            ],
+            "limits": {"devices": 5, "concurrentTasks": 3},
+            "expiresAt": int(time.time()) + 30 * 86400,
+            "codeLabel": "OC-PRO-****-A1B2",
+        }
+
+        def redeem(code, *, account_id):
+            seen.append((code, account_id))
+            return dict(entitlement)
+
+        self.bridge.redeem_authorization_code_with_license_server = redeem
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.current_authorization_entitlement_from_license_server = (
+            lambda _account_id: dict(entitlement)
+        )
+        status, payload = self.bridge.handle_entitlement_redeem(
+            {
+                "code": "OC-PRO-SECRET-A1B2",
+                "installId": "install-a",
+                "deviceId": "host-a",
+            },
+            "Bearer sk-test-secret-value",
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(seen, [("OC-PRO-SECRET-A1B2", "42")])
+        lease = payload["entitlementLease"]
+        self.assertEqual(lease["accountId"], "42")
+        self.assertEqual(
+            lease["limits"],
+            {
+                "devices": 1000,
+                "concurrentTasks": 3,
+                "unlimitedDevices": True,
+            },
+        )
+        self.assertEqual(payload["entitlement"]["source"], "authorization_code")
+        self.verify_lease_signature(lease)
+
+        status, payload = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="default",
+            install_id="install-a",
+            device_id="host-a",
+        )
+        self.assertEqual(status, 200)
+        lease_a = payload["data"]["entitlementLease"]
+        self.assertEqual(
+            lease_a["limits"],
+            {
+                "devices": 1000,
+                "concurrentTasks": 3,
+                "unlimitedDevices": True,
+            },
+        )
+        self.assertEqual(payload["data"]["entitlement"]["source"], "authorization_code")
+
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease_a,
+            "matrix.device.claim",
+            ["phone-a", "phone-b"],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            payload["phoneSeatLease"]["phoneDeviceIds"],
+            ["phone-a", "phone-b"],
+        )
+        self.verify_lease_signature(payload["phoneSeatLease"])
+
+        status, payload = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="default",
+            install_id="install-b",
+            device_id="host-b",
+        )
+        self.assertEqual(status, 200)
+        lease_b = payload["data"]["entitlementLease"]
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease_b,
+            "matrix.device.claim",
+            ["phone-c"],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["phoneSeatLease"]["phoneDeviceIds"], ["phone-c"])
+        self.verify_lease_signature(payload["phoneSeatLease"])
+
+    def test_payment_bridge_buys_native_subscription_with_nominal_usd_cny_mapping(self):
+        calls = []
+        trade_no = "SUBUSR42NOABC123456789"
+
+        def upstream(_opener, path, *, method="GET", body=None, headers=None, timeout=20):
+            calls.append((path, method, dict(body or {}), dict(headers or {})))
+            self.assertNotIn("sk-test-secret-value", json.dumps(headers or {}))
+            self.assertEqual("42", (headers or {}).get("New-Api-User"))
+            self.assertTrue(str((headers or {}).get("Authorization") or "").startswith("Bearer "))
+            if path == "/api/subscription/plans":
+                return {
+                    "success": True,
+                    "data": [
+                        {
+                            "plan": {
+                                "id": 1,
+                                "title": "基础套餐",
+                                "subtitle": "模型服务基础订阅",
+                                "price_amount": 50,
+                                "currency": "USD",
+                                "duration_unit": "month",
+                                "duration_value": 1,
+                                "enabled": True,
+                                "total_amount": 100000000,
+                                "quota_reset_period": "daily",
+                            }
+                        }
+                    ],
+                }
+            if path == "/api/user/topup/info":
+                return {
+                    "success": True,
+                    "data": {
+                        "enable_online_topup": True,
+                        "payment_compliance_confirmed": True,
+                        "pay_methods": [{"name": "支付宝", "type": "alipay"}],
+                    },
+                }
+            if path == "/api/subscription/epay/pay":
+                self.assertEqual(
+                    {"plan_id": 1, "payment_method": "alipay"}, body
+                )
+                connection = sqlite3.connect(self.bridge.DB_PATH)
+                try:
+                    connection.execute(
+                        """
+                        insert into subscription_orders(
+                            user_id, plan_id, money, trade_no, payment_method,
+                            payment_provider, status, create_time
+                        ) values(42, 1, 50, ?, 'alipay', 'epay', 'pending', ?)
+                        """,
+                        (trade_no, int(time.time())),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                return {
+                    "message": "success",
+                    "url": "https://zpayz.cn/submit.php",
+                    "data": {
+                        "pid": "merchant-1",
+                        "type": "alipay",
+                        "out_trade_no": trade_no,
+                        "notify_url": "https://api.example/api/subscription/epay/notify",
+                        "return_url": "https://api.example/api/subscription/epay/return",
+                        "name": "SUB:基础套餐",
+                        "money": "50.00",
+                        "sign": "fixed-order-signature",
+                        "sign_type": "MD5",
+                    },
+                }
+            raise AssertionError(f"unexpected upstream path: {path}")
+
+        self.bridge.request_json = upstream
+        self.bridge.PUBLIC_API_BASE = "https://api.heang.top/v1"
+        self.bridge.SUBSCRIPTION_PAYMENT_FORM_HOSTS = frozenset({"zpayz.cn"})
+        token = "Bearer sk-test-secret-value"
+        status, plans = self.bridge.handle_payment_plans(
+            {"accountId": "attacker"}, token
+        )
+        self.assertEqual(200, status, plans)
+        plan = plans["data"]["plans"][0]
+        self.assertEqual("newapi-subscription-1", plan["planKey"])
+        self.assertEqual("50.00", plan["amount"])
+        self.assertEqual("CNY", plan["currency"])
+        self.assertEqual("USD", plan["sourceCurrency"])
+        self.assertEqual("nominal_1_to_1", plan["pricingRule"])
+        self.assertEqual("ready", plans["data"]["payment"]["reasonCode"])
+        status, created = self.bridge.handle_payment_order_create(
+            {
+                "accountId": "attacker",
+                "planKey": "newapi-subscription-1",
+                "paymentType": "alipay",
+                "requestId": "click-1",
+                "clientIp": "198.51.100.200",
+            },
+            token,
+            "203.0.113.41",
+        )
+        self.assertEqual(200, status, created)
+        order = created["data"]["order"]
+        self.assertEqual(trade_no, order["orderId"])
+        self.assertEqual("pending", order["status"])
+        self.assertEqual("50.00", order["amount"])
+        self.assertEqual("CNY", order["currency"])
+        checkout_url = urllib.parse.urlparse(order["qrcode"])
+        self.assertEqual("https", checkout_url.scheme)
+        self.assertEqual("api.heang.top", checkout_url.hostname)
+        self.assertEqual("/api/openclaw/subscriptions/checkout", checkout_url.path)
+        checkout_token = urllib.parse.parse_qs(checkout_url.query)["token"][0]
+        self.assertNotIn(checkout_token.encode("utf-8"), Path(self.bridge.BIND_DB_PATH).read_bytes())
+
+        status, repeated = self.bridge.handle_payment_order_create(
+            {
+                "planKey": "newapi-subscription-1",
+                "paymentType": "alipay",
+                "requestId": "click-1",
+            },
+            token,
+            "203.0.113.41",
+        )
+        self.assertEqual(200, status, repeated)
+        self.assertEqual(trade_no, repeated["data"]["order"]["orderId"])
+        self.assertEqual(
+            1,
+            len([call for call in calls if call[0] == "/api/subscription/epay/pay"]),
+        )
+
+        status, checkout_html, form_origin = self.bridge.handle_subscription_checkout(
+            checkout_token
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("https://zpayz.cn", form_origin)
+        self.assertIn('action="https://zpayz.cn/submit.php"', checkout_html)
+        self.assertIn('name="out_trade_no"', checkout_html)
+        self.assertIn('value="fixed-order-signature"', checkout_html)
+        self.assertNotIn("sk-test-secret-value", checkout_html)
+
+        status, queried = self.bridge.handle_payment_order_status(
+            {
+                "accountId": "attacker",
+                "orderId": trade_no,
+                "reconcile": True,
+            },
+            token,
+        )
+        self.assertEqual(200, status, queried)
+        self.assertEqual("pending", queried["data"]["order"]["status"])
+
+        connection = self.bridge._bind_connection()
+        try:
+            connection.execute(
+                "update subscription_checkout_requests set expires_at = ? where order_id = ?",
+                (int(time.time()) - 1, trade_no),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        status, queried = self.bridge.handle_payment_order_status(
+            {"orderId": trade_no}, token
+        )
+        self.assertEqual(200, status, queried)
+        self.assertEqual("expired", queried["data"]["order"]["status"])
+
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        try:
+            connection.execute(
+                "update subscription_orders set status = 'success', complete_time = ? where trade_no = ?",
+                (int(time.time()), trade_no),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        status, queried = self.bridge.handle_payment_order_status(
+            {"orderId": trade_no}, token
+        )
+        self.assertEqual(200, status, queried)
+        self.assertEqual("paid", queried["data"]["order"]["status"])
+
+        before = len(calls)
+        status, denied = self.bridge.handle_payment_order_create(
+            {"planKey": "newapi-subscription-1", "requestId": "click-2"}, ""
+        )
+        self.assertEqual(401, status)
+        self.assertEqual("account_token_required", denied["code"])
+        self.assertEqual(before, len(calls))
+
+    def test_payment_plans_explain_why_zpay_checkout_is_disabled(self):
+        def upstream(_opener, path, *, method="GET", body=None, headers=None, timeout=20):
+            del method, body, headers, timeout
+            if path == "/api/subscription/plans":
+                return {"success": True, "data": []}
+            if path == "/api/user/topup/info":
+                return {
+                    "success": True,
+                    "data": {
+                        "enable_online_topup": False,
+                        "payment_compliance_confirmed": False,
+                        "pay_methods": [],
+                    },
+                }
+            raise AssertionError(f"unexpected upstream path: {path}")
+
+        self.bridge.request_json = upstream
+        status, payload = self.bridge.handle_payment_plans({}, "Bearer sk-test-secret-value")
+        self.assertEqual(200, status, payload)
+        payment = payload["data"]["payment"]
+        self.assertFalse(payment["configured"])
+        self.assertEqual("online_topup_disabled", payment["reasonCode"])
+        self.assertEqual("服务端在线充值尚未启用。", payment["message"])
+
+    def test_subscription_payment_request_id_cannot_be_reused_for_other_terms(self):
+        connection = self.bridge._bind_connection()
+        try:
+            connection.execute(
+                """
+                insert into subscription_checkout_requests(
+                    account_id, request_id, plan_id, payment_method, status,
+                    order_id, order_json, checkout_token_hash, checkout_payload,
+                    created_at, expires_at
+                ) values('42', 'same-click', 1, 'alipay', 'pending',
+                         'SUB-1', '{}', '', '{}', ?, ?)
+                """,
+                (int(time.time()), int(time.time()) + 3600),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        status, payload = self.bridge.handle_payment_order_create(
+            {
+                "planKey": "newapi-subscription-2",
+                "paymentType": "alipay",
+                "requestId": "same-click",
+            },
+            "Bearer sk-test-secret-value",
+        )
+
+        self.assertEqual(409, status)
+        self.assertEqual("payment_request_conflict", payload["code"])
+
+    def test_linux_companion_download_is_bound_to_an_immutable_digest(self):
+        artifact = Path(self.tmp.name) / "LumiLinuxRuntime.apk"
+        artifact.write_bytes(b"verified-companion-apk")
+        expected = hashlib.sha256(artifact.read_bytes()).hexdigest().upper()
+        original_path = self.bridge.LINUX_COMPANION_APK_PATH
+        original_hash = self.bridge.LINUX_COMPANION_APK_SHA256
+        try:
+            self.bridge.LINUX_COMPANION_APK_PATH = str(artifact)
+            self.bridge.LINUX_COMPANION_APK_SHA256 = expected
+            verified = self.bridge.linux_companion_artifact()
+            self.assertIsNotNone(verified)
+            self.assertEqual(str(artifact), verified[0])
+            self.assertEqual(artifact.stat().st_size, verified[1])
+            artifact.write_bytes(b"tampered")
+            self.assertIsNone(self.bridge.linux_companion_artifact())
+        finally:
+            self.bridge.LINUX_COMPANION_APK_PATH = original_path
+            self.bridge.LINUX_COMPANION_APK_SHA256 = original_hash
+
+    def test_payment_http_boundary_requires_bearer_and_grants_no_browser_cors(self):
+        status, denied = self.bridge.handle_payment_plans({}, "")
+        self.assertEqual(401, status)
+        self.assertEqual("account_token_required", denied["code"])
+
+        response_headers = []
+        response = SimpleNamespace(
+            headers={"Origin": "https://evil.example"},
+            wfile=BytesIO(),
+            send_response=lambda value: None,
+            send_header=lambda name, value: response_headers.append((name, value)),
+            end_headers=lambda: None,
+        )
+        self.bridge.Handler._send(response, status, denied)
+
+        names = {name.lower() for name, _value in response_headers}
+        self.assertNotIn("access-control-allow-origin", names)
+        self.assertNotIn("access-control-allow-credentials", names)
+        self.assertNotIn("access-control-allow-headers", names)
+        self.assertEqual(
+            "no-store",
+            next(
+                value for name, value in response_headers if name.lower() == "cache-control"
+            ),
+        )
+
+    def test_payment_client_ip_only_trusts_local_reverse_proxy_header(self):
+        proxied = SimpleNamespace(
+            client_address=("127.0.0.1", 12345),
+            headers={"X-Real-IP": "203.0.113.88"},
+        )
+        direct = SimpleNamespace(
+            client_address=("198.51.100.20", 12345),
+            headers={"X-Real-IP": "203.0.113.99"},
+        )
+        malformed = SimpleNamespace(
+            client_address=("127.0.0.1", 12345),
+            headers={"X-Real-IP": "not-an-ip"},
+        )
+
+        self.assertEqual("203.0.113.88", self.bridge._payment_client_ip(proxied))
+        self.assertEqual("198.51.100.20", self.bridge._payment_client_ip(direct))
+        self.assertEqual("127.0.0.1", self.bridge._payment_client_ip(malformed))
+
+    def test_authorization_expiry_parsing_is_utc_and_accepts_z_suffix(self):
+        self.assertEqual(
+            self.bridge._entitlement_expiry_epoch("2030-01-01T00:00:00Z"),
+            1_893_456_000,
+        )
+        self.assertEqual(
+            self.bridge._entitlement_expiry_epoch("2030-01-01"),
+            1_893_542_399,
+        )
+
+    def test_entitlement_redeem_requires_account_token_and_never_persists_plain_code(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        self.bridge.redeem_authorization_code_with_license_server = lambda *_args, **_kwargs: {
+            "source": "authorization_code",
+            "plan": "standard",
+            "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+            "limits": {"devices": 3, "concurrentTasks": 2},
+            "expiresAt": int(time.time()) + 86400,
+            "codeLabel": "OC-STANDARD-****-ZZ99",
+        }
+
+        status, payload = self.bridge.handle_entitlement_redeem(
+            {
+                "code": "OC-STANDARD-TOP-SECRET-ZZ99",
+                "installId": "install-a",
+                "deviceId": "host-a",
+            },
+            "",
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["code"], "account_token_required")
+
+        status, payload = self.bridge.handle_entitlement_redeem(
+            {
+                "code": "OC-STANDARD-TOP-SECRET-ZZ99",
+                "installId": "install-a",
+                "deviceId": "host-a",
+            },
+            "Bearer sk-test-secret-value",
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertNotIn("OC-STANDARD-TOP-SECRET-ZZ99", repr(payload))
+        raw_db = Path(self.bridge.BIND_DB_PATH).read_bytes()
+        self.assertNotIn(b"OC-STANDARD-TOP-SECRET-ZZ99", raw_db)
+
+    def test_entitlement_redeem_preserves_stable_license_service_error_codes(self):
+        def reject(*_args, **_kwargs):
+            raise self.bridge.BridgeUpstreamError(
+                "Authorization code is expired",
+                status_code=403,
+                code="LICENSE_EXPIRED",
+            )
+
+        self.bridge.redeem_authorization_code_with_license_server = reject
+
+        status, payload = self.bridge.handle_entitlement_redeem(
+            {
+                "code": "OC-STANDARD-EXPIRED-ZZ99",
+                "installId": "install-a",
+                "deviceId": "host-a",
+            },
+            "Bearer sk-test-secret-value",
+        )
+
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["code"], "authorization_code_expired")
+
+    def test_signed_legacy_license_migration_is_disabled_in_favor_of_code_binding(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        proof = {
+            "schema": "loom.license.v1",
+            "licenseId": "legacy-license-id",
+            "installId": "legacy-install",
+            "deviceId": "legacy-device",
+            "expires": "2030-01-01",
+            "signature": "legacy-signature-do-not-persist",
+        }
+        seen = []
+
+        def migrate(legacy_license, *, account_id):
+            seen.append((legacy_license, account_id))
+            raise AssertionError("disabled migration must not call the license server")
+
+        self.bridge.migrate_legacy_authorization_with_license_server = migrate
+
+        status, payload = self.bridge.handle_entitlement_migrate_legacy(
+            {
+                "legacyLicense": proof,
+                "installId": "current-install",
+                "deviceId": "current-host",
+            },
+            "Bearer sk-test-secret-value",
+        )
+
+        self.assertEqual(410, status, payload)
+        self.assertEqual("legacy_migration_disabled", payload["code"])
+        self.assertEqual("use_authorization_code", payload["action"])
+        self.assertEqual([], seen)
+
+    def test_legacy_license_migration_requires_login_and_valid_proof_shape(self):
+        status, payload = self.bridge.handle_entitlement_migrate_legacy(
+            {"legacyLicense": {}},
+            "",
+        )
+        self.assertEqual(401, status)
+        self.assertEqual("account_token_required", payload["code"])
+
+        status, payload = self.bridge.handle_entitlement_migrate_legacy(
+            {
+                "legacyLicense": {},
+                "installId": "current-install",
+                "deviceId": "current-host",
+            },
+            "Bearer sk-test-secret-value",
+        )
+        self.assertEqual(410, status)
+        self.assertEqual("legacy_migration_disabled", payload["code"])
+
+    def test_entitlement_refresh_issues_lease_for_valid_legacy_account_token(self):
+        entitlement = {
+            "source": "authorization_code",
+            "plan": "matrix_pro",
+            "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+            "limits": {"devices": 4, "concurrentTasks": 2},
+            "expiresAt": int(time.time()) + 86400,
+            "codeLabel": "OC-PRO-****-ZZ99",
+        }
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        connection.execute(
+            """
+            update tokens
+            set name = ?, model_limits_enabled = 1, model_limits = ?
+            where key = ?
+            """,
+            ("legacy account token", "agnes-2.0-flash", "sk-test-secret-value"),
+        )
+        connection.commit()
+        connection.close()
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.current_authorization_entitlement_from_license_server = (
+            lambda _account_id: dict(entitlement)
+        )
+
+        status, payload = self.bridge.handle_entitlement_refresh(
+            {"installId": "install-a", "deviceId": "host-a"},
+            "Bearer sk-test-secret-value",
+        )
+
+        self.assertEqual(200, status, payload)
+        self.assertEqual("authorization_code", payload["data"]["entitlement"]["source"])
+        lease = payload["data"]["entitlementLease"]
+        self.verify_lease_signature(lease)
+        self.assertEqual("42", lease["accountId"])
+        self.assertEqual("install-a", lease["installId"])
+        self.assertEqual("host-a", lease["deviceId"])
+
+    def test_permanent_license_revocation_downgrades_account_and_revokes_old_lease(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        entitlement = {
+            "source": "authorization_code",
+            "plan": "matrix_pro",
+            "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+            "limits": {"devices": 4, "concurrentTasks": 2},
+            "expiresAt": int(time.time()) + 86400,
+            "codeLabel": "OC-PRO-****-ZZ99",
+        }
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            entitlement,
+            action="test_seed",
+        )
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.current_authorization_entitlement_from_license_server = (
+            lambda _account_id: dict(entitlement)
+        )
+        _, before = self.bridge.build_launcher_payload(
+            user_id="42",
+            account="user@example.com",
+            group="default",
+            install_id="install-a",
+            device_id="host-a",
+        )
+        old_lease = before["data"]["entitlementLease"]
+
+        def revoked(_account_id):
+            raise self.bridge.BridgeUpstreamError(
+                "Authorization code was revoked",
+                status_code=410,
+                code="ACCOUNT_ENTITLEMENT_REVOKED",
+            )
+
+        original_current = self.bridge.current_authorization_entitlement_from_license_server
+        original_service_token = self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN
+        try:
+            connection = sqlite3.connect(self.bridge.DB_PATH)
+            connection.execute(
+                "update tokens set name = ?, key = ? where key = ?",
+                ("LOOM Launcher test", "testsecretvalue123", "sk-test-secret-value"),
+            )
+            connection.commit()
+            connection.close()
+            self.bridge.current_authorization_entitlement_from_license_server = revoked
+            self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+            status, refreshed = self.bridge.handle_entitlement_refresh(
+                {"installId": "install-a", "deviceId": "host-a"},
+                "Bearer testsecretvalue123",
+            )
+        finally:
+            self.bridge.current_authorization_entitlement_from_license_server = original_current
+            self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = original_service_token
+
+        self.assertEqual(status, 200, refreshed)
+        self.assertEqual(
+            refreshed["data"]["entitlement"]["source"],
+            "authorization_required",
+        )
+        self.assertEqual(refreshed["data"]["entitlement"]["limits"]["devices"], 0)
+        self.assertNotIn("entitlementLease", refreshed["data"])
+        old_status, old_result = self.bridge.authorize_entitlement_operation(
+            old_lease,
+            "matrix.task.start",
+        )
+        self.assertEqual(old_status, 403)
+        self.assertEqual(old_result["code"], "lease_revoked")
+
+    def test_temporary_license_outage_does_not_mint_a_fresh_paid_lease(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            {
+                "source": "authorization_code",
+                "plan": "matrix_pro",
+                "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+                "limits": {"devices": 4, "concurrentTasks": 2},
+                "expiresAt": int(time.time()) + 86400,
+                "codeLabel": "OC-PRO-****-ZZ99",
+            },
+            action="test_seed",
+        )
+
+        def unavailable(_account_id):
+            raise self.bridge.BridgeUpstreamError(
+                "License service is unavailable",
+                status_code=503,
+            )
+
+        original_current = self.bridge.current_authorization_entitlement_from_license_server
+        original_service_token = self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN
+        try:
+            connection = sqlite3.connect(self.bridge.DB_PATH)
+            connection.execute(
+                "update tokens set name = ?, key = ? where key = ?",
+                ("LOOM Launcher test", "testsecretvalue123", "sk-test-secret-value"),
+            )
+            connection.commit()
+            connection.close()
+            self.bridge.current_authorization_entitlement_from_license_server = unavailable
+            self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+
+            status, payload = self.bridge.handle_entitlement_refresh(
+                {"installId": "install-a", "deviceId": "host-a"},
+                "Bearer testsecretvalue123",
+            )
+        finally:
+            self.bridge.current_authorization_entitlement_from_license_server = original_current
+            self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = original_service_token
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "authorization_service_unavailable")
+        self.assertNotIn("entitlementLease", repr(payload))
+        self.assertEqual(
+            self.bridge.effective_entitlement_policy("42")["source"],
+            "authorization_code",
+        )
+
+    def test_refresh_without_license_service_credentials_does_not_mint_cached_paid_lease(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            {
+                "source": "authorization_code",
+                "plan": "matrix_pro",
+                "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+                "limits": {"devices": 4, "concurrentTasks": 2},
+                "expiresAt": int(time.time()) + 86400,
+                "codeLabel": "OC-PRO-****-ZZ99",
+            },
+            action="test_seed",
+        )
+        connection = sqlite3.connect(self.bridge.DB_PATH)
+        connection.execute(
+            "update tokens set name = ?, key = ? where key = ?",
+            ("LOOM Launcher test", "testsecretvalue123", "sk-test-secret-value"),
+        )
+        connection.commit()
+        connection.close()
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = ""
+
+        status, payload = self.bridge.handle_entitlement_refresh(
+            {"installId": "install-a", "deviceId": "host-a"},
+            "Bearer testsecretvalue123",
+        )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "authorization_service_unavailable")
+        self.assertNotIn("entitlementLease", repr(payload))
+
+    def test_entitlement_version_revokes_previous_lease(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        old_lease = self._activated_lease(
+            install_id="install-a",
+            host_device_id="phone-a",
+        )
+
+        new_version = self.bridge.revoke_account_entitlements("42", reason="password-reset")
+
+        self.assertEqual(
+            new_version,
+            int(old_lease["entitlementVersion"]) + 1,
+        )
+        status, check = self.bridge.authorize_entitlement_operation(old_lease, "matrix.task.start")
+        self.assertEqual(status, 403)
+        self.assertEqual(check["code"], "lease_revoked")
+
+        status, check = self.bridge.authorize_entitlement_operation(
+            old_lease,
+            "matrix.emergency_stop",
+        )
+        self.assertEqual(status, 200, check)
+        self.assertTrue(check["success"])
+
+    def test_operation_refreshes_authorization_and_revokes_an_active_lease(self):
+        lease = self._activated_lease()
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC = 30
+        calls = []
+
+        def revoked(account_id):
+            calls.append(account_id)
+            raise self.bridge.BridgeUpstreamError(
+                "Authorization code was revoked",
+                status_code=410,
+                code="ACCOUNT_ENTITLEMENT_REVOKED",
+            )
+
+        self.bridge.current_authorization_entitlement_from_license_server = revoked
+
+        status, payload = self.bridge.authorize_entitlement_operation(
+            lease,
+            "matrix.task.start",
+            ["phone-a"],
+        )
+
+        self.assertEqual(403, status)
+        self.assertEqual("lease_revoked", payload["code"])
+        self.assertEqual(["42"], calls)
+
+    def test_operation_authorization_refresh_is_bounded_by_a_short_cache(self):
+        lease = self._activated_lease()
+        self.bridge.LICENSE_ENTITLEMENT_SERVICE_TOKEN = "service-token"
+        self.bridge.ENTITLEMENT_AUTHORIZATION_REFRESH_TTL_SEC = 30
+        calls = []
+        entitlement = self.bridge.effective_entitlement_policy("42", "default")
+
+        def current(account_id):
+            calls.append(account_id)
+            return dict(entitlement)
+
+        self.bridge.current_authorization_entitlement_from_license_server = current
+
+        for phone_id in ("phone-a", "phone-b"):
+            status, payload = self.bridge.authorize_entitlement_operation(
+                lease,
+                "matrix.task.start",
+                [phone_id],
+            )
+            self.assertEqual(200, status, payload)
+
+        self.assertEqual(["42"], calls)
+
+    def test_valid_source_reactivation_clears_revocation_and_keeps_old_lease_invalid(self):
+        entitlement = {
+            "source": "authorization_code",
+            "plan": "matrix_pro",
+            "features": ["matrix.devices", "matrix.tasks", "matrix.diagnostics"],
+            "limits": {"devices": 4, "concurrentTasks": 2},
+            "expiresAt": int(time.time()) + 86400,
+            "codeLabel": "OC-PRO-****-R1A2",
+        }
+        self.bridge.persist_account_entitlement_grant(
+            "42",
+            entitlement,
+            action="test_seed",
+        )
+        old_status, old_payload = self.bridge.issue_entitlement_lease(
+            account_id="42",
+            group="default",
+            install_id="install-a",
+            device_id="host-a",
+            session_token="session-a",
+            source_verified=True,
+        )
+        self.assertEqual(old_status, 200, old_payload)
+        old_lease = old_payload["entitlementLease"]
+
+        revoked_version = self.bridge.revoke_account_entitlements(
+            "42",
+            reason="support-review",
+        )
+        restored_version = self.bridge.persist_account_entitlement_grant(
+            "42",
+            entitlement,
+            action="source_reactivated",
+        )
+        new_status, new_payload = self.bridge.issue_entitlement_lease(
+            account_id="42",
+            group="default",
+            install_id="install-a",
+            device_id="host-a",
+            session_token="session-b",
+            source_verified=True,
+        )
+
+        self.assertEqual(new_status, 200, new_payload)
+        self.assertGreater(restored_version, revoked_version)
+        connection = sqlite3.connect(self.bridge.BIND_DB_PATH)
+        try:
+            revoked_at = connection.execute(
+                "select revoked_at from entitlement_accounts where account_id = ?",
+                ("42",),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(revoked_at, 0)
+        old_check, old_result = self.bridge.authorize_entitlement_operation(
+            old_lease,
+            "matrix.task.start",
+        )
+        self.assertEqual(old_check, 403)
+        self.assertEqual(old_result["code"], "lease_revoked")
+        new_check, new_result = self.bridge.authorize_entitlement_operation(
+            new_payload["entitlementLease"],
+            "matrix.task.start",
+            ["phone-a"],
+        )
+        self.assertEqual(new_check, 200, new_result)
+
+    def test_expired_lease_blocks_new_matrix_tasks_but_allows_safety_operations(self):
+        self.bridge.fetch_models = lambda _token: ["glm-5.2-coding"]
+        lease = self._activated_lease(
+            install_id="install-a",
+            host_device_id="phone-a",
+        )
+        expired_now = int(lease["expiresAt"]) + 1
+
+        with patch.object(self.bridge.time, "time", return_value=expired_now):
+            status, check = self.bridge.authorize_entitlement_operation(
+                lease,
+                "matrix.task.start",
+            )
+            self.assertEqual(status, 403)
+            self.assertEqual(check["code"], "lease_expired")
+
+            status, check = self.bridge.authorize_entitlement_operation(
+                lease,
+                "matrix.emergency_stop",
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(check["success"])
+
+    def test_concurrent_activated_phone_claims_preserve_all_phones(self):
+        lease = self._activated_lease()
+        results = []
+        lock = threading.Lock()
+
+        def claim(index):
+            result = self.bridge.authorize_entitlement_operation(
+                lease,
+                "matrix.device.claim",
+                [f"phone-{index}"],
+            )
+            with lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=claim, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sum(1 for status, _ in results if status == 200), 8)
+        connection = sqlite3.connect(self.bridge.BIND_DB_PATH)
+        try:
+            claimed = [
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    select phone_device_id
+                    from entitlement_phone_seats
+                    where account_id = ? and released_at = 0
+                    order by phone_device_id
+                    """,
+                    ("42",),
+                ).fetchall()
+            ]
+        finally:
+            connection.close()
+        self.assertEqual(claimed, [f"phone-{index}" for index in range(8)])
 
     def test_launcher_token_in_account_group_is_reused(self):
         connection = sqlite3.connect(self.bridge.DB_PATH)
@@ -607,6 +2604,25 @@ class BindTicketTests(unittest.TestCase):
         status, payload = self.bridge.handle_bind_claim({"ticket": ticket})
         self.assertEqual(status, 404)
         self.assertIn("not found", payload["error"])
+
+    def test_claim_returns_inactive_entitlement_until_authorization_code_is_bound(self):
+        self.bridge.handle_launcher_token = self.stub_launcher_token
+        _, start_payload = self.bridge.handle_bind_start({"username": "user@example.com", "password": "pw"})
+        ticket = start_payload["data"]["ticket"]
+
+        status, payload = self.bridge.handle_bind_claim({
+            "ticket": ticket,
+            "installId": "install-claim",
+            "deviceId": "host-claim",
+        })
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("entitlementLease", payload["data"])
+        self.assertEqual(
+            payload["data"]["entitlement"]["source"],
+            "authorization_required",
+        )
+        self.assertEqual(payload["data"]["entitlement"]["limits"]["devices"], 0)
 
     def test_concurrent_claim_only_returns_key_once(self):
         self.bridge.handle_launcher_token = self.stub_launcher_token

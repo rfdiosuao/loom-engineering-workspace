@@ -25,8 +25,14 @@ PROTECTED_TABLES = (
     "prompt_templates",
     "account_gateway_settings",
     "publish_relay_packets",
+    "account_entitlement_redemptions",
+    "payment_orders",
 )
 ALLOWED_EXPECTED_CHANGES = frozenset({"plans"})
+ADDITIVE_MIGRATION_TABLES = frozenset({
+    "account_entitlement_redemptions",
+    "payment_orders",
+})
 TABLE_REQUIRED_COLUMNS = {
     "codes": (
         "code_hash", "code_label", "full_code", "licensee", "edition",
@@ -72,6 +78,18 @@ TABLE_REQUIRED_COLUMNS = {
         "seq", "packet_id", "channel_id", "packet_json", "status", "attempts",
         "created_at", "updated_at", "leased_by", "lease_id", "lease_until_ms",
         "next_available_at_ms", "completed_at", "result_json", "last_error",
+    ),
+    "account_entitlement_redemptions": (
+        "code_hash", "account_id", "plan", "features_json", "devices",
+        "concurrent_tasks", "expires_at", "code_label", "redeemed_at",
+    ),
+    "payment_orders": (
+        "order_id", "out_trade_no", "account_id", "request_id", "product_id",
+        "product_name", "plan_key", "provider", "payment_type", "amount_minor",
+        "currency", "duration_days", "features_json", "quotas_json", "nonce_hash",
+        "status", "provider_order_reference", "provider_transaction_id", "qrcode",
+        "pay_url", "expires_at", "paid_at", "entitlement_code_hash",
+        "last_error_code", "created_at", "updated_at",
     ),
     "plans": (
         "plan_key", "display_name", "duration_days", "features_json", "gateway_base_url",
@@ -154,9 +172,13 @@ def _open_read_only(path: Path, label: str) -> sqlite3.Connection:
 def _validate_required_schema(
     connection: sqlite3.Connection,
     label: str,
+    *,
+    allowed_missing_tables: frozenset[str] = frozenset(),
 ) -> None:
     table_names = _table_names(connection)
-    missing_tables = sorted(set(TABLE_REQUIRED_COLUMNS) - table_names)
+    missing_tables = sorted(
+        set(TABLE_REQUIRED_COLUMNS) - table_names - allowed_missing_tables
+    )
     if missing_tables:
         raise DatabaseVerificationError(
             f"required tables unavailable in {label}: " + ",".join(missing_tables)
@@ -164,6 +186,8 @@ def _validate_required_schema(
 
     invalid_tables = []
     for table, required_columns in TABLE_REQUIRED_COLUMNS.items():
+        if table not in table_names and table in allowed_missing_tables:
+            continue
         if not set(required_columns).issubset(_columns(connection, table)):
             invalid_tables.append(table)
     if invalid_tables:
@@ -217,11 +241,39 @@ def verify_databases(
         with closing(_open_read_only(before_file, "before")) as before, closing(
             _open_read_only(after_file, "after")
         ) as after:
-            _validate_required_schema(before, "before")
+            _validate_required_schema(
+                before,
+                "before",
+                allowed_missing_tables=ADDITIVE_MIGRATION_TABLES,
+            )
             _validate_required_schema(after, "after")
+            before_tables = _table_names(before)
             for table in TABLE_REQUIRED_COLUMNS:
                 expected_change = table in expected
-                result = compare_table(before, after, table, expected_change=expected_change)
+                schema_addition = (
+                    table in ADDITIVE_MIGRATION_TABLES
+                    and table not in before_tables
+                )
+                if schema_addition:
+                    after_count, _after_digest = _row_digest(
+                        after,
+                        table,
+                        _columns(after, table),
+                    )
+                    result = TableComparison(
+                        table,
+                        0,
+                        after_count,
+                        after_count == 0,
+                        expected_change=True,
+                    )
+                else:
+                    result = compare_table(
+                        before,
+                        after,
+                        table,
+                        expected_change=expected_change,
+                    )
                 comparisons.append(result)
                 if result.before_count < 0 or (not result.equal and not expected_change):
                     failures.append(table)

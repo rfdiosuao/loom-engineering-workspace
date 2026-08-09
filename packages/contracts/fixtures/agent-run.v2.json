@@ -1,0 +1,16 @@
+{
+  "schema": "loom.agent.run.v2",
+  "runId": "run_fixture_v2_001",
+  "sessionId": "session_fixture_001",
+  "status": "running",
+  "executionState": {
+    "phase": "planning",
+    "retryable": false,
+    "degraded": false
+  },
+  "checkpoint": "checkpoint_fixture_v2_001",
+  "campaignIds": [
+    "cmp_fixture_001"
+  ],
+  "startedAt": "2026-07-15T14:29:55+08:00"
+}

@@ -102,29 +102,54 @@ export async function ensureDaemon() {
 
 export async function runViaDaemon(config) {
   const runtime = await ensureDaemon();
+  const safeConfig = daemonRequestConfig(config);
   return requestDaemon(runtime, '/v1/run', {
+    ...safeConfig,
     schema: 'loom.phone_daemon.run.v1',
     requestId: crypto.randomUUID(),
-    ...config,
   }, daemonRequestTimeoutMs(config));
 }
 
 export async function metricsViaDaemon(config) {
   const runtime = await ensureDaemon();
+  const safeConfig = daemonRequestConfig(config);
   return requestDaemon(runtime, '/v1/metrics', {
+    ...safeConfig,
     schema: 'loom.phone_daemon.metrics.v1',
     requestId: crypto.randomUUID(),
-    ...config,
   }, daemonRequestTimeoutMs(config));
 }
 
 export async function syncEventsViaDaemon(config, onEvent) {
   const runtime = await ensureDaemon();
+  const safeConfig = daemonRequestConfig(config);
   return requestDaemonEventStream(runtime, '/v1/events-sync', {
+    ...safeConfig,
     schema: 'loom.phone_daemon.events_sync.v1',
     requestId: crypto.randomUUID(),
-    ...config,
   }, daemonEventStreamTimeoutMs(config), onEvent);
+}
+
+export function daemonRequestConfig(config) {
+  const request = config && typeof config === 'object' ? { ...config } : {};
+  for (const key of [
+    'id',
+    'baseUrl',
+    'phoneUrl',
+    'token',
+    'phoneToken',
+    'launcherId',
+    'lumiLauncherId',
+    'launcherSecret',
+    'lumiLauncherSecret',
+    'album',
+    'tags',
+    'priority',
+    'source',
+  ]) {
+    delete request[key];
+  }
+  return request;
 }
 
 async function requestDaemon(runtime, endpoint, requestPayload, timeoutMs) {

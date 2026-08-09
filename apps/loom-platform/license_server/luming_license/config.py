@@ -50,6 +50,7 @@ class Settings:
     publish_relay_default_lease_ms: int
     publish_relay_default_wait_ms: int
     publish_relay_max_attempts: int
+    account_redeem_service_token: str
     max_bulk_code_hashes: int
     max_request_body_bytes: int
     request_timeout_seconds: int
@@ -106,6 +107,9 @@ class Settings:
             publish_relay_default_lease_ms=bounded_int_env("PUBLISH_RELAY_DEFAULT_LEASE_MS", 30000, 1000, 900000),
             publish_relay_default_wait_ms=bounded_int_env("PUBLISH_RELAY_DEFAULT_WAIT_MS", 15000, 0, 900000),
             publish_relay_max_attempts=bounded_int_env("PUBLISH_RELAY_MAX_ATTEMPTS", 5, 1, 20),
+            account_redeem_service_token=os.environ.get(
+                "LICENSE_ACCOUNT_REDEEM_SERVICE_TOKEN", ""
+            ).strip(),
             max_bulk_code_hashes=bounded_int_env("LICENSE_MAX_BULK_CODE_HASHES", 1000, 1, 5000),
             max_request_body_bytes=bounded_int_env("LICENSE_MAX_REQUEST_BODY_BYTES", 1048576, 1024, 16777216),
             request_timeout_seconds=bounded_int_env("LICENSE_REQUEST_TIMEOUT_SECONDS", 30, 5, 300),

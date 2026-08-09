@@ -3,7 +3,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ensurePhoneConfig, readLauncherPhoneConfigByDevice, signedFetch, signedJsonRequest } from './openclaw-phone-secure.mjs';
+import {
+  ensurePhoneConfig,
+  hasLauncherPhoneRuntimeConfig,
+  readLauncherPhoneConfigByDevice,
+  resolveLauncherPhoneConnection,
+  signedFetch,
+  signedJsonRequest,
+} from './openclaw-phone-secure.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,8 +38,6 @@ Commands:
 
 Options:
   --device-id <id>             Optional. Select one configured APKClaw device from launcher
-  --phone-url <url>            Optional. Defaults to launcher Phone Control config, then env
-  --phone-token <token>        Optional. Defaults to launcher Phone Control config, then env
   --id <filename>              Recording id/filename for download
   --latest                     Download the newest recording
   --out-dir <path>             Download directory. Default: data/phone-videos
@@ -145,22 +150,11 @@ function parseArgs(argv) {
 }
 
 async function resolveConfig(args) {
-  const runtime = await readRuntimeContext();
+  const runtime = hasLauncherPhoneRuntimeConfig() ? {} : await readRuntimeContext();
   const launcherPhone = await readLauncherPhoneConfigByDevice(args.deviceId);
   return {
     ...args,
-    phoneUrl: firstNonEmpty(
-      args.phoneUrl,
-      process.env.OPENCLAW_PHONE_BASE_URL,
-      process.env.APKCLAW_BASE_URL,
-      runtime?.phone?.baseUrl,
-      launcherPhone.phoneUrl
-    ),
-    phoneToken: firstNonEmpty(args.phoneToken, process.env.OPENCLAW_PHONE_TOKEN, process.env.APKCLAW_TOKEN, launcherPhone.phoneToken),
-    deviceId: args.deviceId || launcherPhone.id || runtime?.phone?.defaultDeviceId || '',
-    lumiLauncherId: firstNonEmpty(args.lumiLauncherId, process.env.LUMI_LAUNCHER_ID, launcherPhone.lumiLauncherId),
-    lumiLauncherSecret: firstNonEmpty(args.lumiLauncherSecret, process.env.LUMI_LAUNCHER_SECRET, launcherPhone.lumiLauncherSecret),
-    source: launcherPhone.source,
+    ...resolveLauncherPhoneConnection(args, launcherPhone, runtime),
   };
 }
 
@@ -177,13 +171,6 @@ async function readRuntimeContext() {
     }
   }
   return {};
-}
-
-function firstNonEmpty(...values) {
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim()) return value.trim();
-  }
-  return '';
 }
 
 async function requestJson(config, method, endpoint, body) {

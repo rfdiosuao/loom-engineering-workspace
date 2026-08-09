@@ -33,7 +33,21 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  ; No-op: the handoff restores data and verifies the new process health.
+  ; A direct install into the renamed product directory has no detached
+  ; handoff. Import only files missing from the exact legacy sibling and keep
+  ; the source intact; the migration script rejects reparse points.
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File "/oname=loom-migrate-legacy-product-data.ps1" "${__FILEDIR__}\..\..\..\..\installer\migrate-legacy-product-data.ps1"
+  SetOutPath "$INSTDIR"
+  StrCpy $1 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" 0 loom_legacy_migration_shell_ready
+  StrCpy $1 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  loom_legacy_migration_shell_ready:
+  ExecWait '"$1" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\loom-migrate-legacy-product-data.ps1" -InstallRoot "$INSTDIR"' $0
+  StrCmp $0 "0" loom_legacy_migration_done
+  MessageBox MB_ICONEXCLAMATION|MB_OK "The previous installation data could not be imported automatically. Existing data was kept intact. Diagnostic log: $TEMP\loom-legacy-data-migration.log"
+  loom_legacy_migration_done:
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

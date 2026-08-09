@@ -1,5 +1,4 @@
 import React from 'react';
-import { LoomLogoMark } from '../brand/LoomBrand';
 import { APP_DISPLAY_NAME } from '../../version';
 import { showConfirm } from '../common';
 import { useTheme } from '../../hooks/useTheme';
@@ -16,12 +15,13 @@ interface SidebarProps {
   onStop: () => void;
 }
 
-type IconName = 'rocket' | 'box' | 'creative' | 'phone' | 'target' | 'matrix' | 'user' | 'capability' | 'model' | 'wrench' | 'settings' | 'power' | 'exit';
+type IconName = 'rocket' | 'box' | 'creative' | 'phone' | 'target' | 'matrix' | 'skill' | 'user' | 'capability' | 'model' | 'wrench' | 'settings' | 'power' | 'exit';
 
 function iconFor(item: NavItem): IconName {
   const key = item.key;
   if (key === 'dashboard') return 'rocket';
   if (key === 'agents') return 'box';
+  if (key === 'skills') return 'skill';
   if (key === 'creative') return 'creative';
   if (key === 'acquisition') return 'target';
   if (key === 'phone') return 'phone';
@@ -101,6 +101,15 @@ const Icon: React.FC<{ name: IconName; className?: string }> = ({ name, classNam
         <path d="M10 18h4" />
         <path d="M7 11v4" />
         <path d="M17 11v4" />
+      </svg>
+    );
+  }
+  if (name === 'skill') {
+    return (
+      <svg {...common}>
+        <path d="M7 4.5h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" />
+        <path d="M9 2.8v3.4M15 2.8v3.4" />
+        <path d="m9 12 2 2 4-4" />
       </svg>
     );
   }
@@ -197,13 +206,13 @@ const NavButton: React.FC<{
     aria-label={item.label}
     className={`group relative flex min-h-[64px] w-full flex-col items-center justify-center gap-1.5 rounded-[8px] px-1 py-2 text-center transition-all ${
       isActive
-        ? 'bg-white/[0.075] text-accent shadow-[inset_0_0_0_1px_rgba(55,213,163,0.16)]'
+        ? 'bg-white/[0.075] text-white shadow-[inset_0_0_0_1px_rgba(55,213,163,0.16)]'
         : 'text-white/58 hover:bg-white/[0.05] hover:text-white'
     }`}
   >
     {isActive && <span className="absolute right-[-8px] top-2 h-11 w-[3px] rounded-l bg-accent" />}
     <Icon name={iconFor(item)} className="h-[22px] w-[22px]" />
-    <span className={`text-[11px] font-black leading-none ${isActive ? 'text-accent' : 'text-white/68 group-hover:text-white'}`}>
+    <span className={`text-[11px] font-black leading-none ${isActive ? 'text-white' : 'text-white/68 group-hover:text-white'}`}>
       {item.label}
     </span>
   </button>
@@ -243,11 +252,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="relative z-10 flex h-full w-[72px] shrink-0 flex-col border-r border-white/10 bg-app-sidebar text-white">
       <div className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-[linear-gradient(90deg,transparent,rgba(55,213,163,0.08))]" />
 
-      <div className="relative flex shrink-0 items-center justify-center pb-3 pt-4">
-        <LoomLogoMark className="h-10 w-10 shadow-[0_14px_30px_rgba(0,0,0,0.34),0_0_0_1px_rgba(223,250,255,0.04)]" />
-      </div>
-
-      <nav className="relative flex-1 overflow-y-auto px-2 pb-3">
+      <nav className="relative flex-1 overflow-y-auto px-2 pb-3 pt-3">
         <div className="space-y-2">
           {items.map((item) => (
             <NavButton

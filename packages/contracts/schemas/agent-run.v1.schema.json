@@ -8,7 +8,6 @@
     "runId",
     "sessionId",
     "status",
-    "executionState",
     "campaignIds"
   ],
   "properties": {
@@ -48,6 +47,16 @@
         "minLength": 1
       },
       "uniqueItems": true
+    },
+    "modelId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "modelSource": {
+      "enum": [
+        "session",
+        "account-default"
+      ]
     },
     "startedAt": {
       "type": "string",

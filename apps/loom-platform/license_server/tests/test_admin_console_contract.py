@@ -31,6 +31,24 @@ class AdminConsoleContractTests(unittest.TestCase):
         self.assertIn('confirmation: "UNBIND"', source)
         self.assertNotIn("confirm(", source)
 
+    def test_plan_editor_controls_native_payment_catalog(self) -> None:
+        with open(ADMIN_HTML, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        for field_id in (
+            "planPaymentEnabled",
+            "planPriceMinor",
+            "planCurrency",
+            "planPaymentDescription",
+            "planPaymentBenefits",
+            "planPaymentSort",
+        ):
+            self.assertIn(f'id="{field_id}"', source)
+        self.assertIn("paymentEnabled:", source)
+        self.assertIn("priceMinor:", source)
+        self.assertIn("paymentBenefits:", source)
+        self.assertIn("扫码售价", source)
+
     def test_public_home_is_a_real_commercial_entry(self) -> None:
         self.assertTrue(os.path.isfile(PUBLIC_HTML), PUBLIC_HTML)
         with open(PUBLIC_HTML, "r", encoding="utf-8") as handle:

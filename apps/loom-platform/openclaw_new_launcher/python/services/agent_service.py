@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import copy
 import hashlib
 import json
 import os
@@ -26,6 +29,7 @@ from core.loom_model_client import LoomModelClient, extract_explicit_capability_
 from core.native_agent_runtime import LoomNativeRuntimeAdapter
 from core.newapi_account_manager import NewApiAccountManager
 from core.phone_matrix import MatrixControlPlane
+from core.job_ownership import current_account_job_identity, job_visible_to_account
 from services.agent_builtin_capabilities import AgentBuiltinCapabilityProvider
 from services.skills import SkillService
 
@@ -63,6 +67,207 @@ _SCOPE_INDEPENDENT_MEDIA_TERMS = (
     "做视频",
     "生视频",
 )
+_MAX_USER_ATTACHMENTS = 8
+_MAX_USER_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024
+_MAX_USER_IMAGE_BYTES = 8 * 1024 * 1024
+_MAX_USER_TEXT_CHARS = 32_768
+_USER_IMAGE_MIME_EXTENSIONS = {
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+_USER_TEXT_EXTENSIONS = {
+    ".csv",
+    ".json",
+    ".jsonl",
+    ".log",
+    ".markdown",
+    ".md",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+
+_PUBLIC_AGENT_FIELDS = {
+    "loom.agent.approval.v1": (
+        "schema",
+        "approvalId",
+        "sessionId",
+        "runId",
+        "toolCallId",
+        "capability",
+        "inputHash",
+        "actionSummary",
+        "targets",
+        "inputSummary",
+        "risk",
+        "riskReason",
+        "status",
+        "requestedAt",
+        "expiresAt",
+        "decision",
+        "decidedBy",
+        "decidedAt",
+        "consumedAt",
+    ),
+    "loom.agent.session.v1": (
+        "schema",
+        "sessionId",
+        "title",
+        "status",
+        "runtimeProfileId",
+        "modelId",
+        "createdAt",
+        "updatedAt",
+        "lastMessagePreview",
+        "activeRunId",
+    ),
+    "loom.agent.message.v1": (
+        "schema",
+        "messageId",
+        "sessionId",
+        "role",
+        "status",
+        "blocks",
+        "createdAt",
+        "completedAt",
+    ),
+    "loom.agent.run.v1": (
+        "schema",
+        "runId",
+        "sessionId",
+        "status",
+        "executionState",
+        "checkpoint",
+        "campaignIds",
+        "modelId",
+        "modelSource",
+        "startedAt",
+        "completedAt",
+        "error",
+    ),
+    "loom.agent.run.v2": (
+        "schema",
+        "runId",
+        "sessionId",
+        "status",
+        "executionState",
+        "checkpoint",
+        "campaignIds",
+        "modelId",
+        "modelSource",
+        "startedAt",
+        "completedAt",
+        "error",
+    ),
+}
+_PUBLIC_RUN_EXECUTION_STATE_FIELDS = ("phase", "retryable", "degraded")
+_PUBLIC_RUN_ERROR_FIELDS = ("code", "message", "recoverable")
+_PUBLIC_TRACE_NODE_FIELDS = (
+    "traceId",
+    "parentTraceId",
+    "runId",
+    "kind",
+    "name",
+    "status",
+    "startedAt",
+    "durationMs",
+    "eventCount",
+    "inputSummary",
+    "outputSummary",
+    "error",
+)
+_PRIVATE_AGENT_KEYS = frozenset({"ownerAccountId", "request"})
+
+
+def _public_agent_contract(record: Mapping[str, Any]) -> Json:
+    schema_id = str(record.get("schema") or "")
+    if not schema_id:
+        if record.get("approvalId"):
+            schema_id = "loom.agent.approval.v1"
+        elif record.get("messageId"):
+            schema_id = "loom.agent.message.v1"
+        elif record.get("runId"):
+            schema_id = "loom.agent.run.v1"
+        elif record.get("sessionId"):
+            schema_id = "loom.agent.session.v1"
+    fields = _PUBLIC_AGENT_FIELDS.get(schema_id)
+    if fields is None:
+        raise ValueError(f"unsupported public agent contract schema: {schema_id or '<missing>'}")
+    public = {
+        field: copy.deepcopy(record[field])
+        for field in fields
+        if field in record and record[field] is not None
+    }
+    public.setdefault("schema", schema_id)
+    if schema_id in {"loom.agent.run.v1", "loom.agent.run.v2"}:
+        public.setdefault("campaignIds", [])
+    if public.get("checkpoint") == "":
+        public.pop("checkpoint", None)
+    if schema_id == "loom.agent.message.v1" and isinstance(public.get("blocks"), list):
+        public["blocks"] = [
+            {
+                field: copy.deepcopy(block[field])
+                for field in ("type", "data")
+                if isinstance(block, Mapping) and field in block
+            }
+            if isinstance(block, Mapping)
+            else copy.deepcopy(block)
+            for block in public["blocks"]
+        ]
+    if schema_id == "loom.agent.approval.v1":
+        for field in ("targets", "inputSummary"):
+            if field in public:
+                public[field] = _public_trace_summary(public[field])
+    if schema_id in {"loom.agent.run.v1", "loom.agent.run.v2"}:
+        for field, allowed_fields in (
+            ("executionState", _PUBLIC_RUN_EXECUTION_STATE_FIELDS),
+            ("error", _PUBLIC_RUN_ERROR_FIELDS),
+        ):
+            value = public.get(field)
+            if isinstance(value, Mapping):
+                public[field] = {
+                    nested_field: copy.deepcopy(value[nested_field])
+                    for nested_field in allowed_fields
+                    if nested_field in value and value[nested_field] is not None
+                }
+    return public
+
+
+def _public_approval_outcome(outcome: Mapping[str, Any]) -> Json:
+    public_outcome = copy.deepcopy(dict(outcome))
+    if isinstance(outcome.get("approval"), Mapping):
+        public_outcome["approval"] = _public_agent_contract(outcome["approval"])
+    if isinstance(outcome.get("run"), Mapping):
+        public_outcome["run"] = _public_agent_contract(outcome["run"])
+    return public_outcome
+
+
+def _public_trace_summary(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _public_trace_summary(nested)
+            for key, nested in value.items()
+            if str(key) not in _PRIVATE_AGENT_KEYS
+        }
+    if isinstance(value, list):
+        return [_public_trace_summary(nested) for nested in value]
+    return copy.deepcopy(value)
+
+
+def _public_trace_node(node: Mapping[str, Any]) -> Json:
+    return {
+        field: (
+            _public_trace_summary(node[field])
+            if field in {"inputSummary", "outputSummary", "error"}
+            else copy.deepcopy(node[field])
+        )
+        for field in _PUBLIC_TRACE_NODE_FIELDS
+        if field in node and node[field] is not None
+    }
 
 
 def _native_runtime_profile_id(_value: Any = None) -> str:
@@ -106,6 +311,44 @@ def _is_scope_continuation(text: str) -> bool:
     return continuation and not independent_media
 
 
+def _account_id_from_session(session: Any) -> str:
+    if not isinstance(session, Mapping) or session.get("loggedIn") is not True:
+        return ""
+    entitlement = (
+        session.get("accountEntitlement")
+        if isinstance(session.get("accountEntitlement"), Mapping)
+        else {}
+    )
+    account_id = str(
+        entitlement.get("accountId")
+        or session.get("accountId")
+        or ""
+    ).strip()
+    if account_id:
+        return account_id
+    member_id = str(session.get("memberId") or "").strip()
+    return member_id.partition(":")[2].strip() if member_id.startswith("newapi:") else ""
+
+
+def _safe_attachment_name(value: Any) -> str:
+    name = os.path.basename(str(value or "").replace("\\", "/")).replace("\x00", "").strip()
+    if not name:
+        raise ValueError("AGENT_ATTACHMENT_INVALID: attachment name is required")
+    return name[:160]
+
+
+def _image_signature_matches(mime: str, payload: bytes) -> bool:
+    if mime == "image/png":
+        return payload.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime == "image/jpeg":
+        return payload.startswith(b"\xff\xd8\xff")
+    if mime == "image/gif":
+        return payload.startswith((b"GIF87a", b"GIF89a"))
+    if mime == "image/webp":
+        return len(payload) >= 12 and payload.startswith(b"RIFF") and payload[8:12] == b"WEBP"
+    return False
+
+
 class AgentService:
     """Join persistence, runtime execution, policy, tools, and API envelopes."""
 
@@ -126,11 +369,9 @@ class AgentService:
         self.paths = paths
         self.brand_identity = load_brand_identity(paths)
         self.native_runtime_name = self.brand_identity.native_agent_name
-        self.repository = AgentSessionRepository(paths)
-        self.event_bus = AgentEventBus(self.repository)
         self.context_factory = context_factory
         self.job_manager = job_manager
-        self._matrix_factory = matrix_factory or (lambda: MatrixControlPlane(self.paths))
+        self._matrix_factory = matrix_factory or self._default_matrix_factory
         self._campaign_links: dict[str, Json] = {}
         self._matrix_monitor_stop = threading.Event()
         self.account_manager = account_manager
@@ -138,6 +379,24 @@ class AgentService:
         if runtime is None:
             self.account_manager = account_manager or NewApiAccountManager(paths, lambda _text: None)
             self.model_client = model_client or LoomModelClient(self.account_manager)
+        public_session, public_session_resolved = self._read_public_account_session()
+        self._account_scoped = bool(
+            isinstance(self.account_manager, NewApiAccountManager)
+            or (
+                self.account_manager is not None
+                and "loggedIn" in public_session
+            )
+        )
+        self._initial_account_logged_out = bool(
+            public_session_resolved and public_session.get("loggedIn") is False
+        )
+        self.owner_account_id = _account_id_from_session(public_session)
+        self.repository = AgentSessionRepository(
+            paths,
+            owner_account_id=self.owner_account_id if self._account_scoped else None,
+        )
+        self.event_bus = AgentEventBus(self.repository)
+        if runtime is None:
             self.runtime = LoomNativeRuntimeAdapter(
                 self.model_client,
                 runtime_name=self.native_runtime_name,
@@ -171,6 +430,7 @@ class AgentService:
             max_workers=max(1, min(int(max_workers), 16)),
             thread_name_prefix="loom-agent-run",
         )
+
         self._futures: dict[str, Future[Any]] = {}
         self._pending_continuations: dict[str, RunContinuation] = {}
         self._resume_requests: set[str] = set()
@@ -179,7 +439,12 @@ class AgentService:
         self._closed = False
         self._executor_shutdown = False
 
-        recovered = self.orchestrator.recover_unfinished_runs()
+        execution_permitted = self._execution_permitted()
+        recovered = (
+            self.orchestrator.recover_unfinished_runs()
+            if execution_permitted
+            else []
+        )
         for run in recovered:
             if run.get("status") == "queued":
                 self._submit_run(
@@ -187,7 +452,8 @@ class AgentService:
                     str(run["runId"]),
                     self._request_from_run(run),
                 )
-        self._restore_matrix_campaign_links()
+        if execution_permitted:
+            self._restore_matrix_campaign_links()
         self._matrix_monitor_thread = threading.Thread(
             target=self._monitor_matrix_campaigns,
             name="loom-agent-matrix-monitor",
@@ -195,7 +461,36 @@ class AgentService:
         )
         self._matrix_monitor_thread.start()
 
+    def _default_matrix_factory(self) -> MatrixControlPlane:
+        ctx = self.context_factory() if callable(self.context_factory) else None
+        owner_account_id, owner_binding = (
+            current_account_job_identity(ctx) if ctx is not None else ("", "")
+        )
+        return MatrixControlPlane(
+            self.paths,
+            phone_authorizer=self._authorize_matrix_phone_devices,
+            owner_account_id=owner_account_id,
+            owner_account_binding=owner_binding,
+        )
+
+    def _authorize_matrix_phone_devices(
+        self,
+        device_ids: list[str],
+        operation: str,
+    ) -> dict | None:
+        if not callable(self.context_factory):
+            return None
+        from api.routes_phone import _authorize_phone_entitlement
+
+        return _authorize_phone_entitlement(
+            self.context_factory(),
+            device_ids,
+            operation,
+        )
+
     def bootstrap(self) -> Json:
+        self._require_current_account()
+        execution_access = self._execution_access()
         runtime_status = redact_sensitive(self.runtime.status(NATIVE_RUNTIME_PROFILE_ID))
         if not isinstance(runtime_status, Mapping):
             runtime_status = {}
@@ -220,7 +515,13 @@ class AgentService:
             "models": models,
             "defaultModelId": default_model_id,
             "capabilities": capabilities,
-            "permissions": {"read": True, "control": True, "outbound": True, "critical": False},
+            "executionAccess": execution_access,
+            "permissions": {
+                "read": True,
+                "control": bool(execution_access["authorized"]),
+                "outbound": bool(execution_access["authorized"]),
+                "critical": False,
+            },
             "policy": {
                 "mode": self.policy.approval_mode,
                 "approvalRequired": ["critical"] if self.policy.approval_mode == "weak" else ["outbound", "critical"],
@@ -231,20 +532,33 @@ class AgentService:
         }
 
     def list_sessions(self, *, query: str | None = None, cursor: str | None = None, limit: int = 50) -> Json:
-        return self.repository.list_sessions(query=query, cursor=cursor, limit=limit)
+        self._require_current_account()
+        page = self.repository.list_sessions(query=query, cursor=cursor, limit=limit)
+        return {
+            "sessions": [
+                _public_agent_contract(session)
+                for session in page.get("sessions", [])
+                if isinstance(session, Mapping)
+            ],
+            **({"nextCursor": page["nextCursor"]} if page.get("nextCursor") else {}),
+        }
 
     def create_session(self, body: Mapping[str, Any] | None = None) -> Json:
+        self._require_execution_access()
         data = dict(body or {})
         model_id = str(data.get("modelId") or "").strip()
         if model_id:
             self._ensure_model_available(model_id)
-        return self.repository.create_session(
-            title=str(data.get("title") or "New conversation"),
-            runtime_profile_id=_native_runtime_profile_id(data.get("runtimeProfileId")),
-            model_id=model_id,
+        return _public_agent_contract(
+            self.repository.create_session(
+                title=str(data.get("title") or "New conversation"),
+                runtime_profile_id=_native_runtime_profile_id(data.get("runtimeProfileId")),
+                model_id=model_id,
+            )
         )
 
     def update_session(self, session_id: str, body: Mapping[str, Any] | None = None) -> Json:
+        self._require_execution_access()
         data = dict(body or {})
         if "modelId" in data:
             model_id = str(data.get("modelId") or "").strip()
@@ -252,18 +566,28 @@ class AgentService:
                 self._ensure_model_available(model_id)
             data["modelId"] = model_id
         data["runtimeProfileId"] = NATIVE_RUNTIME_PROFILE_ID
-        return self.repository.update_session(session_id, data)
+        return _public_agent_contract(self.repository.update_session(session_id, data))
 
     def session_detail(self, session_id: str, *, cursor: str | None = None, limit: int = 100) -> Json:
+        self._require_current_account()
         page = self.repository.page_messages(session_id, cursor=cursor, limit=limit)
         return {
-            "session": self.repository.get_session(session_id),
-            "messages": page.get("messages", []),
-            "runs": self.repository.list_runs(session_id),
+            "session": _public_agent_contract(self.repository.get_session(session_id)),
+            "messages": [
+                _public_agent_contract(message)
+                for message in page.get("messages", [])
+                if isinstance(message, Mapping)
+            ],
+            "runs": [
+                _public_agent_contract(run)
+                for run in self.repository.list_runs(session_id)
+                if isinstance(run, Mapping)
+            ],
             **({"nextCursor": page["nextCursor"]} if page.get("nextCursor") else {}),
         }
 
     def send_message(self, session_id: str, body: Mapping[str, Any]) -> Json:
+        self._require_execution_access()
         with self._lock:
             if self._closed:
                 raise RuntimeError("agent service is closed")
@@ -272,13 +596,16 @@ class AgentService:
         if not client_message_id:
             raise ValueError("clientMessageId is required")
         text = str(request.get("text") or "").strip()
-        attachments = request.get("attachments") if isinstance(request.get("attachments"), list) else []
-        if not text and not attachments:
+        raw_attachments = request.get("attachments") if isinstance(request.get("attachments"), list) else []
+        if not text and not raw_attachments:
             raise ValueError("message text or attachment is required")
         session = self.repository.get_session(session_id)
         existing = self.repository.find_message_run(session_id, client_message_id)
         if existing is not None:
-            return {"message": existing["message"], "run": existing["run"]}
+            return {
+                "message": _public_agent_contract(existing["message"]),
+                "run": _public_agent_contract(existing["run"]),
+            }
         model_id, model_source = self._resolve_run_model(session)
         supplied_scope = request.get("scope") if isinstance(request.get("scope"), Mapping) else None
         legacy_targets = request.get("targets") if isinstance(request.get("targets"), Mapping) else {}
@@ -306,6 +633,19 @@ class AgentService:
                     break
         if requested_mode == "manual" and scope_resolution.status != "resolved":
             raise ValueError(f"AGENT_SCOPE_INVALID: {scope_resolution.summary}")
+        materialized_attachments: list[Json] = []
+        try:
+            attachments = self._normalize_user_attachments(
+                session_id,
+                raw_attachments,
+                materialized=materialized_attachments,
+            )
+        except Exception:
+            self._cleanup_unreferenced_user_attachments(
+                session_id,
+                materialized_attachments,
+            )
+            raise
         session_artifacts = self._session_artifacts(session_id)
         now = _utc_now()
         message_id = f"message_{uuid.uuid4().hex}"
@@ -375,14 +715,26 @@ class AgentService:
         with self._lock:
             if self._closed:
                 raise RuntimeError("agent service is closed")
-            result = self.repository.create_message_run(
-                session_id,
-                client_message_id,
-                message,
-                run,
-                reject_active_run=True,
-                history_limit=40,
-            )
+            try:
+                result = self.repository.create_message_run(
+                    session_id,
+                    client_message_id,
+                    message,
+                    run,
+                    reject_active_run=True,
+                    history_limit=40,
+                )
+            except Exception:
+                self._cleanup_unreferenced_user_attachments(
+                    session_id,
+                    materialized_attachments,
+                )
+                raise
+            if not result.get("created"):
+                self._cleanup_unreferenced_user_attachments(
+                    session_id,
+                    materialized_attachments,
+                )
             if result.get("created"):
                 persisted_request = result["run"].get("request")
                 if not isinstance(persisted_request, Mapping):
@@ -395,7 +747,211 @@ class AgentService:
                     data={"status": "queued"},
                 )
                 self._submit_run(session_id, str(result["run"]["runId"]), persisted_request)
-        return {"message": result["message"], "run": result["run"]}
+        return {
+            "message": _public_agent_contract(result["message"]),
+            "run": _public_agent_contract(result["run"]),
+        }
+
+    def _normalize_user_attachments(
+        self,
+        session_id: str,
+        values: list[Any],
+        *,
+        materialized: list[Json] | None = None,
+    ) -> list[Json]:
+        if len(values) > _MAX_USER_ATTACHMENTS:
+            raise ValueError(
+                f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: at most {_MAX_USER_ATTACHMENTS} attachments are allowed"
+            )
+        normalized: list[Json] = []
+        total_bytes = 0
+        for value in values:
+            if not isinstance(value, Mapping):
+                raise ValueError("AGENT_ATTACHMENT_INVALID: attachment must be an object")
+            name = _safe_attachment_name(value.get("name"))
+            try:
+                size = max(0, int(value.get("size") or 0))
+            except (TypeError, ValueError):
+                raise ValueError(f"AGENT_ATTACHMENT_INVALID: invalid size for {name}") from None
+            total_bytes += size
+            if total_bytes > _MAX_USER_ATTACHMENT_TOTAL_BYTES:
+                raise ValueError(
+                    "AGENT_ATTACHMENT_LIMIT_EXCEEDED: attachment total exceeds 16 MB"
+                )
+            supplied_type = str(value.get("type") or value.get("mime") or "").strip().lower()
+            extension = os.path.splitext(name)[1].lower()
+            kind = str(value.get("kind") or "").strip().lower()
+
+            if kind == "image" or supplied_type.startswith("image/"):
+                encoded = str(value.get("dataUrl") or "")
+                header = f"data:{supplied_type};base64,"
+                encoded_bytes = max(0, len(encoded) - len(header))
+                estimated_bytes = (encoded_bytes * 3) // 4
+                total_bytes += max(0, estimated_bytes - size)
+                if total_bytes > _MAX_USER_ATTACHMENT_TOTAL_BYTES:
+                    raise ValueError(
+                        "AGENT_ATTACHMENT_LIMIT_EXCEEDED: attachment total exceeds 16 MB"
+                    )
+                attachment = self._materialize_user_image_attachment(
+                    session_id,
+                    name=name,
+                    mime=supplied_type,
+                    size=size,
+                    last_modified=value.get("lastModified"),
+                    data_url=encoded,
+                )
+                normalized.append(attachment)
+                if materialized is not None:
+                    materialized.append(attachment)
+                continue
+
+            is_text = (
+                kind in {"", "text"}
+                and (
+                    supplied_type.startswith("text/")
+                    or supplied_type in {
+                        "",
+                        "application/javascript",
+                        "application/json",
+                        "application/ld+json",
+                        "application/xml",
+                        "application/x-yaml",
+                        "application/yaml",
+                    }
+                    or extension in _USER_TEXT_EXTENSIONS
+                )
+            )
+            if is_text:
+                content = str(value.get("content") or "")[:_MAX_USER_TEXT_CHARS]
+                normalized.append({
+                    "name": name,
+                    "size": size,
+                    "type": supplied_type or "text/plain",
+                    "mime": supplied_type or "text/plain",
+                    "kind": "text",
+                    "lastModified": value.get("lastModified"),
+                    "content": content,
+                    "truncated": bool(
+                        value.get("truncated")
+                        or value.get("contentTruncated")
+                        or len(str(value.get("content") or "")) > _MAX_USER_TEXT_CHARS
+                    ),
+                })
+                continue
+
+            raise ValueError(
+                f"AGENT_ATTACHMENT_TYPE_UNSUPPORTED: {name} is not a supported image or text attachment"
+            )
+        return normalized
+
+    def _cleanup_unreferenced_user_attachments(
+        self,
+        session_id: str,
+        attachments: list[Json],
+    ) -> None:
+        attachment_root = os.path.abspath(os.path.join(
+            self.paths.data_dir,
+            "agent",
+            "attachments",
+            session_id,
+        ))
+        candidates: list[str] = []
+        for item in attachments:
+            raw_path = str(item.get("path") or "").strip() if isinstance(item, Mapping) else ""
+            if not raw_path:
+                continue
+            path = os.path.abspath(raw_path)
+            try:
+                inside_root = os.path.commonpath([path, attachment_root]) == attachment_root
+            except ValueError:
+                inside_root = False
+            if inside_root and path not in candidates:
+                candidates.append(path)
+        if not candidates:
+            return
+        try:
+            referenced = self.repository.referenced_attachment_paths(session_id, candidates)
+        except Exception:
+            # If durable-state inspection fails, retain files so repository
+            # recovery cannot resurrect a message with a missing attachment.
+            return
+        referenced_keys = {os.path.normcase(os.path.abspath(path)) for path in referenced}
+        for path in candidates:
+            if os.path.normcase(path) in referenced_keys:
+                continue
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+        try:
+            os.rmdir(attachment_root)
+        except OSError:
+            pass
+
+    def _materialize_user_image_attachment(
+        self,
+        session_id: str,
+        *,
+        name: str,
+        mime: str,
+        size: int,
+        last_modified: Any,
+        data_url: Any,
+    ) -> Json:
+        if mime not in _USER_IMAGE_MIME_EXTENSIONS:
+            raise ValueError(f"AGENT_ATTACHMENT_TYPE_UNSUPPORTED: unsupported image type for {name}")
+        if size > _MAX_USER_IMAGE_BYTES:
+            raise ValueError(f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: {name} exceeds 8 MB")
+        encoded = str(data_url or "")
+        expected_header = f"data:{mime};base64,"
+        if not encoded.startswith(expected_header):
+            raise ValueError(f"AGENT_ATTACHMENT_INVALID: image data is missing for {name}")
+        raw_base64 = encoded[len(expected_header):]
+        if len(raw_base64) > ((_MAX_USER_IMAGE_BYTES + 2) // 3) * 4 + 8:
+            raise ValueError(f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: {name} exceeds 8 MB")
+        try:
+            payload = base64.b64decode(raw_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError(f"AGENT_ATTACHMENT_INVALID: image data is invalid for {name}") from None
+        if not payload or len(payload) > _MAX_USER_IMAGE_BYTES:
+            raise ValueError(f"AGENT_ATTACHMENT_LIMIT_EXCEEDED: {name} exceeds 8 MB")
+        if size and size != len(payload):
+            raise ValueError(f"AGENT_ATTACHMENT_INVALID: image size mismatch for {name}")
+        if not _image_signature_matches(mime, payload):
+            raise ValueError(f"AGENT_ATTACHMENT_INVALID: image signature mismatch for {name}")
+
+        attachment_dir = os.path.join(
+            self.paths.data_dir,
+            "agent",
+            "attachments",
+            session_id,
+        )
+        os.makedirs(attachment_dir, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}{_USER_IMAGE_MIME_EXTENSIONS[mime]}"
+        path = os.path.abspath(os.path.join(attachment_dir, filename))
+        if os.path.commonpath([path, os.path.abspath(attachment_dir)]) != os.path.abspath(attachment_dir):
+            raise ValueError("AGENT_ATTACHMENT_INVALID: unsafe attachment path")
+        temporary_path = f"{path}.tmp"
+        try:
+            with open(temporary_path, "xb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+        return {
+            "name": name,
+            "size": len(payload),
+            "type": mime,
+            "mime": mime,
+            "kind": "image",
+            "lastModified": last_modified,
+            "path": path,
+        }
 
     def _session_artifacts(self, session_id: str, *, limit: int = 20) -> list[Json]:
         try:
@@ -489,9 +1045,11 @@ class AgentService:
         return "", "account-default"
 
     def get_run(self, run_id: str) -> Json:
-        return self.repository.get_run(run_id)
+        self._require_current_account()
+        return _public_agent_contract(self.repository.get_run(run_id))
 
     def get_trace(self, run_id: str) -> Json:
+        self._require_current_account()
         run = self.repository.get_run(run_id)
         session_id = str(run["sessionId"])
         events = self.repository.replay_events(session_id)
@@ -501,17 +1059,28 @@ class AgentService:
             if event.get("entityId") == run_id or event.get("data", {}).get("runId") == run_id
         ]
         trace = self._trace_nodes(run_id, relevant_events)
+        public_trace = [
+            _public_trace_node(node)
+            for node in trace
+            if isinstance(node, Mapping)
+        ]
         return {
-            "run": run,
-            "trace": trace,
-            "nodes": trace,
-            "approvals": self.repository.list_approvals(session_id, run_id=run_id),
+            "run": _public_agent_contract(run),
+            "trace": public_trace,
+            "nodes": copy.deepcopy(public_trace),
+            "approvals": [
+                _public_agent_contract(approval)
+                for approval in self.repository.list_approvals(session_id, run_id=run_id)
+                if isinstance(approval, Mapping)
+            ],
         }
 
     def pause_run(self, run_id: str) -> Json:
-        return self.orchestrator.pause_run(run_id)
+        self._require_execution_access()
+        return _public_agent_contract(self.orchestrator.pause_run(run_id))
 
     def resume_run(self, run_id: str) -> Json:
+        self._require_execution_access()
         with self._lock:
             run = self.repository.get_run(run_id)
             pause_requested = (
@@ -522,16 +1091,17 @@ class AgentService:
                 run.get("status") != "paused"
                 and not pause_requested
             ) or run_id in self._resume_requests:
-                return run
+                return _public_agent_contract(run)
             self._resume_requests.add(run_id)
             try:
                 self._submit_run(str(run["sessionId"]), run_id, self._request_from_run(run), resume=True)
             except Exception:
                 self._resume_requests.discard(run_id)
                 raise
-        return self.repository.get_run(run_id)
+        return _public_agent_contract(self.repository.get_run(run_id))
 
     def cancel_run(self, run_id: str) -> Json:
+        self._require_execution_access()
         run = self.repository.get_run(run_id)
         campaign_ids = [
             str(campaign_id)
@@ -573,10 +1143,11 @@ class AgentService:
                     entity_id=run_id,
                     data={"runId": run_id, "campaignIds": campaign_ids, "incomplete": incomplete},
                 )
-                return updated
-        return self.orchestrator.cancel_run(run_id)
+                return _public_agent_contract(updated)
+        return _public_agent_contract(self.orchestrator.cancel_run(run_id))
 
     def resolve_approval(self, approval_id: str, body: Mapping[str, Any]) -> Json:
+        self._require_execution_access()
         approval = self.repository.get_approval(approval_id)
         decision = str(body.get("decision") or "").strip().lower()
         decision = {"approve": "approved", "reject": "rejected"}.get(decision, decision)
@@ -588,13 +1159,16 @@ class AgentService:
                 with self._lock:
                     self._matrix_confirmation_tokens.setdefault(input_hash, []).append(approval_id)
         try:
-            return self.orchestrator.resolve_approval(
+            outcome = self.orchestrator.resolve_approval(
                 str(approval["sessionId"]),
                 approval_id,
                 decision=decision,
                 decided_by=str(body.get("operator") or body.get("decidedBy") or "local-user"),
                 request=self._request_from_run(self.repository.get_run(str(approval["runId"]))),
             )
+            if not isinstance(outcome, Mapping):
+                return outcome
+            return _public_approval_outcome(outcome)
         finally:
             if confirmation_token is not None:
                 input_hash, token_approval_id = confirmation_token
@@ -606,6 +1180,7 @@ class AgentService:
                         self._matrix_confirmation_tokens.pop(input_hash, None)
 
     def queue_approval_resolution(self, approval_id: str, body: Mapping[str, Any]) -> Json:
+        self._require_execution_access()
         approval = self.repository.get_approval(approval_id)
         decision = str(body.get("decision") or "").strip().lower()
         decision = {"approve": "approved", "reject": "rejected"}.get(decision, decision)
@@ -641,7 +1216,7 @@ class AgentService:
             )
             if outcome.get("approval", {}).get("status") != "approved":
                 release_confirmation()
-                return outcome
+                return _public_approval_outcome(outcome)
             self._submit_run(
                 str(approval["sessionId"]),
                 str(approval["runId"]),
@@ -650,13 +1225,76 @@ class AgentService:
                 on_complete=release_confirmation,
                 queue_if_busy=True,
             )
-            return outcome
+            return _public_approval_outcome(outcome)
         except Exception:
             release_confirmation()
             raise
 
     def events_after(self, *, session_id: str, after_seq: int) -> list[Json]:
+        self._require_current_account()
         return self.event_bus.replay(session_id, after_seq=after_seq, limit=500)
+
+    def _read_public_account_session(self) -> tuple[Mapping[str, Any], bool]:
+        reader = getattr(self.account_manager, "public_session", None)
+        if not callable(reader):
+            return {}, False
+        try:
+            value = reader()
+        except Exception:
+            return {}, False
+        if not isinstance(value, Mapping):
+            return {}, False
+        return value, True
+
+    def _require_current_account(self) -> None:
+        if not self._account_scoped:
+            return
+        current_session, current_session_resolved = self._read_public_account_session()
+        if not current_session_resolved:
+            raise KeyError("agent account scope")
+        current = _account_id_from_session(current_session)
+        if current and current == self.owner_account_id:
+            return
+        if (
+            not current
+            and not self.owner_account_id
+            and self._initial_account_logged_out
+            and current_session.get("loggedIn") is False
+        ):
+            return
+        raise KeyError("agent account scope")
+
+    def _execution_permitted(self) -> bool:
+        try:
+            self._require_current_account()
+        except KeyError:
+            return False
+        return bool(self._execution_access()["authorized"])
+
+    def _execution_access(self) -> Json:
+        entitlement = getattr(self.account_manager, "account_entitlement", None)
+        current_state = getattr(entitlement, "current_state", None)
+        if not callable(current_state):
+            return {"authorized": True, "code": "ok", "message": ""}
+        try:
+            state = current_state()
+        except Exception:
+            state = {}
+        if isinstance(state, Mapping) and state.get("authorized") is True:
+            return {"authorized": True, "code": "ok", "message": ""}
+        return {
+            "authorized": False,
+            "code": "AGENT_ENTITLEMENT_REQUIRED",
+            "message": "商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。",
+            "action": "open_account_entitlement",
+        }
+
+    def _require_execution_access(self) -> None:
+        self._require_current_account()
+        if not self._execution_permitted():
+            raise PermissionError(
+                "AGENT_ENTITLEMENT_REQUIRED: account entitlement is inactive"
+            )
 
     def shutdown(self, *, grace_seconds: float = 2.0) -> Json:
         with self._lock:
@@ -870,6 +1508,7 @@ class AgentService:
         node = {
             "traceId": str(event.get("eventId") or f"trace_{uuid.uuid4().hex}"),
             "runId": run_id,
+            "ownerAccountId": str(event.get("ownerAccountId") or "").strip(),
             "kind": kind,
             "name": event_type,
             "status": status,
@@ -956,8 +1595,18 @@ class AgentService:
         campaign_id_set = set(campaign_ids)
         if self.job_manager is not None:
             try:
+                account_id, owner_binding = self._current_job_owner_identity()
                 self.job_manager.cancel_matching(
-                    lambda job: str((job.get("progress") or {}).get("campaignId") or "") in campaign_id_set
+                    lambda job: (
+                        self._matrix_job_visible_to_identity(
+                            job,
+                            account_id=account_id,
+                            owner_binding=owner_binding,
+                        )
+                        and str(
+                            (job.get("progress") or {}).get("campaignId") or ""
+                        ) in campaign_id_set
+                    )
                 )
             except Exception:
                 incomplete.append("jobs")
@@ -1235,12 +1884,9 @@ class AgentService:
         return self._matrix_factory().status()
 
     def _load_skill_instructions(self, skill_id: str, payload: Json) -> Json:
-        document = self._skill_service.read_readme(skill_id)
-        return {
-            "skillId": skill_id,
-            "instructions": str(document.get("content") or "")[:20_000],
-            "requestedContext": sanitize_for_storage(payload),
-        }
+        context = self._skill_service.resolve_execution_context(skill_id)
+        context["requestedContext"] = sanitize_for_storage(payload)
+        return context
 
     def _matrix_dispatch(self, payload: Json) -> Json:
         self._require_matrix_access()
@@ -1258,8 +1904,18 @@ class AgentService:
         if not campaign_id:
             raise ValueError("campaignId is required")
         if self.job_manager is not None:
+            account_id, owner_binding = self._current_job_owner_identity()
             self.job_manager.cancel_matching(
-                lambda job: str((job.get("progress") or {}).get("campaignId") or "") == campaign_id
+                lambda job: (
+                    self._matrix_job_visible_to_identity(
+                        job,
+                        account_id=account_id,
+                        owner_binding=owner_binding,
+                    )
+                    and str(
+                        (job.get("progress") or {}).get("campaignId") or ""
+                    ) == campaign_id
+                )
             )
         return self._matrix_factory().cancel(campaign_id)
 
@@ -1310,7 +1966,10 @@ class AgentService:
     def _start_matrix_job(self, kind: str, title: str, matrix: MatrixControlPlane, task: Json, body: Json) -> Json | None:
         if self.job_manager is None or self.context_factory is None:
             return None
-        from api.routes_matrix import _run_matrix_campaign
+        from api.routes_matrix import _matrix_job_metadata, _run_matrix_campaign
+
+        context = self.context_factory()
+        job_metadata = _matrix_job_metadata(context, task)
 
         def run(job_id: str) -> Json:
             return _run_matrix_campaign(self.context_factory(), matrix, task, body, job_id)
@@ -1325,6 +1984,7 @@ class AgentService:
                     "phase": f"{kind}.queued",
                     "commandId": kind,
                     "campaignId": task.get("campaignId"),
+                    **job_metadata,
                 },
             )
         except Exception as exc:
@@ -1345,6 +2005,31 @@ class AgentService:
                 execution_may_continue=True,
             )
         return job
+
+    def _current_job_owner_identity(self) -> tuple[str, str]:
+        if not callable(self.context_factory):
+            return "", ""
+        try:
+            context = self.context_factory()
+        except Exception:
+            return "", ""
+        return current_account_job_identity(context)
+
+    @staticmethod
+    def _matrix_job_visible_to_identity(
+        job: dict,
+        *,
+        account_id: str,
+        owner_binding: str,
+    ) -> bool:
+        return bool(
+            str(job.get("kind") or "").startswith("matrix.")
+            and job_visible_to_account(
+                job,
+                account_id=account_id,
+                owner_binding=owner_binding,
+            )
+        )
 
     def _matrix_attachment(self, task: Json, job: Json | None) -> Json:
         rows = [

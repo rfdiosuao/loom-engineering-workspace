@@ -23,6 +23,12 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const ACTION_LOCK_DIR = path.join(PROJECT_ROOT, 'data', '.openclaw', 'runtime', 'phone-action-locks');
 const ACTION_LOCK_STALE_MS = 90_000;
+const REMOTE_CANCEL_MAX_ATTEMPTS = 3;
+const REMOTE_CANCEL_CONFIRM_MAX_ATTEMPTS = 3;
+const REMOTE_CANCEL_REQUEST_TIMEOUT_MS = 1_500;
+const REMOTE_CANCEL_RETRY_BASE_MS = 100;
+const REMOTE_CANCEL_CONFIRM_DELAY_MS = 150;
+const REMOTE_TASK_TERMINAL_STATUSES = new Set(['success', 'error', 'failed', 'cancelled']);
 
 export const QUEUE_KIND = Object.freeze({
   READ: 'read',
@@ -106,7 +112,7 @@ export async function runPhoneCommand(config) {
 }
 
 async function runPhoneCommandUnlocked(config) {
-  if (await cancellationRequested(config.cancelFile)) {
+  if (await configCancellationRequested(config)) {
     return cancelledPhoneCommandResult(config);
   }
   const plan = fixedFastPathPlan(config);
@@ -136,8 +142,27 @@ export async function getPhoneMetrics(config) {
 }
 
 export async function syncPhoneEvents(config, onEvent) {
+  if (await configCancellationRequested(config)) {
+    return cancelledPhoneEventSyncResult();
+  }
   await probeDeviceStatus(config);
-  const response = await signedFetch(config, 'GET', '/api/lumi/events', (config.maxSec + 5) * 1000);
+  if (await configCancellationRequested(config)) {
+    return cancelledPhoneEventSyncResult();
+  }
+  let response;
+  try {
+    response = await signedFetch(
+      config,
+      'GET',
+      '/api/lumi/events',
+      (config.maxSec + 5) * 1000,
+    );
+  } catch (error) {
+    if (await configCancellationRequested(config)) {
+      return cancelledPhoneEventSyncResult();
+    }
+    throw error;
+  }
   if (!response.ok) {
     throw new PhoneBridgeError(
       'phone_event_stream_failed',
@@ -272,7 +297,7 @@ function taskBody(config) {
 
 async function runAgentCommand(config) {
   await assertReadyForAgent(config);
-  if (await cancellationRequested(config.cancelFile)) {
+  if (await configCancellationRequested(config)) {
     return cancelledPhoneCommandResult(config);
   }
   const submitted = await submitTask(config);
@@ -711,14 +736,112 @@ async function getTask(config, taskId, signal = undefined) {
   );
 }
 
-async function cancelRemoteTask(config, taskId) {
-  await signedJsonRequest(
-    config,
-    'POST',
-    `/api/lumi/agent/tasks/${encodeURIComponent(taskId)}/cancel`,
-    {},
-    Math.min(3_000, config.stepTimeoutSec * 1000),
+export async function cancelAndConfirmPhoneTask(config, taskId, options = {}) {
+  const cancelEndpoint = `/api/lumi/agent/tasks/${encodeURIComponent(taskId)}/cancel`;
+  const statusEndpoint = `/api/lumi/agent/tasks/${encodeURIComponent(taskId)}`;
+  const requestTimeoutMs = remoteCancelRequestTimeoutMs(config, options);
+  const confirmationDelayMs = Math.max(
+    50,
+    Math.min(
+      500,
+      Number(options.pollMs ?? config.pollMs) || REMOTE_CANCEL_CONFIRM_DELAY_MS,
+    ),
   );
+  let cancellationAttempts = 0;
+  let confirmationAttempts = 0;
+  let remoteCancellation = null;
+  let lastPayload = null;
+  let lastStatus = null;
+  let cancellationError = null;
+  let confirmationError = null;
+
+  for (let attempt = 1; attempt <= REMOTE_CANCEL_MAX_ATTEMPTS; attempt += 1) {
+    cancellationAttempts = attempt;
+    try {
+      remoteCancellation = await signedJsonRequest(
+        config,
+        'POST',
+        cancelEndpoint,
+        {},
+        requestTimeoutMs,
+      );
+      const receiptTask = remoteTaskFromPayload(remoteCancellation, taskId);
+      if (receiptTask?.status) lastStatus = receiptTask;
+      if (isRemoteTaskTerminal(receiptTask)) {
+        return confirmedCancellationResult(
+          receiptTask,
+          remoteCancellation,
+          remoteCancellation,
+          cancellationAttempts,
+          confirmationAttempts,
+          options,
+        );
+      }
+      break;
+    } catch (error) {
+      cancellationError = cancellationErrorSummary(error);
+      if (error?.retryable === false || attempt === REMOTE_CANCEL_MAX_ATTEMPTS) break;
+      await sleep(Math.min(500, REMOTE_CANCEL_RETRY_BASE_MS * attempt));
+    }
+  }
+
+  for (let attempt = 1; attempt <= REMOTE_CANCEL_CONFIRM_MAX_ATTEMPTS; attempt += 1) {
+    confirmationAttempts = attempt;
+    try {
+      lastPayload = await signedJsonRequest(
+        config,
+        'GET',
+        statusEndpoint,
+        undefined,
+        requestTimeoutMs,
+      );
+      lastStatus = remoteTaskFromPayload(lastPayload, taskId);
+      confirmationError = null;
+      if (isRemoteTaskTerminal(lastStatus)) {
+        return confirmedCancellationResult(
+          lastStatus,
+          lastPayload,
+          remoteCancellation,
+          cancellationAttempts,
+          confirmationAttempts,
+          options,
+        );
+      }
+    } catch (error) {
+      confirmationError = cancellationErrorSummary(error);
+      if (error?.retryable === false) break;
+    }
+    if (attempt < REMOTE_CANCEL_CONFIRM_MAX_ATTEMPTS) {
+      await sleep(confirmationDelayMs);
+    }
+  }
+
+  const cancellationMessage = cancellationError?.message
+    || confirmationError?.message
+    || 'Remote task did not reach a terminal state.';
+  return {
+    payload: lastPayload || remoteCancellation,
+    task: {
+      ...(lastStatus || {}),
+      taskId,
+      status: 'cancelling',
+      cancelled: false,
+      error: 'Remote cancellation could not be confirmed; the task may still be running.',
+      errorCode: 'phone_task_cancel_unconfirmed',
+      executionMayContinue: true,
+      outcomeIndeterminate: true,
+      cancellationAttempts,
+      confirmationAttempts,
+      cancellationError: cancellationMessage,
+      ...(cancellationError?.errorCode
+        ? { cancellationErrorCode: cancellationError.errorCode }
+        : {}),
+      ...(confirmationError?.errorCode
+        ? { confirmationErrorCode: confirmationError.errorCode }
+        : {}),
+      ...(remoteCancellation ? { remoteCancellation } : {}),
+    },
+  };
 }
 
 async function waitForTask(config, taskId) {
@@ -730,24 +853,16 @@ async function waitForTask(config, taskId) {
   let totalPollFailures = 0;
   let pollAttempt = 0;
   while (Date.now() - startedAt < maxWaitMs) {
-    if (await cancellationRequested(config.cancelFile)) {
-      await cancelRemoteTask(config, taskId);
-      return {
-        payload: null,
-        task: { taskId, status: 'cancelled', error: 'cancelled' },
-      };
+    if (await configCancellationRequested(config)) {
+      return cancelAndConfirmPhoneTask(config, taskId, { pollMs: config.pollMs });
     }
     const delayMs = adaptivePollDelayMs(pollAttempt, config.pollMs);
     pollAttempt += 1;
     if (delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    if (await cancellationRequested(config.cancelFile)) {
-      await cancelRemoteTask(config, taskId);
-      return {
-        payload: null,
-        task: { taskId, status: 'cancelled', error: 'cancelled' },
-      };
+    if (await configCancellationRequested(config)) {
+      return cancelAndConfirmPhoneTask(config, taskId, { pollMs: config.pollMs });
     }
     const pollController = new AbortController();
     const taskPoll = getTask(config, taskId, pollController.signal)
@@ -758,7 +873,11 @@ async function waitForTask(config, taskId) {
         }
         throw error;
       });
-    const cancellationPoll = waitForCancellation(config.cancelFile, pollController.signal)
+    const cancellationPoll = waitForCancellation(
+      config.cancelFile,
+      pollController.signal,
+      config.cancelSignal,
+    )
       .then((cancelled) => ({ type: cancelled ? 'cancel' : 'watch_stopped', payload: null }));
     let outcome;
     try {
@@ -766,11 +885,7 @@ async function waitForTask(config, taskId) {
       if (outcome.type === 'cancel') {
         pollController.abort();
         await taskPoll;
-        await cancelRemoteTask(config, taskId);
-        return {
-          payload: null,
-          task: { taskId, status: 'cancelled', error: 'cancelled' },
-        };
+        return cancelAndConfirmPhoneTask(config, taskId, { pollMs: config.pollMs });
       }
     } catch (error) {
       consecutivePollFailures += 1;
@@ -823,7 +938,102 @@ function isRetryableTaskPollError(error) {
   ]).has(code);
 }
 
-export async function cancellationRequested(cancelFile) {
+function remoteCancelRequestTimeoutMs(config, options) {
+  const requested = Number(options.requestTimeoutMs);
+  if (Number.isFinite(requested) && requested > 0) {
+    return Math.max(250, Math.min(REMOTE_CANCEL_REQUEST_TIMEOUT_MS, requested));
+  }
+  const stepTimeoutMs = Number(config.stepTimeoutSec) * 1000;
+  if (Number.isFinite(stepTimeoutMs) && stepTimeoutMs > 0) {
+    return Math.max(250, Math.min(REMOTE_CANCEL_REQUEST_TIMEOUT_MS, stepTimeoutMs));
+  }
+  return REMOTE_CANCEL_REQUEST_TIMEOUT_MS;
+}
+
+function remoteTaskFromPayload(payload, taskId) {
+  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+  if (!data || typeof data !== 'object') return { taskId };
+  return {
+    ...data,
+    taskId: data.taskId || data.id || taskId,
+  };
+}
+
+function isRemoteTaskTerminal(task) {
+  return REMOTE_TASK_TERMINAL_STATUSES.has(String(task?.status || '').toLowerCase());
+}
+
+function confirmedCancellationResult(
+  remoteTask,
+  payload,
+  remoteCancellation,
+  cancellationAttempts,
+  confirmationAttempts,
+  options,
+) {
+  const remoteStatus = String(remoteTask?.status || '').toLowerCase();
+  const common = {
+    ...remoteTask,
+    taskId: remoteTask?.taskId || '',
+    executionMayContinue: false,
+    cancellationAttempts,
+    confirmationAttempts,
+    ...(remoteCancellation ? { remoteCancellation } : {}),
+  };
+  if (remoteStatus === 'cancelled') {
+    return {
+      payload,
+      task: {
+        ...common,
+        status: 'cancelled',
+        cancelled: true,
+        error: remoteTask?.result?.error || remoteTask?.error || 'cancelled',
+        errorCode: remoteTask?.result?.errorCode || remoteTask?.errorCode || 'cancelled',
+      },
+    };
+  }
+  if (remoteStatus === 'success') {
+    return {
+      payload,
+      task: {
+        ...common,
+        status: 'failed',
+        remoteStatus,
+        cancelled: false,
+        error: 'Remote task completed after cancellation was requested.',
+        errorCode: 'phone_task_completed_after_cancel',
+        outcomeIndeterminate: true,
+        operationMayHaveCompleted: true,
+        ...(options.commitSensitive ? { commitMayHaveOccurred: true } : {}),
+      },
+    };
+  }
+  return {
+    payload,
+    task: {
+      ...common,
+      status: remoteStatus === 'failed' ? 'failed' : 'error',
+      remoteStatus,
+      cancelled: false,
+      error: remoteTask?.result?.error
+        || remoteTask?.error
+        || 'Remote task stopped with an error while cancellation was requested.',
+      errorCode: remoteTask?.result?.errorCode
+        || remoteTask?.errorCode
+        || 'phone_task_stopped_during_cancel',
+    },
+  };
+}
+
+function cancellationErrorSummary(error) {
+  return {
+    errorCode: String(error?.errorCode || error?.code || 'phone_task_cancel_failed'),
+    message: String(error?.message || error || 'Remote cancellation request failed').slice(0, 500),
+  };
+}
+
+export async function cancellationRequested(cancelFile, cancelSignal = undefined) {
+  if (cancelSignal?.aborted) return true;
   if (!cancelFile) return false;
   try {
     await fs.access(cancelFile);
@@ -831,6 +1041,10 @@ export async function cancellationRequested(cancelFile) {
   } catch {
     return false;
   }
+}
+
+async function configCancellationRequested(config = {}) {
+  return cancellationRequested(config.cancelFile, config.cancelSignal);
 }
 
 export function cancelledPhoneCommandResult(config = {}) {
@@ -845,9 +1059,20 @@ export function cancelledPhoneCommandResult(config = {}) {
   };
 }
 
-async function waitForCancellation(cancelFile, signal) {
+function cancelledPhoneEventSyncResult() {
+  return {
+    ok: true,
+    cancelled: true,
+    eventCount: 0,
+    elapsedMs: 0,
+    stoppedBy: 'cancelled',
+    executionMayContinue: false,
+  };
+}
+
+async function waitForCancellation(cancelFile, signal, cancelSignal = undefined) {
   while (!signal?.aborted) {
-    if (await cancellationRequested(cancelFile)) return true;
+    if (await cancellationRequested(cancelFile, cancelSignal)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return false;
@@ -892,8 +1117,19 @@ function publicTaskResult(task) {
   const queue = queueFields(task);
   const events = Array.isArray(result?.events) ? result.events : Array.isArray(task?.events) ? task.events : undefined;
   const progressLog = normalizeProgressLog(result?.progressLog || task?.progressLog, events);
+  const status = String(task?.status || 'unknown');
   return {
     final: task,
+    status,
+    success: status === 'success',
+    cancelled: task?.cancelled === true || status === 'cancelled',
+    errorCode: result?.errorCode || task?.errorCode || '',
+    executionMayContinue: result?.executionMayContinue === true || task?.executionMayContinue === true,
+    outcomeIndeterminate: result?.outcomeIndeterminate === true || task?.outcomeIndeterminate === true,
+    operationMayHaveCompleted: result?.operationMayHaveCompleted === true || task?.operationMayHaveCompleted === true,
+    commitMayHaveOccurred: result?.commitMayHaveOccurred === true || task?.commitMayHaveOccurred === true,
+    cancellationError: result?.cancellationError || task?.cancellationError || '',
+    remoteStatus: result?.remoteStatus || task?.remoteStatus || '',
     metrics,
     mode: result?.mode || task?.mode || metrics?.mode,
     currentStep: result?.currentStep || task?.currentStep || task?.status,
@@ -960,19 +1196,48 @@ async function readSseChunksWithDeadline(response, config, onEvent) {
   const stop = (stoppedBy) => ({ ok: true, eventCount, elapsedMs: Date.now() - startedAt, stoppedBy });
   try {
     while (true) {
+      if (await configCancellationRequested(config)) {
+        await reader.cancel();
+        return stop('cancelled');
+      }
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
         await reader.cancel();
         return stop('max_sec');
       }
-      const readResult = await Promise.race([
-        reader.read(),
-        new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), remainingMs)),
+      const cancellationWatch = new AbortController();
+      let timeout = null;
+      const readPromise = reader.read().then(
+        (value) => ({ type: 'read', value }),
+        (error) => ({ type: 'read_error', error }),
+      );
+      const timeoutPromise = new Promise((resolve) => {
+        timeout = setTimeout(
+          () => resolve({ type: 'timeout' }),
+          remainingMs,
+        );
+      });
+      const cancellationPromise = waitForCancellation(
+        config.cancelFile,
+        cancellationWatch.signal,
+        config.cancelSignal,
+      ).then((cancelled) => ({
+        type: cancelled ? 'cancelled' : 'watch_stopped',
+      }));
+      const outcome = await Promise.race([
+        readPromise,
+        timeoutPromise,
+        cancellationPromise,
       ]);
-      if (readResult?.timeout) {
+      clearTimeout(timeout);
+      cancellationWatch.abort();
+      if (outcome.type === 'cancelled' || outcome.type === 'timeout') {
         await reader.cancel();
-        return stop('max_sec');
+        await readPromise;
+        return stop(outcome.type === 'cancelled' ? 'cancelled' : 'max_sec');
       }
+      if (outcome.type === 'read_error') throw outcome.error;
+      const readResult = outcome.value;
       if (readResult.done) break;
       buffer += decoder.decode(readResult.value, { stream: true });
       const parsed = extractSseFrames(buffer);

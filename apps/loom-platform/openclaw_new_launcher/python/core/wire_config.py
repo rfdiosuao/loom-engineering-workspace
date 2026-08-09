@@ -31,6 +31,11 @@ from core.model_catalog import (
     model_descriptor_to_dict,
     resolve_model_descriptor,
 )
+from core.model_directory import (
+    choose_live_text_model,
+    protocol_text_verified,
+    protocol_tool_call_verified,
+)
 from core.openclaw_model_sync import sync_openclaw_models_from_gateway_profile
 from core.paths import AppPaths
 from core.secret_store import protect_secret, unprotect_secret
@@ -75,7 +80,13 @@ VIDEO_MODEL_MARKERS = (
     "luma",
 )
 MANAGED_ACCOUNT_SOURCES = {"newapi_account", WIRE_MANAGED_BY, WIRE_CUSTOM_MANAGED_BY}
-AGENT_ENV_KEYS = ("LOOM_OPENCODE_API_KEY", "LOOM_CODEX_API_KEY", "LOOM_CLAUDE_API_KEY")
+AGENT_ENV_KEYS = (
+    "LOOM_OPENCODE_API_KEY",
+    "LOOM_CODEX_API_KEY",
+    "LOOM_CLAUDE_API_KEY",
+    "LOOM_PI_API_KEY",
+    "LOOM_GROK_API_KEY",
+)
 AGENT_STALE_MODEL_ENV_KEYS = ("OPENAI_MODEL", "ANTHROPIC_MODEL", "CLAUDE_CODE_MODEL", "OPENCODE_MODEL", "OPENCODE_PROVIDER")
 CODEX_TRANSACTION_LOCK_TIMEOUT_SECONDS = 8.0
 CODEX_REMOTE_PROBE_TIMEOUT_SECONDS = 12.0
@@ -101,7 +112,20 @@ AGENT_MODEL_CONFIGS = {
         "configDir": ".openclaw",
         "configFile": "openclaw.json",
     },
+    "pi": {
+        "target": "pi",
+        "name": "Pi",
+        "configDir": os.path.join(".pi", "agent"),
+        "configFile": "models.json",
+    },
+    "grok-build": {
+        "target": "grok",
+        "name": "Grok Build",
+        "configDir": ".grok",
+        "configFile": "config.toml",
+    },
 }
+REMOTE_REQUIRED_AGENT_CONFIGS = {"codex-desktop", "pi", "grok-build"}
 
 SECRET_TEXT_PATTERNS = (
     re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|session[_-]?cookie|password|secret|token)(\s*[:=]\s*)([^\s,;]+)"),
@@ -241,22 +265,38 @@ class WireService:
         current_snapshot = _snapshot_text_file(self.paths.wire_current)
         last_good_snapshot = _snapshot_text_file(self.paths.wire_last_good)
         try:
-            self.sync_custom_provider(
+            compatibility = self.probe_provider_compatibility(
                 provider=provider,
                 base_url=base_url,
                 api_key=api_key,
-                text_model=model,
+                preferred_model=model,
+            )
+            selected_model = _pick_text(compatibility.get("selectedModel"))
+            if component_id == "codex-desktop" and (
+                "responses" not in compatibility.get("protocols", [])
+                or compatibility.get("toolCall") is not True
+            ):
+                raise WireConfigError("codex_responses_tool_call_missing")
+            self.sync_custom_provider(
+                provider=provider,
+                base_url=_pick_text(compatibility.get("baseUrl"), base_url),
+                api_key=api_key,
+                text_model=selected_model,
                 targets=(),
             )
             wire = self.current()
             if not wire:
                 raise WireConfigError("custom_wire_not_persisted")
-            return self.sync_agent_model_config(
+            status = self.sync_agent_model_config(
                 component_id,
-                model=model,
+                model=selected_model,
                 wire=wire,
-                validate_remote=component_id == "codex-desktop",
+                validate_remote=component_id in REMOTE_REQUIRED_AGENT_CONFIGS,
+                remote_validation=(
+                    compatibility if component_id in REMOTE_REQUIRED_AGENT_CONFIGS else None
+                ),
             )
+            return {**status, "providerCompatibility": compatibility}
         except Exception:
             _restore_text_file_snapshot(current_snapshot)
             _restore_text_file_snapshot(last_good_snapshot)
@@ -388,6 +428,184 @@ class WireService:
         safe = _redact_secret_text("; ".join(errors[-2:]))
         detail = error_details[-1] if error_details else classify_model_catalog_error(safe)
         raise WireConfigError(f"provider_models_probe_failed: {safe}", detail=detail)
+
+    def probe_provider_compatibility(
+        self,
+        *,
+        provider: str,
+        base_url: str,
+        api_key: str,
+        preferred_model: str = "",
+    ) -> dict[str, Any]:
+        provider = _pick_text(provider, "自定义 Provider")
+        base = _validate_provider_url(base_url)
+        api_key = _pick_text(api_key)
+        if not api_key:
+            raise WireConfigError("provider_api_key_required")
+        candidates = [base]
+        if not base.endswith("/v1"):
+            candidates.append(f"{base}/v1")
+        started_at = time.perf_counter()
+        last_detail: dict[str, Any] | None = None
+
+        for candidate in candidates:
+            try:
+                models_payload = _provider_json_request(
+                    f"{candidate}/models",
+                    api_key,
+                    method="GET",
+                )
+                model_ids = _extract_remote_model_ids(models_payload)
+                if not model_ids:
+                    raise WireConfigError(
+                        "provider_models_empty",
+                        detail=classify_model_catalog_error("provider_models_empty"),
+                    )
+                selected_model, model_fallback = choose_live_text_model(
+                    model_ids,
+                    preferred_model,
+                )
+            except ValueError as exc:
+                last_detail = classify_model_catalog_error(str(exc))
+                continue
+            except WireConfigError as exc:
+                last_detail = exc.detail or classify_model_catalog_error(str(exc))
+                continue
+
+            protocols: list[str] = []
+            protocol_payloads = {
+                "responses": {
+                    "url": f"{candidate}/responses",
+                    "payload": {
+                        "model": selected_model,
+                        "input": "Reply exactly with LOOM_OK.",
+                        "max_output_tokens": 32,
+                    },
+                },
+                "chat_completions": {
+                    "url": f"{candidate}/chat/completions",
+                    "payload": {
+                        "model": selected_model,
+                        "messages": [{"role": "user", "content": "Reply exactly with LOOM_OK."}],
+                        "max_tokens": 32,
+                    },
+                },
+            }
+            protocol_errors: list[WireConfigError] = []
+            for protocol, request_spec in protocol_payloads.items():
+                try:
+                    payload = _provider_json_request(
+                        request_spec["url"],
+                        api_key,
+                        method="POST",
+                        payload=request_spec["payload"],
+                    )
+                    if not protocol_text_verified(protocol, payload):
+                        raise WireConfigError(f"{protocol}_invalid_text_response")
+                    protocols.append(protocol)
+                except WireConfigError as exc:
+                    protocol_errors.append(exc)
+            if not protocols:
+                raw_error = str(protocol_errors[-1]) if protocol_errors else "provider_protocol_unavailable"
+                last_detail = classify_model_catalog_error(raw_error)
+                continue
+
+            tool_protocols: list[str] = []
+            streaming_protocols: list[str] = []
+            tool_definition = {
+                "type": "function",
+                "function": {
+                    "name": "loom_capability_probe",
+                    "description": "Verify native tool calls.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"probe": {"type": "string"}},
+                        "required": ["probe"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+            for protocol in protocols:
+                request_spec = protocol_payloads[protocol]
+                if protocol == "responses":
+                    tool_payload = {
+                        "model": selected_model,
+                        "input": "Call loom_capability_probe with probe='provider-tools'.",
+                        "tools": [{
+                            "type": "function",
+                            "name": tool_definition["function"]["name"],
+                            "description": tool_definition["function"]["description"],
+                            "parameters": tool_definition["function"]["parameters"],
+                            "strict": True,
+                        }],
+                        "tool_choice": {"type": "function", "name": "loom_capability_probe"},
+                        "max_output_tokens": 64,
+                    }
+                else:
+                    tool_payload = {
+                        "model": selected_model,
+                        "messages": [{
+                            "role": "user",
+                            "content": "Call loom_capability_probe with probe='provider-tools'.",
+                        }],
+                        "tools": [tool_definition],
+                        "tool_choice": {
+                            "type": "function",
+                            "function": {"name": "loom_capability_probe"},
+                        },
+                        "max_tokens": 64,
+                    }
+                try:
+                    tool_response = _provider_json_request(
+                        request_spec["url"],
+                        api_key,
+                        method="POST",
+                        payload=tool_payload,
+                    )
+                    if protocol_tool_call_verified(protocol, tool_response):
+                        tool_protocols.append(protocol)
+                except WireConfigError:
+                    pass
+                try:
+                    stream_payload = {**request_spec["payload"], "stream": True}
+                    if _provider_stream_request(
+                        request_spec["url"],
+                        api_key,
+                        payload=stream_payload,
+                    ):
+                        streaming_protocols.append(protocol)
+                except WireConfigError:
+                    pass
+
+            descriptors = build_model_descriptors(
+                model_ids,
+                provider_id=provider,
+                protocol_evidence={selected_model: protocols},
+            )
+            selected_descriptor = resolve_model_descriptor(descriptors, selected_model)
+            return {
+                "reachable": True,
+                "protocols": protocols,
+                "toolCall": bool(tool_protocols),
+                "toolCallProtocols": tool_protocols,
+                "streaming": bool(streaming_protocols),
+                "streamingProtocols": streaming_protocols,
+                "selectedModel": selected_model,
+                "availableModelCount": len(model_ids),
+                "modelDescriptor": (
+                    model_descriptor_to_dict(selected_descriptor)
+                    if selected_descriptor is not None
+                    else {}
+                ),
+                "latencyMs": max(0, int((time.perf_counter() - started_at) * 1000)),
+                "source": "live-probe",
+                "fallbackUsed": model_fallback or candidate != base,
+                "baseUrl": candidate,
+                "probedAt": _iso_now(),
+            }
+
+        detail = last_detail or classify_model_catalog_error("provider_compatibility_probe_failed")
+        raise WireConfigError("provider_compatibility_probe_failed", detail=detail)
 
     def rollback(self) -> dict[str, Any]:
         previous = _read_json_if_exists(self.paths.wire_last_good)
@@ -526,6 +744,8 @@ class WireService:
                 and remote_verified
                 and transaction_committed
             )
+        elif component_id in REMOTE_REQUIRED_AGENT_CONFIGS:
+            configured = bool(files_configured and remote_verified)
         actual_channel_mode = _pick_text(user_profile.get("channelMode"), "official")
         official_channel = bool(official_channel and actual_channel_mode == "official")
         if official_channel:
@@ -549,6 +769,9 @@ class WireService:
         elif component_id == "codex-desktop" and files_configured and not remote_verified:
             status = "unverified"
             message = "配置已写入，点击写入配置完成模型连通性验证"
+        elif component_id in REMOTE_REQUIRED_AGENT_CONFIGS and files_configured and not remote_verified:
+            status = "unverified"
+            message = "配置文件已写入，但尚未通过真实模型连接验证"
         elif configured:
             status = "configured"
             message = "模型配置已写入"
@@ -605,7 +828,10 @@ class WireService:
                 journal_state == "committed"
                 or (metadata.get("backupPath") and os.path.exists(str(metadata.get("backupPath"))))
             ),
-            "rollbackAvailable": bool(journal_state == "committed"),
+            "rollbackAvailable": bool(
+                journal_state == "committed"
+                or (metadata.get("backupPath") and os.path.isfile(str(metadata.get("backupPath"))))
+            ),
             "transactionId": transaction_journal.get("transactionId") or metadata.get("transactionId") or "",
             "transactionState": journal_state or metadata.get("transactionState") or "",
             "remoteVerified": remote_verified,
@@ -622,6 +848,7 @@ class WireService:
         model: str = "",
         wire: dict[str, Any] | None = None,
         validate_remote: bool = False,
+        remote_validation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         component_id = str(component_id or "").strip()
         if component_id not in AGENT_MODEL_CONFIGS:
@@ -643,13 +870,92 @@ class WireService:
                 wire,
                 selected_model,
                 validate_remote=validate_remote,
+                remote_validation=remote_validation,
             )
         if component_id == "openclaw-companion":
             _clear_stale_agent_model_env_keys(self.paths, broadcast=False)
             return self._sync_openclaw_agent_model_config(component_id, wire, selected_model)
         if component_id == "claude-code":
             return self._sync_claude_model_config_transaction(wire, selected_model)
+        if component_id in {"pi", "grok-build"}:
+            return self._sync_external_agent_model_config_transaction(
+                component_id,
+                wire,
+                selected_model,
+                validate_remote=validate_remote,
+                remote_validation=remote_validation,
+            )
         raise WireConfigError("该组件暂不支持模型配置")
+
+    def _sync_external_agent_model_config_transaction(
+        self,
+        component_id: str,
+        wire: dict[str, Any],
+        selected_model: str,
+        *,
+        validate_remote: bool,
+        remote_validation: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        config_path = self._agent_config_path(component_id)
+        metadata_path = self._agent_config_metadata_path(component_id)
+        config_snapshot = _snapshot_text_file(config_path)
+        metadata_snapshot = _snapshot_text_file(metadata_path)
+        verified_remote = copy.deepcopy(remote_validation) if isinstance(remote_validation, dict) else {}
+        try:
+            if validate_remote and not verified_remote:
+                verified_remote = self.probe_provider_compatibility(
+                    provider=_pick_text(wire.get("provider"), "LOOM"),
+                    base_url=_pick_text(wire.get("baseUrl")),
+                    api_key=_pick_text(wire.get("apiKey")),
+                    preferred_model=selected_model,
+                )
+            if not verified_remote or verified_remote.get("textGeneration") is not True:
+                raise WireConfigError("agent_provider_live_probe_required")
+            protocols = {
+                _pick_text(item).lower()
+                for item in _list_values(verified_remote.get("protocols"))
+            }
+            if not protocols.intersection({"chat_completions", "responses"}):
+                raise WireConfigError("agent_provider_openai_protocol_required")
+            config_text = self._agent_config_text(component_id, wire, selected_model)
+            backup_path = _write_text_with_backup(config_path, config_text)
+            _validate_external_agent_config(
+                component_id,
+                config_path,
+                _pick_text(wire.get("baseUrl")).rstrip("/"),
+                selected_model,
+            )
+            metadata = {
+                "componentId": component_id,
+                "configured": True,
+                "managedBy": _wire_managed_by(wire),
+                "provider": _pick_text(wire.get("provider"), "LOOM"),
+                "baseUrl": _pick_text(wire.get("baseUrl")).rstrip("/"),
+                "model": selected_model,
+                "configPath": config_path,
+                "userConfigPath": "",
+                "backupPath": backup_path or self._agent_config_metadata(component_id).get("backupPath") or "",
+                "remoteVerified": True,
+                "remoteValidation": verified_remote,
+                "keyStorage": "protected_wire_runtime_injection",
+                "updatedAt": _iso_now(),
+            }
+            _atomic_write_text(metadata_path, json.dumps(metadata, indent=2, ensure_ascii=False) + "\n")
+            return self.agent_model_config_status(component_id)
+        except Exception as exc:
+            try:
+                _restore_text_file_snapshot(config_snapshot)
+                _restore_text_file_snapshot(metadata_snapshot)
+            except Exception as rollback_error:
+                raise WireConfigError(
+                    f"{component_id}_config_recovery_required: "
+                    f"{_redact_secret_text(exc)}; rollback={_redact_secret_text(rollback_error)}"
+                ) from exc
+            if isinstance(exc, WireConfigError):
+                raise
+            raise WireConfigError(
+                _redact_secret_text(str(exc)) or f"{component_id}_config_transaction_failed"
+            ) from exc
 
     def _sync_claude_model_config_transaction(
         self,
@@ -747,16 +1053,18 @@ class WireService:
         selected_model: str,
         *,
         validate_remote: bool,
+        remote_validation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         source_fingerprint = _codex_wire_fingerprint(wire, selected_model)
         base_url = _pick_text(wire.get("baseUrl")).rstrip("/")
         api_key = _pick_text(wire.get("apiKey"))
         provider = _pick_text(wire.get("provider"), "LOOM")
         managed_by = _wire_managed_by(wire)
-        remote_validation: dict[str, Any] = {}
-        if validate_remote:
-            remote_validation = _probe_codex_provider(base_url, api_key, selected_model)
-            base_url = _pick_text(remote_validation.get("baseUrl"), base_url).rstrip("/")
+        verified_remote = copy.deepcopy(remote_validation) if isinstance(remote_validation, dict) else {}
+        if validate_remote and not verified_remote:
+            verified_remote = _probe_codex_provider(base_url, api_key, selected_model)
+        if verified_remote:
+            base_url = _pick_text(verified_remote.get("baseUrl"), base_url).rstrip("/")
 
         with _exclusive_codex_config_lock(
             self.paths,
@@ -836,7 +1144,7 @@ class WireService:
                 "previousCommittedJournal": previous_committed_journal,
                 "officialAuthPath": auth_path,
                 "officialAuthSha256": auth_before,
-                "remoteValidation": remote_validation,
+                "remoteValidation": verified_remote,
                 "sessionInventoryBefore": session_before,
             }
             self._write_codex_transaction_journal(journal)
@@ -911,8 +1219,8 @@ class WireService:
                     "environmentWarning": "",
                     "transactionId": transaction_id,
                     "transactionState": "committed",
-                    "remoteVerified": bool(validate_remote),
-                    "remoteValidation": remote_validation,
+                    "remoteVerified": bool(verified_remote),
+                    "remoteValidation": verified_remote,
                     "officialAuthUnchanged": True,
                     "sessionInventoryBefore": session_before,
                     "sessionInventoryAfter": session_after,
@@ -1486,6 +1794,10 @@ class WireService:
             return _codex_config_text(base_url, provider, model, _wire_managed_by(wire))
         if component_id == "claude-code":
             return _claude_settings_text(base_url, provider, model)
+        if component_id == "pi":
+            return _pi_models_text(base_url, provider, model)
+        if component_id == "grok-build":
+            return _grok_config_text(base_url, provider, model)
         raise WireConfigError("该组件暂不支持模型配置")
 
 
@@ -2081,6 +2393,47 @@ def _provider_json_request(
         raise WireConfigError("provider_response_not_json") from exc
 
 
+def _provider_stream_request(
+    url: str,
+    api_key: str,
+    *,
+    payload: dict[str, Any],
+) -> bool:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "LOOM-Provider-Compatibility-Probe/1.0",
+        },
+    )
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    try:
+        opener = urllib.request.build_opener(NoRedirect())
+        with opener.open(request, timeout=CODEX_REMOTE_PROBE_TIMEOUT_SECONDS) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            raw = response.read(256 * 1024)
+    except urllib.error.HTTPError as exc:
+        raise WireConfigError(f"http_{exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise WireConfigError(f"network_error: {_redact_secret_text(exc)}") from exc
+    if status >= 400:
+        raise WireConfigError(f"http_{status}")
+    text = raw.decode("utf-8", errors="replace")
+    return any(
+        line.startswith(("data:", "event:"))
+        and line.partition(":")[2].strip() not in {"", "[DONE]"}
+        for line in text.splitlines()
+    )
+
+
 def _extract_remote_model_ids(payload: Any) -> list[str]:
     if isinstance(payload, dict):
         for key in ("data", "models", "items"):
@@ -2134,6 +2487,20 @@ def _agent_config_model(component_id: str, path: str) -> str:
             payload = json.loads(_read_text(path))
             env = payload.get("env") if isinstance(payload, dict) else {}
             return _pick_text(env.get("ANTHROPIC_MODEL")) if isinstance(env, dict) else ""
+        if component_id == "pi":
+            payload = json.loads(_read_text(path))
+            providers = payload.get("providers") if isinstance(payload, dict) else {}
+            provider = providers.get("loom") if isinstance(providers, dict) else {}
+            models = provider.get("models") if isinstance(provider, dict) else []
+            first = models[0] if isinstance(models, list) and models else {}
+            return _pick_text(first.get("id")) if isinstance(first, dict) else ""
+        if component_id == "grok-build":
+            payload = tomllib.loads(_read_text(path))
+            models = payload.get("models") if isinstance(payload, dict) else {}
+            default = _pick_text(models.get("default")) if isinstance(models, dict) else ""
+            definitions = payload.get("model") if isinstance(payload, dict) else {}
+            selected = definitions.get(default) if isinstance(definitions, dict) else {}
+            return _pick_text(selected.get("model")) if isinstance(selected, dict) else ""
     except Exception:
         return ""
     return ""
@@ -2659,6 +3026,75 @@ def _claude_settings_text(base_url: str, provider: str, model: str) -> str:
             "ANTHROPIC_MODEL": model,
         },
     }, indent=2, ensure_ascii=False) + "\n"
+
+
+def _pi_models_text(base_url: str, provider: str, model: str) -> str:
+    return json.dumps({
+        "providers": {
+            "loom": {
+                "name": provider or "麓鸣",
+                "baseUrl": _pick_text(base_url).rstrip("/"),
+                "api": "openai-completions",
+                "apiKey": "$LOOM_PI_API_KEY",
+                "authHeader": True,
+                "models": [{
+                    "id": model,
+                    "name": model,
+                    "input": ["text", "image"],
+                    "contextWindow": 128000,
+                    "maxTokens": 16384,
+                }],
+            },
+        },
+    }, indent=2, ensure_ascii=False) + "\n"
+
+
+def _grok_config_text(base_url: str, provider: str, model: str) -> str:
+    return "\n".join([
+        "# Managed by Luming. The API key is injected only when Luming launches Grok Build.",
+        "[models]",
+        'default = "loom"',
+        "",
+        '[model."loom"]',
+        f'model = "{_toml_string(model)}"',
+        f'base_url = "{_toml_string(_pick_text(base_url).rstrip("/"))}"',
+        f'name = "{_toml_string(provider or "麓鸣")}"',
+        'env_key = "LOOM_GROK_API_KEY"',
+        "",
+    ])
+
+
+def _validate_external_agent_config(
+    component_id: str,
+    path: str,
+    base_url: str,
+    model: str,
+) -> None:
+    if component_id == "pi":
+        payload = json.loads(_read_text(path))
+        provider = payload.get("providers", {}).get("loom", {}) if isinstance(payload, dict) else {}
+        models = provider.get("models") if isinstance(provider, dict) else []
+        first = models[0] if isinstance(models, list) and models else {}
+        valid = bool(
+            isinstance(first, dict)
+            and provider.get("baseUrl") == base_url
+            and provider.get("api") == "openai-completions"
+            and provider.get("apiKey") == "$LOOM_PI_API_KEY"
+            and first.get("id") == model
+        )
+    elif component_id == "grok-build":
+        payload = tomllib.loads(_read_text(path))
+        default = payload.get("models", {}).get("default") if isinstance(payload, dict) else None
+        provider = payload.get("model", {}).get(default, {}) if isinstance(payload, dict) and default else {}
+        valid = bool(
+            provider.get("base_url") == base_url
+            and provider.get("model") == model
+            and provider.get("env_key") == "LOOM_GROK_API_KEY"
+        )
+    else:
+        raise WireConfigError("该组件没有可验证的第三方模型 Schema")
+    if not valid:
+        raise WireConfigError(f"{component_id}_config_readback_mismatch")
 
 
 def _write_text_with_backup(path: str, text: str) -> str:

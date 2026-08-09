@@ -16,17 +16,27 @@ const pairingFailures = new Map();
 const pairingRepairInflight = new Map();
 const pairingAuthRetryTails = new Map();
 const PHONE_RUNTIME_CONFIG_ENV = 'LOOM_PHONE_RUNTIME_CONFIG_JSON';
+const PHONE_RELAY_PRODUCER_TOKEN_ENV = 'LOOM_PHONE_RELAY_PRODUCER_TOKEN';
+const PHONE_RUNTIME_TEST_ONLY_ENV = 'LOOM_PHONE_RUNTIME_AUTH_TEST_ONLY';
+const PHONE_RUNTIME_TEST_PUBLIC_KEY_ENV = 'LOOM_PHONE_RUNTIME_AUTH_TEST_PUBLIC_KEY_B64';
+const ENTITLEMENT_SCHEMA = 'loom.entitlement_lease.v1';
+const PHONE_SEAT_LEASE_SCHEMA = 'loom.phone_seat_lease.v1';
+const ENTITLEMENT_KEY_ID = 'openclaw-ed25519-v1';
+const ENTITLEMENT_PUBLIC_KEY_B64 = 'njEIf3io24DAXRYVp37p2gIT5u2KZaWoGvBPD0JlTZ4=';
+const MAX_ENTITLEMENT_LEASE_WINDOW_SEC = 8 * 24 * 60 * 60;
+const MAX_ENTITLEMENT_CLOCK_SKEW_SEC = 300;
 const LEGACY_JSON_MEDIA_FALLBACK_BYTES = 8 * 1024 * 1024;
+const PACKAGED_RUNTIME_ROOT_NAMES = new Set(['_up_', 'resources', 'loomfiles', 'openclawfiles']);
+const verifiedLauncherPhoneConfigs = new WeakSet();
 const PHONE_CONFIG_REMEDIATION = Object.freeze([
-  '请打开 APKClaw -> Settings -> LAN Config，并确认局域网服务已开启。',
-  '确认手机和电脑在同一网络，端口通常为 9527。',
-  "PowerShell 示例：$env:OPENCLAW_PHONE_BASE_URL='http://手机IP:9527'; $env:OPENCLAW_PHONE_TOKEN='<连接令牌>'",
-  'CLI 示例：node scripts\\openclaw-phone-agent.mjs metrics --phone-url http://手机IP:9527 --phone-token <连接令牌> --json',
+  '请在手机端打开“与 LOOM 配对”并生成一次性配对码或完整配对信息。',
+  '回到 LOOM 手机连接页完成安全配对，并选择要操作的目标设备。',
+  '局域网连接请确认手机与电脑处于同一网络；USB 连接可直接使用 6 位配对码。',
 ]);
 const PHONE_AUTH_REMEDIATION = Object.freeze([
-  '手机已经可以连接，但保存的连接令牌无效或已经变更。',
-  '请打开 APKClaw -> Settings -> LAN Config，重新复制当前连接令牌。',
-  '回到麓鸣手机连接配置，替换旧令牌并保存，然后重新检测。',
+  '手机已经可以连接，但安全配对凭据已失效或不属于当前模型账号。',
+  '请在手机端“与 LOOM 配对”页生成新的配对码。',
+  '回到 LOOM 手机连接页重新完成安全配对，然后再次检测。',
 ]);
 
 export class PhoneBridgeError extends Error {
@@ -155,14 +165,14 @@ function normalizeBridgeError(error) {
   if (/Missing phone token/i.test(message)) {
     return normalizeBridgeError(new PhoneBridgeError(
       'missing_phone_token',
-      '手机连接令牌缺失。请在 APKClaw -> Settings -> LAN Config 中复制连接令牌，再回到麓鸣保存。',
+      '手机尚未完成安全配对。请在手机端生成配对码，并回到 LOOM 手机连接页完成配对。',
       { retryable: true },
     ));
   }
   if (looksLikePhoneAuthFailure(message)) {
     return normalizeBridgeError(new PhoneBridgeError(
       'auth_failed',
-      '已连接到手机端 APKClaw，但连接令牌无效或已经变更。请重新复制并保存 LAN Config 中的当前连接令牌。',
+      '已连接到手机端 APKClaw，但安全配对凭据无效或已经变更。请生成新的配对码并重新配对。',
       {
         retryable: true,
         remediation: PHONE_AUTH_REMEDIATION,
@@ -271,17 +281,530 @@ export function ensurePhoneConfig(config) {
   if (!config.phoneUrl) {
     throw new PhoneBridgeError(
       'missing_phone_url',
-      '手机连接地址缺失。请在麓鸣手机页保存手机 IP，或打开 APKClaw -> Settings -> LAN Config 后复制地址。',
+      '手机连接信息缺失。请在手机端生成配对码或完整配对信息，并回到 LOOM 手机连接页完成配对。',
       { retryable: true, remediation: PHONE_CONFIG_REMEDIATION },
     );
   }
   if (!config.phoneToken) {
     throw new PhoneBridgeError(
       'missing_phone_token',
-      '手机连接令牌缺失。请在 APKClaw -> Settings -> LAN Config 中复制连接令牌，再回到麓鸣保存。',
+      '手机尚未完成安全配对。请在手机端生成配对码，并回到 LOOM 手机连接页完成配对。',
       { retryable: true, remediation: PHONE_CONFIG_REMEDIATION },
     );
   }
+}
+
+function runtimeAuthorizationError(code, message, details = {}) {
+  return new PhoneBridgeError(code, message, {
+    retryable: false,
+    phase: 'runtime_authorization',
+    currentStep: 'preflight',
+    details,
+  });
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256CanonicalJson(value) {
+  return crypto.createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
+}
+
+function strictPositiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+export function phoneRuntimeTestOverridesAllowed() {
+  return (
+    !PACKAGED_RUNTIME_ROOT_NAMES.has(path.basename(PROJECT_ROOT).toLowerCase())
+    && String(process.env[PHONE_RUNTIME_TEST_ONLY_ENV] || '') === '1'
+    && Boolean(process.env.NODE_TEST_CONTEXT)
+  );
+}
+
+function trustedRuntimePublicKey() {
+  if (phoneRuntimeTestOverridesAllowed()) {
+    const testKey = String(process.env[PHONE_RUNTIME_TEST_PUBLIC_KEY_ENV] || '').trim();
+    if (testKey) return testKey;
+  }
+  return ENTITLEMENT_PUBLIC_KEY_B64;
+}
+
+function ed25519PublicKey(publicKeyB64) {
+  let raw;
+  try {
+    raw = Buffer.from(String(publicKeyB64 || ''), 'base64');
+  } catch {
+    raw = Buffer.alloc(0);
+  }
+  if (raw.length !== 32) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_key_invalid',
+      'LOOM 手机运行时权益公钥无效，请更新 LOOM。',
+    );
+  }
+  const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
+  return crypto.createPublicKey({
+    key: Buffer.concat([spkiPrefix, raw]),
+    format: 'der',
+    type: 'spki',
+  });
+}
+
+function signatureBytes(value) {
+  const text = String(value || '').trim();
+  if (!text || text.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(text)) {
+    return null;
+  }
+  const decoded = Buffer.from(text, 'base64');
+  return decoded.length === 64 ? decoded : null;
+}
+
+function verifyServiceSignature(payload, publicKey, errorCode) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw runtimeAuthorizationError(errorCode, '缺少服务端签名的手机账号权益。');
+  }
+  const signature = signatureBytes(payload.signature);
+  const signed = { ...payload };
+  delete signed.signature;
+  if (
+    !signature
+    || !crypto.verify(
+      null,
+      Buffer.from(canonicalJson(signed), 'utf8'),
+      publicKey,
+      signature,
+    )
+  ) {
+    throw runtimeAuthorizationError(
+      errorCode,
+      '手机运行时账号权益验签失败，请重新登录并刷新权益。',
+    );
+  }
+}
+
+function normalizedRuntimeDevices(runtime) {
+  if (!Array.isArray(runtime?.devices)) {
+    throw runtimeAuthorizationError(
+      'runtime_config_malformed',
+      'LOOM 手机运行时设备列表格式无效。',
+    );
+  }
+  const devices = runtime.devices.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw runtimeAuthorizationError(
+        'runtime_config_malformed',
+        'LOOM 手机运行时设备配置格式无效。',
+      );
+    }
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    const phoneUrl = normalizeStoredPhoneUrl(item.baseUrl ?? item.phoneUrl);
+    const phoneToken = typeof item.token === 'string' ? item.token.trim() : '';
+    if (!id || !phoneUrl || !phoneToken) {
+      throw runtimeAuthorizationError(
+        'runtime_config_malformed',
+        'LOOM 手机运行时设备缺少标识、安全地址或配对凭据。',
+      );
+    }
+    return {
+      id,
+      entitlementDeviceId: (
+        typeof item.entitlementDeviceId === 'string'
+          ? item.entitlementDeviceId.trim()
+          : typeof item.deviceInstanceId === 'string'
+            ? item.deviceInstanceId.trim()
+          : id
+      ),
+      deviceInstanceId: (
+        typeof item.deviceInstanceId === 'string'
+          ? item.deviceInstanceId.trim()
+          : typeof item.entitlementDeviceId === 'string'
+            ? item.entitlementDeviceId.trim()
+            : ''
+      ),
+      name: typeof item.name === 'string' ? item.name.trim() : '',
+      phoneUrl,
+      phoneToken,
+      lumiLauncherId: typeof item.launcherId === 'string' ? item.launcherId.trim() : '',
+      lumiLauncherSecret: typeof item.launcherSecret === 'string' ? item.launcherSecret.trim() : '',
+      album: typeof item.album === 'string' ? item.album.trim() : '',
+      tags: Array.isArray(item.tags) ? item.tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
+      priority: Number.isFinite(Number(item.priority)) ? Number(item.priority) : 0,
+    };
+  });
+  const ids = devices.map((device) => device.id);
+  if (new Set(ids).size !== ids.length) {
+    throw runtimeAuthorizationError(
+      'runtime_config_malformed',
+      'LOOM 手机运行时包含重复设备标识。',
+    );
+  }
+  return devices;
+}
+
+function verifyEntitlementLease(lease, publicKey, options = {}) {
+  if (!lease || typeof lease !== 'object' || Array.isArray(lease)) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_required',
+      '缺少服务端签名的账号权益租约，请重新登录。',
+    );
+  }
+  const required = [
+    'schema',
+    'accountId',
+    'sessionBinding',
+    'installId',
+    'deviceId',
+    'hostDeviceId',
+    'features',
+    'limits',
+    'issuedAt',
+    'expiresAt',
+    'offlineGraceUntil',
+    'entitlementVersion',
+    'keyId',
+    'signature',
+  ];
+  const missing = required.filter((field) => !Object.prototype.hasOwnProperty.call(lease, field));
+  if (missing.length) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_malformed',
+      '服务端账号权益租约字段不完整。',
+      { missing },
+    );
+  }
+  if (lease.schema !== ENTITLEMENT_SCHEMA || lease.keyId !== ENTITLEMENT_KEY_ID) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_schema_unsupported',
+      '服务端账号权益租约版本或签名密钥不受支持，请更新 LOOM。',
+    );
+  }
+  verifyServiceSignature(lease, publicKey, 'runtime_entitlement_signature_invalid');
+
+  const identityFields = ['accountId', 'sessionBinding', 'installId', 'deviceId', 'hostDeviceId'];
+  if (identityFields.some((field) => typeof lease[field] !== 'string' || !lease[field].trim())) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_malformed',
+      '服务端账号权益租约身份字段无效。',
+    );
+  }
+  if (lease.deviceId !== lease.hostDeviceId) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_host_mismatch',
+      '服务端账号权益租约主机身份不一致。',
+    );
+  }
+  const features = lease.features;
+  const limits = lease.limits;
+  if (
+    !Array.isArray(features)
+    || features.some((feature) => typeof feature !== 'string' || !feature.trim())
+    || !features.includes('matrix.devices')
+    || !limits
+    || typeof limits !== 'object'
+    || Array.isArray(limits)
+    || !strictPositiveInteger(limits.devices)
+    || !strictPositiveInteger(limits.concurrentTasks)
+    || limits.unlimitedDevices !== true
+  ) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_feature_required',
+      '当前账号权益未授权手机设备能力。',
+    );
+  }
+  if (
+    !strictPositiveInteger(lease.issuedAt)
+    || !strictPositiveInteger(lease.expiresAt)
+    || !strictPositiveInteger(lease.offlineGraceUntil)
+    || !strictPositiveInteger(lease.entitlementVersion)
+    || !(lease.issuedAt < lease.expiresAt && lease.expiresAt <= lease.offlineGraceUntil)
+    || lease.offlineGraceUntil - lease.issuedAt > MAX_ENTITLEMENT_LEASE_WINDOW_SEC
+  ) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_time_invalid',
+      '服务端账号权益租约时间窗口无效。',
+    );
+  }
+  const nowSec = Number.isSafeInteger(options.nowSec)
+    ? options.nowSec
+    : Math.floor(Date.now() / 1000);
+  if (lease.issuedAt > nowSec + MAX_ENTITLEMENT_CLOCK_SKEW_SEC) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_not_yet_valid',
+      '服务端账号权益租约尚未生效，请同步系统时间。',
+    );
+  }
+  if (nowSec > lease.offlineGraceUntil) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_expired',
+      '账号权益离线宽限已结束，请联网刷新账号。',
+    );
+  }
+  const localInstallId = String(options.localInstallId || '').trim();
+  if (localInstallId && lease.installId !== localInstallId) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_install_mismatch',
+      '账号权益租约不属于当前 LOOM 安装。',
+    );
+  }
+  const activeAccountIds = Array.isArray(options.activeAccountIds)
+    ? options.activeAccountIds.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  if (activeAccountIds.length && !activeAccountIds.includes(lease.accountId)) {
+    throw runtimeAuthorizationError(
+      'runtime_entitlement_account_mismatch',
+      '账号权益租约不属于当前登录账号。',
+    );
+  }
+  return lease;
+}
+
+function verifyPhoneSeatLease(seatLease, entitlementLease, publicKey, devices, options = {}) {
+  if (!devices.length && (!seatLease || typeof seatLease !== 'object')) return null;
+  if (!seatLease || typeof seatLease !== 'object' || Array.isArray(seatLease)) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_seat_lease_required',
+      '缺少服务端签名的手机席位凭证，请联网刷新权益。',
+    );
+  }
+  const required = [
+    'schema',
+    'accountId',
+    'installId',
+    'hostDeviceId',
+    'phoneDeviceIds',
+    'limit',
+    'issuedAt',
+    'expiresAt',
+    'entitlementVersion',
+    'keyId',
+    'signature',
+  ];
+  const missing = required.filter((field) => !Object.prototype.hasOwnProperty.call(seatLease, field));
+  if (missing.length) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_seat_lease_malformed',
+      '服务端手机席位凭证字段不完整。',
+      { missing },
+    );
+  }
+  if (seatLease.schema !== PHONE_SEAT_LEASE_SCHEMA || seatLease.keyId !== ENTITLEMENT_KEY_ID) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_seat_lease_schema_unsupported',
+      '服务端手机席位凭证版本或签名密钥不受支持，请更新 LOOM。',
+    );
+  }
+  verifyServiceSignature(
+    seatLease,
+    publicKey,
+    'runtime_phone_seat_signature_invalid',
+  );
+  const hostDeviceId = entitlementLease.hostDeviceId || entitlementLease.deviceId;
+  if (
+    seatLease.accountId !== entitlementLease.accountId
+    || seatLease.installId !== entitlementLease.installId
+    || seatLease.hostDeviceId !== hostDeviceId
+    || seatLease.entitlementVersion !== entitlementLease.entitlementVersion
+  ) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_seat_entitlement_mismatch',
+      '服务端手机席位凭证与当前账号权益不一致。',
+    );
+  }
+  if (
+    !strictPositiveInteger(seatLease.issuedAt)
+    || !strictPositiveInteger(seatLease.expiresAt)
+    || !strictPositiveInteger(seatLease.entitlementVersion)
+    || !strictPositiveInteger(seatLease.limit)
+    || !(seatLease.issuedAt < seatLease.expiresAt)
+    || seatLease.expiresAt - seatLease.issuedAt > MAX_ENTITLEMENT_LEASE_WINDOW_SEC
+    || !Array.isArray(seatLease.phoneDeviceIds)
+  ) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_seat_lease_malformed',
+      '服务端手机席位凭证时间、额度或设备列表无效。',
+    );
+  }
+  const nowSec = Number.isSafeInteger(options.nowSec)
+    ? options.nowSec
+    : Math.floor(Date.now() / 1000);
+  if (seatLease.issuedAt > nowSec + MAX_ENTITLEMENT_CLOCK_SKEW_SEC) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_seat_not_yet_valid',
+      '服务端手机席位凭证尚未生效，请同步系统时间。',
+    );
+  }
+  if (nowSec > seatLease.expiresAt) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_seat_lease_expired',
+      '手机席位离线凭证已过期，请联网刷新。',
+    );
+  }
+  const phoneDeviceIds = seatLease.phoneDeviceIds.map((value) => (
+    typeof value === 'string' ? value.trim() : ''
+  ));
+  if (
+    phoneDeviceIds.some((value) => !value)
+    || new Set(phoneDeviceIds).size !== phoneDeviceIds.length
+    || (
+      entitlementLease.limits.unlimitedDevices !== true
+      && (
+        phoneDeviceIds.length > seatLease.limit
+        || seatLease.limit > entitlementLease.limits.devices
+      )
+    )
+  ) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_seat_lease_malformed',
+      '服务端手机席位凭证设备列表或额度无效。',
+    );
+  }
+  const allowedIds = new Set(phoneDeviceIds);
+  const unauthorized = devices
+    .map((device) => device.entitlementDeviceId)
+    .filter((deviceId) => !allowedIds.has(deviceId));
+  if (unauthorized.length) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_device_unauthorized',
+      'LOOM 手机运行时包含未获账号权益授权的设备。',
+      { deviceIds: unauthorized },
+    );
+  }
+  return seatLease;
+}
+
+export function verifyLauncherPhoneRuntimeConfig(runtimeConfig, options = {}) {
+  let runtime = runtimeConfig;
+  if (typeof runtimeConfig === 'string') {
+    try {
+      runtime = JSON.parse(runtimeConfig);
+    } catch {
+      throw runtimeAuthorizationError(
+        'runtime_config_malformed',
+        'LOOM 手机运行时配置不是有效 JSON。',
+      );
+    }
+  }
+  if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) {
+    throw runtimeAuthorizationError(
+      'runtime_config_malformed',
+      'LOOM 手机运行时配置格式无效。',
+    );
+  }
+  const devices = normalizedRuntimeDevices(runtime);
+  const publicKey = ed25519PublicKey(trustedRuntimePublicKey());
+  const entitlementLease = verifyEntitlementLease(
+    runtime.entitlementLease,
+    publicKey,
+    options,
+  );
+  const producerToken = String(options.producerToken || '').trim();
+  if (!producerToken) {
+    throw runtimeAuthorizationError(
+      'runtime_producer_token_required',
+      '手机运行时缺少当前模型账号安全凭据，请重新登录。',
+    );
+  }
+  const expectedSessionBinding = crypto
+    .createHash('sha256')
+    .update(Buffer.concat([
+      Buffer.from('loom-entitlement-session-v1\0', 'utf8'),
+      Buffer.from(producerToken, 'utf8'),
+    ]))
+    .digest('hex');
+  const actualSessionBinding = String(
+    entitlementLease.sessionBinding || '',
+  );
+  if (
+    actualSessionBinding.length !== expectedSessionBinding.length
+    || !crypto.timingSafeEqual(
+      Buffer.from(actualSessionBinding, 'utf8'),
+      Buffer.from(expectedSessionBinding, 'utf8'),
+    )
+  ) {
+    throw runtimeAuthorizationError(
+      'runtime_producer_token_mismatch',
+      '当前模型账号安全凭据与签名权益租约不一致，请重新登录。',
+    );
+  }
+  const phoneSeatLease = verifyPhoneSeatLease(
+    runtime.phoneSeatLease,
+    entitlementLease,
+    publicKey,
+    devices,
+    options,
+  );
+  const selectedDeviceId = typeof runtime.selectedDeviceId === 'string'
+    ? runtime.selectedDeviceId.trim()
+    : '';
+  if (selectedDeviceId && !devices.some((device) => device.id === selectedDeviceId)) {
+    throw runtimeAuthorizationError(
+      'runtime_phone_device_unauthorized',
+      'LOOM 手机运行时选择了未获授权的设备。',
+      { deviceIds: [selectedDeviceId] },
+    );
+  }
+  return {
+    selectedDeviceId: selectedDeviceId || devices[0]?.id || '',
+    devices,
+    source: 'bridge-runtime',
+    accountId: entitlementLease.accountId,
+    entitlementLease,
+    phoneSeatLease,
+    configDigest: (
+      typeof options.configDigest === 'string'
+      && /^[a-f0-9]{64}$/i.test(options.configDigest)
+    )
+      ? options.configDigest.toLowerCase()
+      : sha256CanonicalJson(runtime),
+  };
+}
+
+export function hasLauncherPhoneRuntimeConfig() {
+  return Object.prototype.hasOwnProperty.call(process.env, PHONE_RUNTIME_CONFIG_ENV);
+}
+
+export function resolveLauncherPhoneConnection(args = {}, launcherPhone = {}, runtime = {}, options = {}) {
+  if (
+    !hasLauncherPhoneRuntimeConfig()
+    || !launcherPhone
+    || typeof launcherPhone !== 'object'
+    || !verifiedLauncherPhoneConfigs.has(launcherPhone)
+  ) {
+    return {
+      phoneUrl: '',
+      phoneToken: '',
+      deviceId: '',
+      lumiLauncherId: '',
+      lumiLauncherSecret: '',
+      source: 'bridge-runtime-required',
+    };
+  }
+  return {
+    phoneUrl: launcherPhone.phoneUrl || '',
+    phoneToken: launcherPhone.phoneToken || '',
+    deviceId: args.deviceId || launcherPhone.id || '',
+    lumiLauncherId: launcherPhone.lumiLauncherId || '',
+    lumiLauncherSecret: launcherPhone.lumiLauncherSecret || '',
+    source: launcherPhone.source || 'bridge-runtime',
+  };
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
 }
 
 export async function readLauncherPhoneConfig() {
@@ -309,71 +832,113 @@ export async function readLauncherPhoneLlmConfig() {
   return { baseUrl: '', apiKey: '', model: '', source: '' };
 }
 
-export async function readLauncherPhoneStore() {
-  const runtimeStore = readRuntimePhoneStore();
-  if (runtimeStore.devices.length) return runtimeStore;
-  const candidates = launcherConfigCandidates('phone-agents.json');
-
-  for (const filePath of candidates) {
-    try {
-      const parsed = JSON.parse(await fs.readFile(filePath, 'utf8'));
-      if (!Array.isArray(parsed?.devices) || !parsed.devices.length) continue;
-      return {
-        selectedDeviceId: typeof parsed?.selectedDeviceId === 'string' ? parsed.selectedDeviceId : '',
-        devices: parsed.devices
-          .filter((item) => item && typeof item === 'object')
-          .map((item) => ({
-            id: typeof item.id === 'string' ? item.id.trim() : '',
-            name: typeof item.name === 'string' ? item.name.trim() : '',
-            phoneUrl: normalizeStoredPhoneUrl(item.baseUrl),
-            phoneToken: typeof item.token === 'string' ? item.token.trim() : '',
-            lumiLauncherId: typeof item.launcherId === 'string' ? item.launcherId.trim() : '',
-            lumiLauncherSecret: typeof item.launcherSecret === 'string' ? item.launcherSecret.trim() : '',
-            album: typeof item.album === 'string' ? item.album.trim() : '',
-            tags: Array.isArray(item.tags) ? item.tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
-            priority: Number.isFinite(Number(item.priority)) ? Number(item.priority) : 0,
-          }))
-          .filter((item) => item.id || item.phoneUrl || item.name),
-        source: filePath,
-      };
-    } catch (error) {
-      if (error?.code !== 'ENOENT') throw new Error(`Failed to read launcher phone config: ${filePath}: ${error.message}`);
-    }
-  }
-
-  return { selectedDeviceId: '', devices: [], source: '' };
+export async function readLauncherPhoneStore(options = {}) {
+  if (hasLauncherPhoneRuntimeConfig()) return readRuntimePhoneStore(options);
+  return {
+    selectedDeviceId: '',
+    devices: [],
+    source: 'bridge-runtime-required',
+  };
 }
 
-function readRuntimePhoneStore() {
+async function readRuntimePhoneStore(options = {}) {
   const raw = String(process.env[PHONE_RUNTIME_CONFIG_ENV] || '').trim();
-  if (!raw) return { selectedDeviceId: '', devices: [], source: '' };
+  if (!raw) {
+    throw runtimeAuthorizationError(
+      'runtime_config_malformed',
+      'LOOM 手机运行时配置为空。',
+    );
+  }
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error('Invalid launcher phone runtime config.');
+    throw runtimeAuthorizationError(
+      'runtime_config_malformed',
+      'LOOM 手机运行时配置不是有效 JSON。',
+    );
   }
-  const devices = Array.isArray(parsed?.devices)
-    ? parsed.devices
-      .filter((item) => item && typeof item === 'object')
-      .map((item) => ({
-        id: typeof item.id === 'string' ? item.id.trim() : '',
-        name: typeof item.name === 'string' ? item.name.trim() : '',
-        phoneUrl: normalizeStoredPhoneUrl(item.baseUrl ?? item.phoneUrl),
-        phoneToken: typeof item.token === 'string' ? item.token.trim() : '',
-        lumiLauncherId: typeof item.launcherId === 'string' ? item.launcherId.trim() : '',
-        lumiLauncherSecret: typeof item.launcherSecret === 'string' ? item.launcherSecret.trim() : '',
-        album: typeof item.album === 'string' ? item.album.trim() : '',
-        tags: Array.isArray(item.tags) ? item.tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
-        priority: Number.isFinite(Number(item.priority)) ? Number(item.priority) : 0,
-      }))
-      .filter((item) => item.id || item.phoneUrl || item.name)
-    : [];
-  return {
-    selectedDeviceId: typeof parsed?.selectedDeviceId === 'string' ? parsed.selectedDeviceId.trim() : '',
-    devices,
-    source: 'bridge-runtime',
+  const binding = await readRuntimeAuthorizationBinding();
+  const authorizedRuntime = {
+    ...parsed,
+    entitlementLease: parsed.entitlementLease || binding.entitlementLease,
+    phoneSeatLease: parsed.phoneSeatLease || binding.phoneSeatLease,
   };
+  return verifyLauncherPhoneRuntimeConfig(authorizedRuntime, {
+    ...binding,
+    ...options,
+    producerToken: (
+      options.producerToken
+      || process.env[PHONE_RELAY_PRODUCER_TOKEN_ENV]
+      || ''
+    ),
+    configDigest: sha256CanonicalJson(parsed),
+  });
+}
+
+async function readRuntimeAuthorizationBinding() {
+  const roots = trustedRuntimeRoots();
+  const [
+    entitlementLease,
+    phoneSeatLease,
+    localInstallId,
+    memberSession,
+  ] = await Promise.all([
+    readFirstRuntimeJson(roots, ['data', 'account-entitlement.json']),
+    readFirstRuntimeJson(roots, ['data', 'account-phone-seat-lease.json']),
+    readFirstRuntimeText(roots, ['data', 'install_id.txt']),
+    readFirstRuntimeJson(roots, ['data', '.openclaw', 'launcher', 'member-session.json']),
+  ]);
+  return {
+    entitlementLease,
+    phoneSeatLease,
+    localInstallId,
+    activeAccountIds: accountIdsFromMemberSession(memberSession),
+  };
+}
+
+function trustedRuntimeRoots() {
+  const roots = [PROJECT_ROOT];
+  const name = path.basename(PROJECT_ROOT).toLowerCase();
+  if (PACKAGED_RUNTIME_ROOT_NAMES.has(name)) {
+    roots.push(path.resolve(PROJECT_ROOT, '..'));
+  }
+  return uniquePaths(roots);
+}
+
+async function readFirstRuntimeJson(roots, relativeParts) {
+  for (const root of roots) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(root, ...relativeParts), 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    }
+  }
+  return null;
+}
+
+async function readFirstRuntimeText(roots, relativeParts) {
+  for (const root of roots) {
+    try {
+      const text = String(await fs.readFile(path.join(root, ...relativeParts), 'utf8')).trim();
+      if (text) return text;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  return '';
+}
+
+function accountIdsFromMemberSession(session) {
+  if (!session || typeof session !== 'object') return [];
+  const newApi = session.newApi && typeof session.newApi === 'object' ? session.newApi : {};
+  const memberId = String(session.memberId || '').trim();
+  return [...new Set([
+    String(newApi.userId || '').trim(),
+    memberId,
+    memberId.replace(/^newapi:/, ''),
+  ].filter(Boolean))];
 }
 
 export async function readLauncherPhoneConfigByDevice(deviceId = '') {
@@ -387,11 +952,30 @@ export async function readLauncherPhoneConfigByDevice(deviceId = '') {
       (store.selectedDeviceId ? store.devices.find((device) => device.id === store.selectedDeviceId) : undefined) ||
       store.devices[0];
     if (selected) {
-      return {
+      const verified = {
         ...selected,
         source: store.source,
       };
+      verifiedLauncherPhoneConfigs.add(verified);
+      return verified;
     }
+  }
+  if (store.source === 'bridge-runtime' || store.source === 'bridge-runtime-required') {
+    if (deviceId) {
+      throw new Error(`Unknown APKClaw device id: ${deviceId}`);
+    }
+    return {
+      id: '',
+      name: '',
+      phoneUrl: '',
+      phoneToken: '',
+      lumiLauncherId: '',
+      lumiLauncherSecret: '',
+      album: '',
+      tags: [],
+      priority: 0,
+      source: store.source,
+    };
   }
 
   const candidates = [
@@ -657,7 +1241,7 @@ export async function signedFetch(config, method, endpoint, timeoutMs = REQUEST_
       ...authHeaders(config),
       ...headers,
     },
-  }, timeoutMs);
+  }, timeoutMs, config.cancelSignal);
   if (response.status === 403 && retryPairing) {
     return enqueuePairingAuthRetry(config, async () => {
       await repairLumiPairing(config, pairing);
@@ -667,25 +1251,33 @@ export async function signedFetch(config, method, endpoint, timeoutMs = REQUEST_
   return response;
 }
 
-export async function uploadMediaBuffer(config, bytes, filename, mime, endpoint) {
+export async function uploadMediaBuffer(config, bytes, filename, mime, endpoint, requestOptions = {}) {
   const dataUrl = `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`;
   const payload = await signedJsonRequest(config, 'POST', endpoint, {
     dataUrl,
     album: config.album || 'LOOM',
     filename,
-  }, 120_000);
+  }, 120_000, true, requestOptions);
   return payload.data || payload;
 }
 
-export async function uploadImageBuffer(config, bytes, filename, mime = 'image/png') {
-  return uploadMediaBuffer(config, bytes, filename, mime, '/api/lumi/media/import_image');
+export async function uploadImageBuffer(config, bytes, filename, mime = 'image/png', requestOptions = {}) {
+  return uploadMediaBuffer(config, bytes, filename, mime, '/api/lumi/media/import_image', requestOptions);
 }
 
-export async function uploadVideoBuffer(config, bytes, filename, mime = 'video/mp4') {
-  return uploadMediaBuffer(config, bytes, filename, mime, '/api/lumi/media/import_video');
+export async function uploadVideoBuffer(config, bytes, filename, mime = 'video/mp4', requestOptions = {}) {
+  return uploadMediaBuffer(config, bytes, filename, mime, '/api/lumi/media/import_video', requestOptions);
 }
 
-export async function uploadMediaFile(config, filePath, filename, mime, kind, retryPairing = true) {
+export async function uploadMediaFile(
+  config,
+  filePath,
+  filename,
+  mime,
+  kind,
+  retryPairing = true,
+  requestOptions = {},
+) {
   ensurePhoneConfig(config);
   const normalizedKind = String(kind || '').trim().toLowerCase();
   if (!['image', 'video'].includes(normalizedKind)) {
@@ -717,21 +1309,21 @@ export async function uploadMediaFile(config, filePath, filename, mime, kind, re
     },
     body: createReadStream(filePath),
     duplex: 'half',
-  }, 615_000, undefined, { operation: 'media_upload', sizeBytes: stat.size });
+  }, 615_000, requestOptions.signal, { operation: 'media_upload', sizeBytes: stat.size });
 
   const payload = await parseJsonResponse(response, 'Phone media import returned non-JSON response');
   if (retryPairing && isLumiAuthFailure(response, payload)) {
     return enqueuePairingAuthRetry(config, async () => {
       await repairLumiPairing(config, pairing, { forceRefresh: true });
-      return uploadMediaFile(config, filePath, filename, mime, normalizedKind, false);
+      return uploadMediaFile(config, filePath, filename, mime, normalizedKind, false, requestOptions);
     });
   }
   if (response.status === 404) {
     if (stat.size <= LEGACY_JSON_MEDIA_FALLBACK_BYTES) {
       const bytes = await fs.readFile(filePath);
       return normalizedKind === 'video'
-        ? uploadVideoBuffer(config, bytes, filename, mime)
-        : uploadImageBuffer(config, bytes, filename, mime);
+        ? uploadVideoBuffer(config, bytes, filename, mime, requestOptions)
+        : uploadImageBuffer(config, bytes, filename, mime, requestOptions);
     }
     throw new PhoneBridgeError(
       'phone_media_streaming_update_required',

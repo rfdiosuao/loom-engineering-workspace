@@ -93,7 +93,7 @@
     "subtitle": "麓鸣多智能体安装器",
     "app_user_model_id": "LOOM.Agent",
     "terminal_header": "LOOM 运行时",
-    "logoUrl": "logo.png"
+    "logoUrl": ""
   },
   "navItems": [
     {"key": "dashboard", "label": "总览", "desc": "状态 / 演示", "icon": "HOME", "group": "LOOM"},

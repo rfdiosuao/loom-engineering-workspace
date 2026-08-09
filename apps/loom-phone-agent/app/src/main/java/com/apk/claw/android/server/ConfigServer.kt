@@ -11,6 +11,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.apk.claw.android.utils.XLog
 import fi.iki.elonen.NanoHTTPD
+import com.apk.claw.android.server.stream.PhoneStreamApiController
 
 /**
  * 局域网 HTTP 配置服务器
@@ -26,6 +27,12 @@ class ConfigServer(
         const val PORT = 9527
         private const val MIME_HTML = "text/html"
         private const val MIME_JSON = "application/json"
+        private const val SECRET_REDACTED = "********"
+        private const val SECRET_REDACTED_FALLBACK = "########"
+        private val CHANNEL_SECRET_FIELDS = setOf("dingtalkAppSecret", "feishuAppSecret", "qqAppSecret", "discordBotToken", "telegramBotToken")
+        private val LLM_SECRET_FIELDS = setOf("llmApiKey")
+        private val CHANNEL_CONFIG_FIELDS = setOf("dingtalkAppKey", "dingtalkAppSecret", "feishuAppId", "feishuAppSecret", "qqAppId", "qqAppSecret", "discordBotToken", "telegramBotToken")
+        private val LLM_CONFIG_FIELDS = setOf("llmApiKey", "llmBaseUrl", "llmModelName")
     }
 
     private val gson = Gson()
@@ -136,6 +143,15 @@ class ConfigServer(
                 }
                 uri == "/api/lumi/vision/action" && method == Method.POST -> handleLumiJson(session) {
                     VisionApiController.handleAction(it)
+                }
+                uri == "/api/lumi/stream/session" && method == Method.POST -> handleLumiJson(session) {
+                    PhoneStreamApiController.handleCreate(context, it)
+                }
+                uri == "/api/lumi/stream/h264" && method == Method.GET -> handleLumiGet(session) {
+                    PhoneStreamApiController.handleH264(it)
+                }
+                uri == "/api/lumi/stream/stop" && method == Method.POST -> handleLumiJson(session) {
+                    PhoneStreamApiController.handleStop(context, it)
                 }
                 uri == "/api/lumi/debug/crashes/latest" && method == Method.GET -> handleLumiGet(session) {
                     CrashLogApiController.handleLatest(context, it)
@@ -408,6 +424,17 @@ class ConfigServer(
                 )
             )
         }
+        val replaceSecrets = try {
+            validateStringFields(json, CHANNEL_CONFIG_FIELDS)
+            parseReplaceSecrets(json, CHANNEL_SECRET_FIELDS)
+        } catch (_: IllegalArgumentException) {
+            return corsResponse(
+                newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST, MIME_JSON,
+                    """{"code":-1,"message":"invalid configuration"}"""
+                )
+            )
+        }
 
         var reinitDingtalk = false
         var reinitFeishu = false
@@ -424,7 +451,7 @@ class ConfigServer(
         if (json.has("dingtalkAppSecret")) {
             val value = json.get("dingtalkAppSecret").asString
             // 如果是脱敏值则跳过
-            if (!isMaskedValue(value)) {
+            if ("dingtalkAppSecret" in replaceSecrets || !isMaskedValue(value, KVUtils.getDingtalkAppSecret())) {
                 KVUtils.setDingtalkAppSecret(value)
                 reinitDingtalk = true
             }
@@ -438,7 +465,7 @@ class ConfigServer(
         }
         if (json.has("feishuAppSecret")) {
             val value = json.get("feishuAppSecret").asString
-            if (!isMaskedValue(value)) {
+            if ("feishuAppSecret" in replaceSecrets || !isMaskedValue(value, KVUtils.getFeishuAppSecret())) {
                 KVUtils.setFeishuAppSecret(value)
                 reinitFeishu = true
             }
@@ -452,7 +479,7 @@ class ConfigServer(
         }
         if (json.has("qqAppSecret")) {
             val value = json.get("qqAppSecret").asString
-            if (!isMaskedValue(value)) {
+            if ("qqAppSecret" in replaceSecrets || !isMaskedValue(value, KVUtils.getQqAppSecret())) {
                 KVUtils.setQqAppSecret(value)
                 reinitQQ = true
             }
@@ -461,7 +488,7 @@ class ConfigServer(
         // Discord 配置
         if (json.has("discordBotToken")) {
             val value = json.get("discordBotToken").asString
-            if (!isMaskedValue(value)) {
+            if ("discordBotToken" in replaceSecrets || !isMaskedValue(value, KVUtils.getDiscordBotToken())) {
                 KVUtils.setDiscordBotToken(value)
                 reinitDiscord = true
             }
@@ -470,7 +497,7 @@ class ConfigServer(
         // Telegram 配置
         if (json.has("telegramBotToken")) {
             val value = json.get("telegramBotToken").asString
-            if (!isMaskedValue(value)) {
+            if ("telegramBotToken" in replaceSecrets || !isMaskedValue(value, KVUtils.getTelegramBotToken())) {
                 KVUtils.setTelegramBotToken(value)
                 reinitTelegram = true
             }
@@ -536,10 +563,21 @@ class ConfigServer(
                 )
             )
         }
+        val replaceSecrets = try {
+            validateStringFields(json, LLM_CONFIG_FIELDS)
+            parseReplaceSecrets(json, LLM_SECRET_FIELDS)
+        } catch (_: IllegalArgumentException) {
+            return corsResponse(
+                newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST, MIME_JSON,
+                    """{"code":-1,"message":"invalid configuration"}"""
+                )
+            )
+        }
 
         if (json.has("llmApiKey")) {
             val value = json.get("llmApiKey").asString
-            if (!isMaskedValue(value)) {
+            if ("llmApiKey" in replaceSecrets || !isMaskedValue(value, KVUtils.getLlmApiKey())) {
                 KVUtils.setLlmApiKey(value)
             }
         }
@@ -703,19 +741,51 @@ class ConfigServer(
     }
 
     /**
-     * 脱敏：只显示后4位，前面用 * 替代
+     * 脱敏：返回固定 marker；当主 marker 会包含完整原文时切换到不相交的备用 marker。
      */
     private fun maskSecret(secret: String): String {
         if (secret.isEmpty()) return ""
-        if (secret.length <= 4) return secret
-        return "*".repeat(secret.length - 4) + secret.takeLast(4)
+        return if (SECRET_REDACTED.contains(secret)) SECRET_REDACTED_FALLBACK else SECRET_REDACTED
     }
 
     /**
-     * 判断是否为脱敏后的值（包含 *）
+     * 只有提交值精确等于当前已存 secret 的脱敏结果时，才视为 UI 回传的 marker。
      */
-    private fun isMaskedValue(value: String): Boolean {
-        return value.contains("*")
+    private fun isMaskedValue(value: String, currentSecret: String): Boolean {
+        return value == maskSecret(currentSecret)
+    }
+
+    private fun parseReplaceSecrets(json: JsonObject, allowedFields: Set<String>): Set<String> {
+        if (!json.has("replaceSecrets")) return emptySet()
+        val intent = json.get("replaceSecrets")
+        require(intent.isJsonArray) { "replaceSecrets must be an array" }
+
+        val replacements = linkedSetOf<String>()
+        intent.asJsonArray.forEach { entry ->
+            require(entry.isJsonPrimitive && entry.asJsonPrimitive.isString) {
+                "replaceSecrets entries must be strings"
+            }
+            val field = entry.asString
+            require(field in allowedFields) { "replaceSecrets contains an unsupported field" }
+            require(replacements.add(field)) { "replaceSecrets contains a duplicate field" }
+            require(json.has(field)) { "replaceSecrets field is missing its value" }
+            val value = json.get(field)
+            require(value.isJsonPrimitive && value.asJsonPrimitive.isString) {
+                "replaceSecrets field values must be strings"
+            }
+        }
+        return replacements
+    }
+
+    private fun validateStringFields(json: JsonObject, allowedFields: Set<String>) {
+        allowedFields.forEach { field ->
+            if (json.has(field)) {
+                val value = json.get(field)
+                require(value.isJsonPrimitive && value.asJsonPrimitive.isString) {
+                    "$field must be a string"
+                }
+            }
+        }
     }
 
     private fun corsResponse(response: Response): Response {

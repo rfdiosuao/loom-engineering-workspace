@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
+import { MessageSquareText, ShieldCheck } from 'lucide-react';
 import type { AgentMessage, AgentMessageBlock, AgentRun } from '../../types/agent';
 import type { FeatureNavigationContext } from '../../stores/appStore';
-import { LoomAgentMark } from '../brand/LoomBrand';
 import { shouldShowThinking, thinkingStatusLabel } from './agentViewModel';
 import { AgentThinkingIndicator } from './AgentThinkingIndicator';
 import { MessageBlockView, ToolExecutionGroup } from './messageBlocks';
@@ -12,6 +12,12 @@ interface ConversationStreamProps {
   currentRun: AgentRun | null;
   sending: boolean;
   loading?: boolean;
+  unavailableMessage?: string;
+  onUnavailableRetry?: () => void;
+  executionBlocked?: boolean;
+  executionTitle?: string;
+  executionMessage?: string;
+  onOpenAccount?: () => void;
   busyKey: string | null;
   onRunAction: (runId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>;
   onOpenRunDetails: (runId: string, trigger: HTMLButtonElement) => void;
@@ -91,6 +97,12 @@ export function ConversationStream({
   currentRun,
   sending,
   loading,
+  unavailableMessage = '',
+  onUnavailableRetry,
+  executionBlocked = false,
+  executionTitle = '',
+  executionMessage = '',
+  onOpenAccount,
   busyKey,
   onRunAction,
   onOpenRunDetails,
@@ -120,9 +132,44 @@ export function ConversationStream({
     >
       <div className="mx-auto w-full max-w-[920px]">
         {loading ? <div className="py-10 text-center text-sm text-text-muted">正在读取对话...</div> : null}
-        {!loading && messages.length === 0 && !thinking ? (
+        {!loading && unavailableMessage ? (
+          <div role="alert" className="mx-auto mt-10 max-w-[620px] rounded-[8px] border border-status-danger/30 bg-status-danger/10 px-5 py-4 text-center text-sm leading-6 text-status-danger">
+            <div className="font-black">智能体暂不可用</div>
+            <div className="mt-1">{unavailableMessage}</div>
+            {onUnavailableRetry ? (
+              <button
+                type="button"
+                onClick={onUnavailableRetry}
+                className="mt-3 h-9 rounded-[8px] border border-status-danger/40 bg-surface px-4 text-xs font-black text-status-danger hover:bg-status-danger/10"
+              >
+                重新连接
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {!loading && !unavailableMessage && executionBlocked ? (
+          <section
+            role="status"
+            className="mx-auto mt-8 max-w-[620px] rounded-[10px] border border-status-warning/35 bg-status-warning/10 px-5 py-5 text-center"
+            data-agent-entitlement-gate
+          >
+            <ShieldCheck className="mx-auto h-8 w-8 text-status-warning" aria-hidden="true" />
+            <h2 className="mt-3 text-base font-semibold text-text">{executionTitle}</h2>
+            <p className="mx-auto mt-2 max-w-[520px] text-sm leading-6 text-text-muted">{executionMessage}</p>
+            {onOpenAccount ? (
+              <button
+                type="button"
+                onClick={onOpenAccount}
+                className="mt-4 h-10 rounded-[8px] bg-accent px-4 text-sm font-semibold text-accent-ink hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                前往模型账号
+              </button>
+            ) : null}
+          </section>
+        ) : null}
+        {!loading && !unavailableMessage && !executionBlocked && messages.length === 0 && !thinking ? (
           <div className="flex min-h-[260px] flex-col items-center justify-center text-center">
-            <LoomAgentMark className="h-14 w-14" />
+            <MessageSquareText className="h-10 w-10 text-accent" aria-hidden="true" />
             <div className="mt-4 text-base font-semibold text-text">开始一段新对话</div>
           </div>
         ) : null}

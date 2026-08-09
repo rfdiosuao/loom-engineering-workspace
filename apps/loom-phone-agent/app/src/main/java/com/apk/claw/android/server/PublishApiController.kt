@@ -1,5 +1,8 @@
 package com.apk.claw.android.server
 
+import com.apk.claw.android.publish.PublishCommitGuard
+import com.apk.claw.android.publish.PublishRequestPolicy
+import com.apk.claw.android.service.ClawAccessibilityService
 import com.apk.claw.android.utils.XLog
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
@@ -9,13 +12,32 @@ object PublishApiController {
 
     private const val TAG = "PublishApiController"
     private const val MIME_JSON_UTF8 = "application/json; charset=utf-8"
-    fun handleExecutePacket(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+    fun handleExecutePacket(
+        session: NanoHTTPD.IHTTPSession,
+        beforeToolDispatch: ((String, Map<String, Any>) -> String?)? = null,
+    ): NanoHTTPD.Response {
         val packet = ToolApiController.parseJsonBody(session) ?: return jsonResponse(
             NanoHTTPD.Response.Status.BAD_REQUEST,
             false,
             null,
             "Invalid JSON body"
         )
+        val draftOnly = packet.getBoolean("draftOnly", true)
+        if (!PublishRequestPolicy.mayExecute(draftOnly, beforeToolDispatch != null)) {
+            return jsonResponse(
+                NanoHTTPD.Response.Status.FORBIDDEN,
+                false,
+                null,
+                "Formal publish requires a trusted signed relay commit gate"
+            )
+        }
+        val effectiveGate = beforeToolDispatch ?: PublishCommitGuard(
+            draftOnly = true,
+            screenTree = { ClawAccessibilityService.getInstance()?.screenTreeJson },
+            authorizeCommit = {
+                throw IllegalStateException("Direct publish requests cannot authorize a formal commit")
+            },
+        )::beforeToolDispatch
 
         val prompt = buildPublishPrompt(packet)
         val agentBody = JsonObject().apply {
@@ -31,7 +53,8 @@ object PublishApiController {
 
         XLog.i(TAG, "Executing publish packet: ${packet.get("platformLabel")?.asString ?: packet.get("platformId")?.asString ?: "unknown"}")
         return AgentApiController.handleExecuteTask(
-            CachedBodySession(session, agentBody.toString().toByteArray(Charsets.UTF_8))
+            CachedBodySession(session, agentBody.toString().toByteArray(Charsets.UTF_8)),
+            effectiveGate,
         )
     }
 
@@ -48,6 +71,7 @@ object PublishApiController {
         val title = packet.getString("title", "").trim()
         val body = packet.getString("body", "").trim()
         val notes = packet.getString("notes", "").trim()
+        val draftOnly = packet.getBoolean("draftOnly", true)
         val hashtags = packet.getAsJsonArray("hashtags")
             ?.mapNotNull {
                 if (it.isJsonPrimitive) {
@@ -83,7 +107,13 @@ object PublishApiController {
             appendLine("- 先进入对应平台的发布入口，再确认当前页面标题。")
             appendLine("- 有素材时按顺序添加，封面需要时先确认封面。")
             appendLine("- 发布前检查预览、可见性、定位、草稿状态和平台提示。")
-            appendLine("- 只有在内容正确时才提交发布。")
+            if (draftOnly) {
+                appendLine("- 本任务只允许保存草稿，绝对不要点击发布、发表、提交发布或立即发布。")
+                appendLine("- 保存草稿后进入草稿箱确认内容存在，再结束任务。")
+            } else {
+                appendLine("- 只有在内容正确且安全门禁放行时，才允许点击一次最终发布按钮。")
+                appendLine("- 最终发布被拦截时立即停止，不得绕过、重复点击或改用坐标重试。")
+            }
             appendLine("- 完成后返回是否发布成功、草稿状态和失败原因。")
         }
     }
@@ -106,6 +136,15 @@ object PublishApiController {
     private fun JsonObject.getString(key: String, fallback: String): String {
         val element = get(key) ?: return fallback
         return if (element.isJsonPrimitive) element.asString else fallback
+    }
+
+    private fun JsonObject.getBoolean(key: String, fallback: Boolean): Boolean {
+        val element = get(key) ?: return fallback
+        return if (element.isJsonPrimitive) {
+            runCatching { element.asBoolean }.getOrDefault(fallback)
+        } else {
+            fallback
+        }
     }
 
     private fun jsonResponse(

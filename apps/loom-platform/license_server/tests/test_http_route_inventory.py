@@ -18,7 +18,14 @@ from luming_license.http import handler as http_handler
 from luming_license.http import responses as http_responses
 from luming_license.http.handler import ROUTE_INVENTORY
 from luming_license.http.responses import ResponseMixin
-from luming_license.http import routes_admin, routes_auth, routes_public, routes_relay
+from luming_license.http import (
+    routes_admin,
+    routes_auth,
+    routes_payments,
+    routes_public,
+    routes_relay,
+    routes_service,
+)
 from test_license_flow import load_server
 
 EXPECTED_ROUTE_MARKERS = {
@@ -61,11 +68,13 @@ EXPECTED_ROUTE_MARKERS = {
     "/api/beta/claim",
     "/api/beta/status",
     "/api/client/config",
+    "/api/lumi/publish/commit-authorize",
     "/api/lumi/publish/complete",
     "/api/lumi/publish/health",
     "/api/lumi/publish/packet",
     "/api/lumi/publish/poll",
     "/api/lumi/publish/status",
+    "/api/lumi/relay/commit-authorize",
     "/api/lumi/relay/complete",
     "/api/lumi/relay/health",
     "/api/lumi/relay/packet",
@@ -76,6 +85,14 @@ EXPECTED_ROUTE_MARKERS = {
     "/api/member/refresh",
     "/api/member/usage",
     "/api/public/config",
+    "/api/payments/zpay/notify",
+    "/api/payments/zpay/return",
+    "/api/service/account-entitlements/current",
+    "/api/service/account-entitlements/migrate-legacy",
+    "/api/service/account-entitlements/redeem",
+    "/api/service/payments/orders/create",
+    "/api/service/payments/orders/status",
+    "/api/service/payments/plans",
     "/api/templates",
     "/api/v1/member/activate",
     "/api/v1/member/current",
@@ -183,7 +200,14 @@ class HttpRouteInventoryTests(unittest.TestCase):
         self.assertEqual(set(), EXPECTED_ROUTE_MARKERS - set(ROUTE_INVENTORY))
 
     def test_router_registry_is_exact_union_of_exact_path_tables(self) -> None:
-        modules = (routes_public, routes_auth, routes_admin, routes_relay)
+        modules = (
+            routes_public,
+            routes_auth,
+            routes_admin,
+            routes_relay,
+            routes_service,
+            routes_payments,
+        )
         registered: set[str] = set()
         for module in modules:
             for attribute in ("GET_ROUTES", "POST_ROUTES"):
@@ -262,6 +286,44 @@ class HttpRouteInventoryTests(unittest.TestCase):
         self.assertEqual("no-store", probe.header("Cache-Control"))
         self.assertEqual("session=value", probe.header("Set-Cookie"))
         self.assertTrue(transaction.response_sent)
+
+    def test_account_entitlement_service_response_is_private_and_not_cached(self) -> None:
+        for path in (
+            "/api/service/account-entitlements/redeem",
+            "/api/service/account-entitlements/current?accountId=account-1",
+            "/api/service/account-entitlements/migrate-legacy",
+        ):
+            with self.subTest(path=path):
+                probe = ResponseProbe(path)
+                probe.send_json(200, {"ok": True, "entitlement": {}})
+                self.assertEqual(
+                    "no-store, private",
+                    probe.header("Cache-Control"),
+                )
+
+    def test_sensitive_service_and_payment_routes_expose_no_cors(self) -> None:
+        for path in (
+            "/api/service/account-entitlements/current?accountId=account-1",
+            "/api/service/payments/plans",
+            "/api/service/payments/orders/create",
+            "/api/service/payments/orders/status",
+            "/api/payments/zpay/notify",
+            "/api/payments/zpay/return",
+        ):
+            with self.subTest(path=path):
+                probe = ResponseProbe(path, origin="https://evil.example")
+                probe.send_json(200, {"ok": True})
+
+                for header in (
+                    "Access-Control-Allow-Origin",
+                    "Access-Control-Allow-Methods",
+                    "Access-Control-Allow-Headers",
+                ):
+                    self.assertIsNone(probe.header(header), (path, header))
+                self.assertEqual(
+                    "no-store, private",
+                    probe.header("Cache-Control"),
+                )
 
     def test_missing_file_head_keeps_error_content_length_without_body(self) -> None:
         probe = ResponseProbe("/logo.ico")

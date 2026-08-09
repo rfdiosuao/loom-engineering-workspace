@@ -4,6 +4,7 @@ import {
   type AgentMessage,
   type AgentMessageBlock,
   type AgentMessageRole,
+  type AgentBootstrapResponse,
   type AgentModelSummary,
   type AgentRun,
   type AgentRunStatus,
@@ -45,6 +46,47 @@ export function agentModelSelectionState(
 
 export function agentModelUpdateRequest(modelId?: string): UpdateAgentSessionRequest {
   return { modelId: modelId || '' };
+}
+
+export interface AgentExecutionGate {
+  blocked: boolean;
+  title: string;
+  message: string;
+  actionLabel: string;
+}
+
+const AGENT_ENTITLEMENT_MESSAGE = '商业矩阵授权尚未激活。请先在“模型账号”绑定授权码，再返回这里继续。';
+
+export function agentExecutionGate(bootstrap: AgentBootstrapResponse | null): AgentExecutionGate {
+  if (!bootstrap) {
+    return {
+      blocked: true,
+      title: '智能体正在连接',
+      message: '正在读取模型账号与商业矩阵授权，请稍候。',
+      actionLabel: '',
+    };
+  }
+  if (bootstrap.executionAccess?.authorized === true) {
+    return { blocked: false, title: '', message: '', actionLabel: '' };
+  }
+  const safeMessage = /[\u3400-\u9fff]/.test(bootstrap.executionAccess?.message || '')
+    ? bootstrap.executionAccess.message
+    : AGENT_ENTITLEMENT_MESSAGE;
+  return {
+    blocked: true,
+    title: '需要激活商业矩阵授权',
+    message: safeMessage,
+    actionLabel: bootstrap.executionAccess?.action === 'open_account_entitlement' ? '前往模型账号' : '',
+  };
+}
+
+export function isAgentEntitlementRequired(value: unknown): boolean {
+  const text = typeof value === 'string'
+    ? value
+    : value instanceof Error
+      ? value.message
+      : JSON.stringify(value || {});
+  return /agent_entitlement_required|account[_ ]entitlement.*inactive/i.test(text);
 }
 
 export function shouldShowThinking(

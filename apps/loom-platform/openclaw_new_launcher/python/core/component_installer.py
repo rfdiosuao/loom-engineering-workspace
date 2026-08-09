@@ -20,13 +20,12 @@ from urllib.request import Request, urlopen
 
 from core.component_state import ComponentState, ComponentStateStore
 from core.official_codex import (
+    CODEX_CLI_COMPONENT_ID,
+    CODEX_DESKTOP_COMPONENT_ID,
     CODEX_DESKTOP_APP_ID,
-    CODEX_DESKTOP_PACKAGE_NAMES,
     CODEX_STORE_COMMAND_TIMEOUT_MS,
-    CODEX_STORE_INSTALLER_FILENAME,
-    CODEX_STORE_INSTALLER_URL,
-    CODEX_STORE_PRODUCT_ID,
     is_official_codex_component,
+    openai_desktop_identity,
 )
 from core.paths import AppPaths
 from core.release_manifest import ReleaseComponent
@@ -75,11 +74,15 @@ class ComponentInstallError(RuntimeError):
 WINDOWS_COMMAND_SUFFIXES = ("", ".cmd", ".exe", ".ps1", ".bat")
 
 KNOWN_COMPONENT_COMMANDS: dict[str, tuple[str, ...]] = {
-    "codex-desktop": ("Codex", "codex"),
+    "codex-cli": ("codex",),
     "claude-code": ("claude",),
     "opencode": ("opencode",),
     "openclaw-companion": ("openclaw",),
     "hermes": ("hermes",),
+    "grok-build": ("grok",),
+    "pi": ("pi",),
+    "goose": ("goose",),
+    "gemini-cli": ("gemini",),
 }
 
 KNOWN_NPM_PACKAGE_COMMANDS: dict[str, tuple[str, ...]] = {
@@ -88,6 +91,8 @@ KNOWN_NPM_PACKAGE_COMMANDS: dict[str, tuple[str, ...]] = {
     "opencode-ai": ("opencode",),
     "opencode-windows-x64": ("opencode",),
     "openclaw": ("openclaw",),
+    "@earendil-works/pi-coding-agent": ("pi",),
+    "@google/gemini-cli": ("gemini",),
 }
 
 RETRY_DELAYS_SECONDS = (0.0, 0.8, 1.6)
@@ -101,6 +106,7 @@ DOWNLOAD_PROGRESS_PERCENT_STEP = 5
 DOWNLOAD_PROGRESS_INTERVAL_SECONDS = 2.0
 _EXTERNAL_ENTRY_CACHE: dict[tuple[object, ...], tuple[float, str | None]] = {}
 _GUIDANCE_WRITE_LOCK = threading.Lock()
+_EXTERNAL_COMMAND_INSTALL_LOCK = threading.Lock()
 LOOM_GUIDANCE_START = "<!-- LOOM:BEGIN DEFAULT-LANGUAGE -->"
 LOOM_GUIDANCE_END = "<!-- LOOM:END DEFAULT-LANGUAGE -->"
 LOOM_DEFAULT_LANGUAGE_GUIDANCE = """# LOOM 默认交互语言
@@ -132,11 +138,21 @@ NON_TEXT_MODEL_MARKERS = (
     "pika",
     "luma",
 )
-MODEL_ENV_SCRUB_COMPONENTS = {"codex-desktop", "claude-code", "opencode", "openclaw-companion"}
+MODEL_ENV_SCRUB_COMPONENTS = {
+    "codex-desktop",
+    "codex-cli",
+    "claude-code",
+    "opencode",
+    "openclaw-companion",
+    "pi",
+    "grok-build",
+}
 AGENT_MODEL_ENV_KEYS = (
     "LOOM_CODEX_API_KEY",
     "LOOM_CLAUDE_API_KEY",
     "LOOM_OPENCODE_API_KEY",
+    "LOOM_PI_API_KEY",
+    "LOOM_GROK_API_KEY",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_API_BASE",
@@ -249,6 +265,8 @@ class ComponentInstaller:
             return self._simulate_install(component, job_id=job_id, on_progress=on_progress)
         if is_official_codex_component(component):
             return self._install_official_codex(component, job_id=job_id, on_progress=on_progress)
+        if component.archive_type == "external":
+            return self._install_external_command(component, job_id=job_id, on_progress=on_progress)
         self._mark(component, "downloading", job_id=job_id, on_progress=on_progress, message=f"下载 {component.name}")
         try:
             package_path = self._download_to_cache(component, on_progress=on_progress)
@@ -295,7 +313,7 @@ class ComponentInstaller:
         managed_codex_entry = None
         managed_codex_version = None
         verified_bundled_entry = self._verified_bundled_entry(component, install_path)
-        if component.component_id == "codex-desktop":
+        if _is_codex_cli_component(component):
             managed_codex_entry = self._managed_codex_entry(install_path)
             if managed_codex_entry:
                 managed_codex_version = self._detect_installed_version(component, install_path, entry_path=managed_codex_entry)
@@ -438,6 +456,98 @@ class ComponentInstaller:
             on_progress(f"{component.name} 已就绪", "ok")
         return state
 
+    def _install_external_command(
+        self,
+        component: ReleaseComponent,
+        *,
+        job_id: str | None,
+        on_progress: ProgressCallback | None,
+    ) -> ComponentState:
+        if not component.install_command:
+            raise ComponentInstallError(
+                f"{component.name} 当前仅支持安全探测；请从官方入口安装后重新检测",
+                phase="installing",
+                error_code="official_manual_install_required",
+            )
+        install_path = self._safe_install_path(component.install_path)
+        os.makedirs(install_path, exist_ok=True)
+        backup_path = os.path.join(self.staging_dir, f"{component.component_id}.npm-prefix-backup")
+        private_prefix = self._npm_private_prefix()
+        with _EXTERNAL_COMMAND_INSTALL_LOCK:
+            self._remove_path(backup_path)
+            prefix_existed = os.path.isdir(private_prefix)
+            if prefix_existed:
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                shutil.copytree(private_prefix, backup_path)
+            self._mark(
+                component,
+                "configuring",
+                job_id=job_id,
+                on_progress=on_progress,
+                message=f"隔离安装 {component.name}",
+            )
+            try:
+                self._run_install_command(component, install_path, on_progress=on_progress)
+                self._invalidate_external_entry_cache(component)
+                self._assert_external_install_available(component, force_refresh=True)
+                entry_path = self._resolve_component_entry(component, install_path, force_external_probe=True)
+                installed_version = self._detect_installed_version(component, install_path, entry_path=entry_path)
+                if not installed_version:
+                    raise ComponentInstallError("安装入口无法执行 --version，已撤销本次安装")
+            except Exception as exc:
+                self._remove_path(private_prefix)
+                if prefix_existed and os.path.isdir(backup_path):
+                    os.makedirs(os.path.dirname(private_prefix), exist_ok=True)
+                    self._replace_path(backup_path, private_prefix)
+                else:
+                    self._remove_path(backup_path)
+                self._invalidate_external_entry_cache(component)
+                message = str(exc) or "隔离安装失败"
+                self.state_store.mark(
+                    component.component_id,
+                    "config_failed",
+                    version=component.version,
+                    job_id=job_id,
+                    error_code="external_install_rolled_back",
+                    error_message=message,
+                )
+                if on_progress:
+                    on_progress(f"安装失败，已恢复安装前状态：{message}", "danger")
+                raise ComponentInstallError(
+                    f"install command failed for {component.component_id}: {message}",
+                    phase="configuring",
+                    error_code="external_install_rolled_back",
+                    retryable=True,
+                    preserved_user_data=True,
+                ) from exc
+            self._remove_path(backup_path)
+
+        state = self.state_store.mark(
+            component.component_id,
+            "ready",
+            version=installed_version,
+            job_id=job_id,
+            detection=_detection_evidence(
+                component,
+                available=True,
+                healthy=True,
+                source="managed_npm",
+                reason=f"{component.name} 已安装到麓鸣私有 npm 前缀，入口与版本探测通过",
+                next_action="可以启动；配置第三方模型前仍需完成协议兼容性探测",
+                items=_ready_detection_items(
+                    component,
+                    entry_path=entry_path,
+                    architecture_entry=entry_path,
+                    entry_arch="script",
+                    installed_version=installed_version,
+                ),
+            ),
+        )
+        self._configure_component_experience(component.component_id, on_progress=on_progress)
+        if on_progress:
+            on_progress(f"{component.name} 已就绪", "ok")
+        return state
+
     def _install_official_codex(
         self,
         component: ReleaseComponent,
@@ -445,13 +555,16 @@ class ComponentInstaller:
         job_id: str | None,
         on_progress: ProgressCallback | None,
     ) -> ComponentState:
-        existing_entry = self._official_codex_entry(refresh=True)
+        identity = openai_desktop_identity(component)
+        if identity is None:
+            raise ComponentInstallError(f"未知 OpenAI 桌面产品：{component.component_id}")
+        existing_entry = self._official_component_entry(component, refresh=True)
         if existing_entry:
             version = _codex_desktop_version_from_path(existing_entry) or component.version
             state = self.state_store.mark(component.component_id, "ready", version=version, job_id=job_id)
             self._configure_component_experience(component.component_id, on_progress=on_progress)
             if on_progress:
-                on_progress("ChatGPT Codex 原版已安装", "ok")
+                on_progress(f"{identity.name} 已安装", "ok")
             return state
 
         self._mark(
@@ -459,14 +572,14 @@ class ComponentInstaller:
             "configuring",
             job_id=job_id,
             on_progress=on_progress,
-            message="正在通过 Microsoft Store 安装 ChatGPT Codex 原版",
+            message=f"正在通过 Microsoft Store 安装 {identity.name}",
         )
         winget_error = ""
         winget_command = [
             "winget",
             "install",
             "--id",
-            CODEX_STORE_PRODUCT_ID,
+            identity.product_id,
             "--source",
             "msstore",
             "--accept-package-agreements",
@@ -484,13 +597,17 @@ class ComponentInstaller:
             winget_succeeded = False
             winget_error = str(exc) or "winget 不可用"
 
-        installed_entry = self._wait_for_official_codex_entry() if winget_succeeded else self._official_codex_entry(refresh=True)
+        installed_entry = (
+            self._wait_for_official_codex_entry(component)
+            if winget_succeeded
+            else self._official_component_entry(component, refresh=True)
+        )
         if installed_entry:
             version = _codex_desktop_version_from_path(installed_entry) or component.version
             state = self.state_store.mark(component.component_id, "ready", version=version, job_id=job_id)
             self._configure_component_experience(component.component_id, on_progress=on_progress)
             if on_progress:
-                on_progress("ChatGPT Codex 原版已安装", "ok")
+                on_progress(f"{identity.name} 已安装", "ok")
             return state
 
         if on_progress:
@@ -498,15 +615,15 @@ class ComponentInstaller:
             on_progress(f"Microsoft Store 自动安装尚未完成，正在打开官方安装器{detail}", "warning")
         bootstrapper_error = ""
         try:
-            installer_path = self._download_official_codex_store_installer()
+            installer_path = self._download_official_codex_store_installer(component)
             self._verify_microsoft_store_installer(installer_path)
             self._launch_official_codex_store_installer(installer_path)
         except Exception as exc:
             bootstrapper_error = str(exc) or "微软安装器不可用"
             try:
-                self._open_official_codex_store_page()
+                self._open_official_codex_store_page(component)
             except Exception as store_exc:
-                message = f"ChatGPT Codex 原版安装入口均不可用：{bootstrapper_error}；{store_exc}"
+                message = f"{identity.name} 安装入口均不可用：{bootstrapper_error}；{store_exc}"
                 self.state_store.mark(
                     component.component_id,
                     "config_failed",
@@ -524,7 +641,7 @@ class ComponentInstaller:
             job_id=job_id,
             error_code="waiting_for_microsoft_store",
             error_message=(
-                "请在已打开的 Microsoft Store 中完成 ChatGPT 安装，然后点击重新检测"
+                f"请在已打开的 Microsoft Store 中完成 {identity.name} 安装，然后点击重新检测"
                 + (f"；官方引导器未执行：{bootstrapper_error}" if bootstrapper_error else "")
             ),
         )
@@ -532,19 +649,22 @@ class ComponentInstaller:
             on_progress("官方安装器已打开；完成安装后点击重新检测", "warning")
         return state
 
-    def _wait_for_official_codex_entry(self) -> str | None:
+    def _wait_for_official_codex_entry(self, component: ReleaseComponent) -> str | None:
         for delay in (0.0, 0.5, 1.0, 2.0, 3.0):
             if delay:
                 self.retry_sleep(delay)
-            entry = self._official_codex_entry(refresh=True)
+            entry = self._official_component_entry(component, refresh=True)
             if entry:
                 return entry
         return None
 
-    def _download_official_codex_store_installer(self) -> str:
+    def _download_official_codex_store_installer(self, component: ReleaseComponent) -> str:
+        identity = openai_desktop_identity(component)
+        if identity is None:
+            raise ComponentInstallError(f"未知 OpenAI 桌面产品：{component.component_id}")
         os.makedirs(self.cache_dir, exist_ok=True)
-        target = os.path.join(self.cache_dir, CODEX_STORE_INSTALLER_FILENAME)
-        payload = self.fetcher(CODEX_STORE_INSTALLER_URL, self.timeout)
+        target = os.path.join(self.cache_dir, identity.installer_filename)
+        payload = self.fetcher(identity.installer_url, self.timeout)
         if not payload:
             raise ComponentInstallError("微软官方安装器下载为空")
         temporary = target + ".tmp"
@@ -588,10 +708,13 @@ class ComponentInstaller:
             creationflags=creationflags,
         )
 
-    def _open_official_codex_store_page(self) -> None:
+    def _open_official_codex_store_page(self, component: ReleaseComponent) -> None:
+        identity = openai_desktop_identity(component)
+        if identity is None:
+            raise ComponentInstallError(f"未知 OpenAI 桌面产品：{component.component_id}")
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         subprocess.Popen(
-            ["explorer.exe", f"ms-windows-store://pdp/?ProductId={CODEX_STORE_PRODUCT_ID}"],
+            ["explorer.exe", f"ms-windows-store://pdp/?ProductId={identity.product_id}"],
             cwd=self.base_path,
             close_fds=True,
             creationflags=creationflags,
@@ -606,20 +729,59 @@ class ComponentInstaller:
         force_external_probe: bool = False,
     ) -> ComponentState:
         install_path = self._safe_install_path(component.install_path)
+        official_entry: str | None = None
         self._mark(component, "health_checking", job_id=job_id, on_progress=on_progress, message=f"检测 {component.name}")
         if is_official_codex_component(component):
-            official_entry = self._official_codex_entry(refresh=force_external_probe)
-            if not official_entry:
+            identity = openai_desktop_identity(component)
+            if identity is None:
+                raise ComponentInstallError(f"未知 OpenAI 桌面产品：{component.component_id}")
+            package_locations = self._openai_desktop_appx_locations(component)
+            if not package_locations:
                 state = self.state_store.mark(
                     component.component_id,
                     "not_installed",
                     version=component.version,
                     job_id=job_id,
+                    detection=_detection_evidence(
+                        component,
+                        available=False,
+                        healthy=False,
+                        source="microsoft_store",
+                        reason=f"未找到精确 Store 包身份 {identity.package_name}",
+                        next_action=f"从 Microsoft Store 安装 {identity.name}，然后重新检测",
+                        items=[_detection_item("package", "Store 包", identity.package_name, "missing")],
+                    ),
                 )
                 if on_progress:
-                    on_progress("未检测到 ChatGPT Codex 原版", "neutral")
+                    on_progress(f"未检测到 {identity.name}", "neutral")
                 return state
-        if not os.path.exists(install_path):
+            official_entry = self._official_component_entry(component, refresh=force_external_probe)
+            if not official_entry:
+                message = f"已发现 {identity.package_name}，但桌面启动入口缺失；请在 Windows 设置中修复或重装"
+                self.state_store.mark(
+                    component.component_id,
+                    "health_failed",
+                    version=component.version,
+                    job_id=job_id,
+                    error_code="desktop_entry_missing",
+                    error_message=message,
+                    detection=_detection_evidence(
+                        component,
+                        available=True,
+                        healthy=False,
+                        source="microsoft_store",
+                        reason="Store 包仍在，但清单声明的程序入口不存在",
+                        next_action=f"在 Windows 设置中修复 {identity.name}；仍失败时卸载后从 Store 重装",
+                        items=[
+                            _detection_item("package", "Store 包", package_locations[0], "ok"),
+                            _detection_item("executable", "程序入口", " / ".join(identity.entry_names), "missing"),
+                        ],
+                    ),
+                )
+                if on_progress:
+                    on_progress(f"检测失败：{message}", "danger")
+                raise ComponentInstallError(message, phase="health_checking", error_code="desktop_entry_missing")
+        if not os.path.exists(install_path) and not official_entry:
             external_entry = self._first_existing_external_entry(component, refresh=force_external_probe)
             if not external_entry:
                 state = self.state_store.mark(
@@ -627,35 +789,73 @@ class ComponentInstaller:
                     "not_installed",
                     version=component.version,
                     job_id=job_id,
+                    detection=_detection_evidence(
+                        component,
+                        available=False,
+                        healthy=False,
+                        source="command",
+                        reason=f"未找到可执行的 {component.name} 独立入口",
+                        next_action=f"安装或修复 {component.name}，然后重新检测",
+                        items=[_detection_item("alias", "命令入口", component.component_id, "missing")],
+                    ),
                 )
                 if on_progress:
                     on_progress(f"{component.name} 未安装", "neutral")
                 return state
         try:
-            entry_path = self._resolve_component_entry(
+            entry_path = official_entry or self._resolve_component_entry(
                 component,
                 install_path,
                 force_external_probe=force_external_probe,
             )
+            architecture_entry = (
+                _codex_cli_native_entry(entry_path)
+                if _is_codex_cli_component(component)
+                else entry_path
+            ) or entry_path
+            entry_arch = detect_pe_architecture(architecture_entry) if str(architecture_entry).lower().endswith(".exe") else "script"
+            if entry_arch == "legacy_16bit":
+                raise ComponentInstallError(
+                    "入口是旧式 16 位 Windows 程序，无法在当前系统启动；请修复 App Execution Alias 或重新安装正确架构",
+                    phase="health_checking",
+                    error_code="legacy_16bit_entry",
+                )
+            effective_arch = _architecture_from_windowsapps_path(entry_path) or entry_arch
+            if not _architectures_compatible(component.arch, effective_arch):
+                raise ComponentInstallError(
+                    f"入口架构不匹配：需要 {component.arch}，检测到 {effective_arch}",
+                    phase="health_checking",
+                    error_code="entry_arch_mismatch",
+                )
             self._assert_component_available(component, install_path, entry_path)
             if component.health_check is not None:
                 self.health_checker(component, install_path)
         except Exception as exc:
             message = str(exc) or "组件检测失败"
+            error_code = getattr(exc, "error_code", "") or "detect_failed"
             self.state_store.mark(
                 component.component_id,
                 "health_failed",
                 version=component.version,
                 job_id=job_id,
-                error_code="detect_failed",
+                error_code=error_code,
                 error_message=message,
+                detection=_detection_evidence(
+                    component,
+                    available=True,
+                    healthy=False,
+                    source="microsoft_store" if is_official_codex_component(component) else "command",
+                    reason=message,
+                    next_action=f"按提示修复 {component.name} 后重新检测",
+                    items=[_detection_item("executable", "程序入口", locals().get("entry_path", "-"), "failed")],
+                ),
             )
             if on_progress:
                 on_progress(f"检测失败：{message}", "danger")
             raise ComponentInstallError(f"detect failed for {component.component_id}: {message}") from exc
 
         installed_version = self._detect_installed_version(component, install_path, entry_path=entry_path)
-        is_managed_codex = component.component_id == "codex-desktop" and entry_path == self._managed_codex_entry(install_path)
+        is_managed_codex = _is_codex_cli_component(component) and entry_path == self._managed_codex_entry(install_path)
         if is_managed_codex and not installed_version:
             message = "managed Codex version check failed"
             self.state_store.mark(
@@ -682,14 +882,64 @@ class ComponentInstaller:
             if on_progress:
                 on_progress(f"检测失败：{message}", "danger")
             raise ComponentInstallError(message)
-        is_codex_desktop_app = component.component_id == "codex-desktop" and _is_codex_desktop_executable(entry_path)
-        if installed_version and not is_codex_desktop_app and not _versions_match(component.version, installed_version):
-            state = self.state_store.mark(component.component_id, "upgrade_available", version=installed_version, job_id=job_id)
+        is_codex_desktop_app = is_official_codex_component(component) and _is_codex_desktop_executable(entry_path)
+        if (
+            installed_version
+            and not is_codex_desktop_app
+            and not _is_placeholder_component_version(component.version)
+            and not _versions_match(component.version, installed_version)
+        ):
+            architecture_entry = locals().get("architecture_entry", entry_path)
+            entry_arch = detect_pe_architecture(architecture_entry) if str(architecture_entry).lower().endswith(".exe") else "script"
+            state = self.state_store.mark(
+                component.component_id,
+                "upgrade_available",
+                version=installed_version,
+                job_id=job_id,
+                detection=_detection_evidence(
+                    component,
+                    available=True,
+                    healthy=True,
+                    source="command",
+                    reason=f"{component.name} 可执行，但版本 {installed_version} 与目标版本 {component.version} 不一致",
+                    next_action=f"升级到 {component.version}，或继续使用当前已检测版本",
+                    items=_ready_detection_items(
+                        component,
+                        entry_path=entry_path,
+                        architecture_entry=architecture_entry,
+                        entry_arch=entry_arch,
+                        installed_version=installed_version,
+                        version_status="outdated",
+                    ),
+                ),
+            )
             if on_progress:
                 on_progress(f"{component.name} 已检测到旧版本 {installed_version}，建议升级到 {component.version}", "warning")
             return state
 
-        state = self.state_store.mark(component.component_id, "ready", version=installed_version or component.version, job_id=job_id)
+        architecture_entry = locals().get("architecture_entry", entry_path)
+        entry_arch = detect_pe_architecture(architecture_entry) if str(architecture_entry).lower().endswith(".exe") else "script"
+        state = self.state_store.mark(
+            component.component_id,
+            "ready",
+            version=installed_version or component.version,
+            job_id=job_id,
+            detection=_detection_evidence(
+                component,
+                available=True,
+                healthy=True,
+                source="microsoft_store" if is_official_codex_component(component) else "command",
+                reason=f"身份、入口和最小可用性探测均通过：{component.name} 可用",
+                next_action="可以直接启动；版本或入口变化后可点击重新检测",
+                items=_ready_detection_items(
+                    component,
+                    entry_path=entry_path,
+                    architecture_entry=architecture_entry,
+                    entry_arch=_architecture_from_windowsapps_path(entry_path) or entry_arch,
+                    installed_version=installed_version or component.version,
+                ),
+            ),
+        )
         self._configure_component_experience(component.component_id, on_progress=on_progress)
         if on_progress:
             on_progress(f"{component.name} 已就绪", "ok")
@@ -809,10 +1059,15 @@ class ComponentInstaller:
 
     def _requires_launch_version_probe(self, component: ReleaseComponent) -> bool:
         return not self._custom_launcher and component.component_id in {
+            CODEX_CLI_COMPONENT_ID,
             "claude-code",
             "opencode",
             "openclaw-companion",
             "hermes",
+            "grok-build",
+            "pi",
+            "goose",
+            "gemini-cli",
         }
 
     def _simulate_install(
@@ -866,13 +1121,17 @@ class ComponentInstaller:
         job_id: str | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> ComponentState:
+        if component.archive_type == "external":
+            return self._uninstall_external_command(component, job_id=job_id, on_progress=on_progress)
         existing_state = self.state_store.load().get(component.component_id)
         version = (existing_state.version if existing_state else None) or component.version
         self._mark(component, "uninstalling", job_id=job_id, on_progress=on_progress, message=f"卸载 {component.name}")
         try:
             install_path = self._safe_install_path(component.install_path)
-            managed_codex = component.component_id == "codex-desktop" and os.path.exists(install_path)
-            if component.component_id == "codex-desktop" and not managed_codex:
+            if is_official_codex_component(component):
+                raise ComponentInstallError(f"{component.name} 请从 Windows 设置中卸载")
+            managed_codex = _is_codex_cli_component(component) and os.path.exists(install_path)
+            if _is_codex_cli_component(component) and not managed_codex:
                 raise ComponentInstallError("检测到的是外部 Codex 安装，请从原安装来源卸载")
             if not managed_codex:
                 self._run_uninstall_command(component)
@@ -896,6 +1155,75 @@ class ComponentInstaller:
         if on_progress:
             on_progress(f"{component.name} 已卸载", "ok")
         return state
+
+    def _uninstall_external_command(
+        self,
+        component: ReleaseComponent,
+        *,
+        job_id: str | None,
+        on_progress: ProgressCallback | None,
+    ) -> ComponentState:
+        if not component.uninstall_command:
+            raise ComponentInstallError(
+                f"{component.name} 不是由麓鸣安装，请使用官方卸载方式",
+                phase="uninstalling",
+                error_code="official_manual_uninstall_required",
+            )
+        existing_state = self.state_store.load().get(component.component_id)
+        version = (existing_state.version if existing_state else None) or component.version
+        private_prefix = self._npm_private_prefix()
+        backup_path = os.path.join(self.staging_dir, f"{component.component_id}.npm-prefix-uninstall-backup")
+        self._mark(component, "uninstalling", job_id=job_id, on_progress=on_progress, message=f"卸载 {component.name}")
+        with _EXTERNAL_COMMAND_INSTALL_LOCK:
+            self._remove_path(backup_path)
+            prefix_existed = os.path.isdir(private_prefix)
+            if prefix_existed:
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                shutil.copytree(private_prefix, backup_path)
+            try:
+                self._run_uninstall_command(component)
+                self._invalidate_external_entry_cache(component)
+                if self._private_npm_entry_exists(component):
+                    raise ComponentInstallError("卸载命令结束后麓鸣私有入口仍然存在")
+                self._remove_path(self._safe_install_path(component.install_path))
+            except Exception as exc:
+                self._remove_path(private_prefix)
+                if prefix_existed and os.path.isdir(backup_path):
+                    os.makedirs(os.path.dirname(private_prefix), exist_ok=True)
+                    self._replace_path(backup_path, private_prefix)
+                else:
+                    self._remove_path(backup_path)
+                self._invalidate_external_entry_cache(component)
+                message = str(exc) or "隔离卸载失败"
+                self.state_store.mark(
+                    component.component_id,
+                    "uninstall_failed",
+                    version=version,
+                    job_id=job_id,
+                    error_code="external_uninstall_rolled_back",
+                    error_message=message,
+                )
+                raise ComponentInstallError(
+                    f"uninstall failed for {component.component_id}: {message}",
+                    phase="uninstalling",
+                    error_code="external_uninstall_rolled_back",
+                    retryable=True,
+                ) from exc
+            self._remove_path(backup_path)
+        state = self.state_store.mark(component.component_id, "not_installed", version=component.version, job_id=job_id)
+        if on_progress:
+            on_progress(f"{component.name} 已卸载", "ok")
+        return state
+
+    def _private_npm_entry_exists(self, component: ReleaseComponent) -> bool:
+        prefix = self._npm_private_prefix()
+        for command_name in self._external_command_names(component):
+            stem = os.path.splitext(os.path.basename(command_name))[0]
+            for directory in (prefix, os.path.join(prefix, "bin")):
+                for filename in self._command_file_names(stem):
+                    if os.path.isfile(os.path.join(directory, filename)):
+                        return True
+        return False
 
     def _verified_cache_path(self, component: ReleaseComponent) -> str:
         safe_version = re.sub(r"[^0-9A-Za-z._-]+", "_", component.version)
@@ -1130,11 +1458,11 @@ class ComponentInstaller:
         force_external_probe: bool = False,
     ) -> str:
         if is_official_codex_component(component):
-            official_entry = self._official_codex_entry(refresh=force_external_probe)
+            official_entry = self._official_component_entry(component, refresh=force_external_probe)
             if official_entry:
                 return official_entry
-            raise ComponentInstallError("未检测到 ChatGPT Codex 原版，请先通过 Microsoft Store 安装")
-        if component.component_id == "codex-desktop":
+            raise ComponentInstallError(f"未检测到 {component.name}，请先通过 Microsoft Store 安装")
+        if _is_codex_cli_component(component):
             managed_entry = self._managed_codex_entry(install_path)
             if managed_entry:
                 return managed_entry
@@ -1182,24 +1510,27 @@ class ComponentInstaller:
             cached_entry = self._cached_existing_external_entry(component)
             if cached_entry is not None or cache_key in _EXTERNAL_ENTRY_CACHE:
                 return cached_entry
-        deferred_extensionless: list[str] = []
         for candidate in self._external_entry_candidates(component):
             if not os.path.isfile(candidate):
+                continue
+            if _is_codex_cli_component(component) and _is_openai_desktop_bundled_cli(candidate):
                 continue
             if str(component.platform or "").strip().lower() == "windows" and not os.path.splitext(candidate)[1]:
                 for suffix in (".cmd", ".exe", ".ps1", ".bat"):
                     sibling = f"{candidate}{suffix}"
-                    if os.path.isfile(sibling):
+                    if os.path.isfile(sibling) and not (
+                        _is_codex_cli_component(component)
+                        and _is_openai_desktop_bundled_cli(sibling)
+                    ):
                         _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), sibling)
                         return sibling
-                deferred_extensionless.append(candidate)
+                # npm also creates a POSIX shell shim without an extension.
+                # Windows cannot launch that file and may display the legacy
+                # "unsupported 16-bit application" dialog. Never treat it as a
+                # fallback when no Windows sibling exists.
                 continue
             _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), candidate)
             return candidate
-        if deferred_extensionless:
-            entry_path = deferred_extensionless[0]
-            _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), entry_path)
-            return entry_path
         _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), None)
         return None
 
@@ -1245,9 +1576,6 @@ class ComponentInstaller:
 
     def _fast_external_entry_candidates(self, component: ReleaseComponent) -> list[str]:
         candidates: list[str] = []
-        if component.component_id == "codex-desktop":
-            for candidate in self._codex_desktop_local_entry_candidates():
-                _append_unique(candidates, candidate)
 
         command_names = self._external_command_names(component)
         if self._npm_package_names_from_command(component):
@@ -1272,10 +1600,6 @@ class ComponentInstaller:
 
     def _expensive_external_entry_candidates(self, component: ReleaseComponent) -> list[str]:
         candidates: list[str] = []
-        if component.component_id == "codex-desktop":
-            for candidate in self._codex_desktop_appx_entry_candidates():
-                _append_unique(candidates, candidate)
-
         npm_package_names = self._npm_package_names_from_command(component)
         for directory in self._npm_global_bin_dirs() if npm_package_names else ():
             command_names = self._external_command_names(component)
@@ -1312,14 +1636,24 @@ class ComponentInstaller:
         return tuple(candidates)
 
     def _codex_desktop_appx_entry_candidates(self) -> tuple[str, ...]:
+        component = _openai_desktop_probe_component(CODEX_DESKTOP_COMPONENT_ID)
+        return self._openai_desktop_appx_entry_candidates(component)
+
+    def _openai_desktop_appx_entry_candidates(self, component: ReleaseComponent) -> tuple[str, ...]:
+        identity = openai_desktop_identity(component)
+        if identity is None:
+            return ()
         candidates: list[str] = []
-        for install_location in self._codex_desktop_appx_locations():
-            for relative in ("app/ChatGPT.exe", "app/Codex.exe", "ChatGPT.exe", "Codex.exe"):
+        for install_location in self._openai_desktop_appx_locations(component):
+            for relative in identity.entry_names:
                 _append_unique(candidates, os.path.join(install_location, *relative.split("/")))
         return tuple(candidates)
 
-    def _official_codex_entry(self, *, refresh: bool = False) -> str | None:
-        cache_key = (os.path.normcase(os.path.abspath(self.base_path)), "official-chatgpt-codex")
+    def _official_openai_desktop_entry(self, component: ReleaseComponent, *, refresh: bool = False) -> str | None:
+        identity = openai_desktop_identity(component)
+        if identity is None:
+            return None
+        cache_key = (os.path.normcase(os.path.abspath(self.base_path)), f"official-desktop:{identity.package_name}")
         if not refresh:
             cached = _EXTERNAL_ENTRY_CACHE.get(cache_key)
             if cached is not None:
@@ -1328,22 +1662,40 @@ class ComponentInstaller:
                     return entry_path
                 if not entry_path and time.monotonic() - created_at <= EXTERNAL_ENTRY_CACHE_TTL_SECONDS:
                     return None
-        for candidate in self._codex_desktop_appx_entry_candidates():
+        for candidate in self._openai_desktop_appx_entry_candidates(component):
             if os.path.isfile(candidate):
                 _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), candidate)
                 return candidate
         _EXTERNAL_ENTRY_CACHE[cache_key] = (time.monotonic(), None)
         return None
 
+    def _official_component_entry(self, component: ReleaseComponent, *, refresh: bool = False) -> str | None:
+        if component.component_id == CODEX_DESKTOP_COMPONENT_ID:
+            return self._official_codex_entry(refresh=refresh)
+        return self._official_openai_desktop_entry(component, refresh=refresh)
+
+    def _official_codex_entry(self, *, refresh: bool = False) -> str | None:
+        """Compatibility seam retained for older integrations and tests."""
+
+        return self._official_openai_desktop_entry(
+            _openai_desktop_probe_component(CODEX_DESKTOP_COMPONENT_ID),
+            refresh=refresh,
+        )
+
     def _codex_desktop_appx_locations(self) -> tuple[str, ...]:
-        package_names = ",".join(f"'{name}'" for name in CODEX_DESKTOP_PACKAGE_NAMES)
+        return self._openai_desktop_appx_locations(_openai_desktop_probe_component(CODEX_DESKTOP_COMPONENT_ID))
+
+    def _openai_desktop_appx_locations(self, component: ReleaseComponent) -> tuple[str, ...]:
+        identity = openai_desktop_identity(component)
+        if identity is None:
+            return ()
+        escaped_package_name = identity.package_name.replace("'", "''")
         command = [
             "powershell",
             "-NoProfile",
             "-Command",
             (
-                f"$names=@({package_names}); Get-AppxPackage | "
-                "Where-Object { $names -contains $_.Name } | "
+                f"Get-AppxPackage -Name '{escaped_package_name}' -ErrorAction SilentlyContinue | "
                 "Sort-Object Version -Descending | Select-Object -ExpandProperty InstallLocation"
             ),
         ]
@@ -1356,7 +1708,8 @@ class ComponentInstaller:
         locations: list[str] = []
         for line in str(getattr(result, "stdout", "") or "").splitlines():
             value = line.strip()
-            if value:
+            package_dir = os.path.basename(os.path.normpath(value)) if value else ""
+            if value and re.match(rf"^{re.escape(identity.package_name)}_", package_dir, re.IGNORECASE):
                 _append_unique(locations, self._expand_external_path(value))
         return tuple(locations)
 
@@ -1663,7 +2016,7 @@ class ComponentInstaller:
             managed_codex_version = self._managed_codex_metadata_version(component, install_path, entry_path)
             if managed_codex_version:
                 return managed_codex_version
-            if component.component_id == "codex-desktop" and _is_codex_desktop_executable(entry_path):
+            if is_official_codex_component(component) and _is_codex_desktop_executable(entry_path):
                 return _codex_desktop_version_from_path(entry_path)
             cwd = self._component_cwd(install_path)
             command = [*build_launcher_command(entry_path, cwd, base_path=self.base_path), "--version"]
@@ -1684,7 +2037,7 @@ class ComponentInstaller:
         install_path: str,
         entry_path: str,
     ) -> str | None:
-        if component.component_id != "codex-desktop":
+        if not _is_codex_cli_component(component):
             return None
         managed_entry = self._managed_codex_entry(install_path)
         if not managed_entry:
@@ -2093,6 +2446,212 @@ def _default_installer_runner(command: list[str], cwd: str, timeout_ms: int) -> 
     )
 
 
+def _openai_desktop_probe_component(component_id: str) -> ReleaseComponent:
+    identity = openai_desktop_identity(component_id)
+    if identity is None:
+        raise ValueError(f"unknown OpenAI desktop component: {component_id}")
+    return ReleaseComponent(
+        component_id=component_id,
+        name=identity.name,
+        version="Microsoft Store",
+        platform="windows",
+        arch="x64",
+        archive_type="msstore",
+        size=0,
+        sha256="0" * 64,
+        urls=(identity.installer_url,),
+        install_path=f"agents/{component_id}",
+    )
+
+
+def _is_openai_desktop_component_id(component_id: str | None) -> bool:
+    return component_id == CODEX_DESKTOP_COMPONENT_ID
+
+
+def _is_codex_cli_component(component: ReleaseComponent) -> bool:
+    if component.component_id == CODEX_CLI_COMPONENT_ID:
+        return True
+    # Migration-only compatibility for signed/old manifests that used the
+    # desktop ID for the npm CLI. Store records are never treated as CLI.
+    return component.component_id == CODEX_DESKTOP_COMPONENT_ID and component.archive_type != "msstore"
+
+
+def _is_openai_desktop_bundled_cli(executable: str) -> bool:
+    normalized = os.path.abspath(str(executable or "")).replace("\\", "/").lower()
+    if "/windowsapps/openai.codex_" not in normalized and "/windowsapps/openai.chatgpt_" not in normalized:
+        return False
+    return "/resources/" in normalized or "/vendor/" in normalized or "/node_modules/" in normalized
+
+
+def detect_pe_architecture(path: str) -> str:
+    """Return the PE machine architecture without executing the file."""
+
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(64)
+            if len(header) < 64 or header[:2] != b"MZ":
+                return "not_pe"
+            pe_offset = int.from_bytes(header[0x3C:0x40], "little")
+            if pe_offset < 0 or pe_offset > 16 * 1024 * 1024:
+                return "invalid_pe"
+            handle.seek(pe_offset)
+            signature = handle.read(4)
+            if signature[:2] in {b"NE", b"LE", b"LX"}:
+                return "legacy_16bit"
+            if signature != b"PE\x00\x00":
+                return "invalid_pe"
+            machine = int.from_bytes(handle.read(2), "little")
+    except OSError:
+        return "unreadable"
+    return {
+        0x014C: "x86",
+        0x8664: "x64",
+        0x01C0: "arm",
+        0xAA64: "arm64",
+    }.get(machine, f"unknown_0x{machine:04x}")
+
+
+def _architecture_from_windowsapps_path(path: str) -> str | None:
+    match = re.search(r"_(x64|x86|arm64|arm)__", str(path or ""), re.IGNORECASE)
+    return match.group(1).lower() if match else None
+
+
+def _architectures_compatible(expected: str, actual: str) -> bool:
+    expected_value = str(expected or "").strip().lower()
+    actual_value = str(actual or "").strip().lower()
+    aliases = {"amd64": "x64", "x86_64": "x64", "i386": "x86", "win32": "x86"}
+    expected_value = aliases.get(expected_value, expected_value)
+    actual_value = aliases.get(actual_value, actual_value)
+    if actual_value in {"", "script", "not_pe", "invalid_pe", "unreadable"} or actual_value.startswith("unknown_"):
+        return True
+    return not expected_value or expected_value == actual_value
+
+
+def _detection_item(kind: str, label: str, value: object, status: str) -> dict[str, str]:
+    return {"kind": kind, "label": label, "value": str(value or "-"), "status": status}
+
+
+def _detection_evidence(
+    component: ReleaseComponent,
+    *,
+    available: bool,
+    healthy: bool,
+    source: str,
+    reason: str,
+    next_action: str,
+    items: list[dict[str, str]],
+) -> dict[str, object]:
+    identity = openai_desktop_identity(component)
+    if identity is not None:
+        items = [
+            _detection_item("identity", "产品身份", identity.package_name, "ok" if available else "missing"),
+            *items,
+        ]
+    return {
+        "identity": component.component_id,
+        "identityLabel": component.name,
+        "source": source,
+        "available": bool(available),
+        "healthy": bool(healthy),
+        "reason": reason,
+        "nextAction": next_action,
+        "items": items,
+    }
+
+
+def _windowsapps_package_metadata(path: str) -> dict[str, str]:
+    match = re.search(
+        r"WindowsApps[\\/](OpenAI\.(?:Codex|ChatGPT))_(\d+(?:\.\d+){1,3})_(x64|x86|arm64|arm)__([0-9a-z]+)[\\/]",
+        str(path or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return {}
+    package_name, version, arch, publisher = match.groups()
+    return {
+        "packageName": package_name,
+        "packageFamily": f"{package_name}_{publisher}",
+        "version": version,
+        "arch": arch.lower(),
+    }
+
+
+def _codex_cli_native_entry(entry_path: str) -> str | None:
+    path = os.path.abspath(str(entry_path or ""))
+    if path.lower().endswith(".exe") and not _is_openai_desktop_bundled_cli(path):
+        return path
+    wrapper_dir = os.path.dirname(path)
+    scoped_roots = [
+        os.path.join(wrapper_dir, "node_modules", "@openai", "codex", "node_modules", "@openai"),
+    ]
+    current = wrapper_dir
+    for _depth in range(6):
+        if os.path.basename(current).lower() == "node_modules":
+            scoped_roots.append(os.path.join(current, "@openai", "codex", "node_modules", "@openai"))
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    for scoped_root in scoped_roots:
+        if not os.path.isdir(scoped_root):
+            continue
+        try:
+            packages = os.listdir(scoped_root)
+        except OSError:
+            continue
+        for package in packages:
+            if not package.lower().startswith("codex-win32-"):
+                continue
+            vendor_root = os.path.join(scoped_root, package, "vendor")
+            if not os.path.isdir(vendor_root):
+                continue
+            try:
+                triplets = os.listdir(vendor_root)
+            except OSError:
+                continue
+            for triplet in triplets:
+                candidate = os.path.join(vendor_root, triplet, "bin", "codex.exe")
+                if os.path.isfile(candidate) and not _is_openai_desktop_bundled_cli(candidate):
+                    return os.path.abspath(candidate)
+    return None
+
+
+def _ready_detection_items(
+    component: ReleaseComponent,
+    *,
+    entry_path: str,
+    architecture_entry: str,
+    entry_arch: str,
+    installed_version: str,
+    version_status: str = "ok",
+) -> list[dict[str, str]]:
+    identity = openai_desktop_identity(component)
+    if identity is not None:
+        metadata = _windowsapps_package_metadata(entry_path)
+        app_alias = _codex_desktop_app_uri(entry_path) or f"shell:AppsFolder\\{identity.package_name}!{CODEX_DESKTOP_APP_ID}"
+        return [
+            _detection_item("package", "Store 包名", metadata.get("packageName") or identity.package_name, "ok"),
+            _detection_item("package_family", "包系列", metadata.get("packageFamily") or "已注册，系列名待系统返回", "ok"),
+            _detection_item("package_version", "包版本", metadata.get("version") or installed_version, "ok"),
+            _detection_item("executable", "程序入口", entry_path, "ok"),
+            _detection_item("architecture", "实际架构", metadata.get("arch") or entry_arch, "ok"),
+            _detection_item("alias", "App Execution Alias", app_alias, "ok"),
+            _detection_item("minimal_probe", "最小探测", "包注册、入口存在、架构匹配", "ok"),
+        ]
+    items = [_detection_item("alias", "命令入口", entry_path, "ok")]
+    if os.path.normcase(os.path.abspath(architecture_entry)) != os.path.normcase(os.path.abspath(entry_path)):
+        items.append(_detection_item("executable", "实际可执行文件", architecture_entry, "ok"))
+    else:
+        items.append(_detection_item("executable", "程序入口", architecture_entry, "ok"))
+    items.extend(
+        [
+            _detection_item("architecture", "实际架构", entry_arch, "ok"),
+            _detection_item("version_probe", "--version 探测", installed_version, version_status),
+        ]
+    )
+    return items
+
+
 def _is_codex_desktop_executable(executable: str) -> bool:
     path = os.path.abspath(str(executable or ""))
     filename = os.path.basename(path)
@@ -2155,7 +2714,7 @@ def build_agent_launcher_command(
     *,
     base_path: str | None = None,
 ) -> list[str]:
-    if component_id == "codex-desktop" and _is_codex_desktop_executable(executable):
+    if _is_openai_desktop_component_id(component_id) and _is_codex_desktop_executable(executable):
         app_uri = _codex_desktop_app_uri(executable)
         if app_uri and os.name == "nt":
             return ["explorer.exe", app_uri]
@@ -2182,14 +2741,14 @@ def build_visible_launcher_command(
 ) -> list[str]:
     command = build_agent_launcher_command(component_id, executable, cwd, base_path=base_path)
     use_windows_terminal = os.name == "nt" if force_windows is None else force_windows
-    if component_id == "codex-desktop" and _is_codex_desktop_executable(executable):
+    if _is_openai_desktop_component_id(component_id) and _is_codex_desktop_executable(executable):
         return command
     if not use_windows_terminal:
         return command
 
     command_line = subprocess.list2cmdline(command)
     title = f"LOOM Agent - {_launcher_title(component_id, executable)}"
-    shell_mode = "/c" if component_id == "codex-desktop" else "/k"
+    shell_mode = "/c" if _is_openai_desktop_component_id(component_id) else "/k"
     return ["cmd.exe", shell_mode, f"title {title} && {command_line}"]
 
 
@@ -2209,7 +2768,7 @@ def _default_launcher(executable: str, cwd: str, *, base_path: str | None = None
         close_fds=True,
         creationflags=creationflags,
     )
-    if component_id == "codex-desktop" and not _is_codex_desktop_executable(executable):
+    if component_id in {CODEX_CLI_COMPONENT_ID, CODEX_DESKTOP_COMPONENT_ID} and not _is_codex_desktop_executable(executable):
         time.sleep(CODEX_STARTUP_PROBE_SECONDS)
         return_code = process.poll()
         if return_code is not None:
@@ -2238,7 +2797,7 @@ def _stop_official_codex_desktop() -> None:
     if os.name != "nt":
         raise ComponentInstallError("OpenAI 官方 Codex 重启仅支持 Windows")
     script = """
-$packageNames = @('OpenAI.Codex', 'OpenAI.ChatGPT')
+$packageNames = @('OpenAI.Codex')
 $roots = @(
   foreach ($packageName in $packageNames) {
     Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue |
@@ -2286,7 +2845,7 @@ def _official_codex_desktop_running() -> bool:
     if os.name != "nt":
         return False
     script = """
-$packageNames = @('OpenAI.Codex', 'OpenAI.ChatGPT')
+$packageNames = @('OpenAI.Codex')
 $roots = @(
   foreach ($packageName in $packageNames) {
     Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue |
@@ -2360,7 +2919,7 @@ def build_agent_launcher_environment(base_path: str | None, component_id: str | 
         api_key = _opencode_api_key_from_wire(root)
         if api_key:
             env["LOOM_OPENCODE_API_KEY"] = api_key
-    elif component_id == "codex-desktop":
+    elif component_id in {CODEX_CLI_COMPONENT_ID, CODEX_DESKTOP_COMPONENT_ID}:
         wire = _agent_wire_from_root(root)
         _inject_openai_compatible_env(env, wire, key_name="LOOM_CODEX_API_KEY")
     elif component_id == "claude-code":
@@ -2376,6 +2935,19 @@ def build_agent_launcher_environment(base_path: str | None, component_id: str | 
             env["ANTHROPIC_BASE_URL"] = base_url
         if model:
             env["ANTHROPIC_MODEL"] = model
+    elif component_id == "pi":
+        agent_dir = os.path.join(root, "data", ".pi", "agent")
+        env["PI_CODING_AGENT_DIR"] = agent_dir
+        wire = _agent_wire_from_root(root)
+        api_key = _wire_api_key(wire)
+        if api_key:
+            env["LOOM_PI_API_KEY"] = api_key
+    elif component_id == "grok-build":
+        env["GROK_HOME"] = os.path.join(root, "data", ".grok")
+        wire = _agent_wire_from_root(root)
+        api_key = _wire_api_key(wire)
+        if api_key:
+            env["LOOM_GROK_API_KEY"] = api_key
     return env
 
 
@@ -2392,7 +2964,7 @@ def _ensure_component_language_guidance(
     root = os.path.abspath(base_path)
     targets: list[tuple[str, str, str | None]] = []
     user_home = _user_home_directory()
-    if component_id == "codex-desktop":
+    if component_id in {CODEX_CLI_COMPONENT_ID, CODEX_DESKTOP_COMPONENT_ID}:
         targets.append((os.path.join(root, "data", ".codex"), "AGENTS.md", "AGENTS.override.md"))
         if include_user_home:
             configured_home = str(os.environ.get("CODEX_HOME") or "").strip()
@@ -2612,6 +3184,11 @@ def _normalize_version_core(version: object) -> str | None:
         return None
     match = re.fullmatch(r"v?(\d+(?:\.\d+){1,3})(?:[-+][0-9A-Za-z.-]+)?", text, re.IGNORECASE)
     return match.group(1) if match else None
+
+
+def _is_placeholder_component_version(version: str | None) -> bool:
+    normalized = str(version or "").strip().lower()
+    return not normalized or normalized in {"microsoft store", "latest"} or normalized.startswith("待")
 
 
 def _versions_match(expected: str | None, detected: str | None) -> bool:

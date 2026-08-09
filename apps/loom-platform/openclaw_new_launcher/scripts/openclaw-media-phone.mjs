@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   readLauncherPhoneConfigByDevice,
@@ -23,18 +24,26 @@ const VIDEO_MIME = Object.freeze({
 
 function usage() {
   return `Usage:
-  node scripts/openclaw-media-phone.mjs [--device-id <id>] --image <path> [--image <path> ...] [--video <path> ...] [--json]
+  node scripts/openclaw-media-phone.mjs [--device-id <id>] --image <path> [--image <path> ...] [--video <path> ...] [--cancel-file <path>] [--json]
 
 Uploads existing image/video files to the selected APKClaw gallery. It never submits an Agent task.`;
 }
 
 function parseArgs(argv) {
-  const args = { deviceId: '', images: [], videos: [], json: false, help: false };
+  const args = {
+    deviceId: '',
+    images: [],
+    videos: [],
+    cancelFile: '',
+    json: false,
+    help: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === '--device-id') args.deviceId = requiredValue(argv, ++index, token);
     else if (token === '--image') args.images.push(requiredValue(argv, ++index, token));
     else if (token === '--video') args.videos.push(requiredValue(argv, ++index, token));
+    else if (token === '--cancel-file') args.cancelFile = requiredValue(argv, ++index, token);
     else if (token === '--json') args.json = true;
     else if (token === '--help' || token === '-h') args.help = true;
     else throw new Error(`Unknown option: ${token}`);
@@ -86,18 +95,61 @@ function publicFailure(kind, filePath, error, secrets) {
   };
 }
 
+function cancellationError() {
+  const error = new Error('Phone media upload cancelled.');
+  error.code = 'phone_request_cancelled';
+  error.errorCode = 'phone_request_cancelled';
+  return error;
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw cancellationError();
+}
+
+async function watchCancelFile(cancelFile) {
+  const controller = new AbortController();
+  if (!cancelFile) {
+    return { signal: controller.signal, stop() {} };
+  }
+  let checking = false;
+  const check = async () => {
+    if (checking || controller.signal.aborted) return;
+    checking = true;
+    try {
+      await fs.access(cancelFile);
+      controller.abort(cancellationError());
+    } catch {
+      // Missing cancel file means the job is still active.
+    } finally {
+      checking = false;
+    }
+  };
+  await check();
+  const timer = setInterval(() => { void check(); }, 75);
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    stop() {
+      clearInterval(timer);
+    },
+  };
+}
+
 async function main() {
   let args;
   let configSecrets = [];
+  let cancellation;
   try {
     args = parseArgs(process.argv.slice(2));
     if (args.help) {
       process.stdout.write(`${usage()}\n`);
       return;
     }
+    cancellation = await watchCancelFile(args.cancelFile);
+    throwIfCancelled(cancellation.signal);
     const config = await readLauncherPhoneConfigByDevice(args.deviceId);
     configSecrets = [config.phoneToken, config.lumiLauncherSecret].filter(Boolean);
-    const result = await uploadFiles(args, config);
+    const result = await uploadFiles(args, config, cancellation.signal);
     if (args.json) process.stdout.write(`${safeJson(result, configSecrets)}\n`);
     else if (result.ok) process.stdout.write(`Uploaded ${result.uploadedCount} file(s).\n`);
     else process.stderr.write(`${result.message}\n`);
@@ -111,28 +163,50 @@ async function main() {
     if (args?.json) process.stdout.write(`${safeJson(failure, configSecrets)}\n`);
     else process.stderr.write(`${failure.message}\n`);
     process.exitCode = 1;
+  } finally {
+    cancellation?.stop();
   }
 }
 
-async function uploadFiles(args, config) {
+async function uploadFiles(args, config, signal) {
   if (!args.images.length && !args.videos.length) {
     throw new Error('Provide at least one --image or --video file.');
   }
   const uploads = [];
   const failed = [];
   for (const filePath of args.images) {
+    throwIfCancelled(signal);
     try {
-      await uploadMediaFile(config, filePath, path.basename(filePath), mimeFor('image', filePath), 'image');
+      await uploadMediaFile(
+        config,
+        filePath,
+        path.basename(filePath),
+        mimeFor('image', filePath),
+        'image',
+        true,
+        { signal },
+      );
       uploads.push(publicUpload('image', filePath));
     } catch (error) {
+      if (signal?.aborted || error?.errorCode === 'phone_request_cancelled') throw cancellationError();
       failed.push(publicFailure('image', filePath, error, [config.phoneToken, config.lumiLauncherSecret]));
     }
   }
   for (const filePath of args.videos) {
+    throwIfCancelled(signal);
     try {
-      await uploadMediaFile(config, filePath, path.basename(filePath), mimeFor('video', filePath), 'video');
+      await uploadMediaFile(
+        config,
+        filePath,
+        path.basename(filePath),
+        mimeFor('video', filePath),
+        'video',
+        true,
+        { signal },
+      );
       uploads.push(publicUpload('video', filePath));
     } catch (error) {
+      if (signal?.aborted || error?.errorCode === 'phone_request_cancelled') throw cancellationError();
       failed.push(publicFailure('video', filePath, error, [config.phoneToken, config.lumiLauncherSecret]));
     }
   }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import base64
 import hashlib
@@ -13,8 +14,12 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,13 +31,19 @@ if PYTHON_DIR not in sys.path:
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from tests.matrix_test_support import matrix_context_for_test, matrix_for_test
 
 from api.routes_jobs import register_job_routes
 from api.routes_phone import (
+    PhonePairingError,
     _apply_phone_event_to_matrix,
+    _authorize_phone_entitlement,
+    _is_securely_paired_device,
+    _load_store,
     _phone_cli_failure_code,
     _phone_failure_result,
     _phone_event_sync_public,
+    _start_phone_event_sync,
     _phone_stdout_payload,
     _sync_phone_matrix_presence,
     _parse_phone_sse_events,
@@ -42,14 +53,20 @@ from api.routes_phone import (
     _phone_payload_failure,
     _phone_runtime_config_json,
     _phone_status_request_timeout_ms,
+    _refresh_phone_transport,
+    _remember_phone_connection_candidates,
     _normalize_url,
     _probe_phone_tunnel,
     _public_store,
     _run_phone_process_with_matrix_stream,
     _sanitize_cli_output,
+    _submit_phone_job,
     _write_phone_store,
+    phone_process_env,
     register_phone_routes,
+    stop_all_phone_event_syncs,
 )
+from core.account_entitlement import AccountEntitlementError
 from core.paths import AppPaths
 from core.storage import read_json
 from core.wire_config import WireService
@@ -92,7 +109,1035 @@ def _seed_secure_phone(
     return store
 
 
+def _signed_node_runtime_test_env(
+    base_path: str,
+    phone_device_ids: list[str],
+    *,
+    account_id: str = "test-account",
+) -> dict[str, str]:
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    now = int(time.time())
+    install_id = "install-routes-phone-test"
+    host_device_id = "host-routes-phone-test"
+    producer_token = "routes-phone-node-runtime-test-session"
+
+    def signed(payload: dict) -> dict:
+        result = dict(payload)
+        result["signature"] = base64.b64encode(
+            private_key.sign(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+        ).decode("ascii")
+        return result
+
+    entitlement_lease = signed({
+        "schema": "loom.entitlement_lease.v1",
+        "accountId": account_id,
+        "sessionBinding": hashlib.sha256(
+            b"loom-entitlement-session-v1\0"
+            + producer_token.encode("utf-8")
+        ).hexdigest(),
+        "installId": install_id,
+        "deviceId": host_device_id,
+        "hostDeviceId": host_device_id,
+        "plan": "activated",
+        "source": "authorization_code",
+        "features": ["matrix.devices"],
+        "limits": {
+            "devices": 1000,
+            "concurrentTasks": 100,
+            "unlimitedDevices": True,
+        },
+        "issuedAt": now - 60,
+        "expiresAt": now + 3600,
+        "offlineGraceUntil": now + 7200,
+        "entitlementVersion": 1,
+        "keyId": "openclaw-ed25519-v1",
+    })
+    phone_seat_lease = signed({
+        "schema": "loom.phone_seat_lease.v1",
+        "accountId": account_id,
+        "installId": install_id,
+        "hostDeviceId": host_device_id,
+        "phoneDeviceIds": list(phone_device_ids),
+        "limit": 1000,
+        "issuedAt": now - 60,
+        "expiresAt": now + 3600,
+        "entitlementVersion": 1,
+        "keyId": "openclaw-ed25519-v1",
+    })
+
+    data_dir = Path(base_path, "data")
+    launcher_data_dir = data_dir / ".openclaw" / "launcher"
+    launcher_data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "account-entitlement.json").write_text(
+        json.dumps(entitlement_lease),
+        encoding="utf-8",
+    )
+    (data_dir / "account-phone-seat-lease.json").write_text(
+        json.dumps(phone_seat_lease),
+        encoding="utf-8",
+    )
+    (data_dir / "install_id.txt").write_text(install_id, encoding="utf-8")
+    (launcher_data_dir / "member-session.json").write_text(
+        json.dumps({
+            "memberId": f"newapi:{account_id}",
+            "newApi": {"userId": account_id},
+        }),
+        encoding="utf-8",
+    )
+    return {
+        "NODE_TEST_CONTEXT": "test_routes_phone",
+        "LOOM_PHONE_RUNTIME_AUTH_TEST_ONLY": "1",
+        "LOOM_PHONE_RUNTIME_AUTH_TEST_PUBLIC_KEY_B64": base64.b64encode(
+            public_key
+        ).decode("ascii"),
+    }
+
+
 class PhoneRouteSnapshotTests(unittest.TestCase):
+    def test_event_sync_does_not_reuse_recent_state_from_another_account(self) -> None:
+        import api.routes_phone as routes_phone
+
+        class Process:
+            def poll(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="test-account",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+            )
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            with open(
+                os.path.join(scripts_dir, "openclaw-phone-agent.mjs"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write("// event sync fixture\n")
+            ctx.paths.scripts_dir = scripts_dir
+            key = routes_phone._phone_event_sync_key("phone-a")
+            routes_phone._PHONE_EVENT_SYNC_STATE[key] = {
+                "process": Process(),
+                "deviceId": "phone-a",
+                "finishedAt": "just-now",
+                "finishedEpoch": time.time(),
+                "returncode": 0,
+                "runtimeIdentity": "another-account-and-workspace",
+            }
+
+            with patch.object(
+                routes_phone.subprocess,
+                "Popen",
+                side_effect=RuntimeError("new event sync attempted"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "new event sync attempted"):
+                    _start_phone_event_sync(
+                        ctx,
+                        device_id="phone-a",
+                        max_sec=30,
+                    )
+
+    def test_event_sync_stops_running_state_from_another_account(self) -> None:
+        import api.routes_phone as routes_phone
+
+        class Process:
+            def __init__(self) -> None:
+                self.running = True
+                self.terminated = False
+
+            def poll(self):
+                return None if self.running else 0
+
+            def terminate(self):
+                self.terminated = True
+                self.running = False
+
+            def wait(self, timeout=None):
+                del timeout
+                self.running = False
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="test-account",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+            )
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            with open(
+                os.path.join(scripts_dir, "openclaw-phone-agent.mjs"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write("// event sync fixture\n")
+            ctx.paths.scripts_dir = scripts_dir
+            process = Process()
+            key = routes_phone._phone_event_sync_key("phone-a")
+            routes_phone._PHONE_EVENT_SYNC_STATE[key] = {
+                "process": process,
+                "deviceId": "phone-a",
+                "runtimeIdentity": "another-account-and-workspace",
+            }
+
+            with patch.object(
+                routes_phone.subprocess,
+                "Popen",
+                side_effect=RuntimeError("new event sync attempted"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "new event sync attempted"):
+                    _start_phone_event_sync(
+                        ctx,
+                        device_id="phone-a",
+                        max_sec=30,
+                    )
+
+            self.assertTrue(process.terminated)
+
+    def test_unactivated_account_blocks_direct_phone_surfaces_before_external_calls(self) -> None:
+        external_calls: list[str] = []
+
+        class UnactivatedEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "code": "authorization_required",
+                    "message": "当前账号尚未激活手机矩阵。",
+                    "action": "bind_authorization_code",
+                    "details": {},
+                }
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                raise AssertionError(
+                    f"direct surface must fail before device authorization: {device_ids} {operation}"
+                )
+
+            def claimed_phone_device_ids(self):
+                raise AssertionError("direct surface must fail before reading claimed devices")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                entitlement_mgr=UnactivatedEntitlement(),
+            )
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_devices=lambda: (
+                    external_calls.append("adb.devices")
+                    or {"ok": True, "devices": []}
+                ),
+                phone_adb_doctor=lambda **_kwargs: (
+                    external_calls.append("adb.doctor")
+                    or {"ok": True, "status": "ready"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            responses = [
+                client.get("/api/phone/config"),
+                client.post("/api/phone/pairing/claim", json={"payload": "invalid"}),
+                client.get("/api/phone/usb/devices"),
+                client.post("/api/phone/adb-doctor", json={"confirmed": True}),
+                client.get("/api/phone/daemon/status"),
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [403] * 5)
+        self.assertEqual(
+            [response.json()["code"] for response in responses],
+            ["authorization_required"] * 5,
+        )
+        self.assertEqual(external_calls, [])
+
+    def test_phone_entitlement_fails_closed_when_manager_is_missing(self) -> None:
+        ctx = SimpleNamespace()
+
+        with self.assertRaises(AccountEntitlementError) as denied:
+            _authorize_phone_entitlement(
+                ctx,
+                ["phone-1"],
+                "matrix.device.claim",
+            )
+
+        self.assertEqual(denied.exception.code, "entitlement_service_unavailable")
+
+    def test_phone_entitlement_uses_stable_pairing_identity_not_local_alias(self) -> None:
+        calls: list[tuple[list[str], str]] = []
+
+        class Entitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "accountId": "42",
+                    "lease": {"accountId": "42"},
+                }
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                calls.append((list(device_ids), operation))
+                return {
+                    "authorized": True,
+                    "offline": False,
+                    "accountId": "42",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-1",
+                deviceInstanceId="physical-phone-a7f31",
+                ownerAccountId="42",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=Entitlement(),
+            )
+
+            _authorize_phone_entitlement(
+                ctx,
+                ["phone-1"],
+                "matrix.task.start",
+            )
+
+        self.assertEqual(
+            calls,
+            [(["physical-phone-a7f31"], "matrix.task.start")],
+        )
+
+    def test_phone_entitlement_rejects_credentials_owned_by_another_account(self) -> None:
+        calls: list[tuple[list[str], str]] = []
+
+        class Entitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "accountId": "account-b",
+                    "lease": {"accountId": "account-b"},
+                }
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                calls.append((list(device_ids), operation))
+                return {"authorized": True, "accountId": "account-b"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-1",
+                deviceInstanceId="physical-phone-a7f31",
+                ownerAccountId="account-a",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=Entitlement(),
+            )
+
+            with self.assertRaises(AccountEntitlementError) as denied:
+                _authorize_phone_entitlement(
+                    ctx,
+                    ["phone-1"],
+                    "matrix.task.start",
+                )
+
+        self.assertEqual(denied.exception.code, "phone_owner_account_mismatch")
+        self.assertEqual(denied.exception.action, "repair_phone")
+        self.assertEqual(calls, [])
+
+    def test_legacy_phone_owner_is_migrated_only_after_online_server_authorization(self) -> None:
+        class Entitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "accountId": "42",
+                    "lease": {"accountId": "42"},
+                }
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                return {
+                    "authorized": True,
+                    "offline": False,
+                    "accountId": "42",
+                    "claimedPhoneDeviceIds": list(device_ids),
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-1",
+                deviceInstanceId="physical-phone-a7f31",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=Entitlement(),
+            )
+
+            _authorize_phone_entitlement(
+                ctx,
+                ["phone-1"],
+                "matrix.task.start",
+            )
+
+        persisted = storage[os.path.join(temp_dir, "phone-agents.json")]
+        self.assertEqual(
+            persisted["devices"][0]["ownerAccountId"]["__loomSecret"],
+            "dpapi",
+        )
+        self.assertEqual(_load_store(ctx)["devices"][0]["ownerAccountId"], "42")
+
+    def test_full_pairing_reserves_entitlement_before_phone_claim_and_releases_on_failure(self) -> None:
+        events: list[str] = []
+
+        class Entitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "test-account",
+                    "lease": {"accountId": "test-account"},
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return []
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del session
+                events.append(f"entitlement:{operation}:{','.join(device_ids)}")
+                return {
+                    "authorized": True,
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+        def fail_phone_claim(*_args, **_kwargs):
+            events.append("phone:claim")
+            raise PhonePairingError(
+                "phone_pairing_endpoint_unavailable",
+                "phone unavailable",
+                retryable=True,
+                status_code=409,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                entitlement_mgr=Entitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+            payload = (
+                "lumi://pair?v=3&b=http%3A%2F%2F192.168.1.88%3A9527"
+                "&s=session-1&d=physical-phone-a"
+                f"&k={'ab' * 32}&n=Phone"
+            )
+
+            with patch(
+                "api.routes_phone._claim_phone_pairing_over_http",
+                side_effect=fail_phone_claim,
+            ):
+                response = client.post(
+                    "/api/phone/pairing/claim",
+                    json={"payload": payload, "deviceId": "phone-1"},
+                )
+
+        self.assertEqual(409, response.status_code)
+        self.assertEqual(
+            [
+                "entitlement:matrix.device.claim:physical-phone-a",
+                "phone:claim",
+                "entitlement:matrix.device.release:physical-phone-a",
+            ],
+            events,
+        )
+
+    def test_pairing_cannot_reclaim_phone_owned_by_another_account(self) -> None:
+        events: list[str] = []
+
+        class Entitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "account-b",
+                    "lease": {"accountId": "account-b"},
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return []
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del session
+                events.append(f"entitlement:{operation}:{','.join(device_ids)}")
+                return {
+                    "authorized": True,
+                    "offline": False,
+                    "accountId": "account-b",
+                    "claimedPhoneDeviceIds": list(device_ids),
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+        def prove_phone(*_args, **_kwargs):
+            events.append("phone:claim")
+            return {
+                "phoneToken": "rotated-phone-token",
+                "launcherId": "loom-desktop-verified",
+                "launcherSecret": "rotated-launcher-secret",
+                "deviceInstanceId": "physical-phone-a",
+                "listeningPort": 9527,
+                "pairedAt": "2026-07-29T12:00:00Z",
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            path = os.path.join(temp_dir, "phone-agents.json")
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-1",
+                deviceInstanceId="physical-phone-a",
+                ownerAccountId="account-a",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=Entitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+            payload = (
+                "lumi://pair?v=3&b=http%3A%2F%2F192.168.1.88%3A9527"
+                "&s=session-2&d=physical-phone-a"
+                f"&k={'cd' * 32}&n=Phone"
+            )
+
+            with patch(
+                "api.routes_phone._claim_phone_pairing_over_http",
+                side_effect=prove_phone,
+            ), patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={
+                    "ok": True,
+                    "deviceInstanceId": "physical-phone-a",
+                },
+            ), patch(
+                "api.routes_phone._verify_phone_pairing_hmac",
+                return_value={"ok": True},
+            ), patch(
+                "api.routes_phone._retry_pending_phone_pairing_confirmations",
+                side_effect=lambda *_args, **_kwargs: storage[path],
+            ), patch(
+                "api.routes_phone._ensure_phone_event_syncs_for_saved_devices",
+                return_value={},
+            ):
+                response = client.post(
+                    "/api/phone/pairing/claim",
+                    json={"payload": payload, "deviceId": "phone-1"},
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["code"],
+            "phone_owned_by_another_account",
+        )
+        self.assertEqual(response.json()["action"], "release_from_previous_account")
+        self.assertEqual(events, [])
+        persisted = storage[path]["devices"][0]
+        self.assertEqual(persisted["ownerAccountId"]["__loomSecret"], "dpapi")
+        self.assertEqual(persisted["deviceInstanceId"]["__loomSecret"], "dpapi")
+        decoded = _load_store(ctx)["devices"][0]
+        self.assertEqual(decoded["ownerAccountId"], "account-a")
+        self.assertEqual(decoded["deviceInstanceId"], "physical-phone-a")
+        self.assertNotIn("rotated-phone-token", json.dumps(persisted))
+
+    def test_phone_job_rechecks_entitlement_when_execution_actually_starts(self) -> None:
+        class RevokedAfterQueueEntitlement:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                self.calls += 1
+                if self.calls > 1:
+                    raise AccountEntitlementError(
+                        "账号权益已撤销。",
+                        code="authorization_code_revoked",
+                        action="bind_authorization_code",
+                    )
+                return {
+                    "authorized": True,
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["physical-phone-a"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            script_path = os.path.join(scripts_dir, "openclaw-phone-vision.mjs")
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write("print('should not execute')\n")
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                deviceInstanceId="physical-phone-a",
+            )
+            entitlement = RevokedAfterQueueEntitlement()
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=entitlement,
+            )
+
+            with self.assertRaises(AccountEntitlementError) as denied:
+                _submit_phone_job(
+                    ctx,
+                    kind="phone.task",
+                    label="revoked queued phone task",
+                    script_name="openclaw-phone-vision.mjs",
+                    args=[],
+                    device_id="phone-a",
+                    inline_job_id="job-revoked",
+                )
+
+        self.assertEqual(denied.exception.code, "authorization_code_revoked")
+        self.assertEqual(entitlement.calls, 2)
+
+    def test_phone_job_rechecks_entitlement_after_account_slot_is_acquired(self) -> None:
+        class RevokedWhileWaitingForSlotEntitlement:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del device_ids, operation, session
+                self.calls += 1
+                if self.calls >= 3:
+                    raise AccountEntitlementError(
+                        "账号权益已撤销。",
+                        code="authorization_code_revoked",
+                        action="bind_authorization_code",
+                    )
+                return {
+                    "authorized": True,
+                    "accountId": "42",
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["physical-phone-a"]
+
+            def account_task_slot(self, *_args, **_kwargs):
+                from contextlib import nullcontext
+
+                return nullcontext()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            script_path = os.path.join(scripts_dir, "openclaw-phone-vision.mjs")
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write("print('must not execute')\n")
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                deviceInstanceId="physical-phone-a",
+                ownerAccountId="42",
+            )
+            entitlement = RevokedWhileWaitingForSlotEntitlement()
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=entitlement,
+            )
+
+            with patch(
+                "api.routes_phone._run_phone_process_with_matrix_stream"
+            ) as process, self.assertRaises(AccountEntitlementError) as denied:
+                _submit_phone_job(
+                    ctx,
+                    kind="phone.task",
+                    label="revoked while waiting",
+                    script_name="openclaw-phone-vision.mjs",
+                    args=[],
+                    device_id="phone-a",
+                    inline_job_id="job-revoked-in-slot",
+                )
+
+        self.assertEqual(denied.exception.code, "authorization_code_revoked")
+        self.assertEqual(entitlement.calls, 3)
+        process.assert_not_called()
+
+    def test_phone_job_stops_when_entitlement_is_revoked_while_running(self) -> None:
+        class RevokedWhileRunningEntitlement:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "accountId": "42",
+                    "lease": {"accountId": "42"},
+                }
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                self.calls += 1
+                if self.calls >= 4:
+                    raise AccountEntitlementError(
+                        "账号权益已撤销。",
+                        code="authorization_code_revoked",
+                        action="bind_authorization_code",
+                    )
+                return {
+                    "authorized": True,
+                    "offline": False,
+                    "accountId": "42",
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["physical-phone-a"]
+
+            def account_task_slot(self, *_args, **_kwargs):
+                from contextlib import nullcontext
+                return nullcontext()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            script_path = os.path.join(scripts_dir, "openclaw-phone-agent.mjs")
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write("print('running')\n")
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                deviceInstanceId="physical-phone-a",
+                ownerAccountId="42",
+            )
+            entitlement = RevokedWhileRunningEntitlement()
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=entitlement,
+            )
+            observed_cancel: list[bool] = []
+            cooperative_cancel_files: list[bool] = []
+
+            def fake_runner(*args, **kwargs):
+                command = args[1]
+                cancel_index = command.index("--cancel-file")
+                cancel_file = command[cancel_index + 1]
+                kwargs["on_heartbeat"](6.0)
+                observed_cancel.append(bool(kwargs["should_cancel"]()))
+                cooperative_cancel_files.append(os.path.exists(cancel_file))
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "",
+                    "timedOut": False,
+                    "cancelled": True,
+                }
+
+            with patch(
+                "api.routes_phone._run_phone_process_with_matrix_stream",
+                side_effect=fake_runner,
+            ):
+                result = _submit_phone_job(
+                    ctx,
+                    kind="phone.task",
+                    label="running revoked phone task",
+                    script_name="openclaw-phone-agent.mjs",
+                    args=[],
+                    device_id="phone-a",
+                    inline_job_id="job-running-revoked",
+                )
+
+        self.assertEqual(result["code"], "authorization_code_revoked")
+        self.assertEqual(result["action"], "bind_authorization_code")
+        self.assertEqual(observed_cancel, [True])
+        self.assertEqual(cooperative_cancel_files, [True])
+        self.assertEqual(entitlement.calls, 4)
+
+    def test_phone_job_fails_closed_and_signals_remote_cancel_on_entitlement_check_error(self) -> None:
+        class BrokenWhileRunningEntitlement:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "accountId": "42",
+                    "lease": {"accountId": "42"},
+                }
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del device_ids, operation, session
+                self.calls += 1
+                if self.calls >= 4:
+                    raise OSError("entitlement state unreadable")
+                return {
+                    "authorized": True,
+                    "offline": False,
+                    "accountId": "42",
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["physical-phone-a"]
+
+            def account_task_slot(self, *_args, **_kwargs):
+                from contextlib import nullcontext
+                return nullcontext()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            script_path = os.path.join(scripts_dir, "openclaw-phone-agent.mjs")
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write("print('running')\n")
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                deviceInstanceId="physical-phone-a",
+                ownerAccountId="42",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=BrokenWhileRunningEntitlement(),
+            )
+            observed_cancel_file: list[bool] = []
+
+            def fake_runner(*args, **kwargs):
+                command = args[1]
+                cancel_index = command.index("--cancel-file")
+                cancel_file = command[cancel_index + 1]
+                kwargs["on_heartbeat"](6.0)
+                observed_cancel_file.append(os.path.exists(cancel_file))
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "",
+                    "timedOut": False,
+                    "cancelled": True,
+                }
+
+            with patch(
+                "api.routes_phone._run_phone_process_with_matrix_stream",
+                side_effect=fake_runner,
+            ):
+                result = _submit_phone_job(
+                    ctx,
+                    kind="phone.task",
+                    label="broken entitlement phone task",
+                    script_name="openclaw-phone-agent.mjs",
+                    args=[],
+                    device_id="phone-a",
+                    inline_job_id="job-running-broken",
+                )
+
+        self.assertEqual(result["code"], "phone_entitlement_check_failed")
+        self.assertEqual(result["action"], "restart_loom")
+        self.assertEqual(observed_cancel_file, [True])
+
+    def test_phone_config_device_checks_entitlement_before_persisting(self) -> None:
+        class DeniedEntitlement:
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                raise AccountEntitlementError(
+                    "当前账号绑定的手机数量超过系统安全上限。",
+                    code="device_limit_exceeded",
+                    action="contact_support",
+                    details={"limit": 1000, "phoneDeviceIds": list(device_ids)},
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-b",
+                name="Phone B Before",
+            )
+            app = FastAPI()
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=DeniedEntitlement(),
+            )
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/phone/config/device",
+                json={
+                    "deviceId": "phone-b",
+                    "name": "Phone B After",
+                    "baseUrl": "192.168.1.89",
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "device_limit_exceeded")
+        self.assertIn("Phone B Before", repr(storage))
+        self.assertNotIn("Phone B After", repr(storage))
+
+    def test_phone_config_device_releases_new_entitlement_claim_when_persist_fails(self) -> None:
+        events: list[tuple[list[str], str]] = []
+
+        class Entitlement:
+            def claimed_phone_device_ids(self):
+                return []
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del session
+                events.append((list(device_ids), operation))
+                return {"authorized": True}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-new",
+                name="Phone Before",
+                deviceInstanceId="physical-phone-new",
+            )
+            app = FastAPI()
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=Entitlement(),
+            )
+            register_phone_routes(app, ctx)
+            client = TestClient(app, raise_server_exceptions=False)
+            write_calls = 0
+
+            def migrate_then_fail(write_ctx, next_store):
+                nonlocal write_calls
+                write_calls += 1
+                if write_calls == 1:
+                    return _write_phone_store(write_ctx, next_store)
+                raise OSError("disk full")
+
+            with patch(
+                "api.routes_phone.protect_secret",
+                side_effect=lambda value: {
+                    "__loomSecret": "dpapi",
+                    "value": str(value).encode("utf-8").hex(),
+                },
+            ), patch(
+                "api.routes_phone.unprotect_secret",
+                side_effect=lambda value: bytes.fromhex(str(value.get("value") or "")).decode("utf-8")
+                if isinstance(value, dict)
+                else str(value or ""),
+            ), patch(
+                "api.routes_phone._write_phone_store",
+                side_effect=migrate_then_fail,
+            ):
+                response = client.post(
+                    "/api/phone/config/device",
+                    json={
+                        "deviceId": "phone-new",
+                        "name": "Phone New",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["code"], "phone_config_write_failed")
+        self.assertEqual(
+            events,
+            [
+                (["physical-phone-new"], "matrix.device.claim"),
+                (["physical-phone-new"], "matrix.device.release"),
+            ],
+        )
+        self.assertIn("Phone Before", repr(storage))
+        self.assertNotIn("Phone New", repr(storage))
+
     def test_phone_usb_identity_probe_never_sends_token_before_challenge_verification(self) -> None:
         class FakeResponse:
             status = 200
@@ -324,12 +1369,44 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
         self.assertEqual(len(definitions), 1)
 
+    def test_phone_model_push_exposes_only_authorized_devices_to_child_process(self) -> None:
+        from api.routes_phone import _push_phone_model_to_device
+
+        ctx = SimpleNamespace(
+            paths=SimpleNamespace(
+                base_path="D:\\loom-test",
+                node_exe=sys.executable,
+            ),
+        )
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout='{"ok": true, "model": "test-model"}',
+            stderr="",
+        )
+        with patch(
+            "api.routes_phone._configured_phone_device_count",
+            return_value=2,
+        ), patch(
+            "api.routes_phone._script_path",
+            return_value=__file__,
+        ), patch(
+            "api.routes_phone.phone_process_env",
+            return_value={"LOOM_PHONE_RUNTIME_CONFIG_JSON": "scoped"},
+        ) as process_env, patch(
+            "api.routes_phone.subprocess.run",
+            return_value=completed,
+        ):
+            result = _push_phone_model_to_device(ctx, ["phone-2"])
+
+        self.assertTrue(result["success"])
+        process_env.assert_called_once_with(ctx, ["phone-2"])
+
     def test_failed_phone_status_marks_selected_matrix_device_offline(self) -> None:
         from core.phone_matrix import MatrixControlPlane
 
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(base_path=temp_dir)
-            matrix = MatrixControlPlane(paths)
+            matrix = matrix_for_test(paths)
             matrix.register_device(
                 {
                     "deviceId": "phone-1",
@@ -338,7 +1415,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     "currentTaskId": "stale-task",
                 }
             )
-            ctx = SimpleNamespace(paths=paths)
+            ctx = matrix_context_for_test(paths)
 
             _sync_phone_matrix_presence(
                 ctx,
@@ -424,8 +1501,8 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
             worker = threading.Thread(target=run_process)
             worker.start()
-            started = _wait_for_path(started_path, timeout=20.0)
-            pid = _read_pid(started_path) if started else 0
+            pid = _wait_for_pid(started_path, timeout=20.0)
+            started = pid > 0
             try:
                 cancel_requested.set()
                 with open(cancel_path, "w", encoding="ascii") as handle:
@@ -720,10 +1797,10 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(base_path=temp_dir)
-            matrix = MatrixControlPlane(paths)
+            matrix = matrix_for_test(paths)
             matrix.register_device({"deviceId": "phone-1", "online": True})
 
-            _mark_phone_event_stream_offline(SimpleNamespace(paths=paths), "phone-1")
+            _mark_phone_event_stream_offline(matrix_context_for_test(paths), "phone-1")
             device = matrix.status()["devices"][0]
 
         self.assertFalse(device["online"])
@@ -942,6 +2019,247 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(stopped.status_code, 200)
             self.assertFalse(stopped.json()["running"])
 
+    def test_phone_event_sync_stops_when_account_entitlement_is_revoked(self) -> None:
+        class RevokedEntitlement:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "account-a",
+                    "lease": {"accountId": "account-a"},
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["lumi-phone-a"]
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del device_ids, operation, session
+                self.calls += 1
+                if self.calls >= 2:
+                    raise AccountEntitlementError(
+                        "矩阵权益已撤销。",
+                        code="account_entitlement_revoked",
+                        action="bind_authorization_code",
+                    )
+                return {"authorized": True, "accountId": "account-a"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            with open(
+                os.path.join(scripts_dir, "openclaw-phone-agent.mjs"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write("import time\ntime.sleep(30)\n")
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="account-a",
+            )
+            entitlement = RevokedEntitlement()
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=entitlement,
+            )
+            ctx.paths.scripts_dir = scripts_dir
+            ctx.paths.script_roots = ()
+            ctx.get_newapi_account_mgr = lambda: SimpleNamespace(
+                current=lambda: {"memberToken": "test", "newApi": {}}
+            )
+
+            with patch(
+                "api.routes_phone._PHONE_ENTITLEMENT_HEARTBEAT_SEC",
+                0.01,
+                create=True,
+            ):
+                started = _start_phone_event_sync(
+                    ctx,
+                    device_id="phone-a",
+                    max_sec=30,
+                )
+                deadline = time.time() + 2
+                public = started
+                while time.time() < deadline:
+                    public = _phone_event_sync_public(
+                        __import__("api.routes_phone", fromlist=["_PHONE_EVENT_SYNC_STATE"])
+                        ._PHONE_EVENT_SYNC_STATE["phone-a"]
+                    )
+                    if not public["running"]:
+                        break
+                    time.sleep(0.01)
+
+            self.assertFalse(public["running"])
+            self.assertEqual(public["stoppedBy"], "entitlement_revoked")
+            self.assertIn("撤销", public["lastError"])
+
+    def test_phone_event_sync_fails_closed_when_entitlement_check_crashes(self) -> None:
+        class BrokenEntitlement:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "account-a",
+                    "lease": {"accountId": "account-a"},
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["lumi-phone-a"]
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del device_ids, operation, session
+                self.calls += 1
+                if self.calls >= 2:
+                    raise RuntimeError("entitlement backend crashed")
+                return {"authorized": True, "accountId": "account-a"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            with open(
+                os.path.join(scripts_dir, "openclaw-phone-agent.mjs"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write("import time\ntime.sleep(30)\n")
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="account-a",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=BrokenEntitlement(),
+            )
+            ctx.paths.scripts_dir = scripts_dir
+            ctx.paths.script_roots = ()
+            ctx.get_newapi_account_mgr = lambda: SimpleNamespace(
+                current=lambda: {"memberToken": "test", "newApi": {}}
+            )
+
+            with patch(
+                "api.routes_phone._PHONE_ENTITLEMENT_HEARTBEAT_SEC",
+                0.01,
+                create=True,
+            ):
+                started = _start_phone_event_sync(
+                    ctx,
+                    device_id="phone-a",
+                    max_sec=30,
+                )
+                deadline = time.time() + 2
+                public = started
+                while time.time() < deadline:
+                    public = _phone_event_sync_public(
+                        __import__("api.routes_phone", fromlist=["_PHONE_EVENT_SYNC_STATE"])
+                        ._PHONE_EVENT_SYNC_STATE["phone-a"]
+                    )
+                    if not public["running"]:
+                        break
+                    time.sleep(0.01)
+
+            self.assertFalse(public["running"])
+            self.assertEqual(public["stoppedBy"], "entitlement_check_failed")
+            self.assertIn("安全停止", public["lastError"])
+
+    def test_stop_all_phone_event_syncs_stops_every_device_process(self) -> None:
+        from api import routes_phone
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode = None
+                self.terminated = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self.returncode = 0
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        first = FakeProcess()
+        second = FakeProcess()
+        states = {
+            "phone-a": {"process": first, "deviceId": "phone-a"},
+            "phone-b": {"process": second, "deviceId": "phone-b"},
+        }
+        with patch.dict(routes_phone._PHONE_EVENT_SYNC_STATE, states, clear=True):
+            result = stop_all_phone_event_syncs()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stoppedCount"], 2)
+        self.assertFalse(result["executionMayContinue"])
+        self.assertTrue(first.terminated)
+        self.assertTrue(second.terminated)
+
+    def test_stop_phone_event_syncs_for_account_never_stops_another_account(self) -> None:
+        from api import routes_phone
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode = None
+                self.terminated = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self.returncode = 0
+
+            def wait(self, timeout=None):
+                del timeout
+                return self.returncode
+
+        first = FakeProcess()
+        second = FakeProcess()
+        states = {
+            "phone-a": {
+                "process": first,
+                "deviceId": "phone-a",
+                "accountId": "account-a",
+            },
+            "phone-b": {
+                "process": second,
+                "deviceId": "phone-b",
+                "accountId": "account-b",
+            },
+        }
+        with patch.dict(routes_phone._PHONE_EVENT_SYNC_STATE, states, clear=True):
+            result = routes_phone.stop_phone_event_syncs_for_account(
+                "account-a"
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stoppedCount"], 1)
+        self.assertTrue(first.terminated)
+        self.assertFalse(second.terminated)
+
     def test_phone_config_save_auto_starts_event_sync_for_saved_device(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scripts_dir = os.path.join(temp_dir, "scripts")
@@ -1016,18 +2334,77 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                                 name="Secure Phone",
                                 base_url="http://192.168.1.88:9527",
                                 token="plain-phone-token",
+                                deviceInstanceId="physical-phone-secure",
+                                ownerAccountId="account-secure",
                             )
                         ],
                     },
                 )
+                decoded = _load_store(ctx)
                 loaded = client.get("/api/phone/config")
 
             self.assertEqual(loaded.status_code, 200)
             self.assertTrue(loaded.json()["devices"][0]["tokenAvailable"])
+            self.assertEqual(
+                decoded["devices"][0]["deviceInstanceId"],
+                "physical-phone-secure",
+            )
+            self.assertEqual(decoded["devices"][0]["ownerAccountId"], "account-secure")
             stored = next(value for key, value in storage.items() if key.endswith("phone-agents.json"))
             serialized = json.dumps(stored, ensure_ascii=False)
             self.assertNotIn("plain-phone-token", serialized)
+            self.assertNotIn("physical-phone-secure", serialized)
+            self.assertNotIn("account-secure", serialized)
             self.assertEqual(stored["devices"][0]["token"]["__loomSecret"], "dpapi")
+            self.assertEqual(
+                stored["devices"][0]["deviceInstanceId"]["__loomSecret"],
+                "dpapi",
+            )
+            self.assertEqual(
+                stored["devices"][0]["ownerAccountId"]["__loomSecret"],
+                "dpapi",
+            )
+
+    def test_tampered_protected_phone_identity_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+
+            def protect(value):
+                return {
+                    "__loomSecret": "dpapi",
+                    "value": str(value).encode("utf-8").hex(),
+                }
+
+            def unprotect(value):
+                if isinstance(value, dict):
+                    return bytes.fromhex(str(value.get("value") or "")).decode("utf-8")
+                return str(value or "")
+
+            with patch("api.routes_phone.protect_secret", side_effect=protect), patch(
+                "api.routes_phone.unprotect_secret",
+                side_effect=unprotect,
+            ):
+                _write_phone_store(
+                    ctx,
+                    {
+                        "selectedDeviceId": "phone-secure",
+                        "devices": [
+                            _secure_phone_device(
+                                "phone-secure",
+                                deviceInstanceId="physical-phone-secure",
+                                ownerAccountId="account-secure",
+                            )
+                        ],
+                    },
+                )
+                path = os.path.join(temp_dir, "phone-agents.json")
+                storage[path]["devices"][0]["deviceInstanceId"]["value"] = "not-hex"
+                decoded = _load_store(ctx)
+
+            self.assertEqual(decoded["devices"][0]["deviceInstanceId"], "")
+            self.assertFalse(_is_securely_paired_device(decoded["devices"][0]))
 
     def test_phone_usb_connect_preserves_lan_address_and_switches_public_channel(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1600,6 +2977,51 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertNotIn("actions", serialized)
             self.assertNotIn("product:private", serialized)
 
+    def test_phone_adb_doctor_rejects_a_known_device_owned_by_another_account(self) -> None:
+        class AccountBEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "account-b",
+                    "lease": {"accountId": "account-b"},
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            calls: list[dict] = []
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="account-a",
+                connectionMode="usb",
+                adbSerial="adb-phone-a",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=AccountBEntitlement(),
+            )
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_doctor=lambda **kwargs: calls.append(kwargs) or {"ok": True},
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/phone/adb-doctor",
+                json={"serial": "adb-phone-a", "confirmed": True},
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["code"], "phone_owner_account_mismatch")
+            self.assertEqual(calls, [])
+
     def test_phone_usb_connect_rejects_wrong_phone_identity_and_removes_new_forward(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []
@@ -1692,7 +3114,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 return_value={"ok": True, "status": "verified"},
             ), patch(
                 "api.routes_phone._write_phone_store",
-                side_effect=[None, None, OSError("disk full"), None],
+                side_effect=[None, None, None, OSError("disk full"), None],
             ):
                 response = client.post(
                     "/api/phone/usb/connect",
@@ -1744,6 +3166,8 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(response.status_code, 409)
             self.assertEqual(observed["transactions"][0]["operation"], "connect")
             self.assertGreater(observed["transactions"][0]["localPort"], 0)
+            self.assertEqual(observed["transactions"][0]["ownerAccountId"], "test-account")
+            self.assertEqual(observed["transactions"][0]["entitlementDeviceId"], "lumi-phone-a")
             stored = next(value for key, value in storage.items() if key.endswith("phone-agents.json"))
             self.assertEqual(len(stored["usbTransportTransactions"]), 1)
             self.assertEqual(stored["usbTransportTransactions"][0]["serial"], "adb-phone-a")
@@ -1763,6 +3187,8 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                         "operation": "delete",
                         "serial": "",
                         "localPort": 19527,
+                        "ownerAccountId": "test-account",
+                        "entitlementDeviceId": "phone-a",
                     }],
                 },
             }
@@ -1785,6 +3211,80 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(calls, [{"serial": "", "local_port": 19527}])
             self.assertNotIn("usbTransportTransactions", storage[path])
 
+    def test_phone_usb_reconcile_preserves_cross_account_and_legacy_transactions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [
+                        _secure_phone_device(
+                            "phone-a",
+                            ownerAccountId="test-account",
+                        ),
+                    ],
+                    "usbTransportTransactions": [
+                        {
+                            "id": "usb-current",
+                            "deviceId": "phone-a",
+                            "operation": "connect",
+                            "serial": "adb-current",
+                            "localPort": 19527,
+                            "ownerAccountId": "test-account",
+                            "entitlementDeviceId": "lumi-phone-a",
+                        },
+                        {
+                            "id": "usb-other-account",
+                            "deviceId": "phone-b",
+                            "operation": "connect",
+                            "serial": "adb-other",
+                            "localPort": 19528,
+                            "ownerAccountId": "account-other",
+                            "entitlementDeviceId": "lumi-phone-b",
+                        },
+                        {
+                            "id": "usb-legacy",
+                            "deviceId": "phone-c",
+                            "operation": "connect",
+                            "serial": "adb-legacy",
+                            "localPort": 19529,
+                        },
+                    ],
+                },
+            }
+            calls: list[dict] = []
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **kwargs: (
+                    calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post("/api/phone/usb/reconcile")
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(
+                calls,
+                [{"serial": "adb-current", "local_port": 19527}],
+            )
+            remaining = storage[path]["usbTransportTransactions"]
+            self.assertEqual(
+                {item["id"] for item in remaining},
+                {"usb-other-account", "usb-legacy"},
+            )
+            self.assertEqual(
+                {item["reason"] for item in response.json()["pending"]},
+                {
+                    "owner_account_mismatch",
+                    "legacy_transaction_requires_manual_recovery",
+                },
+            )
+
     def test_phone_usb_reconciliation_is_registered_for_bridge_startup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []
@@ -1799,6 +3299,45 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertTrue(
                 any(handler.__name__ == "start_saved_usb_transport_restore" for handler in startup_handlers)
             )
+
+    def test_unactivated_account_does_not_start_phone_restore_or_pairing_workers(self) -> None:
+        class UnactivatedEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "code": "authorization_required",
+                    "message": "当前账号尚未激活手机矩阵。",
+                    "action": "bind_authorization_code",
+                    "details": {},
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            app = FastAPI()
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                entitlement_mgr=UnactivatedEntitlement(),
+            )
+            register_phone_routes(app, ctx)
+            handlers = {
+                handler.__name__: handler
+                for handler in app.router.on_startup
+            }
+
+            async def exercise_startup_workers() -> None:
+                await handlers["retry_pending_phone_pairing_confirmations_on_startup"]()
+                await handlers["start_phone_pairing_confirmation_retry"]()
+                await handlers["start_saved_usb_transport_restore"]()
+                await asyncio.sleep(0)
+
+            asyncio.run(exercise_startup_workers())
+
+            self.assertFalse(hasattr(app.state, "phone_pairing_confirmation_retry_task"))
+            self.assertFalse(hasattr(app.state, "phone_usb_restore_task"))
+            self.assertTrue(any("authorization" in line for line in logs))
 
     def test_phone_runtime_config_excludes_unverified_usb_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1837,6 +3376,150 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in runtime["devices"]], ["lan-phone"])
             self.assertNotIn("usb-secret", json.dumps(runtime))
 
+    def test_unactivated_account_runtime_config_never_exposes_saved_phone_credentials(self) -> None:
+        class UnactivatedEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "code": "authorization_required",
+                    "message": "当前账号尚未激活手机矩阵。",
+                    "action": "bind_authorization_code",
+                    "details": {},
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage = {
+                path: {
+                    "selectedDeviceId": "previous-account-phone",
+                    "devices": [{
+                        "id": "previous-account-phone",
+                        "baseUrl": "http://192.168.1.66:9527",
+                        "token": "previous-account-secret",
+                        "launcherId": "previous-launcher",
+                        "launcherSecret": "previous-launcher-secret",
+                        "deviceInstanceId": "stable-previous",
+                        "ownerAccountId": "previous-account",
+                    }],
+                },
+            }
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=UnactivatedEntitlement(),
+            )
+
+            runtime = json.loads(_phone_runtime_config_json(ctx))
+
+            self.assertEqual(runtime, {"selectedDeviceId": "", "devices": []})
+            self.assertNotIn("previous-account-secret", json.dumps(runtime))
+
+    def test_phone_process_env_scrubs_inherited_phone_credentials_and_sets_empty_runtime(self) -> None:
+        ctx = SimpleNamespace(
+            paths=SimpleNamespace(launcher_dir="", base_path="D:/loom-test"),
+        )
+        inherited = {
+            "OPENCLAW_PHONE_BASE_URL": "http://old-phone:9527",
+            "OPENCLAW_PHONE_TOKEN": "old-openclaw-token",
+            "APKCLAW_BASE_URL": "http://older-phone:9527",
+            "APKCLAW_TOKEN": "old-apkclaw-token",
+            "LUMI_LAUNCHER_ID": "old-launcher",
+            "LUMI_LAUNCHER_SECRET": "old-launcher-secret",
+            "LOOM_PHONE_RELAY_PRODUCER_TOKEN": "stale-model-account-token",
+        }
+
+        with patch.dict(os.environ, inherited, clear=False):
+            env = phone_process_env(ctx, [])
+
+        for name in inherited:
+            self.assertNotIn(name, env)
+        self.assertEqual(
+            json.loads(env["LOOM_PHONE_RUNTIME_CONFIG_JSON"]),
+            {"selectedDeviceId": "", "devices": []},
+        )
+
+    def test_phone_process_env_carries_signed_runtime_and_separate_model_token(self) -> None:
+        entitlement_lease = {
+            "schema": "loom.entitlement_lease.v1",
+            "accountId": "account-runtime",
+            "signature": "signed-entitlement",
+        }
+        phone_seat_lease = {
+            "schema": "loom.phone_seat_lease.v1",
+            "accountId": "account-runtime",
+            "phoneDeviceIds": ["phone-a"],
+            "signature": "signed-seat",
+        }
+
+        class RuntimeEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "account-runtime",
+                    "lease": entitlement_lease,
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["stable-phone-a"]
+
+            def phone_runtime_authorization(self, device_ids, *, session=None):
+                self.session = session
+                self.device_ids = list(device_ids)
+                return {
+                    "accountId": "account-runtime",
+                    "entitlementLease": entitlement_lease,
+                    "phoneSeatLease": phone_seat_lease,
+                    "authorizedPhoneDeviceIds": ["stable-phone-a"],
+                    "requestedPhoneDeviceIds": list(device_ids),
+                }
+
+        entitlement = RuntimeEntitlement()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                deviceInstanceId="stable-phone-a",
+                ownerAccountId="account-runtime",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(lambda _line: None),
+                [],
+                storage,
+                entitlement_mgr=entitlement,
+            )
+            ctx.get_newapi_account_mgr = lambda: SimpleNamespace(
+                current=lambda: {
+                    "source": "newapi_account",
+                    "memberId": "newapi:account-runtime",
+                    "memberToken": "model-account-token",
+                    "newApi": {
+                        "userId": "account-runtime",
+                        "baseUrl": "https://api.heang.top",
+                    },
+                }
+            )
+
+            env = phone_process_env(ctx, ["phone-a"])
+            runtime = json.loads(env["LOOM_PHONE_RUNTIME_CONFIG_JSON"])
+
+        self.assertEqual(runtime["entitlementLease"], entitlement_lease)
+        self.assertEqual(runtime["phoneSeatLease"], phone_seat_lease)
+        self.assertEqual(runtime["devices"][0]["id"], "phone-a")
+        self.assertEqual(
+            env["LOOM_PHONE_RELAY_PRODUCER_TOKEN"],
+            "model-account-token",
+        )
+        self.assertNotIn("model-account-token", env["LOOM_PHONE_RUNTIME_CONFIG_JSON"])
+        self.assertEqual(entitlement.device_ids, ["stable-phone-a"])
+
     def test_bridge_startup_rebuilds_and_verifies_saved_usb_transport(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []
@@ -1849,6 +3532,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                         "baseUrl": "http://127.0.0.1:19527",
                         "token": "plain-phone-token",
                         "connectionMode": "usb",
+                        "ownerAccountId": "test-account",
                         "adbSerial": "adb-phone-a",
                         "adbLocalPort": 19527,
                         "adbRemotePort": 9528,
@@ -1902,9 +3586,566 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
             self.assertEqual([item["remote_port"] for item in forward_calls], [9528, 9527])
             self.assertTrue(all(not runtime["devices"] for runtime in runtime_during_restore))
-            self.assertEqual(storage[path]["devices"][0]["deviceInstanceId"], "lumi-phone-a")
+            self.assertEqual(
+                storage[path]["devices"][0]["deviceInstanceId"]["__loomSecret"],
+                "dpapi",
+            )
+            self.assertEqual(
+                _load_store(ctx)["devices"][0]["deviceInstanceId"],
+                "lumi-phone-a",
+            )
             self.assertEqual(storage[path]["devices"][0]["adbRemotePort"], 9527)
             self.assertTrue(storage[path]["devices"][0]["usbIdentityVerified"])
+
+    def test_bridge_startup_restores_only_current_accounts_claimed_usb_phones(self) -> None:
+        class AccountAEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "account-a",
+                    "lease": {"accountId": "account-a"},
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["stable-a"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [
+                        _secure_phone_device(
+                            "phone-a",
+                            deviceInstanceId="stable-a",
+                            ownerAccountId="account-a",
+                            connectionMode="usb",
+                            usbIdentityVerified=True,
+                            adbSerial="adb-a",
+                            adbLocalPort=19527,
+                            adbRemotePort=9527,
+                        ),
+                        _secure_phone_device(
+                            "phone-b",
+                            deviceInstanceId="stable-b",
+                            ownerAccountId="account-b",
+                            connectionMode="usb",
+                            usbIdentityVerified=True,
+                            adbSerial="adb-b",
+                            adbLocalPort=29527,
+                            adbRemotePort=9527,
+                        ),
+                    ],
+                },
+            }
+            forward_calls: list[str] = []
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=AccountAEntitlement(),
+            )
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_status=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "forward_missing",
+                },
+                phone_adb_forward=lambda **kwargs: (
+                    forward_calls.append(kwargs["serial"])
+                    or {
+                        "ok": True,
+                        "status": "connected",
+                        "serial": kwargs["serial"],
+                        "localPort": kwargs["local_port"],
+                        "remotePort": kwargs["remote_port"],
+                        "baseUrl": f"http://127.0.0.1:{kwargs['local_port']}",
+                    }
+                ),
+                phone_adb_forward_remove=lambda **_kwargs: {
+                    "ok": True,
+                    "status": "disconnected",
+                },
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+
+            with patch(
+                "api.routes_phone._probe_phone_tunnel",
+                return_value={
+                    "ok": True,
+                    "status": "verified",
+                    "deviceInstanceId": "stable-a",
+                    "listeningPort": 9527,
+                },
+            ):
+                with TestClient(app) as client:
+                    self.assertEqual(client.get("/api/phone/config").status_code, 200)
+                    deadline = time.time() + 2
+                    while time.time() < deadline and not forward_calls:
+                        time.sleep(0.01)
+
+            self.assertEqual(forward_calls, ["adb-a"])
+            devices = {
+                item["id"]: item
+                for item in storage[path]["devices"]
+            }
+            self.assertTrue(devices["phone-a"]["usbIdentityVerified"])
+            self.assertTrue(devices["phone-b"]["usbIdentityVerified"])
+
+    def test_bridge_startup_replaces_cross_account_daemon_without_usb_devices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="test-account",
+                connectionMode="lan",
+            )
+            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            handlers = {
+                handler.__name__: handler
+                for handler in app.router.on_startup
+            }
+
+            async def exercise() -> None:
+                await handlers["reconcile_usb_transport_on_startup"]()
+                await handlers["start_saved_usb_transport_restore"]()
+                task = getattr(app.state, "phone_usb_restore_task", None)
+                if task:
+                    await task
+
+            with (
+                patch(
+                    "api.routes_phone.phone_daemon_status",
+                    return_value={
+                        "ok": True,
+                        "running": True,
+                        "pid": 123,
+                        "port": 9527,
+                        "accountId": "account-other",
+                        "configDigest": "stale-config",
+                    },
+                ),
+                patch(
+                    "api.routes_phone.stop_phone_daemon",
+                    return_value={
+                        "ok": True,
+                        "running": False,
+                        "stopped": True,
+                    },
+                ) as stop,
+                patch(
+                    "api.routes_phone.start_phone_daemon",
+                    return_value={
+                        "ok": True,
+                        "running": True,
+                        "state": "starting",
+                    },
+                ) as start,
+            ):
+                asyncio.run(exercise())
+
+            stop.assert_called_once()
+            self.assertEqual(
+                start.call_args.kwargs["account_id"],
+                "test-account",
+            )
+
+    def test_bridge_usb_restore_rechecks_entitlement_and_removes_new_forward(self) -> None:
+        class RevokedAfterForwardEntitlement:
+            def __init__(self) -> None:
+                self.revoked = False
+
+            def current_state(self, _feature=None):
+                if self.revoked:
+                    return {
+                        "authorized": False,
+                        "source": "account_entitlement",
+                        "accountId": "account-a",
+                        "code": "account_entitlement_revoked",
+                        "message": "矩阵权益已撤销。",
+                        "action": "bind_authorization_code",
+                    }
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "account-a",
+                    "lease": {"accountId": "account-a"},
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                if self.revoked:
+                    raise AccountEntitlementError(
+                        "矩阵权益已撤销。",
+                        code="account_entitlement_revoked",
+                        action="bind_authorization_code",
+                    )
+                return ["stable-a"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [
+                        _secure_phone_device(
+                            "phone-a",
+                            deviceInstanceId="stable-a",
+                            ownerAccountId="account-a",
+                            connectionMode="usb",
+                            usbIdentityVerified=True,
+                            adbSerial="adb-a",
+                            adbLocalPort=19527,
+                            adbRemotePort=9527,
+                        ),
+                    ],
+                },
+            }
+            entitlement = RevokedAfterForwardEntitlement()
+            cleanup_calls: list[dict] = []
+
+            def forward(**kwargs):
+                entitlement.revoked = True
+                return {
+                    "ok": True,
+                    "status": "connected",
+                    "serial": kwargs["serial"],
+                    "localPort": kwargs["local_port"],
+                    "remotePort": kwargs["remote_port"],
+                    "baseUrl": f"http://127.0.0.1:{kwargs['local_port']}",
+                }
+
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=entitlement,
+            )
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_status=lambda **_kwargs: {
+                    "ok": False,
+                    "status": "forward_missing",
+                },
+                phone_adb_forward=forward,
+                phone_adb_forward_remove=lambda **kwargs: (
+                    cleanup_calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            handlers = {
+                handler.__name__: handler
+                for handler in app.router.on_startup
+            }
+
+            async def exercise() -> None:
+                await handlers["reconcile_usb_transport_on_startup"]()
+                await handlers["start_saved_usb_transport_restore"]()
+                task = getattr(app.state, "phone_usb_restore_task", None)
+                if task:
+                    await task
+
+            with (
+                patch(
+                    "api.routes_phone.phone_daemon_status",
+                    return_value={"ok": True, "running": False, "state": "stopped"},
+                ),
+                patch(
+                    "api.routes_phone._probe_phone_tunnel",
+                    side_effect=AssertionError(
+                        "revoked restore must stop before probing the phone"
+                    ),
+                ),
+            ):
+                asyncio.run(exercise())
+
+            self.assertEqual(
+                cleanup_calls,
+                [{"serial": "adb-a", "local_port": 19527}],
+            )
+            self.assertFalse(storage[path]["devices"][0]["usbIdentityVerified"])
+            self.assertTrue(
+                any("authorization changed" in line for line in logs)
+            )
+
+    def test_entitlement_monitor_reaps_jobs_daemon_and_usb_transport_after_revoke(self) -> None:
+        class MutableEntitlement:
+            def __init__(self) -> None:
+                self.authorized = True
+
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": self.authorized,
+                    "source": "account_entitlement",
+                    "accountId": "account-a",
+                    "lease": {"accountId": "account-a"} if self.authorized else None,
+                    "code": "ok" if self.authorized else "account_entitlement_revoked",
+                    "message": "" if self.authorized else "矩阵权益已撤销。",
+                    "action": "" if self.authorized else "bind_authorization_code",
+                    "features": ["matrix.devices"] if self.authorized else [],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                if not self.authorized:
+                    raise AccountEntitlementError(
+                        "矩阵权益已撤销。",
+                        code="account_entitlement_revoked",
+                        action="bind_authorization_code",
+                    )
+                return ["stable-a"]
+
+        class RecordingJobs:
+            def __init__(self) -> None:
+                self.cancelled_kinds: list[str] = []
+                self.cancelled_ids: list[str] = []
+
+            def cancel_matching(self, predicate, *, wait_for_workers=True):
+                del wait_for_workers
+                jobs = [
+                    {"id": "phone-job", "kind": "phone.task"},
+                    {"id": "matrix-job", "kind": "matrix.dispatch"},
+                    {"id": "publish-job", "kind": "publish"},
+                    {"id": "transfer-job", "kind": "media.transfer"},
+                    {
+                        "id": "image-job",
+                        "kind": "media.image",
+                        "progress": {
+                            "requiresPhoneEntitlement": True,
+                            "ownerAccountId": "account-a",
+                            "phoneDeviceIds": ["phone-a"],
+                        },
+                    },
+                    {
+                        "id": "account-b-job",
+                        "kind": "phone.task",
+                        "progress": {
+                            "requiresPhoneEntitlement": True,
+                            "ownerAccountId": "account-b",
+                            "phoneDeviceIds": ["phone-b"],
+                        },
+                    },
+                ]
+                self.cancelled_kinds = [
+                    job["kind"]
+                    for job in jobs
+                    if predicate(job)
+                ]
+                self.cancelled_ids = [
+                    job["id"]
+                    for job in jobs
+                    if predicate(job)
+                ]
+                return list(self.cancelled_ids)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [
+                        _secure_phone_device(
+                            "phone-a",
+                            deviceInstanceId="stable-a",
+                            ownerAccountId="account-a",
+                            connectionMode="usb",
+                            usbIdentityVerified=True,
+                            adbSerial="adb-a",
+                            adbLocalPort=19527,
+                            adbRemotePort=9527,
+                        ),
+                        _secure_phone_device(
+                            "phone-b",
+                            deviceInstanceId="stable-b",
+                            ownerAccountId="account-b",
+                            connectionMode="usb",
+                            usbIdentityVerified=True,
+                            adbSerial="adb-b",
+                            adbLocalPort=19528,
+                            adbRemotePort=9527,
+                        ),
+                    ],
+                },
+            }
+            entitlement = MutableEntitlement()
+            jobs = RecordingJobs()
+            cleanup_calls: list[dict] = []
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=entitlement,
+            )
+            ctx.get_job_mgr = lambda: jobs
+            def remove_usb_forward(**kwargs):
+                cleanup_calls.append(kwargs)
+                return {
+                    "ok": len(cleanup_calls) >= 3,
+                    "status": (
+                        "disconnected"
+                        if len(cleanup_calls) >= 3
+                        else "adb_busy"
+                    ),
+                }
+
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=remove_usb_forward,
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            startup_handlers = {
+                handler.__name__: handler
+                for handler in app.router.on_startup
+            }
+            shutdown_handlers = {
+                handler.__name__: handler
+                for handler in app.router.on_shutdown
+            }
+
+            async def exercise() -> None:
+                await startup_handlers["start_phone_entitlement_monitor"]()
+                entitlement.authorized = False
+                deadline = time.monotonic() + 2
+                while storage[path]["devices"][0]["usbIdentityVerified"]:
+                    if time.monotonic() >= deadline:
+                        break
+                    await asyncio.sleep(0.01)
+                await shutdown_handlers["stop_phone_entitlement_monitor"]()
+
+            with (
+                patch(
+                    "api.routes_phone._PHONE_ENTITLEMENT_MONITOR_SEC",
+                    0.01,
+                    create=True,
+                ),
+                patch(
+                    "api.routes_phone.phone_daemon_status",
+                    return_value={
+                        "ok": True,
+                        "running": True,
+                        "pid": 123,
+                        "port": 9527,
+                        "accountId": "account-a",
+                    },
+                ),
+                patch(
+                    "api.routes_phone.stop_phone_daemon",
+                    return_value={
+                        "ok": True,
+                        "running": False,
+                        "stopped": True,
+                    },
+                ) as stop_daemon,
+            ):
+                asyncio.run(exercise())
+
+            self.assertCountEqual(
+                jobs.cancelled_kinds,
+                [
+                    "phone.task",
+                    "matrix.dispatch",
+                    "publish",
+                    "media.transfer",
+                    "media.image",
+                ],
+            )
+            self.assertNotIn("account-b-job", jobs.cancelled_ids)
+            stop_daemon.assert_called()
+            self.assertEqual(
+                cleanup_calls,
+                [
+                    {"serial": "adb-a", "local_port": 19527},
+                    {"serial": "adb-a", "local_port": 19527},
+                    {"serial": "adb-a", "local_port": 19527},
+                ],
+            )
+            self.assertFalse(storage[path]["devices"][0]["usbIdentityVerified"])
+            self.assertTrue(storage[path]["devices"][1]["usbIdentityVerified"])
+            self.assertTrue(any("runtime reaped" in line for line in logs))
+
+    def test_account_usb_cleanup_retries_and_never_touches_other_account(self) -> None:
+        from api import routes_phone
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "phone-a",
+                    "devices": [
+                        _secure_phone_device(
+                            "phone-a",
+                            ownerAccountId="account-a",
+                            connectionMode="usb",
+                            usbIdentityVerified=True,
+                            adbSerial="adb-a",
+                            adbLocalPort=19527,
+                        ),
+                        _secure_phone_device(
+                            "phone-b",
+                            ownerAccountId="account-b",
+                            connectionMode="usb",
+                            usbIdentityVerified=True,
+                            adbSerial="adb-b",
+                            adbLocalPort=19528,
+                        ),
+                    ],
+                },
+            }
+            calls: list[dict] = []
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+            )
+
+            def remove_forward(**kwargs):
+                calls.append(kwargs)
+                return {
+                    "ok": len(calls) >= 3,
+                    "status": "disconnected" if len(calls) >= 3 else "adb_busy",
+                }
+
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=remove_forward,
+            )
+
+            result = routes_phone.cleanup_phone_usb_for_account(
+                ctx,
+                "account-a",
+            )
+
+            self.assertEqual(
+                calls,
+                [
+                    {"serial": "adb-a", "local_port": 19527},
+                    {"serial": "adb-a", "local_port": 19527},
+                    {"serial": "adb-a", "local_port": 19527},
+                ],
+            )
+            self.assertEqual(result["cleanedDeviceIds"], ["phone-a"])
+            self.assertEqual(result["failedDeviceIds"], [])
+            self.assertFalse(result["executionMayContinue"])
+            decoded = _load_store(ctx)["devices"]
+            self.assertFalse(decoded[0]["usbIdentityVerified"])
+            self.assertTrue(decoded[1]["usbIdentityVerified"])
 
     def test_bridge_startup_blocks_usb_restore_when_previous_daemon_survives(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1918,6 +4159,7 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                         "baseUrl": "http://127.0.0.1:19527",
                         "token": "plain-phone-token",
                         "connectionMode": "usb",
+                        "ownerAccountId": "test-account",
                         "usbIdentityVerified": True,
                         "adbSerial": "adb-phone-a",
                         "adbLocalPort": 19527,
@@ -1999,6 +4241,462 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(current["baseUrl"], "http://127.0.0.1:19527")
             self.assertEqual(current["lanBaseUrl"], "http://192.168.1.88:9527")
 
+    def test_phone_usb_disconnect_rejects_device_owned_by_another_account(self) -> None:
+        class AccountBEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "accountId": "account-b",
+                    "lease": {"accountId": "account-b"},
+                    "code": "authorization_required",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            calls: list[dict] = []
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="account-a",
+                connectionMode="usb",
+                adbSerial="adb-phone-a",
+                adbLocalPort=19527,
+                lanBaseUrl="http://192.168.1.88:9527",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=AccountBEntitlement(),
+            )
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **kwargs: (
+                    calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/phone/usb/disconnect",
+                json={"deviceId": "phone-a", "confirmed": True},
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["code"], "phone_owner_account_mismatch")
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                storage[next(iter(storage))]["devices"][0]["connectionMode"],
+                "usb",
+            )
+
+    def test_expired_owner_can_disconnect_usb_but_cannot_start_execution(self) -> None:
+        class ExpiredEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "code": "account_entitlement_expired",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            calls: list[dict] = []
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="test-account",
+                connectionMode="usb",
+                adbSerial="adb-phone-a",
+                adbLocalPort=19527,
+                lanBaseUrl="http://192.168.1.88:9527",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=ExpiredEntitlement(),
+            )
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **kwargs: (
+                    calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            disconnected = client.post(
+                "/api/phone/usb/disconnect",
+                json={"deviceId": "phone-a", "confirmed": True},
+            )
+            started = client.post("/api/phone/events/start", json={"deviceId": "phone-a"})
+
+            self.assertEqual(disconnected.status_code, 200)
+            self.assertEqual(calls, [{"serial": "adb-phone-a", "local_port": 19527}])
+            self.assertGreaterEqual(started.status_code, 400)
+            self.assertEqual(
+                started.json()["code"],
+                "account_entitlement_expired",
+            )
+
+    def test_expired_owner_can_reconcile_its_pending_usb_cleanup(self) -> None:
+        class ExpiredEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "code": "account_entitlement_expired",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage: dict[str, dict] = {
+                path: {
+                    "selectedDeviceId": "",
+                    "devices": [],
+                    "usbTransportTransactions": [{
+                        "id": "cleanup-expired-owner",
+                        "deviceId": "phone-a",
+                        "operation": "disconnect",
+                        "ownerAccountId": "test-account",
+                        "entitlementDeviceId": "lumi-phone-a",
+                        "serial": "adb-phone-a",
+                        "localPort": 19527,
+                    }],
+                },
+            }
+            calls: list[dict] = []
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=ExpiredEntitlement(),
+            )
+            ctx.get_process_svc = lambda: SimpleNamespace(
+                phone_adb_forward_remove=lambda **kwargs: (
+                    calls.append(kwargs)
+                    or {"ok": True, "status": "disconnected"}
+                ),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post("/api/phone/usb/reconcile")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["recovered"], 1)
+            self.assertEqual(calls, [{"serial": "adb-phone-a", "local_port": 19527}])
+            self.assertNotIn("usbTransportTransactions", storage[path])
+
+    def test_phone_event_stop_rejects_sync_owned_by_another_account(self) -> None:
+        import api.routes_phone as routes_phone
+
+        class Process:
+            def __init__(self) -> None:
+                self.terminated = False
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                del timeout
+                return 0
+
+        class AccountBEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "accountId": "account-b",
+                    "lease": {"accountId": "account-b"},
+                    "code": "authorization_required",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            process = Process()
+            key = routes_phone._phone_event_sync_key("phone-a")
+            routes_phone._PHONE_EVENT_SYNC_STATE[key] = {
+                "process": process,
+                "deviceId": "phone-a",
+                "accountId": "account-a",
+            }
+            ctx = _test_context(
+                temp_dir,
+                JobManager(lambda _message: None),
+                [],
+                entitlement_mgr=AccountBEntitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            try:
+                response = client.post(
+                    "/api/phone/events/stop",
+                    json={"deviceId": "phone-a"},
+                )
+            finally:
+                routes_phone._PHONE_EVENT_SYNC_STATE.pop(key, None)
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["code"], "phone_owner_account_mismatch")
+            self.assertFalse(process.terminated)
+
+    def test_expired_owner_can_stop_its_existing_event_sync(self) -> None:
+        import api.routes_phone as routes_phone
+
+        class Process:
+            def __init__(self) -> None:
+                self.terminated = False
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                del timeout
+                return 0
+
+        class ExpiredEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "code": "account_entitlement_expired",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            process = Process()
+            key = routes_phone._phone_event_sync_key("phone-a")
+            routes_phone._PHONE_EVENT_SYNC_STATE[key] = {
+                "process": process,
+                "deviceId": "phone-a",
+                "accountId": "test-account",
+            }
+            ctx = _test_context(
+                temp_dir,
+                JobManager(lambda _message: None),
+                [],
+                entitlement_mgr=ExpiredEntitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            try:
+                response = client.post(
+                    "/api/phone/events/stop",
+                    json={"deviceId": "phone-a"},
+                )
+            finally:
+                routes_phone._PHONE_EVENT_SYNC_STATE.pop(key, None)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(process.terminated)
+
+    def test_phone_daemon_stop_rejects_runtime_owned_by_another_account(self) -> None:
+        class AccountBEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "accountId": "account-b",
+                    "lease": {"accountId": "account-b"},
+                    "code": "authorization_required",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stop_calls: list[dict] = []
+            ctx = _test_context(
+                temp_dir,
+                JobManager(lambda _message: None),
+                [],
+                entitlement_mgr=AccountBEntitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            with (
+                patch(
+                    "api.routes_phone.phone_daemon_status",
+                    return_value={
+                        "ok": True,
+                        "running": True,
+                        "accountId": "account-a",
+                    },
+                ),
+                patch(
+                    "api.routes_phone.stop_phone_daemon",
+                    side_effect=lambda **kwargs: (
+                        stop_calls.append(kwargs)
+                        or {"ok": True, "running": False, "stopped": True}
+                    ),
+                ),
+            ):
+                response = client.post("/api/phone/daemon/stop")
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["code"], "phone_owner_account_mismatch")
+            self.assertEqual(stop_calls, [])
+
+    def test_expired_owner_can_stop_its_daemon_but_cannot_start_one(self) -> None:
+        class ExpiredEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "code": "account_entitlement_expired",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx = _test_context(
+                temp_dir,
+                JobManager(lambda _message: None),
+                [],
+                entitlement_mgr=ExpiredEntitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            with (
+                patch(
+                    "api.routes_phone.phone_daemon_status",
+                    return_value={
+                        "ok": True,
+                        "running": True,
+                        "accountId": "test-account",
+                    },
+                ),
+                patch(
+                    "api.routes_phone.stop_phone_daemon",
+                    return_value={
+                        "ok": True,
+                        "running": False,
+                        "stopped": True,
+                    },
+                ) as stop_daemon,
+                patch("api.routes_phone.start_phone_daemon") as start_daemon,
+            ):
+                stopped = client.post("/api/phone/daemon/stop")
+                started = client.post("/api/phone/daemon/start")
+
+            self.assertEqual(stopped.status_code, 200)
+            stop_daemon.assert_called_once()
+            self.assertGreaterEqual(started.status_code, 400)
+            self.assertEqual(
+                started.json()["code"],
+                "account_entitlement_expired",
+            )
+            start_daemon.assert_not_called()
+
+    def test_cleanup_denies_stale_entitlement_owner_after_session_switch(self) -> None:
+        class StaleAccountAEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "accountId": "account-a",
+                    "lease": {"accountId": "account-a"},
+                    "code": "account_entitlement_expired",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx = _test_context(
+                temp_dir,
+                JobManager(lambda _message: None),
+                [],
+                entitlement_mgr=StaleAccountAEntitlement(),
+            )
+            ctx.get_newapi_account_mgr = lambda: SimpleNamespace(
+                current=lambda: {
+                    "memberId": "newapi:account-b",
+                    "memberToken": "account-b-token",
+                    "newApi": {"userId": "account-b"},
+                }
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            with (
+                patch(
+                    "api.routes_phone.phone_daemon_status",
+                    return_value={
+                        "ok": True,
+                        "running": True,
+                        "accountId": "account-a",
+                    },
+                ),
+                patch("api.routes_phone.stop_phone_daemon") as stop_daemon,
+            ):
+                response = client.post("/api/phone/daemon/stop")
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(
+                response.json()["code"],
+                "phone_owner_account_mismatch",
+            )
+            stop_daemon.assert_not_called()
+
+    def test_phone_daemon_status_rejects_runtime_owned_by_another_account(self) -> None:
+        class AccountBEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "account-b",
+                    "lease": {"accountId": "account-b"},
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx = _test_context(
+                temp_dir,
+                JobManager(lambda _message: None),
+                [],
+                entitlement_mgr=AccountBEntitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            with patch(
+                "api.routes_phone.phone_daemon_status",
+                return_value={
+                    "ok": True,
+                    "running": True,
+                    "accountId": "account-a",
+                    "pid": 123,
+                    "port": 9527,
+                },
+            ):
+                response = client.get("/api/phone/daemon/status")
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["code"], "phone_owner_account_mismatch")
+            self.assertNotIn("pid", response.json())
+            self.assertNotIn("port", response.json())
+
     def test_phone_usb_connect_requires_explicit_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []
@@ -2028,6 +4726,8 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                             "name": "Legacy Phone",
                             "baseUrl": "http://192.168.1.89:9527",
                             "token": "legacy-token",
+                            "deviceInstanceId": "legacy-device-identity",
+                            "ownerAccountId": "legacy-account",
                         }
                     ],
                 }
@@ -2051,14 +4751,49 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(loaded.status_code, 200)
             self.assertFalse(loaded.json()["configured"])
             self.assertTrue(loaded.json()["devices"][0]["legacyUnpaired"])
-            self.assertNotIn("legacy-token", json.dumps(storage[path], ensure_ascii=False))
+            serialized = json.dumps(storage[path], ensure_ascii=False)
+            self.assertNotIn("legacy-token", serialized)
+            self.assertNotIn("legacy-device-identity", serialized)
+            self.assertNotIn("legacy-account", serialized)
+            self.assertEqual(
+                storage[path]["devices"][0]["deviceInstanceId"]["__loomSecret"],
+                "dpapi",
+            )
+            self.assertEqual(
+                storage[path]["devices"][0]["ownerAccountId"]["__loomSecret"],
+                "dpapi",
+            )
 
     def test_phone_config_delete_removes_credentials_and_live_matrix_card(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logs: list[str] = []
             storage: dict[str, dict] = {}
+            entitlement_calls: list[tuple[list[str], str]] = []
+
+            class Entitlement:
+                def current_state(self, _feature=None):
+                    return {
+                        "authorized": True,
+                        "source": "account_entitlement",
+                        "accountId": "test-account",
+                        "lease": {"accountId": "test-account"},
+                    }
+
+                def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                    entitlement_calls.append((list(device_ids), operation))
+                    return {
+                        "authorized": True,
+                        "accountId": "test-account",
+                    }
+
             app = FastAPI()
-            ctx = _test_context(temp_dir, JobManager(logs.append), logs, storage)
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=Entitlement(),
+            )
             for device_id in ("phone-a", "phone-b"):
                 _seed_secure_phone(
                     storage,
@@ -2066,13 +4801,17 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     device_id,
                     base_url="http://127.0.0.1:19527",
                     token=f"token-{device_id}",
+                    ownerAccountId="test-account",
                 )
             register_phone_routes(app, ctx)
             client = TestClient(app)
 
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(ctx.paths)
+            matrix = matrix_for_test(
+                ctx.paths,
+                owner_account_id="test-account",
+            )
             matrix.register_device({"deviceId": "phone-a", "online": True})
             matrix.append_runtime_event("phone.task.complete", "phone-a", "historical result")
 
@@ -2086,6 +4825,113 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertNotIn("phone-a", repr(stored))
             self.assertNotIn("phone-a", [item["deviceId"] for item in matrix.status()["devices"]])
             self.assertEqual(matrix.watch()["events"][-1]["message"], "historical result")
+            self.assertEqual(
+                entitlement_calls,
+                [(["lumi-phone-a"], "matrix.device.release")],
+            )
+
+    def test_phone_config_delete_remains_available_when_entitlement_is_inactive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            queued: list[tuple[list[str], str]] = []
+
+            class InactiveEntitlement:
+                def current_state(self, _feature=None):
+                    return {
+                        "authorized": False,
+                        "source": "account_entitlement",
+                        "accountId": "account-a",
+                        "lease": {"accountId": "account-a"},
+                        "code": "authorization_required",
+                    }
+
+                def authorize_phone_devices(self, _device_ids, _operation, *, session=None):
+                    raise AccountEntitlementError(
+                        "当前账号尚未激活手机矩阵。",
+                        code="authorization_required",
+                        action="bind_authorization_code",
+                    )
+
+                def queue_phone_device_release(self, device_ids, *, reason=""):
+                    queued.append((list(device_ids), reason))
+
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=InactiveEntitlement(),
+            )
+            ctx.get_newapi_account_mgr = lambda: SimpleNamespace(
+                current=lambda: {
+                    "memberId": "newapi:account-a",
+                    "memberToken": "account-a-token",
+                    "newApi": {"userId": "account-a"},
+                }
+            )
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                base_url="http://127.0.0.1:19527",
+                token="token-phone-a",
+                ownerAccountId="account-a",
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            deleted = client.delete("/api/phone/config/device/phone-a")
+
+            self.assertEqual(deleted.status_code, 200)
+            self.assertEqual(deleted.json()["devices"], [])
+            self.assertTrue(deleted.json()["entitlementReleaseDeferred"])
+            self.assertEqual(
+                queued,
+                [(["lumi-phone-a"], "phone_config_delete")],
+            )
+            self.assertTrue(any("authorization_required" in item for item in logs))
+
+    def test_phone_config_delete_rejects_device_owned_by_another_account(self) -> None:
+        class AccountBEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": False,
+                    "source": "account_entitlement",
+                    "accountId": "account-b",
+                    "lease": {"accountId": "account-b"},
+                    "code": "account_entitlement_revoked",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            storage: dict[str, dict] = {}
+            _seed_secure_phone(
+                storage,
+                temp_dir,
+                "phone-a",
+                ownerAccountId="account-a",
+            )
+            ctx = _test_context(
+                temp_dir,
+                JobManager(logs.append),
+                logs,
+                storage,
+                entitlement_mgr=AccountBEntitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            deleted = client.delete("/api/phone/config/device/phone-a")
+
+            self.assertEqual(deleted.status_code, 409)
+            self.assertEqual(
+                deleted.json()["code"],
+                "phone_owner_account_mismatch",
+            )
+            self.assertEqual(len(storage[next(iter(storage))]["devices"]), 1)
 
     def test_phone_config_delete_removes_active_usb_forward(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2226,7 +5072,10 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
 
             from core.phone_matrix import MatrixControlPlane
 
-            matrix = MatrixControlPlane(ctx.paths)
+            matrix = matrix_for_test(
+                ctx.paths,
+                owner_account_id="test-account",
+            )
             self.assertEqual(len(matrix.watch()["events"]), 1)
             self.assertEqual(matrix.status()["devices"][0]["currentPackage"], "com.demo")
 
@@ -2242,6 +5091,31 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
         self.assertIn('"token": "[redacted]"', cleaned)
         self.assertIn('"apiKey": "[redacted]"', cleaned)
         self.assertIn('"Authorization": "[redacted]"', cleaned)
+
+    def test_cli_output_sanitizer_redacts_known_phone_secrets_without_field_labels(self) -> None:
+        ctx = SimpleNamespace(sanitize_text=lambda value: value)
+        raw = (
+            "unexpected echo: phone-token-literal and launcher-secret-literal "
+            "inside a free-form model answer"
+        )
+
+        with patch(
+            "api.routes_phone._load_store",
+            return_value={
+                "devices": [
+                    {
+                        "id": "phone-a",
+                        "token": "phone-token-literal",
+                        "launcherSecret": "launcher-secret-literal",
+                    }
+                ]
+            },
+        ):
+            cleaned = _sanitize_cli_output(ctx, raw, kind="phone.task")
+
+        self.assertNotIn("phone-token-literal", cleaned)
+        self.assertNotIn("launcher-secret-literal", cleaned)
+        self.assertGreaterEqual(cleaned.count("[redacted]"), 2)
 
     def test_cli_output_sanitizer_preserves_json_around_inline_assignment_examples(self) -> None:
         from bridge import _sanitize_text
@@ -2315,6 +5189,79 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
         self.assertTrue(snapshot["devices"][0]["paired"])
         self.assertNotIn("token", snapshot["devices"][0])
         self.assertNotIn("launcherSecret", snapshot["devices"][0])
+
+    def test_phone_status_remembers_all_lan_candidates_without_rotating_pairing_identity(self) -> None:
+        store = {
+            "selectedDeviceId": "phone-a",
+            "devices": [_secure_phone_device(
+                "phone-a",
+                base_url="http://127.0.0.1:19631",
+                connectionMode="usb",
+                adbLocalPort=19631,
+            )],
+        }
+        stdout = json.dumps({
+            "ok": True,
+            "results": [{
+                "ok": True,
+                "device": {"id": "phone-a"},
+                "status": {
+                    "configServerRunning": True,
+                    "configServerPort": 9527,
+                    "networkMode": "hotspot-host",
+                    "networkCandidates": [{
+                        "interface": "ap0",
+                        "address": "192.168.43.1",
+                        "mode": "hotspot-host",
+                        "baseUrl": "http://192.168.43.1:9527",
+                    }],
+                },
+            }],
+        })
+
+        with (
+            patch("api.routes_phone._load_store", return_value=store),
+            patch("api.routes_phone._write_phone_store") as write_store,
+        ):
+            changed = _remember_phone_connection_candidates(SimpleNamespace(), stdout, "phone-a")
+
+        self.assertTrue(changed)
+        saved = write_store.call_args.args[1]["devices"][0]
+        self.assertEqual(store["devices"][0]["token"], saved["token"])
+        self.assertEqual(store["devices"][0]["launcherSecret"], saved["launcherSecret"])
+        self.assertEqual("hotspot-host", saved["lastNetworkMode"])
+        self.assertEqual(["http://192.168.43.1:9527"], saved["lanBaseUrls"])
+
+    def test_transport_refresh_keeps_usb_preferred_without_changing_pairing_identity(self) -> None:
+        device = _secure_phone_device(
+            "phone-a",
+            base_url="http://127.0.0.1:19631",
+            connectionMode="usb",
+            adbLocalPort=19631,
+            networkCandidates=[{
+                "baseUrl": "http://192.168.43.1:9527",
+                "mode": "hotspot-host",
+                "interface": "ap0",
+            }],
+            networkCandidatesObservedAt=0,
+        )
+        store = {"selectedDeviceId": "phone-a", "devices": [device]}
+
+        with (
+            patch("api.routes_phone._load_store", return_value=store),
+            patch("api.routes_phone._write_phone_store") as write_store,
+        ):
+            result = _refresh_phone_transport(
+                SimpleNamespace(read_json=lambda *_args: {}, write_json=lambda *_args: None),
+                "phone-a",
+                probe=lambda url: {"ok": True, "baseUrl": url, "deviceInstanceId": device["deviceInstanceId"]},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("usb-loopback", result["activeTransport"])
+        saved = write_store.call_args.args[1]["devices"][0]
+        self.assertEqual("http://127.0.0.1:19631", saved["baseUrl"])
+        self.assertEqual(device["launcherSecret"], saved["launcherSecret"])
 
     def test_phone_status_route_submits_phone_service_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2405,7 +5352,26 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             register_job_routes(app, ctx)
             client = TestClient(app)
 
-            with patch("api.routes_phone.unprotect_secret", return_value="plain-phone-token"):
+            def protect(value):
+                return {
+                    "__loomSecret": "dpapi",
+                    "value": str(value).encode("utf-8").hex(),
+                }
+
+            def unprotect(value):
+                if not isinstance(value, dict):
+                    return str(value or "")
+                raw = str(value.get("value") or "")
+                if raw == "encrypted-token":
+                    return "plain-phone-token"
+                if raw == "encrypted-launcher-secret":
+                    return "plain-launcher-secret"
+                return bytes.fromhex(raw).decode("utf-8")
+
+            with patch("api.routes_phone.protect_secret", side_effect=protect), patch(
+                "api.routes_phone.unprotect_secret",
+                side_effect=unprotect,
+            ):
                 submitted = client.post("/api/phone/status", json={"deviceId": "phone-secure"})
                 job = _wait_for_job(client, submitted.json()["jobId"])
 
@@ -2426,6 +5392,13 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 shutil.copyfile(
                     os.path.join(LAUNCHER_DIR, "scripts", script_name),
                     os.path.join(scripts_dir, script_name),
+                )
+            lib_dir = os.path.join(scripts_dir, "lib")
+            os.makedirs(lib_dir, exist_ok=True)
+            for script_name in ("phone-command-core.mjs", "phone-progress-log.mjs"):
+                shutil.copyfile(
+                    os.path.join(LAUNCHER_DIR, "scripts", "lib", script_name),
+                    os.path.join(lib_dir, script_name),
                 )
 
             server_loop_ready = threading.Event()
@@ -2467,34 +5440,37 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     server_loop_ready.wait(timeout=10.0),
                     "stalled phone status test server did not enter serve_forever",
                 )
-                config_dir = os.path.join(temp_dir, "data", ".openclaw", "launcher")
-                os.makedirs(config_dir, exist_ok=True)
-                with open(os.path.join(config_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
-                    json.dump(
-                        {
-                            "selectedDeviceId": "phone-stalled",
-                            "devices": [{
-                                "id": "phone-stalled",
-                                "name": "Stalled phone",
-                                "baseUrl": f"http://127.0.0.1:{server.server_port}",
-                                "token": "phone-stalled-token",
-                            }],
-                        },
-                        handle,
-                    )
-
                 logs: list[str] = []
                 job_mgr = JobManager(logs.append)
                 app = FastAPI()
-                ctx = _test_context(temp_dir, job_mgr, logs)
+                storage = {
+                    os.path.join(temp_dir, "phone-agents.json"): {
+                        "selectedDeviceId": "phone-stalled",
+                        "devices": [_secure_phone_device(
+                            "phone-stalled",
+                            name="Stalled phone",
+                            base_url=f"http://127.0.0.1:{server.server_port}",
+                            token="phone-stalled-token",
+                            ownerAccountId="test-account",
+                        )],
+                    },
+                }
+                ctx = _test_context(temp_dir, job_mgr, logs, storage)
                 ctx.paths.node_exe = shutil.which("node") or ""
                 register_phone_routes(app, ctx)
                 register_job_routes(app, ctx)
+                runtime_env = _signed_node_runtime_test_env(
+                    temp_dir,
+                    ["lumi-phone-stalled"],
+                )
 
                 outer_timeout_sec = 8.0
                 inner_timeout_ms = _phone_status_request_timeout_ms(outer_timeout_sec)
                 self.assertLess(inner_timeout_ms, outer_timeout_sec * 1000)
-                with patch("api.routes_phone._PHONE_DIRECT_STEP_TIMEOUT_SEC", outer_timeout_sec):
+                with patch.dict(os.environ, runtime_env), patch(
+                    "api.routes_phone._PHONE_DIRECT_STEP_TIMEOUT_SEC",
+                    outer_timeout_sec,
+                ):
                     with TestClient(app) as client:
                         submitted = client.post(
                             "/api/phone/status",
@@ -2523,6 +5499,13 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 shutil.copyfile(
                     os.path.join(LAUNCHER_DIR, "scripts", script_name),
                     os.path.join(scripts_dir, script_name),
+                )
+            lib_dir = os.path.join(scripts_dir, "lib")
+            os.makedirs(lib_dir, exist_ok=True)
+            for script_name in ("phone-command-core.mjs", "phone-progress-log.mjs"):
+                shutil.copyfile(
+                    os.path.join(LAUNCHER_DIR, "scripts", "lib", script_name),
+                    os.path.join(lib_dir, script_name),
                 )
 
             requests: list[str] = []
@@ -2559,50 +5542,52 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                     server_loop_ready.wait(timeout=10.0),
                     "phone status test server did not enter serve_forever",
                 )
-                config_dir = os.path.join(temp_dir, "data", ".openclaw", "launcher")
-                os.makedirs(config_dir, exist_ok=True)
-                with open(os.path.join(config_dir, "phone-agents.json"), "w", encoding="utf-8") as handle:
-                    json.dump(
-                        {
-                            "selectedDeviceId": "phone-1",
-                            "devices": [
-                                {
-                                    "id": "phone-1",
-                                    "name": "Offline phone",
-                                    "baseUrl": "http://127.0.0.1:1",
-                                    "token": "phone-1-token",
-                                },
-                                {
-                                    "id": "phone-2",
-                                    "name": "Requested phone",
-                                    "baseUrl": f"http://127.0.0.1:{server.server_port}",
-                                    "token": "phone-2-token",
-                                },
-                            ],
-                        },
-                        handle,
-                    )
-
                 logs: list[str] = []
                 job_mgr = JobManager(logs.append)
                 app = FastAPI()
-                ctx = _test_context(temp_dir, job_mgr, logs)
+                storage = {
+                    os.path.join(temp_dir, "phone-agents.json"): {
+                        "selectedDeviceId": "phone-1",
+                        "devices": [
+                            _secure_phone_device(
+                                "phone-1",
+                                name="Offline phone",
+                                base_url="http://127.0.0.1:1",
+                                token="phone-1-token",
+                                ownerAccountId="test-account",
+                            ),
+                            _secure_phone_device(
+                                "phone-2",
+                                name="Requested phone",
+                                base_url=f"http://127.0.0.1:{server.server_port}",
+                                token="phone-2-token",
+                                ownerAccountId="test-account",
+                            ),
+                        ],
+                    },
+                }
+                ctx = _test_context(temp_dir, job_mgr, logs, storage)
                 ctx.paths.node_exe = shutil.which("node") or ""
                 register_phone_routes(app, ctx)
                 register_job_routes(app, ctx)
+                runtime_env = _signed_node_runtime_test_env(
+                    temp_dir,
+                    ["lumi-phone-2"],
+                )
 
-                with TestClient(app) as client:
-                    submitted = client.post("/api/phone/status", json={"deviceId": "phone-2"})
-                    job_id = submitted.json()["jobId"]
-                    try:
-                        job = _wait_for_job(client, job_id, timeout=30.0)
-                    except AssertionError as error:
-                        snapshot = client.get(f"/api/jobs/{job_id}")
-                        pending_job = snapshot.json().get("job", {}) if snapshot.status_code == 200 else {}
-                        self.fail(
-                            f"{error}; "
-                            f"diagnostics={_phone_job_failure_diagnostics(ctx, pending_job, logs)}"
-                        )
+                with patch.dict(os.environ, runtime_env):
+                    with TestClient(app) as client:
+                        submitted = client.post("/api/phone/status", json={"deviceId": "phone-2"})
+                        job_id = submitted.json()["jobId"]
+                        try:
+                            job = _wait_for_job(client, job_id, timeout=30.0)
+                        except AssertionError as error:
+                            snapshot = client.get(f"/api/jobs/{job_id}")
+                            pending_job = snapshot.json().get("job", {}) if snapshot.status_code == 200 else {}
+                            self.fail(
+                                f"{error}; "
+                                f"diagnostics={_phone_job_failure_diagnostics(ctx, pending_job, logs)}"
+                            )
             finally:
                 server.shutdown()
                 server.server_close()
@@ -2651,7 +5636,10 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(job["status"], "succeeded")
             from core.phone_matrix import MatrixControlPlane
 
-            status = MatrixControlPlane(ctx.paths).status()
+            status = matrix_for_test(
+                ctx.paths,
+                owner_account_id="test-account",
+            ).status()
             self.assertEqual(status["summary"]["online"], 1)
             self.assertTrue(status["devices"][0]["online"])
             self.assertEqual(status["devices"][0]["deviceId"], "phone-1")
@@ -2680,6 +5668,90 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             job = _wait_for_job(client, payload["jobId"])
             self.assertEqual(job["status"], "succeeded")
             self.assertEqual(json.loads(job["result"]["stdout"])["argv"], ["list", "--json"])
+
+    def test_phone_devices_route_exposes_only_account_claimed_runtime_devices(self) -> None:
+        class ClaimedEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "accountId": "account-a",
+                    "lease": {"accountId": "account-a"},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["stable-a"]
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                self.last_authorized = (list(device_ids), operation)
+                return {
+                    "authorized": True,
+                    "accountId": "account-a",
+                    "limits": {"devices": 1, "concurrentTasks": 1},
+                }
+
+            def phone_runtime_authorization(self, device_ids, *, session=None):
+                del session
+                return {
+                    "accountId": "account-a",
+                    "entitlementLease": {"accountId": "account-a"},
+                    "phoneSeatLease": {
+                        "accountId": "account-a",
+                        "phoneDeviceIds": list(device_ids),
+                    },
+                    "authorizedPhoneDeviceIds": list(device_ids),
+                    "requestedPhoneDeviceIds": list(device_ids),
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            with open(
+                os.path.join(scripts_dir, "openclaw-phone-fleet.mjs"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write(
+                    "import json, os\n"
+                    "runtime = json.loads(os.environ['LOOM_PHONE_RUNTIME_CONFIG_JSON'])\n"
+                    "print(json.dumps({'deviceIds': [item['id'] for item in runtime['devices']]}, ensure_ascii=False))\n"
+                )
+            path = os.path.join(temp_dir, "phone-agents.json")
+            storage = {
+                path: {
+                    "selectedDeviceId": "phone-b",
+                    "devices": [
+                        _secure_phone_device(
+                            "phone-a",
+                            deviceInstanceId="stable-a",
+                        ),
+                        _secure_phone_device(
+                            "phone-b",
+                            deviceInstanceId="stable-b",
+                        ),
+                    ],
+                }
+            }
+            entitlement = ClaimedEntitlement()
+            logs: list[str] = []
+            job_mgr = JobManager(logs.append)
+            app = FastAPI()
+            ctx = _test_context(
+                temp_dir,
+                job_mgr,
+                logs,
+                storage,
+                entitlement_mgr=entitlement,
+            )
+            register_phone_routes(app, ctx)
+            register_job_routes(app, ctx)
+            client = TestClient(app)
+
+            submitted = client.post("/api/phone/devices")
+            job = _wait_for_job(client, submitted.json()["jobId"])
+
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(json.loads(job["result"]["stdout"])["deviceIds"], ["phone-a"])
+        self.assertEqual(entitlement.last_authorized, (["stable-a"], "phone.devices"))
 
     def test_phone_metrics_route_submits_agent_metrics_command(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2952,6 +6024,38 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(job["result"]["cacheHit"], False)
             self.assertGreaterEqual(job["result"]["metrics"]["screenshotMs"], 0)
 
+    def test_phone_screenshot_denied_by_entitlement_before_job_submission(self) -> None:
+        class DeniedEntitlement:
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                raise AccountEntitlementError(
+                    "当前账号尚未激活手机矩阵。",
+                    code="authorization_required",
+                    action="bind_authorization_code",
+                    details={"phoneDeviceIds": list(device_ids)},
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs: list[str] = []
+            job_mgr = JobManager(logs.append)
+            ctx = _test_context(
+                temp_dir,
+                job_mgr,
+                logs,
+                entitlement_mgr=DeniedEntitlement(),
+            )
+            app = FastAPI()
+            register_phone_routes(app, ctx)
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/phone/screenshot",
+                json={"deviceId": "phone-second"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "authorization_required")
+        self.assertEqual(job_mgr.list(), [])
+
     def test_phone_screenshot_route_passes_decrypted_runtime_config_to_vision_process(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scripts_dir = os.path.join(temp_dir, "scripts")
@@ -2988,7 +6092,26 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             register_job_routes(app, ctx)
             client = TestClient(app)
 
-            with patch("api.routes_phone.unprotect_secret", return_value="plain-phone-token"):
+            def protect(value):
+                return {
+                    "__loomSecret": "dpapi",
+                    "value": str(value).encode("utf-8").hex(),
+                }
+
+            def unprotect(value):
+                if not isinstance(value, dict):
+                    return str(value or "")
+                raw = str(value.get("value") or "")
+                if raw == "encrypted-token":
+                    return "plain-phone-token"
+                if raw == "encrypted-launcher-secret":
+                    return "plain-launcher-secret"
+                return bytes.fromhex(raw).decode("utf-8")
+
+            with patch("api.routes_phone.protect_secret", side_effect=protect), patch(
+                "api.routes_phone.unprotect_secret",
+                side_effect=unprotect,
+            ):
                 submitted = client.post("/api/phone/screenshot", json={"deviceId": "phone-secure"}).json()
                 job = _wait_for_job(client, submitted["jobId"])
 
@@ -3081,6 +6204,81 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
             self.assertEqual(second_job["result"]["mode"], "screenshot")
             self.assertEqual(second_job["result"]["currentStep"], "cache")
 
+    def test_phone_screenshot_cache_is_isolated_between_accounts(self) -> None:
+        class AccountEntitlement:
+            def __init__(self, account_id: str):
+                self.account_id = account_id
+
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "accountId": self.account_id,
+                    "lease": {"accountId": self.account_id},
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def authorize_phone_devices(self, _device_ids, _operation, *, session=None):
+                return {
+                    "authorized": True,
+                    "accountId": self.account_id,
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                return ["phone-1"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts_dir = os.path.join(temp_dir, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            counter_path = os.path.join(temp_dir, "screenshot-count.txt")
+            with open(
+                os.path.join(scripts_dir, "openclaw-phone-vision.mjs"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write(
+                    "import json, os\n"
+                    f"path = {counter_path!r}\n"
+                    "count = int(open(path, 'r', encoding='utf-8').read()) if os.path.exists(path) else 0\n"
+                    "count += 1\n"
+                    "open(path, 'w', encoding='utf-8').write(str(count))\n"
+                    "print(json.dumps({'ok': True, 'screenHash': 'shared-hash', "
+                    "'frame': {'screenHash': 'shared-hash', 'imageOmitted': True}}))\n"
+                )
+
+            def client_for(account_id: str) -> TestClient:
+                logs: list[str] = []
+                job_mgr = JobManager(logs.append)
+                app = FastAPI()
+                ctx = _test_context(
+                    temp_dir,
+                    job_mgr,
+                    logs,
+                    entitlement_mgr=AccountEntitlement(account_id),
+                )
+                register_phone_routes(app, ctx)
+                register_job_routes(app, ctx)
+                return TestClient(app)
+
+            client_a = client_for("account-a")
+            first = client_a.post(
+                "/api/phone/screenshot",
+                json={"screenHash": "shared-hash"},
+            ).json()
+            _wait_for_job(client_a, first["jobId"])
+
+            client_b = client_for("account-b")
+            second = client_b.post(
+                "/api/phone/screenshot",
+                json={"screenHash": "shared-hash"},
+            ).json()
+            second_job = _wait_for_job(client_b, second["jobId"])
+
+            with open(counter_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "2")
+            self.assertFalse(second_job["result"]["metrics"]["cacheHit"])
+
     def test_phone_screenshot_reuses_screen_hash_returned_by_previous_screenshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scripts_dir = os.path.join(temp_dir, "scripts")
@@ -3158,8 +6356,16 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 store_path: {
                     "selectedDeviceId": "phone-a",
                     "devices": [
-                        {"id": "phone-a", "name": "Phone A", "baseUrl": "http://127.0.0.1:19527"},
-                        {"id": "phone-b", "name": "Phone B", "baseUrl": "http://127.0.0.1:29527"},
+                        _secure_phone_device(
+                            "phone-a",
+                            name="Phone A",
+                            base_url="http://127.0.0.1:19527",
+                        ),
+                        _secure_phone_device(
+                            "phone-b",
+                            name="Phone B",
+                            base_url="http://127.0.0.1:29527",
+                        ),
                     ],
                 }
             }
@@ -3209,8 +6415,16 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
                 store_path: {
                     "selectedDeviceId": "phone-a",
                     "devices": [
-                        {"id": "phone-a", "name": "Phone A", "baseUrl": "http://127.0.0.1:19527"},
-                        {"id": "phone-b", "name": "Phone B", "baseUrl": "http://127.0.0.1:29527"},
+                        _secure_phone_device(
+                            "phone-a",
+                            name="Phone A",
+                            base_url="http://127.0.0.1:19527",
+                        ),
+                        _secure_phone_device(
+                            "phone-b",
+                            name="Phone B",
+                            base_url="http://127.0.0.1:29527",
+                        ),
                     ],
                 }
             }
@@ -5102,8 +8316,88 @@ class PhoneRouteSnapshotTests(unittest.TestCase):
         self.assertNotIn("sk-test-token", serialized)
 
 
-def _test_context(base_path: str, job_mgr: JobManager, logs: list[str], storage: dict[str, dict] | None = None) -> SimpleNamespace:
+def _test_context(
+    base_path: str,
+    job_mgr: JobManager,
+    logs: list[str],
+    storage: dict[str, dict] | None = None,
+    *,
+    entitlement_mgr=None,
+) -> SimpleNamespace:
     storage = storage if storage is not None else {}
+    if entitlement_mgr is None:
+        class AllowEntitlement:
+            def current_state(self, _feature=None):
+                return {
+                    "authorized": True,
+                    "source": "account_entitlement",
+                    "accountId": "test-account",
+                    "lease": {"accountId": "test-account"},
+                    "features": ["matrix.devices"],
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                return {
+                    "authorized": True,
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            def claimed_phone_device_ids(self):
+                import api.routes_phone as routes_phone
+
+                claimed: list[str] = []
+                for payload in storage.values():
+                    if not isinstance(payload, dict):
+                        continue
+                    for device in payload.get("devices", []):
+                        if not isinstance(device, dict):
+                            continue
+                        value = device.get("deviceInstanceId")
+                        if isinstance(value, dict):
+                            try:
+                                value = routes_phone.unprotect_secret(value)
+                            except (OSError, TypeError, ValueError):
+                                value = ""
+                        value = str(value or device.get("id") or "").strip()
+                        if value:
+                            claimed.append(value)
+                return claimed or ["phone-1"]
+
+            def phone_runtime_authorization(self, device_ids, *, session=None):
+                del session
+                entitlement_path = os.path.join(
+                    base_path,
+                    "data",
+                    "account-entitlement.json",
+                )
+                seat_path = os.path.join(
+                    base_path,
+                    "data",
+                    "account-phone-seat-lease.json",
+                )
+                entitlement_lease = read_json(
+                    entitlement_path,
+                    {"accountId": "test-account"},
+                )
+                phone_seat_lease = read_json(
+                    seat_path,
+                    {
+                        "accountId": "test-account",
+                        "phoneDeviceIds": list(device_ids),
+                    },
+                )
+                return {
+                    "accountId": "test-account",
+                    "entitlementLease": entitlement_lease,
+                    "phoneSeatLease": phone_seat_lease,
+                    "authorizedPhoneDeviceIds": list(
+                        phone_seat_lease.get("phoneDeviceIds") or []
+                    ),
+                    "requestedPhoneDeviceIds": list(device_ids),
+                }
+
+        entitlement_mgr = AllowEntitlement()
 
     async def body(request):
         try:
@@ -5117,7 +8411,7 @@ def _test_context(base_path: str, job_mgr: JobManager, logs: list[str], storage:
         payload["_meta"] = {"ok": 200 <= status_code < 400 and "error" not in payload, "status": status_code}
         return JSONResponse(status_code=status_code, content=payload)
 
-    return SimpleNamespace(
+    context = SimpleNamespace(
         append_log=logs.append,
         auth_error=lambda _request: None,
         body=body,
@@ -5128,6 +8422,19 @@ def _test_context(base_path: str, job_mgr: JobManager, logs: list[str], storage:
         write_json=lambda path, data: storage.__setitem__(path, data),
         sanitize_text=lambda text: text,
     )
+    context.get_entitlement_mgr = lambda: entitlement_mgr
+    context.get_newapi_account_mgr = lambda: SimpleNamespace(
+        current=lambda: {
+            "source": "newapi_account",
+            "memberId": "newapi:test-account",
+            "memberToken": "routes-phone-node-runtime-test-session",
+            "newApi": {
+                "userId": "test-account",
+                "baseUrl": "https://api.heang.top",
+            },
+        }
+    )
+    return context
 
 
 def _wait_for_path(path: str, timeout: float = 3.0) -> bool:
@@ -5142,6 +8449,19 @@ def _wait_for_path(path: str, timeout: float = 3.0) -> bool:
 def _read_pid(path: str) -> int:
     with open(path, "r", encoding="utf-8") as handle:
         return int(handle.read())
+
+
+def _wait_for_pid(path: str, timeout: float = 3.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            pid = _read_pid(path)
+        except (FileNotFoundError, ValueError):
+            pid = 0
+        if pid > 0:
+            return pid
+        time.sleep(0.01)
+    return 0
 
 
 def _process_is_running(pid: int) -> bool:
@@ -5183,12 +8503,42 @@ def _wire_context(base_path: str, job_mgr: JobManager, logs: list[str], session:
         return JSONResponse(status_code=status_code, content=payload)
 
     manager = SimpleNamespace(current=lambda: session)
+    def claimed_phone_device_ids():
+        store = read_json(
+            os.path.join(paths.launcher_dir, "phone-agents.json"),
+            {"devices": []},
+        )
+        claimed = [
+            str(device.get("deviceInstanceId") or device.get("id") or "").strip()
+            for device in store.get("devices", [])
+            if isinstance(device, dict)
+        ]
+        return [value for value in claimed if value] or ["phone-1"]
+
+    entitlement_manager = SimpleNamespace(
+        current_state=lambda _feature=None: {
+            "authorized": True,
+            "source": "account_entitlement",
+            "accountId": "test-account",
+            "lease": {"accountId": "test-account"},
+            "features": ["matrix.devices"],
+            "limits": {"devices": 1000, "concurrentTasks": 100},
+        },
+        claimed_phone_device_ids=claimed_phone_device_ids,
+        authorize_phone_devices=lambda device_ids, operation, session=None: {
+            "authorized": True,
+            "accountId": "test-account",
+            "phoneDeviceIds": list(device_ids),
+            "operation": operation,
+        },
+    )
     return SimpleNamespace(
         append_log=logs.append,
         auth_error=lambda _request: None,
         body=body,
         fastapi_json=fastapi_json,
         get_job_mgr=lambda: job_mgr,
+        get_entitlement_mgr=lambda: entitlement_manager,
         get_newapi_account_mgr=lambda: manager,
         get_wire_svc=lambda: WireService(paths, logs.append),
         paths=paths,
@@ -5273,10 +8623,12 @@ def _phone_job_failure_diagnostics(ctx, job: dict, logs: list[str]) -> str:
 
 
 def _wait_for_matrix_event(base_path: str, needle: str, timeout: float = 1.0) -> dict:
-    path = os.path.join(base_path, "matrix-events.jsonl")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if os.path.exists(path):
+        paths = sorted(
+            Path(base_path).glob("matrix-events*.jsonl")
+        )
+        for path in paths:
             with open(path, "r", encoding="utf-8") as handle:
                 for line in handle:
                     try:

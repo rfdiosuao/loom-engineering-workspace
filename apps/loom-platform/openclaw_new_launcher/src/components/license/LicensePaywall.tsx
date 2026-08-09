@@ -61,6 +61,21 @@ const STATUS_COPY: Record<LicenseGateStatus, { eyebrow: string; title: string; a
   },
 };
 
+const LICENSE_STATUS_LABELS: Record<LicenseGateStatus, string> = {
+  checking: '等待在线验证',
+  authorized: '已授权',
+  unauthorized: '未授权',
+  expired: '已到期',
+  disabled: '已停用',
+  device_mismatch: '设备不匹配',
+  offline_grace: '离线授权有效',
+  service_error: '服务暂不可用',
+};
+
+function licenseStatusLabel(status: LicenseGateStatus): string {
+  return LICENSE_STATUS_LABELS[status];
+}
+
 const CAPABILITIES = [
   ['多台手机矩阵', '统一查看设备状态与执行任务'],
   ['线索与客户池', '把真实发现结果持续沉淀'],
@@ -82,37 +97,37 @@ const PHONE_MATRIX_CAPABILITIES = [
 const PHONE_MATRIX_COPY: Record<LicenseGateStatus, { eyebrow: string; title: string; action: string }> = {
   checking: {
     eyebrow: '正在检查手机矩阵授权',
-    title: '正在核验这台电脑的矩阵使用资格',
-    action: '麓鸣其他功能不受影响，检查完成后会自动进入手机连接。',
+    title: '正在核验当前模型账号的矩阵使用资格',
+    action: '未激活账号可继续使用麓鸣其他功能，检查完成后会自动进入手机连接。',
   },
   authorized: {
     eyebrow: '手机矩阵授权有效',
     title: '手机连接与矩阵控制已经解锁',
-    action: '正在载入设备和任务状态。',
+    action: '当前账号下已连接的全部手机均可使用，正在载入设备和任务状态。',
   },
   unauthorized: {
     eyebrow: '手机矩阵等待激活',
     title: '激活后连接和控制手机',
-    action: '授权只解锁手机连接、矩阵任务和手机素材传输，麓鸣其他功能可继续使用。',
+    action: '未激活账号可用 0 台手机；授权码绑定当前模型账号后，该账号下已连接的全部手机均可使用。',
   },
   expired: {
     eyebrow: '手机矩阵授权已到期',
     title: '续费或更换授权码后继续控制手机',
-    action: '设备配置和任务记录不会删除，诊断能力仍然保留。',
+    action: '账号下的设备配置和任务记录不会删除，恢复授权后可继续使用。',
   },
   disabled: {
     eyebrow: '手机矩阵授权已停用',
     title: '请联系服务方核对授权状态',
-    action: '可以复制机器码或导出脱敏诊断，麓鸣其他功能仍可使用。',
+    action: '可以导出脱敏诊断交给服务方，麓鸣其他功能仍可使用。',
   },
   device_mismatch: {
-    eyebrow: '手机矩阵设备不匹配',
-    title: '当前电脑尚未绑定这份授权',
-    action: '复制本机机器码，联系服务方重新绑定或更换授权码。',
+    eyebrow: '手机矩阵租约不匹配',
+    title: '当前登录账号与本机权益租约不一致',
+    action: '请重新登录当前账号刷新租约；仍未恢复时导出脱敏诊断交给服务方。',
   },
   offline_grace: {
     eyebrow: '离线手机矩阵授权可用',
-    title: '本机签名有效，授权服务暂时离线',
+    title: '账号签名权益有效，授权服务暂时离线',
     action: '手机矩阵可以继续使用；网络恢复后建议重新检查。',
   },
   service_error: {
@@ -122,8 +137,119 @@ const PHONE_MATRIX_COPY: Record<LicenseGateStatus, { eyebrow: string; title: str
   },
 };
 
+export type MatrixEntitlementSurface = 'phone' | 'workbench' | 'skills' | 'acquisition';
+
+interface MatrixSurfaceMeta {
+  accessId: string;
+  accessLabel: string;
+  name: string;
+  headline: string;
+  summary: string;
+  capabilities: readonly (readonly [string, string])[];
+  steps: readonly string[];
+}
+
+const MATRIX_SURFACE_META: Record<MatrixEntitlementSurface, MatrixSurfaceMeta> = {
+  phone: {
+    accessId: 'phone-matrix-access',
+    accessLabel: '手机矩阵授权',
+    name: '手机连接',
+    headline: '一份授权，管理每一台真实手机',
+    summary: '激活后可使用设备检测、矩阵任务、画面查看、人工接管与素材传输。',
+    capabilities: PHONE_MATRIX_CAPABILITIES,
+    steps: ['激活矩阵', '添加手机', '下发任务'],
+  },
+  workbench: {
+    accessId: 'matrix-workbench-access',
+    accessLabel: '矩阵工作台授权',
+    name: '矩阵工作台',
+    headline: '统一调度已连接的真实手机',
+    summary: '设备、任务、执行结果、急停与审计共用同一份矩阵权益。',
+    capabilities: PHONE_MATRIX_CAPABILITIES,
+    steps: ['激活矩阵', '确认设备', '进入工作台'],
+  },
+  skills: {
+    accessId: 'skill-center-access',
+    accessLabel: 'Skill 中心授权',
+    name: 'Skill 中心',
+    headline: '沉淀并复用已验证流程',
+    summary: '共享 Skill 与模板由手机矩阵权益统一解锁，可被桌面 Agent、手机、获客与飞书流转共同调用。',
+    capabilities: [
+      ['Skill 列表', '查看来源、版本、状态与适用 Agent'],
+      ['流程沉淀', '将用户确认过的成功任务保存为 Skill'],
+      ['二次复用', '优先复用已验证步骤、脚本、模板与缓存'],
+      ['共享模板', '用稳定模板 ID 和版本关联执行流程'],
+      ['导入导出', '安全迁移独立实现的 Skill 包'],
+      ['审计回滚', '记录调用、脱敏参数并保留失败恢复'],
+    ],
+    steps: ['激活矩阵', '打开 Skill', '复用流程'],
+  },
+  acquisition: {
+    accessId: 'acquisition-workbench-access',
+    accessLabel: '矩阵获客授权',
+    name: '矩阵获客',
+    headline: '让手机矩阵与获客流程协同',
+    summary: '线索、草稿、共享模板与飞书连接共用手机矩阵权益，不再重复购买独立能力。',
+    capabilities: CAPABILITIES,
+    steps: ['激活矩阵', '选择模板', '开始获客'],
+  },
+};
+
+function matrixSurfaceStatusCopy(
+  surface: MatrixEntitlementSurface,
+  status: LicenseGateStatus,
+): { eyebrow: string; title: string; action: string } {
+  if (surface === 'phone') return PHONE_MATRIX_COPY[status];
+  const meta = MATRIX_SURFACE_META[surface];
+  const copyByStatus: Record<LicenseGateStatus, { eyebrow: string; title: string; action: string }> = {
+    checking: {
+      eyebrow: `正在检查${meta.name}授权`,
+      title: '正在核验当前模型账号的矩阵权益',
+      action: `检查完成后会自动进入${meta.name}，不会显示内部能力键。`,
+    },
+    authorized: {
+      eyebrow: `${meta.name}授权有效`,
+      title: `${meta.name}已经解锁`,
+      action: '正在载入当前账号的在线数据与本机安全缓存。',
+    },
+    unauthorized: {
+      eyebrow: `${meta.name}等待激活`,
+      title: `激活矩阵权益后使用${meta.name}`,
+      action: `${meta.name}与手机矩阵共用同一份账号授权，无需另购独立能力。`,
+    },
+    expired: {
+      eyebrow: `${meta.name}授权已到期`,
+      title: `续费或更换授权码后继续使用${meta.name}`,
+      action: '现有数据不会删除，恢复矩阵权益后可继续使用。',
+    },
+    disabled: {
+      eyebrow: `${meta.name}授权已停用`,
+      title: '请联系服务方核对授权状态',
+      action: '可以导出脱敏诊断交给服务方，麓鸣其他未受限功能仍可使用。',
+    },
+    device_mismatch: {
+      eyebrow: `${meta.name}权益租约不匹配`,
+      title: '当前登录账号与本机权益租约不一致',
+      action: '请重新登录刷新租约；仍未恢复时导出脱敏诊断。',
+    },
+    offline_grace: {
+      eyebrow: `离线${meta.name}授权可用`,
+      title: '账号签名权益有效，授权服务暂时离线',
+      action: `${meta.name}可以继续使用；网络恢复后建议重新检查。`,
+    },
+    service_error: {
+      eyebrow: '授权服务暂不可用',
+      title: `${meta.name}暂未解锁，可以重试或导出诊断`,
+      action: '请检查网络和 Bridge 状态，麓鸣其他未受限功能不受影响。',
+    },
+  };
+  return copyByStatus[status];
+}
+
 interface LicensePaywallProps {
   scope?: 'application' | 'phone-matrix';
+  matrixSurface?: MatrixEntitlementSurface;
+  accountBindingOnly?: boolean;
   featureDenied?: boolean;
   featureChecking?: boolean;
   gateError?: string;
@@ -151,6 +277,8 @@ function displayDate(value: string | null | undefined): string {
 
 export const LicensePaywall: React.FC<LicensePaywallProps> = ({
   scope = 'application',
+  matrixSurface = 'phone',
+  accountBindingOnly = false,
   featureDenied = false,
   featureChecking = false,
   gateError = '',
@@ -158,12 +286,13 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
   onEmergencyStop,
   emergencyStopping = false,
 }) => {
-  const { licenseGate, isLicenseChecking, checkLicense } = useAppStore();
+  const { licenseGate, isLicenseChecking, checkLicense, setCurrentPage } = useAppStore();
   const [code, setCode] = React.useState('');
   const [activating, setActivating] = React.useState(false);
   const [diagnosing, setDiagnosing] = React.useState(false);
   const [actionError, setActionError] = React.useState('');
   const phoneMatrixScope = scope === 'phone-matrix';
+  const matrixSurfaceMeta = MATRIX_SURFACE_META[matrixSurface];
   const effectiveStatus: LicenseGateStatus = featureChecking
     ? 'checking'
     : featureDenied
@@ -171,14 +300,14 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
       : licenseGate.status;
   const copy = featureDenied ? {
     ...STATUS_COPY.unauthorized,
-    eyebrow: '当前套餐不含手机矩阵',
-    title: '升级或更换授权码后连接手机',
-    action: '这台电脑已经激活，但当前授权范围不包含手机连接与矩阵控制。',
+    eyebrow: `当前套餐不含${matrixSurfaceMeta.name}`,
+    title: `升级或更换授权码后使用${matrixSurfaceMeta.name}`,
+    action: `${matrixSurfaceMeta.name}与手机矩阵共用同一份账号权益；当前授权范围尚未包含该权益。`,
   } : {
     ...STATUS_COPY[effectiveStatus],
-    ...(phoneMatrixScope ? PHONE_MATRIX_COPY[effectiveStatus] : {}),
+    ...(phoneMatrixScope ? matrixSurfaceStatusCopy(matrixSurface, effectiveStatus) : {}),
   };
-  const capabilities = phoneMatrixScope ? PHONE_MATRIX_CAPABILITIES : CAPABILITIES;
+  const capabilities = phoneMatrixScope ? matrixSurfaceMeta.capabilities : CAPABILITIES;
   const installId = licenseGate.installId || licenseGate.license?.installId || '';
   const deviceId = licenseGate.deviceId || licenseGate.license?.deviceId || '';
   const machineId = deviceId || installId;
@@ -203,7 +332,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
         setActionError('授权码已激活，但当前套餐未包含手机矩阵，请更换授权码或联系服务方');
         return;
       }
-      showToast(phoneMatrixScope ? '手机矩阵授权激活成功' : '授权激活成功', 'success');
+      showToast(phoneMatrixScope ? `${matrixSurfaceMeta.name}授权激活成功` : '授权激活成功', 'success');
     } catch (error) {
       setActionError(parseErrorText(error) || '授权激活失败，请检查授权码后重试');
     } finally {
@@ -256,6 +385,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
       data-license-paywall
       data-license-status={effectiveStatus}
       data-license-scope={scope}
+      data-matrix-access-surface={phoneMatrixScope ? matrixSurfaceMeta.accessId : undefined}
       data-phone-matrix-license-gate={phoneMatrixScope || undefined}
       className="h-full min-h-0 flex-1 overflow-y-auto bg-app-bg text-text"
     >
@@ -266,7 +396,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
               <LoomLogoMark className="h-11 w-11 border border-white/10" />
               <div>
                 <div className="text-[12px] font-bold uppercase text-info">
-                  {phoneMatrixScope ? 'Phone Matrix Access' : 'Commercial Access'}
+                  {phoneMatrixScope ? matrixSurfaceMeta.accessLabel : '商业授权'}
                 </div>
                 <div className="mt-1 text-[15px] font-black">{APP_DISPLAY_NAME}</div>
               </div>
@@ -274,21 +404,21 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
 
             <div className="mt-10 max-w-[680px]">
               <p className="text-[13px] font-bold text-info">
-                {phoneMatrixScope ? '手机连接与矩阵控制' : 'AI 矩阵获客商业版'}
+                {phoneMatrixScope ? matrixSurfaceMeta.name : 'AI 矩阵获客商业版'}
               </p>
               <h1 className="mt-3 max-w-[620px] text-[34px] font-black leading-[1.16] sm:text-[42px]">
-                {phoneMatrixScope ? '一份授权，管理每一台真实手机' : '多台手机找线索，AI 做判断，飞书沉淀客户'}
+                {phoneMatrixScope ? matrixSurfaceMeta.headline : '多台手机找线索，AI 做判断，飞书沉淀客户'}
               </h1>
               <p className="mt-4 max-w-[620px] text-[15px] font-medium leading-7 text-white/68">
                 {phoneMatrixScope
-                  ? '授权在手机连接入口完成。激活后可使用设备检测、矩阵任务、实时画面、人工接管与素材传输。'
+                  ? matrixSurfaceMeta.summary
                   : '将手机 Agent、线索发现、跟进草稿、人工确认和飞书多维表格放进同一条可审计链路。'}
               </p>
               {phoneMatrixScope ? (
                 <div className="mt-6 flex flex-wrap gap-2 text-[11px] font-black text-white/80" aria-label="手机矩阵启用步骤">
-                  <span className="border border-white/20 px-3 py-2">1 激活矩阵</span>
-                  <span className="border border-white/20 px-3 py-2">2 添加手机</span>
-                  <span className="border border-white/20 px-3 py-2">3 下发任务</span>
+                  {matrixSurfaceMeta.steps.map((step, index) => (
+                    <span key={step} className="border border-white/20 px-3 py-2">{index + 1} {step}</span>
+                  ))}
                 </div>
               ) : null}
             </div>
@@ -313,38 +443,57 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
                   <h2 className="mt-1 text-[22px] font-black leading-tight">{copy.title}</h2>
                 </div>
                 <span className="border border-current/25 bg-white/55 px-2.5 py-1 text-[11px] font-black">
-                  {effectiveStatus}
+                  {licenseStatusLabel(effectiveStatus)}
                 </span>
               </div>
               <p className="mt-2 text-[12px] font-semibold leading-5 opacity-80">{copy.action}</p>
             </div>
 
-            <form className="mt-6" onSubmit={activateLicense}>
-              <label htmlFor="commercial-license-code" className="text-[12px] font-black text-text">
-                商业授权码
-              </label>
-              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                <input
-                  id="commercial-license-code"
-                  data-license-code-input
-                  type="password"
-                  value={code}
-                  onChange={(event) => setCode(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="请输入服务方提供的授权码"
-                  className="h-11 min-w-0 flex-1 rounded-[6px] border border-border-strong bg-input px-3 text-[14px] font-semibold text-text outline-none transition placeholder:text-text-subtle focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
-                />
+            {accountBindingOnly ? (
+              <div className="mt-6 rounded-[6px] border border-info bg-info-soft p-4">
+                <div className="text-[13px] font-black text-text">授权码绑定模型账号</div>
+                <p className="mt-1 text-[12px] font-semibold leading-5 text-text-muted">
+                  {matrixSurface === 'phone' || matrixSurface === 'workbench'
+                    ? '未激活账号可用 0 台手机。请先登录模型账号并绑定一次授权码；激活后该账号下已连接的全部手机均可使用，以后在其他电脑登录同一账号即可恢复权益。'
+                    : `请先登录模型账号并绑定一次矩阵授权码；激活后即可使用${matrixSurfaceMeta.name}、手机矩阵、共享模板与 Skill，以后在其他电脑登录同一账号即可恢复权益。`}
+                </p>
                 <button
-                  data-license-activate
-                  type="submit"
-                  disabled={activating || isLicenseChecking}
-                  className="h-11 shrink-0 rounded-[6px] bg-accent px-5 text-[13px] font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
+                  data-account-entitlement-link
+                  type="button"
+                  onClick={() => setCurrentPage('license')}
+                  className="mt-3 h-10 rounded-[6px] bg-accent px-4 text-[12px] font-black text-accent-ink transition hover:bg-accent-hover"
                 >
-                  {activating ? '激活中...' : phoneMatrixScope ? '激活手机矩阵' : '激活并进入'}
+                  登录模型账号并绑定授权码
                 </button>
               </div>
-            </form>
+            ) : (
+              <form className="mt-6" onSubmit={activateLicense}>
+                <label htmlFor="commercial-license-code" className="text-[12px] font-black text-text">
+                  商业授权码
+                </label>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    id="commercial-license-code"
+                    data-license-code-input
+                    type="password"
+                    value={code}
+                    onChange={(event) => setCode(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="请输入服务方提供的授权码"
+                    className="h-11 min-w-0 flex-1 rounded-[6px] border border-border-strong bg-input px-3 text-[14px] font-semibold text-text outline-none transition placeholder:text-text-subtle focus:border-info focus:ring-2 focus:ring-[var(--color-focus-soft)]"
+                  />
+                  <button
+                    data-license-activate
+                    type="submit"
+                    disabled={activating || isLicenseChecking}
+                    className="h-11 shrink-0 rounded-[6px] bg-accent px-5 text-[13px] font-black text-accent-ink transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-disabled"
+                  >
+                    {activating ? '激活中...' : phoneMatrixScope ? `激活${matrixSurfaceMeta.name}` : '激活并进入'}
+                  </button>
+                </div>
+              </form>
+            )}
 
             <div className="mt-5 grid grid-cols-2 border-l border-t border-border text-[12px]">
               <div className="min-w-0 border-b border-r border-border p-3">
@@ -416,7 +565,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
               </button>
             </div>
 
-            {phoneMatrixScope && onEmergencyStop ? (
+            {phoneMatrixScope && ['phone', 'workbench'].includes(matrixSurface) && onEmergencyStop ? (
               <button
                 data-license-emergency-stop
                 type="button"
@@ -430,7 +579,7 @@ export const LicensePaywall: React.FC<LicensePaywallProps> = ({
 
             <p className="mt-4 text-[11px] font-medium leading-5 text-text-muted">
               {phoneMatrixScope
-                ? '授权范围仅限手机连接、手机任务、矩阵控制与相关素材传输；急停和脱敏诊断始终保留。'
+                ? `${matrixSurfaceMeta.name}与手机矩阵、共享模板和 Skill 共用同一份账号权益；诊断与审计始终保留。`
                 : '真实发布、评论、私信、加好友和加微仍默认经过草稿、人工确认、白名单、频控与日志留痕。'}
             </p>
           </div>

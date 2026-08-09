@@ -17,8 +17,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const PRIMARY_PAYLOAD_DIR: &str = "LOOMFiles";
 const LEGACY_PAYLOAD_DIR: &str = "OpenClawFiles";
@@ -48,17 +49,17 @@ struct Layer {
 }
 
 // --- First-run download progress, emitted to the WebView as Tauri events ---
-// `dist://start` { layers, count } | `dist://progress` ProgressPayload |
-// `dist://done` | `dist://error` { message }. The frontend shows an overlay
-// only while these fire (i.e. only on a fresh online install).
-#[derive(serde::Serialize, Clone)]
+// Every `dist://start`, `dist://progress`, `dist://done`, and `dist://error`
+// payload is the complete persisted DistributionSetupSnapshot. The frontend
+// reconciles events and the read-only snapshot query by monotonic revision.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
 struct LayerInfo {
     id: String,
     title: String,
     size: u64,
 }
 
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
 struct ProgressPayload {
     id: String,
     title: String,
@@ -69,11 +70,148 @@ struct ProgressPayload {
     count: usize,
 }
 
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DistributionStatus {
+    Idle,
+    Running,
+    Done,
+    Error,
+}
+
+impl Default for DistributionStatus {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+#[derive(serde::Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DistributionSetupSnapshot {
+    revision: u64,
+    run_id: u64,
+    status: DistributionStatus,
+    layers: Vec<LayerInfo>,
+    progress: Option<ProgressPayload>,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct DistributionSetupTracker {
+    snapshot: DistributionSetupSnapshot,
+}
+
+impl DistributionSetupTracker {
+    fn snapshot(&self) -> DistributionSetupSnapshot {
+        self.snapshot.clone()
+    }
+
+    fn start(&mut self, layers: Vec<LayerInfo>) -> DistributionSetupSnapshot {
+        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
+        self.snapshot.run_id = self.snapshot.run_id.saturating_add(1);
+        self.snapshot.status = DistributionStatus::Running;
+        self.snapshot.layers = layers;
+        self.snapshot.progress = None;
+        self.snapshot.error = None;
+        self.snapshot()
+    }
+
+    fn progress(
+        &mut self,
+        run_id: u64,
+        progress: ProgressPayload,
+    ) -> Option<DistributionSetupSnapshot> {
+        if run_id != self.snapshot.run_id || self.snapshot.status != DistributionStatus::Running {
+            return None;
+        }
+        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
+        self.snapshot.progress = Some(progress);
+        Some(self.snapshot())
+    }
+
+    fn done(&mut self, run_id: u64) -> Option<DistributionSetupSnapshot> {
+        if run_id != self.snapshot.run_id || self.snapshot.status != DistributionStatus::Running {
+            return None;
+        }
+        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
+        self.snapshot.status = DistributionStatus::Done;
+        self.snapshot.error = None;
+        Some(self.snapshot())
+    }
+
+    fn error(&mut self, run_id: u64, error: String) -> Option<DistributionSetupSnapshot> {
+        if run_id != self.snapshot.run_id || self.snapshot.status != DistributionStatus::Running {
+            return None;
+        }
+        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
+        self.snapshot.status = DistributionStatus::Error;
+        self.snapshot.error = Some(error);
+        Some(self.snapshot())
+    }
+
+    fn error_new_run(&mut self, error: String) -> DistributionSetupSnapshot {
+        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
+        self.snapshot.run_id = self.snapshot.run_id.saturating_add(1);
+        self.snapshot.status = DistributionStatus::Error;
+        self.snapshot.layers.clear();
+        self.snapshot.progress = None;
+        self.snapshot.error = Some(error);
+        self.snapshot()
+    }
+
+    fn idle_new_run(&mut self) -> DistributionSetupSnapshot {
+        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
+        self.snapshot.run_id = self.snapshot.run_id.saturating_add(1);
+        self.snapshot.status = DistributionStatus::Idle;
+        self.snapshot.layers.clear();
+        self.snapshot.progress = None;
+        self.snapshot.error = None;
+        self.snapshot()
+    }
+}
+
+#[derive(Default)]
+pub struct DistributionSetupState {
+    tracker: Mutex<DistributionSetupTracker>,
+}
+
+impl DistributionSetupState {
+    pub fn snapshot(&self) -> DistributionSetupSnapshot {
+        self.tracker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot()
+    }
+
+    fn transition_and_notify<F, N>(
+        &self,
+        transition: F,
+        mut notify: N,
+    ) -> Option<DistributionSetupSnapshot>
+    where
+        F: FnOnce(&mut DistributionSetupTracker) -> Option<DistributionSetupSnapshot>,
+        N: FnMut(&DistributionSetupSnapshot),
+    {
+        let snapshot = {
+            let mut tracker = self
+                .tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            transition(&mut tracker)
+        };
+        if let Some(snapshot) = snapshot.as_ref() {
+            notify(snapshot);
+        }
+        snapshot
+    }
+}
+
 struct ProgressMeta {
     id: String,
     title: String,
     index: usize,
     count: usize,
+    run_id: u64,
 }
 
 fn layer_title(layer: &Layer) -> String {
@@ -84,29 +222,75 @@ fn layer_title(layer: &Layer) -> String {
     }
 }
 
-fn emit_start(app: &AppHandle, layers: &[&Layer]) {
-    let _ = app.emit(
-        "dist://start",
-        serde_json::json!({
-            "count": layers.len(),
-            "layers": layers.iter().map(|l| LayerInfo { id: l.id.clone(), title: layer_title(l), size: 0 }).collect::<Vec<_>>(),
-        }),
-    );
+fn transition_and_emit<F>(
+    app: &AppHandle,
+    event: &str,
+    transition: F,
+) -> Option<DistributionSetupSnapshot>
+where
+    F: FnOnce(&mut DistributionSetupTracker) -> Option<DistributionSetupSnapshot>,
+{
+    app.state::<DistributionSetupState>()
+        .transition_and_notify(transition, |snapshot| {
+            let _ = app.emit(event, snapshot);
+        })
 }
 
-fn emit_progress(app: &AppHandle, meta: &ProgressMeta, phase: &str, downloaded: u64, total: u64) {
-    let _ = app.emit(
-        "dist://progress",
-        ProgressPayload {
-            id: meta.id.clone(),
-            title: meta.title.clone(),
-            phase: phase.to_string(),
-            downloaded,
-            total,
-            index: meta.index,
-            count: meta.count,
-        },
-    );
+fn record_idle(app: &AppHandle) -> DistributionSetupSnapshot {
+    app.state::<DistributionSetupState>()
+        .transition_and_notify(|tracker| Some(tracker.idle_new_run()), |_| {})
+        .expect("idle transition always returns a snapshot")
+}
+
+pub fn record_setup_error(app: &AppHandle, error: String) -> DistributionSetupSnapshot {
+    transition_and_emit(app, "dist://error", |tracker| {
+        Some(tracker.error_new_run(error))
+    })
+    .expect("new error run always returns a snapshot")
+}
+
+fn emit_start(app: &AppHandle, layers: &[&Layer]) -> DistributionSetupSnapshot {
+    let layers = layers
+        .iter()
+        .map(|layer| LayerInfo {
+            id: layer.id.clone(),
+            title: layer_title(layer),
+            size: 0,
+        })
+        .collect();
+    transition_and_emit(app, "dist://start", |tracker| Some(tracker.start(layers)))
+        .expect("start transition always returns a snapshot")
+}
+
+fn emit_progress(
+    app: &AppHandle,
+    meta: &ProgressMeta,
+    phase: &str,
+    downloaded: u64,
+    total: u64,
+) {
+    let payload = ProgressPayload {
+        id: meta.id.clone(),
+        title: meta.title.clone(),
+        phase: phase.to_string(),
+        downloaded,
+        total,
+        index: meta.index,
+        count: meta.count,
+    };
+    transition_and_emit(app, "dist://progress", |tracker| {
+        tracker.progress(meta.run_id, payload)
+    });
+}
+
+fn emit_done(app: &AppHandle, run_id: u64) {
+    transition_and_emit(app, "dist://done", |tracker| tracker.done(run_id));
+}
+
+fn emit_error(app: &AppHandle, run_id: u64, error: String) {
+    transition_and_emit(app, "dist://error", |tracker| {
+        tracker.error(run_id, error)
+    });
 }
 
 /// Resolve the install root (the directory that contains the payload folder).
@@ -267,42 +451,88 @@ fn default_required_layers_present(install_root: &Path) -> bool {
             root.join("_up_").join("python-runtime").join("python.exe"),
             root.join("python-runtime").join("python.exe"),
         ];
+        let openclaw_candidates = [root
+            .join("node_modules")
+            .join("openclaw")
+            .join("openclaw.mjs")];
         node_candidates.iter().any(|path| path.is_file())
             && python_candidates.iter().any(|path| path.is_file())
+            && openclaw_candidates.iter().any(|path| path.is_file())
     })
 }
 
-async fn read_manifest_text(source: &str) -> Result<String, String> {
+#[derive(Debug)]
+enum ManifestLoadError {
+    Unavailable(String),
+    Invalid(String),
+}
+
+impl ManifestLoadError {
+    fn is_invalid(&self) -> bool {
+        matches!(self, Self::Invalid(_))
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            Self::Unavailable(message) | Self::Invalid(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for ManifestLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(message) | Self::Invalid(message) => formatter.write_str(message),
+        }
+    }
+}
+
+fn classify_manifest_file_error(message: String, error: &io::Error) -> ManifestLoadError {
+    if error.kind() == io::ErrorKind::InvalidData {
+        ManifestLoadError::Invalid(message)
+    } else {
+        ManifestLoadError::Unavailable(message)
+    }
+}
+
+async fn read_manifest_text(source: &str) -> Result<String, ManifestLoadError> {
     if source.starts_with("http://") || source.starts_with("https://") {
-        return client()?
+        return client()
+            .map_err(ManifestLoadError::Unavailable)?
             .get(source)
             .send()
             .await
-            .map_err(|e| format!("manifest fetch: {e}"))?
+            .map_err(|e| ManifestLoadError::Unavailable(format!("manifest fetch: {e}")))?
             .error_for_status()
-            .map_err(|e| format!("manifest status: {e}"))?
+            .map_err(|e| ManifestLoadError::Unavailable(format!("manifest status: {e}")))?
             .text()
             .await
-            .map_err(|e| format!("manifest body: {e}"));
+            .map_err(|e| ManifestLoadError::Unavailable(format!("manifest body: {e}")));
     }
 
     let path = if source.starts_with("file://") {
         reqwest::Url::parse(source)
-            .map_err(|e| format!("manifest file url parse: {e}"))?
+            .map_err(|e| ManifestLoadError::Invalid(format!("manifest file url parse: {e}")))?
             .to_file_path()
-            .map_err(|_| format!("manifest file url is not local: {source}"))?
+            .map_err(|_| ManifestLoadError::Invalid(format!("manifest file url is not local: {source}")))?
     } else {
         PathBuf::from(source)
     };
-    std::fs::read_to_string(&path).map_err(|e| format!("manifest file {}: {e}", path.display()))
+    std::fs::read_to_string(&path).map_err(|error| {
+        classify_manifest_file_error(
+            format!("manifest file {}: {error}", path.display()),
+            &error,
+        )
+    })
 }
 
 async fn fetch_manifest_from_source_with_public_key(
     source: &str,
     public_key: &str,
-) -> Result<(Manifest, String), String> {
+) -> Result<(Manifest, String), ManifestLoadError> {
     let text = read_manifest_text(source).await?;
-    let manifest = parse_manifest_text_with_public_key(&text, public_key)?;
+    let manifest = parse_manifest_text_with_public_key(&text, public_key)
+        .map_err(ManifestLoadError::Invalid)?;
     Ok((manifest, text))
 }
 
@@ -405,7 +635,18 @@ async fn fetch_manifest_with_public_key(
     cache_path: &Path,
     public_key: &str,
 ) -> Result<Manifest, String> {
+    fetch_manifest_classified_with_public_key(sources, cache_path, public_key)
+        .await
+        .map_err(ManifestLoadError::into_message)
+}
+
+async fn fetch_manifest_classified_with_public_key(
+    sources: &[String],
+    cache_path: &Path,
+    public_key: &str,
+) -> Result<Manifest, ManifestLoadError> {
     let mut errors = Vec::new();
+    let mut saw_invalid_source = false;
     for source in sources {
         match fetch_manifest_from_source_with_public_key(source, public_key).await {
             Ok((manifest, text)) => {
@@ -420,26 +661,72 @@ async fn fetch_manifest_with_public_key(
                 eprintln!("[bootstrap] manifest loaded from {source}");
                 return Ok(manifest);
             }
-            Err(e) => errors.push(format!("{source}: {e}")),
+            Err(error) => {
+                saw_invalid_source |= error.is_invalid();
+                errors.push(format!("{source}: {error}"));
+            }
         }
     }
 
     match std::fs::read_to_string(cache_path) {
         Ok(text) => {
             let manifest = parse_manifest_text_with_public_key(&text, public_key)
-                .map_err(|e| format!("cached manifest parse: {e}"))?;
+                .map_err(|e| ManifestLoadError::Invalid(format!("cached manifest parse: {e}")))?;
             eprintln!(
                 "[bootstrap] manifest loaded from local cache {}",
                 cache_path.display()
             );
             Ok(manifest)
         }
-        Err(cache_err) => Err(format!(
-            "manifest unavailable; sources failed [{}]; cache {} failed: {}",
-            errors.join(" | "),
-            cache_path.display(),
-            cache_err
-        )),
+        Err(cache_error) => {
+            let message = format!(
+                "manifest unavailable; sources failed [{}]; cache {} failed: {}",
+                errors.join(" | "),
+                cache_path.display(),
+                cache_error
+            );
+            if saw_invalid_source || cache_error.kind() == io::ErrorKind::InvalidData {
+                Err(ManifestLoadError::Invalid(message))
+            } else {
+                Err(ManifestLoadError::Unavailable(message))
+            }
+        }
+    }
+}
+
+async fn fetch_manifest_or_accept_preinstalled_layers(
+    sources: &[String],
+    cache_path: &Path,
+    install_root: &Path,
+) -> Result<Option<Manifest>, String> {
+    fetch_manifest_or_accept_preinstalled_layers_with_public_key(
+        sources,
+        cache_path,
+        install_root,
+        RELEASE_PUBLIC_KEY_B64,
+    )
+    .await
+}
+
+async fn fetch_manifest_or_accept_preinstalled_layers_with_public_key(
+    sources: &[String],
+    cache_path: &Path,
+    install_root: &Path,
+    public_key: &str,
+) -> Result<Option<Manifest>, String> {
+    match fetch_manifest_classified_with_public_key(sources, cache_path, public_key).await {
+        Ok(manifest) => Ok(Some(manifest)),
+        Err(ManifestLoadError::Unavailable(error)) => {
+            if default_required_layers_present(install_root) {
+                eprintln!(
+                    "[bootstrap] manifest unavailable ({error}); continuing with preinstalled layers"
+                );
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        }
+        Err(ManifestLoadError::Invalid(error)) => Err(error),
     }
 }
 
@@ -750,19 +1037,25 @@ pub async fn ensure_layers(app: AppHandle, install_root: PathBuf) -> Result<(), 
         sources.push(manifest_cache.to_string_lossy().to_string());
     }
     if sources.is_empty() {
+        record_idle(&app);
         return Ok(());
     }
 
-    let manifest = match fetch_manifest(&sources, &manifest_cache).await {
-        Ok(m) => m,
-        Err(e) => {
-            if default_required_layers_present(&install_root) {
-                eprintln!(
-                    "[bootstrap] manifest unavailable ({e}); continuing with preinstalled layers"
-                );
-                return Ok(());
-            }
-            return Err(e);
+    let manifest = match fetch_manifest_or_accept_preinstalled_layers(
+        &sources,
+        &manifest_cache,
+        &install_root,
+    )
+    .await
+    {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            record_idle(&app);
+            return Ok(());
+        }
+        Err(error) => {
+            record_setup_error(&app, error.clone());
+            return Err(error);
         }
     };
     let cache = manifest_cache
@@ -778,9 +1071,10 @@ pub async fn ensure_layers(app: AppHandle, install_root: PathBuf) -> Result<(), 
         .filter(|l| l.required && !is_present(&install_root, l))
         .collect();
     if missing.is_empty() {
+        record_idle(&app);
         return Ok(());
     }
-    emit_start(&app, &missing);
+    let run_id = emit_start(&app, &missing).run_id;
 
     let count = missing.len();
     for (i, layer) in missing.iter().enumerate() {
@@ -789,17 +1083,18 @@ pub async fn ensure_layers(app: AppHandle, install_root: PathBuf) -> Result<(), 
             title: layer_title(layer),
             index: i + 1,
             count,
+            run_id,
         };
         eprintln!("[bootstrap] installing layer {}…", layer.id);
         if let Err(e) =
             install_layer(&app, &meta, &install_root, &manifest.mirrors, layer, &cache).await
         {
-            let _ = app.emit("dist://error", serde_json::json!({ "message": e }));
+            emit_error(&app, run_id, e.clone());
             return Err(e);
         }
         eprintln!("[bootstrap] layer {} installed", layer.id);
     }
-    let _ = app.emit("dist://done", serde_json::json!({ "count": count }));
+    emit_done(&app, run_id);
     Ok(())
 }
 
@@ -813,64 +1108,140 @@ pub async fn install_layer_by_id(
 ) -> Result<(), String> {
     let layer_id = layer_id.trim().to_string();
     if layer_id.is_empty() {
-        return Err("distribution layer id is empty".to_string());
+        let error = "distribution layer id is empty".to_string();
+        record_setup_error(&app, error.clone());
+        return Err(error);
     }
 
     let sources = manifest_sources();
     if sources.is_empty() {
-        return Err("distribution manifest is not configured".to_string());
+        let error = "distribution manifest is not configured".to_string();
+        record_setup_error(&app, error.clone());
+        return Err(error);
     }
 
     let manifest_cache = manifest_cache_path(&install_root);
-    let manifest = fetch_manifest(&sources, &manifest_cache).await?;
+    let manifest = match fetch_manifest(&sources, &manifest_cache).await {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            record_setup_error(&app, error.clone());
+            return Err(error);
+        }
+    };
     let cache = manifest_cache
         .parent()
         .map(|p| p.join("layers"))
         .unwrap_or_else(|| std::env::temp_dir().join("loom-dist-cache"));
 
-    let layer = manifest
+    let layer = match manifest
         .layers
         .iter()
         .find(|layer| layer.id == layer_id)
-        .ok_or_else(|| format!("distribution layer not found: {layer_id}"))?;
+    {
+        Some(layer) => layer,
+        None => {
+            let error = format!("distribution layer not found: {layer_id}");
+            record_setup_error(&app, error.clone());
+            return Err(error);
+        }
+    };
 
     if is_present(&install_root, layer) {
+        record_idle(&app);
         return Ok(());
     }
 
     let selected = vec![layer];
-    emit_start(&app, &selected);
+    let run_id = emit_start(&app, &selected).run_id;
     let meta = ProgressMeta {
         id: layer.id.clone(),
         title: layer_title(layer),
         index: 1,
         count: 1,
+        run_id,
     };
 
     eprintln!("[bootstrap] installing optional layer {}", layer.id);
     if let Err(e) =
         install_layer(&app, &meta, &install_root, &manifest.mirrors, layer, &cache).await
     {
-        let _ = app.emit("dist://error", serde_json::json!({ "message": e }));
+        emit_error(&app, run_id, e.clone());
         return Err(e);
     }
     eprintln!("[bootstrap] optional layer {} installed", layer.id);
-    let _ = app.emit("dist://done", serde_json::json!({ "count": 1 }));
+    emit_done(&app, run_id);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        default_required_layers_present, fetch_manifest_with_public_key, move_path_with_retry,
-        parse_manifest_text_with_public_key, replace_directory_transactionally_with,
-        safe_relative_join,
+        default_required_layers_present, DistributionSetupTracker, DistributionStatus,
+        fetch_manifest_or_accept_preinstalled_layers,
+        fetch_manifest_or_accept_preinstalled_layers_with_public_key,
+        fetch_manifest_with_public_key, move_path_with_retry, parse_manifest_text_with_public_key,
+        replace_directory_transactionally_with, safe_relative_join,
     };
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::{json, Value};
     use std::io;
+
+    fn required_layer_test_root(case: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "loom-required-layers-{case}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn write_required_layer_sentinel(path: &std::path::Path, contents: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn write_complete_required_layers(root: &std::path::Path) -> [std::path::PathBuf; 3] {
+        let node = root.join("_up_").join("node-runtime").join("node.exe");
+        let python = root.join("_up_").join("python-runtime").join("python.exe");
+        let openclaw = root
+            .join("node_modules")
+            .join("openclaw")
+            .join("openclaw.mjs");
+        write_required_layer_sentinel(&node, b"node");
+        write_required_layer_sentinel(&python, b"python");
+        write_required_layer_sentinel(&openclaw, b"openclaw");
+        [node, python, openclaw]
+    }
+
+    fn fetch_missing_manifest_with_fallback(root: &std::path::Path) -> Result<bool, String> {
+        let source = root.join("missing-source-manifest.json");
+        let cache = root.join("missing-cache").join("manifest.json");
+        tauri::async_runtime::block_on(fetch_manifest_or_accept_preinstalled_layers(
+            &[source.to_string_lossy().to_string()],
+            &cache,
+            root,
+        ))
+        .map(|manifest| manifest.is_none())
+    }
+
+    fn fetch_manifest_source_with_fallback(
+        root: &std::path::Path,
+        source: &std::path::Path,
+    ) -> Result<bool, String> {
+        let cache = root.join("missing-cache").join("manifest.json");
+        tauri::async_runtime::block_on(fetch_manifest_or_accept_preinstalled_layers(
+            &[source.to_string_lossy().to_string()],
+            &cache,
+            root,
+        ))
+        .map(|manifest| manifest.is_none())
+    }
+
+    fn assert_missing_manifest_error(error: &str) {
+        assert!(error.contains("manifest unavailable"), "{error}");
+        assert!(error.contains("missing-source-manifest.json"), "{error}");
+        assert!(error.contains("missing-cache"), "{error}");
+    }
 
     fn canonical_json_for_test(value: &Value) -> Vec<u8> {
         fn write_value(value: &Value, out: &mut String) {
@@ -930,6 +1301,15 @@ mod tests {
         (envelope, public_key)
     }
 
+    fn resign_release_envelope(envelope: &mut Value) -> String {
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let mut payload = envelope.clone();
+        payload.as_object_mut().unwrap().remove("signature");
+        let signature = signing_key.sign(&canonical_json_for_test(&payload));
+        envelope["signature"]["value"] = json!(BASE64_STANDARD.encode(signature.to_bytes()));
+        BASE64_STANDARD.encode(signing_key.verifying_key().to_bytes())
+    }
+
     fn parse_test_envelope(envelope: &Value, public_key: &str) -> Result<super::Manifest, String> {
         parse_manifest_text_with_public_key(
             &serde_json::to_string_pretty(envelope).unwrap(),
@@ -946,18 +1326,311 @@ mod tests {
     }
 
     #[test]
-    fn protected_full_runtime_is_detected_without_legacy_payload_folder() {
-        let root = std::env::temp_dir().join(format!("loom-protected-runtime-test-{}", std::process::id()));
+    fn offline_manifest_fallback_accepts_complete_preinstalled_layers() {
+        let root = required_layer_test_root("complete");
         let _ = std::fs::remove_dir_all(&root);
-        let node = root.join("_up_").join("node-runtime").join("node.exe");
-        let python = root.join("_up_").join("python-runtime").join("python.exe");
-        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
-        std::fs::write(&node, b"node").unwrap();
-        std::fs::write(&python, b"python").unwrap();
+        write_complete_required_layers(&root);
 
         assert!(default_required_layers_present(&root));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn offline_manifest_fallback_rejects_missing_openclaw_dependencies() {
+        let root = required_layer_test_root("missing-openclaw");
+        let _ = std::fs::remove_dir_all(&root);
+        let [_, _, openclaw] = write_complete_required_layers(&root);
+        std::fs::remove_file(openclaw).unwrap();
+
+        assert!(!default_required_layers_present(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn offline_manifest_fallback_rejects_damaged_openclaw_entrypoint() {
+        let root = required_layer_test_root("damaged-openclaw");
+        let _ = std::fs::remove_dir_all(&root);
+        let [_, _, openclaw] = write_complete_required_layers(&root);
+        std::fs::remove_file(&openclaw).unwrap();
+        std::fs::create_dir_all(&openclaw).unwrap();
+
+        assert!(!default_required_layers_present(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn offline_manifest_fallback_recovers_after_openclaw_is_restored() {
+        let root = required_layer_test_root("restore-openclaw");
+        let _ = std::fs::remove_dir_all(&root);
+        let [_, _, openclaw] = write_complete_required_layers(&root);
+        std::fs::remove_file(&openclaw).unwrap();
+
+        assert!(!default_required_layers_present(&root));
+
+        write_required_layer_sentinel(&openclaw, b"openclaw");
+        assert!(default_required_layers_present(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_unavailable_accepts_complete_preinstalled_layers() {
+        let root = required_layer_test_root("manifest-unavailable-complete");
+        let _ = std::fs::remove_dir_all(&root);
+        write_complete_required_layers(&root);
+
+        let result = fetch_missing_manifest_with_fallback(&root);
+
+        assert_eq!(result, Ok(true), "{result:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_unavailable_rejects_missing_openclaw_dependencies() {
+        let root = required_layer_test_root("manifest-unavailable-missing-openclaw");
+        let _ = std::fs::remove_dir_all(&root);
+        let [_, _, openclaw] = write_complete_required_layers(&root);
+        std::fs::remove_file(openclaw).unwrap();
+
+        let error = fetch_missing_manifest_with_fallback(&root).unwrap_err();
+
+        assert_missing_manifest_error(&error);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_unavailable_rejects_damaged_openclaw_entrypoint() {
+        let root = required_layer_test_root("manifest-unavailable-damaged-openclaw");
+        let _ = std::fs::remove_dir_all(&root);
+        let [_, _, openclaw] = write_complete_required_layers(&root);
+        std::fs::remove_file(&openclaw).unwrap();
+        std::fs::create_dir_all(&openclaw).unwrap();
+
+        let error = fetch_missing_manifest_with_fallback(&root).unwrap_err();
+
+        assert_missing_manifest_error(&error);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_unavailable_recovers_after_openclaw_is_restored() {
+        let root = required_layer_test_root("manifest-unavailable-restore-openclaw");
+        let _ = std::fs::remove_dir_all(&root);
+        let [_, _, openclaw] = write_complete_required_layers(&root);
+        std::fs::remove_file(&openclaw).unwrap();
+
+        let error = fetch_missing_manifest_with_fallback(&root).unwrap_err();
+        assert_missing_manifest_error(&error);
+
+        write_required_layer_sentinel(&openclaw, b"openclaw");
+        let recovered = fetch_missing_manifest_with_fallback(&root);
+        assert_eq!(recovered, Ok(true), "{recovered:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_integrity_invalid_signature_never_falls_back_to_sentinels() {
+        let root = required_layer_test_root("manifest-integrity-invalid-signature");
+        let _ = std::fs::remove_dir_all(&root);
+        write_complete_required_layers(&root);
+        let source = root.join("invalid-signature.json");
+        let (mut envelope, _) = signed_release_envelope();
+        envelope["signature"]["value"] = json!(BASE64_STANDARD.encode([0_u8; 64]));
+        std::fs::write(&source, serde_json::to_string(&envelope).unwrap()).unwrap();
+
+        let error = fetch_manifest_source_with_fallback(&root, &source).unwrap_err();
+
+        assert!(error.contains("signature"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_integrity_invalid_json_never_falls_back_to_sentinels() {
+        let root = required_layer_test_root("manifest-integrity-invalid-json");
+        let _ = std::fs::remove_dir_all(&root);
+        write_complete_required_layers(&root);
+        let source = root.join("invalid-json.json");
+        std::fs::write(&source, b"{not-json").unwrap();
+
+        let error = fetch_manifest_source_with_fallback(&root, &source).unwrap_err();
+
+        assert!(error.contains("manifest parse"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_integrity_invalid_cache_never_falls_back_to_sentinels() {
+        let root = required_layer_test_root("manifest-integrity-invalid-cache");
+        let _ = std::fs::remove_dir_all(&root);
+        write_complete_required_layers(&root);
+        let cache = root.join("invalid-cache").join("manifest.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, b"{not-json").unwrap();
+
+        let result = tauri::async_runtime::block_on(
+            fetch_manifest_or_accept_preinstalled_layers(&[], &cache, &root),
+        );
+        let error = result.unwrap_err();
+
+        assert!(error.contains("cached manifest parse"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_integrity_signed_invalid_manifest_never_falls_back_to_sentinels() {
+        let root = required_layer_test_root("manifest-integrity-signed-invalid-manifest");
+        let _ = std::fs::remove_dir_all(&root);
+        write_complete_required_layers(&root);
+        let source = root.join("signed-invalid-manifest.json");
+        let (mut envelope, _) = signed_release_envelope();
+        envelope["distribution"]["layers"] = json!([{
+            "id": "node",
+            "title": "Node",
+            "file": "node-runtime.tar.gz",
+            "sha256": "0".repeat(64),
+            "installPath": "../outside",
+            "required": true
+        }]);
+        let public_key = resign_release_envelope(&mut envelope);
+        std::fs::write(&source, serde_json::to_string(&envelope).unwrap()).unwrap();
+        let cache = root.join("missing-cache").join("manifest.json");
+
+        let result = tauri::async_runtime::block_on(
+            fetch_manifest_or_accept_preinstalled_layers_with_public_key(
+                &[source.to_string_lossy().to_string()],
+                &cache,
+                &root,
+                &public_key,
+            ),
+        );
+        let error = result.unwrap_err();
+
+        assert!(error.contains("unsafe path component"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_integrity_invalid_source_uses_valid_signed_cache() {
+        let root = required_layer_test_root("manifest-integrity-valid-cache");
+        let _ = std::fs::remove_dir_all(&root);
+        write_complete_required_layers(&root);
+        let source = root.join("invalid-source.json");
+        std::fs::write(&source, b"{not-json").unwrap();
+        let cache = root.join("valid-cache").join("manifest.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        let (envelope, public_key) = signed_release_envelope();
+        std::fs::write(&cache, serde_json::to_string(&envelope).unwrap()).unwrap();
+
+        let result = tauri::async_runtime::block_on(
+            fetch_manifest_or_accept_preinstalled_layers_with_public_key(
+                &[source.to_string_lossy().to_string()],
+                &cache,
+                &root,
+                &public_key,
+            ),
+        );
+
+        assert!(result.unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn distribution_setup_state_tracks_revision_run_and_rejects_stale_updates() {
+        let mut tracker = DistributionSetupTracker::default();
+        let initial = tracker.snapshot();
+        assert_eq!(initial.revision, 0);
+        assert_eq!(initial.run_id, 0);
+        assert_eq!(initial.status, DistributionStatus::Idle);
+
+        let started = tracker.start(vec![super::LayerInfo {
+            id: "node".to_string(),
+            title: "Node.js".to_string(),
+            size: 10,
+        }]);
+        assert_eq!(started.revision, 1);
+        assert_eq!(started.run_id, 1);
+        assert_eq!(started.status, DistributionStatus::Running);
+        let serialized = serde_json::to_value(&started).unwrap();
+        assert_eq!(serialized["runId"], 1);
+        assert_eq!(serialized["status"], "running");
+        assert!(serialized.get("run_id").is_none());
+
+        let progress = tracker
+            .progress(
+                started.run_id,
+                super::ProgressPayload {
+                    id: "node".to_string(),
+                    title: "Node.js".to_string(),
+                    phase: "download".to_string(),
+                    downloaded: 5,
+                    total: 10,
+                    index: 1,
+                    count: 1,
+                },
+            )
+            .expect("current run progress must be accepted");
+        assert_eq!(progress.revision, 2);
+        assert_eq!(progress.run_id, 1);
+
+        let done = tracker
+            .done(started.run_id)
+            .expect("current run completion must be accepted");
+        assert_eq!(done.revision, 3);
+        assert_eq!(done.status, DistributionStatus::Done);
+
+        let restarted = tracker.start(Vec::new());
+        assert_eq!(restarted.revision, 4);
+        assert_eq!(restarted.run_id, 2);
+        let before_stale = tracker.snapshot();
+        assert!(tracker.progress(started.run_id, progress.progress.unwrap()).is_none());
+        assert!(tracker.error(started.run_id, "late error".to_string()).is_none());
+        assert_eq!(tracker.snapshot(), before_stale);
+    }
+
+    #[test]
+    fn distribution_setup_snapshot_query_is_read_only() {
+        let mut tracker = DistributionSetupTracker::default();
+        tracker.start(Vec::new());
+
+        let first = tracker.snapshot();
+        let second = tracker.snapshot();
+
+        assert_eq!(first, second);
+        assert_eq!(first.revision, 1);
+    }
+
+    #[test]
+    fn distribution_setup_state_records_prestart_error_and_clears_it_on_noop_recovery() {
+        let mut tracker = DistributionSetupTracker::default();
+
+        let failed = tracker.error_new_run("manifest unavailable".to_string());
+        assert_eq!(failed.revision, 1);
+        assert_eq!(failed.run_id, 1);
+        assert_eq!(failed.status, DistributionStatus::Error);
+        assert_eq!(failed.error.as_deref(), Some("manifest unavailable"));
+
+        let recovered = tracker.idle_new_run();
+        assert_eq!(recovered.revision, 2);
+        assert_eq!(recovered.run_id, 2);
+        assert_eq!(recovered.status, DistributionStatus::Idle);
+        assert!(recovered.error.is_none());
+        assert!(recovered.progress.is_none());
+    }
+
+    #[test]
+    fn distribution_setup_state_persists_snapshot_before_notifying() {
+        let state = super::DistributionSetupState::default();
+        let mut notified = Vec::new();
+
+        let result = state.transition_and_notify(
+            |tracker| Some(tracker.start(Vec::new())),
+            |snapshot| {
+                assert_eq!(state.snapshot(), *snapshot);
+                notified.push(snapshot.clone());
+            },
+        );
+
+        assert_eq!(result.as_ref(), notified.first());
+        assert_eq!(state.snapshot().revision, 1);
     }
 
     #[test]

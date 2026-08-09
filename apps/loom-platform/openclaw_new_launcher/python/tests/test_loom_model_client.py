@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
+import base64
 import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import traceback
 import unittest
@@ -182,6 +184,42 @@ def model_tool_call_chunk(tool_call_id, name):
 
 
 class LoomModelClientTests(unittest.TestCase):
+    def test_chat_payload_includes_text_and_image_attachments_as_multimodal_input(self):
+        with tempfile.TemporaryDirectory() as root:
+            image_path = os.path.join(root, "cover.png")
+            image_bytes = b"\x89PNG\r\n\x1a\nloom"
+            with open(image_path, "wb") as handle:
+                handle.write(image_bytes)
+
+            payload = build_chat_payload(transport_profile(), {
+                "prompt": "总结附件",
+                "attachments": [
+                    {
+                        "name": "brief.txt",
+                        "kind": "text",
+                        "mime": "text/plain",
+                        "content": "附件中的销售目标是 100 个。",
+                    },
+                    {
+                        "name": "cover.png",
+                        "kind": "image",
+                        "mime": "image/png",
+                        "path": image_path,
+                    },
+                ],
+            })
+
+        user_message = payload["messages"][-1]
+        self.assertEqual(user_message["role"], "user")
+        self.assertIsInstance(user_message["content"], list)
+        self.assertIn("附件中的销售目标是 100 个。", user_message["content"][0]["text"])
+        self.assertEqual(user_message["content"][1]["type"], "image_url")
+        expected = base64.b64encode(image_bytes).decode("ascii")
+        self.assertEqual(
+            user_message["content"][1]["image_url"]["url"],
+            f"data:image/png;base64,{expected}",
+        )
+
     def test_chat_payload_reads_persisted_block_messages_as_conversation_history(self):
         payload = build_chat_payload(transport_profile(), {
             "prompt": "我上一句发了什么？",

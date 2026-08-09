@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -21,6 +22,7 @@ if str(PYTHON_ROOT) not in sys.path:
 
 from core.paths import AppPaths
 from core.phone_matrix import MatrixControlPlane
+from tests.matrix_test_support import matrix_for_test
 
 
 routes_media = importlib.import_module("api.routes_media")
@@ -29,14 +31,42 @@ routes_media = importlib.import_module("api.routes_media")
 class ImmediateJobManager:
     def __init__(self) -> None:
         self.results: dict[str, dict] = {}
+        self.submissions: list[dict] = []
 
     def submit_progress(self, kind, _label, target, initial_progress=None):
         job_id = f"job-{kind}"
+        self.submissions.append({
+            "id": job_id,
+            "kind": kind,
+            "initialProgress": dict(initial_progress or {}),
+        })
         self.results[job_id] = target(job_id)
         return {"id": job_id, "status": "succeeded", "result": self.results[job_id]}
 
     def progress(self, *_args, **_kwargs) -> None:
         return None
+
+
+class AllowPhoneEntitlement:
+    def current_state(self, _feature=None):
+        return {
+            "authorized": True,
+            "source": "account_entitlement",
+            "accountId": "account-a",
+            "lease": {"accountId": "account-a"},
+            "limits": {"devices": 1000, "concurrentTasks": 100},
+        }
+
+    def authorize_phone_devices(self, device_ids, operation, *, session=None):
+        del session
+        return {
+            "authorized": True,
+            "phoneDeviceIds": list(device_ids),
+            "operation": operation,
+        }
+
+    def claimed_phone_device_ids(self):
+        return ["phone-a", "phone-b"]
 
 
 class MediaPhoneTransferTests(unittest.TestCase):
@@ -45,7 +75,10 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.paths = AppPaths(base_path=self.temp_dir.name)
         os.makedirs(self.paths.scripts_dir, exist_ok=True)
         Path(self.paths.scripts_dir, "openclaw-media-phone.mjs").write_text("", encoding="utf-8")
-        self.ctx = SimpleNamespace(paths=self.paths)
+        self.ctx = SimpleNamespace(
+            paths=self.paths,
+            get_entitlement_mgr=lambda: AllowPhoneEntitlement(),
+        )
         self.image_path = str(Path(self.paths.data_dir, "generated-images", "result.png"))
         self.video_path = str(Path(self.paths.data_dir, "videos", "result.mp4"))
         Path(self.image_path).parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +105,8 @@ class MediaPhoneTransferTests(unittest.TestCase):
                     "baseUrl": "http://127.0.0.1:9527",
                     "token": "TOP_SECRET_PHONE_TOKEN",
                     "album": "LOOM",
+                    "deviceInstanceId": "phone-a",
+                    "ownerAccountId": "account-a",
                 },
                 {
                     "id": "phone-b",
@@ -79,12 +114,14 @@ class MediaPhoneTransferTests(unittest.TestCase):
                     "baseUrl": "http://127.0.0.1:9528",
                     "token": "OTHER_SECRET_PHONE_TOKEN",
                     "album": "Other",
+                    "deviceInstanceId": "phone-b",
+                    "ownerAccountId": "account-a",
                 },
             ],
         }
 
     def test_selected_online_phone_uses_upload_only_script_without_secret_args(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(
             returncode=0,
             stdout=json.dumps({
@@ -96,7 +133,10 @@ class MediaPhoneTransferTests(unittest.TestCase):
             stderr="",
         )
 
-        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch.object(
+        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch(
+            "api.routes_phone.phone_process_env",
+            return_value={},
+        ) as process_env, mock.patch.object(
             routes_media.subprocess,
             "run",
             return_value=completed,
@@ -113,6 +153,37 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.assertNotIn("phone-b", command)
         self.assertNotIn("TOP_SECRET_PHONE_TOKEN", repr(command))
         self.assertNotIn("TOP_SECRET_PHONE_TOKEN", json.dumps(result))
+        process_env.assert_called_once_with(self.ctx, ["phone-a"])
+
+    def test_async_transfer_passes_job_cancel_file_to_upload_process(self) -> None:
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        completed = {
+            "returncode": 0,
+            "stdout": json.dumps({
+                "ok": True,
+                "uploadedCount": 1,
+                "totalCount": 1,
+                "uploaded": [{"kind": "image", "filename": "result.png"}],
+            }),
+            "stderr": "",
+            "cancelled": False,
+        }
+        cancel_file = str(Path(self.paths.data_dir, "jobs", "job-media.cancel"))
+
+        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch(
+            "api.routes_phone._run_phone_process_with_matrix_stream",
+            return_value=completed,
+        ) as run:
+            result = routes_media._transfer_generated_media_to_phone(
+                self.ctx,
+                "image",
+                [{"path": self.image_path, "mime": "image/png"}],
+                cancel_file=cancel_file,
+            )
+
+        command = run.call_args.args[1]
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(command[command.index("--cancel-file") + 1], cancel_file)
 
     def test_multi_phone_transfer_attempts_every_configured_device_and_reports_each_result(self) -> None:
         completed = SimpleNamespace(
@@ -150,9 +221,255 @@ class MediaPhoneTransferTests(unittest.TestCase):
         )
         self.assertNotIn("TOP_SECRET_PHONE_TOKEN", json.dumps(result))
 
+    def test_multi_phone_transfer_holds_one_account_slot_for_every_target_device(self) -> None:
+        slot_calls: list[dict] = []
+        authorization_calls: list[dict] = []
+
+        class SlotEntitlement(AllowPhoneEntitlement):
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                authorization_calls.append({
+                    "deviceIds": list(device_ids),
+                    "operation": operation,
+                })
+                return super().authorize_phone_devices(
+                    device_ids,
+                    operation,
+                    session=session,
+                )
+
+            @contextmanager
+            def account_task_slot(
+                self,
+                entitlement,
+                operation,
+                *,
+                cancelled=None,
+                device_ids=None,
+            ):
+                slot_calls.append({
+                    "entitlement": dict(entitlement),
+                    "operation": operation,
+                    "cancelled": cancelled,
+                    "deviceIds": list(device_ids or []),
+                })
+                yield
+
+        entitlement = SlotEntitlement()
+        self.ctx.get_entitlement_mgr = lambda: entitlement
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "ok": True,
+                "uploadedCount": 1,
+                "totalCount": 1,
+                "uploaded": [{"kind": "image", "filename": "result.png"}],
+            }),
+            stderr="",
+        )
+
+        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch.object(
+            routes_media.subprocess,
+            "run",
+            return_value=completed,
+        ):
+            result = routes_media._transfer_generated_media_to_phones(
+                self.ctx,
+                "image",
+                [{"path": self.image_path, "mime": "image/png"}],
+            )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(len(slot_calls), 1)
+        self.assertEqual(slot_calls[0]["operation"], "media.asset.transfer")
+        self.assertEqual(slot_calls[0]["deviceIds"], ["phone-a", "phone-b"])
+        self.assertEqual(
+            authorization_calls,
+            [
+                {
+                    "deviceIds": ["phone-a", "phone-b"],
+                    "operation": "media.asset.transfer",
+                },
+                {
+                    "deviceIds": ["phone-a", "phone-b"],
+                    "operation": "media.asset.transfer",
+                },
+            ],
+        )
+
+    def test_targeted_generation_reauthorizes_after_account_slot_before_provider_call(self) -> None:
+        authorization_calls: list[dict] = []
+        slot_calls: list[dict] = []
+
+        class RevokedAfterQueueEntitlement(AllowPhoneEntitlement):
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del session
+                authorization_calls.append({
+                    "deviceIds": list(device_ids),
+                    "operation": operation,
+                })
+                if len(authorization_calls) >= 2:
+                    from core.account_entitlement import AccountEntitlementError
+
+                    raise AccountEntitlementError(
+                        "授权码已被撤销。",
+                        code="authorization_code_revoked",
+                        action="bind_authorization_code",
+                        status_code=403,
+                    )
+                return {
+                    "authorized": True,
+                    "accountId": "account-a",
+                    "phoneDeviceIds": list(device_ids),
+                    "operation": operation,
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            @contextmanager
+            def account_task_slot(
+                self,
+                entitlement,
+                operation,
+                *,
+                cancelled=None,
+                device_ids=None,
+            ):
+                slot_calls.append({
+                    "accountId": entitlement.get("accountId"),
+                    "operation": operation,
+                    "cancelled": cancelled,
+                    "deviceIds": list(device_ids or []),
+                })
+                yield
+
+        self.ctx.get_entitlement_mgr = lambda: RevokedAfterQueueEntitlement()
+        generate = mock.Mock(return_value={"files": []})
+        phone_snapshot = {
+            "devices": [
+                {
+                    "id": "phone-a",
+                    "deviceInstanceId": "phone-a",
+                    "ownerAccountId": "account-a",
+                }
+            ]
+        }
+
+        from core.account_entitlement import AccountEntitlementError
+
+        with self.assertRaises(AccountEntitlementError) as raised:
+            routes_media._run_targeted_media_generation(
+                self.ctx,
+                phone_snapshot,
+                "media.generate.transfer",
+                generate,
+            )
+
+        self.assertEqual(raised.exception.code, "authorization_code_revoked")
+        generate.assert_not_called()
+        self.assertEqual(len(slot_calls), 1)
+        self.assertEqual(slot_calls[0]["accountId"], "account-a")
+        self.assertEqual(slot_calls[0]["deviceIds"], [])
+        self.assertEqual(len(authorization_calls), 2)
+
+    def test_cancelled_targeted_generation_stops_before_provider_call(self) -> None:
+        class CancelAwareEntitlement(AllowPhoneEntitlement):
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del session
+                return {
+                    "authorized": True,
+                    "accountId": "account-a",
+                    "phoneDeviceIds": list(device_ids),
+                    "operation": operation,
+                    "limits": {"devices": 1000, "concurrentTasks": 100},
+                }
+
+            @contextmanager
+            def account_task_slot(self, *_args, **_kwargs):
+                yield
+
+        generate = mock.Mock(return_value={"files": []})
+        self.ctx.get_entitlement_mgr = lambda: CancelAwareEntitlement()
+        self.ctx.get_job_mgr = lambda: SimpleNamespace(
+            is_cancelled=lambda job_id: job_id == "job-cancelled"
+        )
+
+        from core.account_entitlement import AccountEntitlementError
+
+        with self.assertRaises(AccountEntitlementError) as raised:
+            routes_media._run_targeted_media_generation(
+                self.ctx,
+                {
+                    "devices": [
+                        {
+                            "id": "phone-a",
+                            "deviceInstanceId": "phone-a",
+                            "ownerAccountId": "account-a",
+                        }
+                    ]
+                },
+                "media.generate.transfer",
+                generate,
+                job_id="job-cancelled",
+            )
+
+        self.assertEqual(raised.exception.code, "task_cancelled")
+        generate.assert_not_called()
+
+    def test_phone_targeted_generation_job_records_account_owned_phone_scope(self) -> None:
+        jobs = ImmediateJobManager()
+
+        async def body(request):
+            return await request.json()
+
+        app = FastAPI()
+        ctx = SimpleNamespace(
+            paths=self.paths,
+            auth_error=lambda _request: None,
+            protected_error=lambda _path: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+            get_job_mgr=lambda: jobs,
+            get_entitlement_mgr=lambda: AllowPhoneEntitlement(),
+        )
+        routes_media.register_media_routes(app, ctx)
+        generated = {
+            "images": ["base64"],
+            "files": [{"path": self.image_path, "filename": "result.png", "mime": "image/png"}],
+            "count": 1,
+        }
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "ok": True,
+                "uploadedCount": 1,
+                "totalCount": 1,
+                "uploaded": [{"kind": "image", "filename": "result.png"}],
+            }),
+            stderr="",
+        )
+
+        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch(
+            "api.routes_phone.node_executable",
+            return_value="node",
+        ), mock.patch("api.routes_phone.phone_process_env", return_value={}), mock.patch.object(
+            routes_media,
+            "_image_generate_payload",
+            return_value=generated,
+        ), mock.patch.object(routes_media.subprocess, "run", return_value=completed):
+            response = TestClient(app).post(
+                "/api/image/generate/submit",
+                json={"prompt": "send to phone", "deviceIds": ["phone-b"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        metadata = jobs.submissions[-1]["initialProgress"]
+        self.assertTrue(metadata["requiresPhoneEntitlement"])
+        self.assertRegex(metadata["ownerAccountBinding"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("ownerAccountId", metadata)
+        self.assertEqual(metadata["phoneDeviceIds"], ["phone-b"])
+
     def test_sync_and_async_http_generation_without_target_stays_local(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-b", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-b", "online": True})
         selected = {"value": "phone-a"}
         jobs = ImmediateJobManager()
 
@@ -167,6 +484,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
             body=body,
             fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
             get_job_mgr=lambda: jobs,
+            get_entitlement_mgr=lambda: AllowPhoneEntitlement(),
         )
         routes_media.register_media_routes(app, ctx)
 
@@ -247,6 +565,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
             body=body,
             fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
             get_job_mgr=lambda: jobs,
+            get_entitlement_mgr=lambda: AllowPhoneEntitlement(),
         )
         routes_media.register_media_routes(app, ctx)
         generated = {
@@ -299,6 +618,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
             body=body,
             fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
             get_job_mgr=lambda: jobs,
+            get_entitlement_mgr=lambda: AllowPhoneEntitlement(),
         )
         routes_media.register_media_routes(app, ctx)
 
@@ -337,6 +657,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
             body=body,
             fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
             get_job_mgr=lambda: jobs,
+            get_entitlement_mgr=lambda: AllowPhoneEntitlement(),
         )
         routes_media._record_media(ctx, self.image_path, {
             "kind": "image",
@@ -382,6 +703,56 @@ class MediaPhoneTransferTests(unittest.TestCase):
             ["phone-b", "phone-a"],
         )
 
+    def test_library_transfer_rejects_unactivated_account_before_job_submission(self) -> None:
+        from core.account_entitlement import AccountEntitlementError
+
+        class DenyPhoneEntitlement(AllowPhoneEntitlement):
+            def authorize_phone_devices(self, device_ids, operation, *, session=None):
+                del device_ids, operation, session
+                raise AccountEntitlementError(
+                    "当前账号尚未激活手机矩阵。",
+                    code="authorization_required",
+                    action="bind_authorization_code",
+                    status_code=403,
+                )
+
+        jobs = ImmediateJobManager()
+
+        async def body(request):
+            return await request.json()
+
+        app = FastAPI()
+        ctx = SimpleNamespace(
+            paths=self.paths,
+            auth_error=lambda _request: None,
+            protected_error=lambda _path: None,
+            body=body,
+            fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
+            get_job_mgr=lambda: jobs,
+            get_entitlement_mgr=lambda: DenyPhoneEntitlement(),
+        )
+        routes_media._record_media(ctx, self.image_path, {
+            "kind": "image",
+            "mime": "image/png",
+            "source": "ui",
+        })
+        asset = routes_media._media_library(ctx).list_assets("image", "", 20)["items"][0]
+        routes_media.register_media_routes(app, ctx)
+
+        with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch.object(
+            routes_media.subprocess,
+            "run",
+        ) as run:
+            response = TestClient(app).post(
+                f"/api/media/assets/{asset['id']}/transfer",
+                json={"deviceIds": ["phone-a"]},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "authorization_required")
+        self.assertEqual(jobs.results, {})
+        run.assert_not_called()
+
     def test_async_image_failure_returns_safe_structured_result(self) -> None:
         jobs = ImmediateJobManager()
 
@@ -421,7 +792,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.assertNotIn("TOP_SECRET", json.dumps(result))
 
     def test_zero_exit_with_invalid_json_is_not_reported_as_uploaded(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(returncode=0, stdout="not-json", stderr="")
 
         with mock.patch("api.routes_phone._load_store", return_value=self.store()), mock.patch.object(
@@ -436,7 +807,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.assertEqual(result["uploadedCount"], 0)
 
     def test_ok_response_requires_exact_uploaded_count(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(
             returncode=0,
             stdout=json.dumps({
@@ -465,7 +836,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         self.assertEqual(result["uploadedFiles"], ["one.png"])
 
     def test_partial_upload_failure_returns_only_safe_filename_summary(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(
             returncode=1,
             stdout=json.dumps({
@@ -511,7 +882,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_stale_offline_matrix_presence_does_not_block_real_upload(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": False})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": False})
         completed = SimpleNamespace(
             returncode=0,
             stdout=json.dumps({
@@ -536,7 +907,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
         run.assert_called_once()
 
     def test_upload_failure_is_nonfatal_and_secret_safe(self) -> None:
-        MatrixControlPlane(self.paths).register_device({"deviceId": "phone-a", "online": True})
+        matrix_for_test(self.paths).register_device({"deviceId": "phone-a", "online": True})
         completed = SimpleNamespace(
             returncode=1,
             stdout=json.dumps({
@@ -724,6 +1095,7 @@ class MediaPhoneTransferTests(unittest.TestCase):
             body=body,
             fastapi_json=lambda data, status_code=200: JSONResponse(data, status_code=status_code),
             get_job_mgr=lambda: jobs,
+            get_entitlement_mgr=lambda: AllowPhoneEntitlement(),
             append_log=logs.append,
         )
         routes_media.register_media_routes(app, ctx)

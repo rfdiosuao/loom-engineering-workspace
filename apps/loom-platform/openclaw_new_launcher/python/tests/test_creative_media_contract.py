@@ -267,14 +267,65 @@ class CreativeMediaUiContractTests(unittest.TestCase):
 
 
 class CreativeMediaBackendContractTests(unittest.TestCase):
-    def test_image_gateway_524_is_reported_as_retryable_upstream_timeout(self) -> None:
+    def test_image_gateway_524_is_reported_as_indeterminate_without_direct_retry(self) -> None:
         from api.routes_media import _image_generation_failure
+        from services.image_api import ImageApiError
 
-        failure = _image_generation_failure(RuntimeError("HTTP 524"))
+        failure = _image_generation_failure(ImageApiError(
+            "HTTP 524",
+            status_code=524,
+            phase="submit",
+            outcome_indeterminate=True,
+        ))
 
         self.assertEqual(failure["errorCode"], "image_provider_gateway_timeout")
-        self.assertTrue(failure["retryable"])
+        self.assertFalse(failure["retryable"])
+        self.assertTrue(failure["outcomeIndeterminate"])
+        self.assertFalse(failure["regenerationAllowed"])
         self.assertIn("素材库", failure["error"])
+
+    def test_video_poll_failure_preserves_remote_task_and_blocks_resubmission(self) -> None:
+        from api.routes_media import _video_generation_failure
+        from services.video_api import VideoApiError
+
+        failure = _video_generation_failure(VideoApiError(
+            "HTTP 503: busy",
+            status_code=503,
+            phase="poll",
+            task_id="task-remote-1",
+            request_key="request-1",
+            outcome_indeterminate=True,
+        ))
+
+        self.assertEqual(failure["errorCode"], "video_task_outcome_uncertain")
+        self.assertEqual(failure["taskId"], "task-remote-1")
+        self.assertEqual(failure["requestKey"], "request-1")
+        self.assertTrue(failure["outcomeIndeterminate"])
+        self.assertFalse(failure["retryable"])
+        self.assertFalse(failure["regenerationAllowed"])
+
+    def test_generated_media_download_failures_never_allow_regeneration(self) -> None:
+        from api.routes_media import _image_generation_failure, _video_generation_failure
+        from services.image_api import ImageApiError
+        from services.video_api import VideoApiError
+
+        image_failure = _image_generation_failure(ImageApiError(
+            "HTTP 503",
+            status_code=503,
+            phase="download",
+        ))
+        video_failure = _video_generation_failure(VideoApiError(
+            "HTTP 503: busy",
+            status_code=503,
+            phase="download",
+            task_id="video-already-generated",
+        ))
+
+        self.assertEqual(image_failure["errorCode"], "image_download_failed")
+        self.assertFalse(image_failure["regenerationAllowed"])
+        self.assertEqual(video_failure["errorCode"], "video_download_failed")
+        self.assertEqual(video_failure["taskId"], "video-already-generated")
+        self.assertFalse(video_failure["regenerationAllowed"])
 
     def test_empty_image_config_exposes_gpt_image_2_as_the_real_default(self) -> None:
         routes_media = importlib.import_module("api.routes_media")
@@ -343,6 +394,39 @@ class CreativeMediaBackendContractTests(unittest.TestCase):
                 self.assertEqual(handle.read(), b"first-image")
             with open(second_path, "rb") as handle:
                 self.assertEqual(handle.read(), b"second-image")
+
+    def test_partial_image_batch_preserves_assets_and_blocks_paid_regeneration(self) -> None:
+        routes_media = importlib.import_module("api.routes_media")
+
+        class ImageClient:
+            def generate_many(self, *_args, **_kwargs):
+                return [b"one-paid-image"]
+
+        license_mgr = SimpleNamespace(current_gateway_profile=lambda: {})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx = SimpleNamespace(
+                paths=SimpleNamespace(
+                    image_config=os.path.join(temp_dir, "image.json"),
+                    video_config=os.path.join(temp_dir, "video.json"),
+                    data_dir=temp_dir,
+                ),
+                get_image_client=lambda: ImageClient(),
+                get_license_mgr=lambda: license_mgr,
+            )
+            result = routes_media._image_generate_payload(ctx, {
+                "baseUrl": "https://example.com/v1",
+                "apiKey": "test-key",
+                "prompt": "three posters",
+                "count": 3,
+            })
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["requestedCount"], 3)
+        self.assertTrue(result["partial"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "partial_failure")
+        self.assertFalse(result["regenerationAllowed"])
+        self.assertEqual(len(result["files"]), 1)
 
     def test_async_media_job_result_keeps_paths_without_embedding_large_base64(self) -> None:
         routes_media = importlib.import_module("api.routes_media")

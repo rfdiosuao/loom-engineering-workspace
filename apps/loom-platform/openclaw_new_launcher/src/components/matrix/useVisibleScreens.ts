@@ -39,6 +39,7 @@ export function useVisibleScreens(
   devices: MatrixDeviceView[],
   visibleDeviceIds: ReadonlySet<string>,
   focusedDeviceId?: string,
+  liveStreamDeviceId?: string,
 ): VisibleScreensState {
   const [frames, setFrames] = React.useState<Record<string, MatrixScreenFrame>>({});
   const [errors, setErrors] = React.useState<Record<string, string>>({});
@@ -54,10 +55,12 @@ export function useVisibleScreens(
   const devicesRef = React.useRef(devices);
   const visibleRef = React.useRef(visibleDeviceIds);
   const focusedRef = React.useRef(focusedDeviceId);
+  const liveStreamRef = React.useRef(liveStreamDeviceId);
   framesRef.current = frames;
   devicesRef.current = devices;
   visibleRef.current = visibleDeviceIds;
   focusedRef.current = focusedDeviceId;
+  liveStreamRef.current = liveStreamDeviceId;
 
   const requestNow = React.useCallback((deviceId: string) => {
     const generation = (requestedGenerationRef.current.get(deviceId) ?? 0) + 1;
@@ -72,8 +75,8 @@ export function useVisibleScreens(
   }, []);
 
   React.useEffect(() => {
-    if (focusedDeviceId) requestNow(focusedDeviceId);
-  }, [focusedDeviceId, requestNow]);
+    if (focusedDeviceId && !liveStreamDeviceId) requestNow(focusedDeviceId);
+  }, [focusedDeviceId, liveStreamDeviceId, requestNow]);
 
   React.useEffect(() => {
     const knownIds = new Set(devices.map((device) => device.deviceId));
@@ -216,7 +219,8 @@ export function useVisibleScreens(
       const candidates = devicesRef.current.map((device): ScreenScheduleCandidate => ({
         deviceId: device.deviceId,
         status: device.status,
-        visible: visibleRef.current.has(device.deviceId) || focusedRef.current === device.deviceId,
+        visible: liveStreamRef.current !== device.deviceId
+          && (visibleRef.current.has(device.deviceId) || focusedRef.current === device.deviceId),
         focused: focusedRef.current === device.deviceId,
         dueAt: dueAtRef.current.get(device.deviceId) ?? 0,
       }));

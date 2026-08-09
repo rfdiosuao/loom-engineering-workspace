@@ -1,0 +1,468 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom.mobile-agent-runtime.v1",
+  "title": "LOOM Mobile Agent Runtime v1",
+  "description": "Clean-room discovery and authorization contract for optional mobile runtimes. It carries schema metadata and vault handles, never credential values or arbitrary shell commands.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "scope",
+    "providerSchemas",
+    "providerConfigurations",
+    "workspacePolicy",
+    "memoryPolicy",
+    "skills",
+    "capabilityGrant",
+    "backends",
+    "tracePolicy"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.mobile-agent-runtime.v1"
+    },
+    "scope": {
+      "$ref": "#/$defs/scope"
+    },
+    "providerSchemas": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/providerSchema"
+      }
+    },
+    "providerConfigurations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/providerConfiguration"
+      }
+    },
+    "workspacePolicy": {
+      "$ref": "#/$defs/workspacePolicy"
+    },
+    "memoryPolicy": {
+      "$ref": "#/$defs/memoryPolicy"
+    },
+    "skills": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/skillMetadata"
+      }
+    },
+    "capabilityGrant": {
+      "$ref": "#/$defs/capabilityGrant"
+    },
+    "backends": {
+      "$ref": "#/$defs/backendDiscovery"
+    },
+    "tracePolicy": {
+      "$ref": "#/$defs/tracePolicy"
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "capability": {
+      "enum": [
+        "device.screen.observe",
+        "device.profile.read",
+        "device.app.open",
+        "device.system.key",
+        "workspace.file.read",
+        "workspace.file.write"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accountId", "customerId", "workspaceId"],
+      "properties": {
+        "accountId": {
+          "$ref": "#/$defs/safeId"
+        },
+        "customerId": {
+          "$ref": "#/$defs/safeId"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/safeId"
+        }
+      }
+    },
+    "providerField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "required", "sensitive", "writeOnly"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "type": {
+          "enum": ["string", "url", "boolean", "enum", "secret"]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "sensitive": {
+          "type": "boolean"
+        },
+        "writeOnly": {
+          "type": "boolean"
+        },
+        "allowedValues": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "sensitive": {
+                "const": true
+              }
+            },
+            "required": ["sensitive"]
+          },
+          "then": {
+            "properties": {
+              "writeOnly": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "secret"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "sensitive": {
+                "const": true
+              },
+              "writeOnly": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "enum"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["allowedValues"],
+            "properties": {
+              "allowedValues": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "providerSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "protocols", "fields"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "protocols": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "responses",
+              "chat_completions",
+              "anthropic_messages",
+              "gemini_generate_content",
+              "vendor_oauth"
+            ]
+          }
+        },
+        "fields": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/providerField"
+          }
+        }
+      }
+    },
+    "providerConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerId", "schemaId", "values", "credentialHandles", "commitState"],
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/safeId"
+        },
+        "schemaId": {
+          "$ref": "#/$defs/safeId"
+        },
+        "values": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "pattern": "^(?!.*(?:api[_-]?key|token|secret|password|authorization)).{1,64}$"
+          },
+          "additionalProperties": {
+            "type": ["string", "boolean"]
+          }
+        },
+        "credentialHandles": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {
+            "$ref": "#/$defs/safeId"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^vault:[A-Za-z0-9_.:-]{8,160}$"
+          }
+        },
+        "commitState": {
+          "enum": ["staged", "committed", "rolled_back"]
+        }
+      }
+    },
+    "workspacePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rootHandle",
+        "readOnlyInputs",
+        "separateOutput",
+        "credentialHandlesOnly",
+        "allowHostSockets"
+      ],
+      "properties": {
+        "rootHandle": {
+          "type": "string",
+          "pattern": "^workspace:[A-Za-z0-9_.:-]{8,160}$"
+        },
+        "readOnlyInputs": {
+          "const": true
+        },
+        "separateOutput": {
+          "const": true
+        },
+        "credentialHandlesOnly": {
+          "const": true
+        },
+        "allowHostSockets": {
+          "const": false
+        }
+      }
+    },
+    "memoryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "crossAccount", "crossCustomer", "retentionDays"],
+      "properties": {
+        "namespace": {
+          "$ref": "#/$defs/scope"
+        },
+        "crossAccount": {
+          "const": false
+        },
+        "crossCustomer": {
+          "const": false
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        }
+      }
+    },
+    "skillMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "summary", "sourceDigest", "metadataOnly", "requiredCapabilities"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "sourceDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "metadataOnly": {
+          "const": true
+        },
+        "requiredCapabilities": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/capability"
+          }
+        }
+      }
+    },
+    "capabilityGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approvalId", "allowedCapabilities", "expiresAt", "remoteShell", "arbitraryCommands"],
+      "properties": {
+        "approvalId": {
+          "$ref": "#/$defs/safeId"
+        },
+        "allowedCapabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/capability"
+          }
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "remoteShell": {
+          "const": false
+        },
+        "arbitraryCommands": {
+          "const": false
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "state", "authorized", "capabilities", "priority"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "kind": {
+          "enum": ["native", "optional_linux"]
+        },
+        "state": {
+          "enum": ["available", "unavailable", "unauthorized", "unhealthy", "disabled"]
+        },
+        "authorized": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/capability"
+          }
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        }
+      }
+    },
+    "backendDiscovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "preferredBackendId", "fallbackOrder"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/backend"
+          }
+        },
+        "preferredBackendId": {
+          "type": ["string", "null"],
+          "maxLength": 64
+        },
+        "fallbackOrder": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeId"
+          }
+        }
+      }
+    },
+    "tracePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["redactedHeaderNames", "maxResponseChars", "includeCredentialValues", "debugApiEnabled"],
+      "properties": {
+        "redactedHeaderNames": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "allOf": [
+            {
+              "contains": {
+                "const": "authorization"
+              }
+            },
+            {
+              "contains": {
+                "const": "x-api-key"
+              }
+            }
+          ],
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,64}$"
+          }
+        },
+        "maxResponseChars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "includeCredentialValues": {
+          "const": false
+        },
+        "debugApiEnabled": {
+          "const": false
+        }
+      }
+    }
+  }
+}

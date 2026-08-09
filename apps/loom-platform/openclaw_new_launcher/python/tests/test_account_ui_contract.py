@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import os
+import json
 import unittest
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LICENSE_PAGE = os.path.join(REPO_ROOT, "src", "components", "license", "LicensePage.tsx")
 BRAND_COMPONENT = os.path.join(REPO_ROOT, "src", "components", "brand", "LoomBrand.tsx")
-PACKAGED_LOGO = os.path.join(REPO_ROOT, "src", "assets", "luming-logo.svg")
+SIDEBAR_COMPONENT = os.path.join(REPO_ROOT, "src", "components", "sidebar", "Sidebar.tsx")
+PACKAGED_LOGO = os.path.join(REPO_ROOT, "src", "assets", "luming-logo-full.png")
 SPLASH_PAGE = os.path.join(REPO_ROOT, "src", "components", "brand", "LoomSplash.tsx")
 API_FILE = os.path.join(REPO_ROOT, "src", "services", "api.ts")
 STARTUP_CACHE_FILE = os.path.join(REPO_ROOT, "src", "services", "startupCache.ts")
 SPLASH_VIDEO = os.path.join(REPO_ROOT, "public", "loom-motion", "luming-splash-v2.mp4")
 SPLASH_POSTER = os.path.join(REPO_ROOT, "public", "loom-motion", "luming-splash-v2-poster.jpg")
+DEFAULT_THEME = os.path.join(REPO_ROOT, "data", "themes", "default", "theme.json")
+LOOM_THEME = os.path.join(REPO_ROOT, "data", "themes", "loom", "theme.json")
 
 
 class AccountUiContractTests(unittest.TestCase):
@@ -38,20 +42,53 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("网页注册", source)
         self.assertIn("grid-cols-2", source)
 
-    def test_account_identity_uses_the_shared_packaged_logo(self) -> None:
+    def test_email_code_mode_remains_clickable_when_capability_probe_is_unavailable(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        email_mode = source.split(">验证码登录</ModeButton>", 1)[0].rsplit(
+            "<ModeButton", 1
+        )[1]
+        self.assertNotIn("disabled={!authCapabilities.inlineEmailCode}", email_mode)
+        self.assertIn("if (!authCapabilities.inlineEmailCode)", source)
+        self.assertIn("authCapabilities.emailReason", source)
+
+    def test_brand_uses_the_full_packaged_logo_before_the_emergency_glyph(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
         with open(BRAND_COMPONENT, "r", encoding="utf-8") as handle:
             brand_source = handle.read()
+        with open(SIDEBAR_COMPONENT, "r", encoding="utf-8") as handle:
+            sidebar_source = handle.read()
 
-        self.assertIn("import { LoomLogoMark } from '../brand/LoomBrand'", source)
-        self.assertGreaterEqual(source.count("<LoomLogoMark"), 2)
+        self.assertIn("UserRound", source)
+        self.assertEqual(source.count("<LoomLogoMark"), 1)
+        logged_in = source.split("if (loggedIn) {", 1)[1].split("\n  return (", 1)[0]
+        self.assertNotIn("<LoomLogoMark", logged_in)
+        self.assertNotIn("LoomLogoMark", sidebar_source)
         self.assertNotIn('/logo.png', source)
-        self.assertIn("new URL('../../assets/luming-logo.svg', import.meta.url).href", brand_source)
+        self.assertIn("new URL('../../assets/luming-logo-full.png', import.meta.url).href", brand_source)
         self.assertIn("const { logoUrl } = useTheme()", brand_source)
+        self.assertIn("logoCandidates", brand_source)
+        self.assertIn("setCandidateIndex", brand_source)
+        self.assertIn("advanceLogoCandidate", brand_source)
         self.assertIn('src={logoSrc}', brand_source)
         self.assertNotIn("'/loom-motion/logo.svg'", brand_source)
         self.assertTrue(os.path.isfile(PACKAGED_LOGO))
+
+        for theme_path in (DEFAULT_THEME, LOOM_THEME):
+            with open(theme_path, "r", encoding="utf-8") as handle:
+                theme = json.load(handle)
+            self.assertEqual(theme["brand"]["logoUrl"], "")
+
+    def test_default_brand_uses_the_full_motion_source_artwork(self) -> None:
+        expected_sha256 = "29babd1fbb5a068e7222ad239ff237f68874b64e768625db1a64761bfe8e9624"
+        import hashlib
+
+        with open(PACKAGED_LOGO, "rb") as handle:
+            actual_sha256 = hashlib.sha256(handle.read()).hexdigest()
+
+        self.assertEqual(actual_sha256, expected_sha256)
 
     def test_splash_uses_the_packaged_h264_video_without_the_legacy_iframe(self) -> None:
         with open(SPLASH_PAGE, "r", encoding="utf-8") as handle:
@@ -81,7 +118,7 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("data-subscription-external-fallback", source)
         self.assertIn("账户与余额", source)
         self.assertIn("当前套餐", source)
-        self.assertIn("套餐与购买", source)
+        self.assertIn("模型服务订阅与购买", source)
         self.assertIn("打开账户中心", source)
         self.assertIn("loom-account-metric-grid", source)
         self.assertNotIn("<iframe", source)
@@ -110,6 +147,20 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("parsed.pathname.replace(/\\/+$/, '') === '/topup'", source)
         self.assertNotIn("`${DEFAULT_BASE_URL}/topup`", source)
 
+    def test_guest_browsing_stays_on_a_read_only_account_page(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("const [guestBrowsing, setGuestBrowsing] = useState(false)", source)
+        self.assertIn("data-account-guest-read-only", source)
+        self.assertIn("只读访客模式", source)
+        self.assertIn("不显示缓存或模拟的余额、套餐和授权状态", source)
+        continue_as_guest = source.split("const continueAsGuest =", 1)[1].split(
+            "const busyTitle", 1
+        )[0]
+        self.assertIn("setGuestBrowsing(true)", continue_as_guest)
+        self.assertNotIn("setCurrentPage('dashboard')", continue_as_guest)
+
     def test_account_login_defaults_to_domestic_accelerated_domain(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
@@ -117,7 +168,7 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("const DEFAULT_BASE_URL = 'https://api.heang.top'", source)
         self.assertNotIn("const DEFAULT_BASE_URL = 'https://api-cn.heang.top'", source)
 
-    def test_account_api_exposes_register_and_subscription(self) -> None:
+    def test_account_api_exposes_register_subscription_and_entitlement_redemption(self) -> None:
         with open(API_FILE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
@@ -127,6 +178,70 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("api('/api/account/subscription')", source)
         self.assertIn("capabilities: ()", source)
         self.assertIn("api('/api/account/capabilities')", source)
+        self.assertIn("accountEntitlement?: AccountEntitlementSnapshot", source)
+        self.assertIn("source?: string", source)
+        self.assertIn("plan?: string", source)
+        self.assertIn("limits?: {", source)
+        self.assertIn("devices?: number", source)
+        self.assertIn("expiresAt?: string | number | null", source)
+        self.assertIn("redeemEntitlement: (params: { code: string })", source)
+        self.assertIn("api('/api/account/entitlement/redeem', 'POST', params)", source)
+        self.assertIn("paymentPlans: ()", source)
+        self.assertIn("api('/api/account/payments/plans')", source)
+        self.assertIn("createPaymentOrder: (params", source)
+        self.assertIn("api('/api/account/payments/order', 'POST', params)", source)
+        self.assertIn("paymentOrderStatus: (params", source)
+        self.assertIn("api('/api/account/payments/order/status', 'POST', params)", source)
+
+    def test_account_page_has_native_qr_purchase_and_server_verified_fulfilment(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("qrcode-generator", source)
+        self.assertIn("data-native-payment-catalog", source)
+        self.assertIn("data-payment-channel", source)
+        self.assertIn("data-payment-qr", source)
+        self.assertIn("accountApi.createPaymentOrder", source)
+        self.assertIn("accountApi.paymentOrderStatus", source)
+        self.assertIn("subscriptionSyncPending", source)
+        self.assertIn("模型服务订阅与购买", source)
+        self.assertIn("USD 数值按 1:1 显示为人民币", source)
+        self.assertNotIn("手机矩阵、云模板和 Skill 权益已开通", source)
+        self.assertIn("paymentRequestVersion", source)
+        self.assertNotIn("手机矩阵、云模板和 Skill 权益已开通", source)
+        self.assertIn("打开账户中心", source)
+        self.assertNotIn("购买与支付在浏览器完成", source)
+
+    def test_payment_qr_never_uses_pay_url_as_qr_content(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("createPaymentQrDataUri(paymentOrder?.qrcode)", source)
+        self.assertNotIn("paymentOrder?.qrcode || paymentOrder?.payUrl", source)
+        self.assertIn("openExternalUrl(paymentPayUrl)", source)
+        self.assertNotIn("openExternalUrl(paymentOrder.payUrl", source)
+        self.assertIn("支付二维码暂不可用，请查询订单或打开直达支付。", source)
+
+    def test_payment_creation_and_status_query_use_independent_busy_states(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("const [creatingPaymentPlanKey, setCreatingPaymentPlanKey]", source)
+        self.assertIn("const [paymentStatusBusy, setPaymentStatusBusy]", source)
+        self.assertIn("creatingPaymentPlanKey === plan.planKey", source)
+        self.assertNotIn("const [paymentBusy, setPaymentBusy]", source)
+
+    def test_paid_order_is_not_reported_as_failed_when_local_entitlement_refresh_fails(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        verify_block = source.split("const verifyPaymentOrder", 1)[1].split("const startPayment", 1)[0]
+        paid_block = verify_block.split("if (response.order.status === 'paid')", 1)[1].split("} else if", 1)[0]
+        self.assertIn("Promise.allSettled", paid_block)
+        self.assertIn("localSyncPending", paid_block)
+        self.assertIn("支付已确认", paid_block)
+        self.assertNotIn("await checkLicense();", paid_block)
+        self.assertNotIn("await loadSubscription(true);", paid_block)
 
     def test_account_page_uses_cached_safe_snapshot_before_manual_refresh(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
@@ -141,8 +256,55 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn("sanitizeAccountForCache", cache_source)
         self.assertIn("delete safe.tokenMasked", cache_source)
         self.assertIn("delete safe.gatewayBaseUrl", cache_source)
-        self.assertNotIn("已显示上一次账号快照", page_source)
+        self.assertIn("delete entitlement.code", cache_source)
+        self.assertIn("delete entitlement.licenseCode", cache_source)
+        self.assertIn("delete entitlement.redeemCode", cache_source)
+        self.assertIn("usingCachedAccount", page_source)
+        self.assertIn("当前显示上次安全快照", page_source)
+        self.assertIn("待在线验证", page_source)
         self.assertNotIn("LoggedInPanel", page_source)
+
+    def test_account_refresh_verifies_logged_in_accounts_online_and_labels_subscription_cache(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        refresh_block = source.split("const refresh =", 1)[1].split("useEffect(() =>", 1)[0]
+        subscription_block = source.split("const loadSubscription =", 1)[1].split("const sendEmailCode =", 1)[0]
+        self.assertIn("accountApi.sync()", refresh_block)
+        self.assertIn("accountApi.current()", refresh_block)
+        self.assertIn("subscriptionIsCached", source)
+        self.assertIn("上次快照", source)
+        self.assertIn("在线数据", source)
+        self.assertIn("resp.subscription?.offline || resp.subscription?.stale", subscription_block)
+        self.assertNotIn("showToast('订阅信息已更新', 'success')", subscription_block)
+
+    def test_account_page_has_compact_hierarchy_and_explains_online_authorization_input(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        logged_in = source.split("if (loggedIn) {", 1)[1].split("\n  return (", 1)[0]
+        self.assertIn('data-account-compact-header', logged_in)
+        self.assertNotIn('px-8 py-7', logged_in)
+        self.assertIn('data-entitlement-helper', logged_in)
+        self.assertIn('aria-describedby="commercial-entitlement-help"', logged_in)
+        self.assertIn('授权码将直接提交给在线授权服务验证', logged_in)
+        self.assertNotIn('<InfoPanel label="购买入口"', logged_in)
+        self.assertNotIn('accent />', logged_in)
+
+    def test_logged_in_account_page_localizes_internal_subscription_values(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        logged_in = source.split("if (loggedIn) {", 1)[1].split("\n  return (", 1)[0]
+        self.assertIn("planDisplayName", source)
+        self.assertIn("基础套餐", source)
+        self.assertIn("matrix_basic: '基础套餐'", source)
+        self.assertIn("matrix_pro: '专业套餐'", source)
+        self.assertIn("matrix_enterprise: '企业套餐'", source)
+        self.assertNotIn("account?.plan || '暂无'", logged_in)
+        self.assertNotIn("'登录后查看'", logged_in)
+        self.assertIn("服务暂未返回", logged_in)
+        self.assertIn('label="套餐到期时间"', logged_in)
 
     def test_runtime_ui_copy_does_not_use_relay_station_wording(self) -> None:
         forbidden = "\u4e2d\u8f6c\u7ad9"
@@ -164,15 +326,38 @@ class AccountUiContractTests(unittest.TestCase):
                             violations.append(os.path.relpath(path, REPO_ROOT))
         self.assertEqual(violations, [])
 
-    def test_legacy_local_authorization_flow_is_not_exposed(self) -> None:
+    def test_logged_in_account_can_redeem_commercial_matrix_entitlement(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertNotIn("setLicenseInfo", source)
         self.assertNotIn("setAuthorized", source)
-        self.assertNotIn("checkLicense", source)
         self.assertNotIn("licenseApi.activate", source)
-        self.assertNotIn("授权码", source)
+        self.assertIn("checkLicense", source)
+        self.assertIn("accountApi.redeemEntitlement({ code })", source)
+        self.assertIn("await checkLicense()", source)
+        after_logged_in_guard = source.split("if (loggedIn) {", 1)[1]
+        logged_in, logged_out = after_logged_in_guard.split("\n  return (", 1)
+        self.assertIn("商业矩阵授权", logged_in)
+        self.assertIn("未激活", logged_in)
+        self.assertIn("已激活", logged_in)
+        self.assertIn("不限", logged_in)
+        self.assertIn("0 台", logged_in)
+        self.assertIn("手机数上限", logged_in)
+        self.assertIn("到期时间", logged_in)
+        self.assertIn("accountEntitlement?.source", source)
+        self.assertIn("accountEntitlement?.features?.includes('matrix.devices')", source)
+        self.assertIn('aria-label="商业矩阵授权码"', logged_in)
+        self.assertIn('type="password"', logged_in)
+        self.assertIn('autoComplete="off"', logged_in)
+        self.assertNotIn('aria-label="商业矩阵授权码"', logged_out)
+        self.assertNotIn("licenseApi.activate", source)
+
+    def test_entitlement_expiry_accepts_signed_epoch_seconds(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("value * 1000", source)
 
     def test_login_returns_on_auth_success_and_reports_background_sync(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
@@ -229,6 +414,27 @@ class AccountUiContractTests(unittest.TestCase):
         self.assertIn('<MetricTile label="可用余额"', logged_in)
         self.assertIn('<MetricTile label="当前套餐"', logged_in)
         self.assertIn('<InfoRow label="默认文本模型"', logged_in)
+
+    def test_cached_logged_in_account_can_enter_and_submit_entitlement_code(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        redeem = source.split("const handleRedeemEntitlement =", 1)[1].split("const logout =", 1)[0]
+        entitlement = source.split("<div data-account-entitlement", 1)[1].split("<div className=\"border-y", 1)[0]
+        self.assertIn("if (!loggedIn)", redeem)
+        self.assertNotIn("if (!accountWritable)", redeem)
+        self.assertIn("disabled={!loggedIn}", entitlement)
+        self.assertIn("disabled={busy || !loggedIn || !entitlementCode.trim()}", entitlement)
+
+    def test_account_quota_is_displayed_as_cny_balance_not_raw_internal_units(self) -> None:
+        with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("const NEW_API_QUOTA_PER_CNY = 500_000", source)
+        self.assertIn("formatQuotaBalance", source)
+        self.assertIn('label="可用余额" value={formatQuotaBalance(', source)
+        self.assertIn('label="累计消费" value={formatQuotaBalance(', source)
+        self.assertNotIn('label="累计消耗"', source)
 
     def test_account_identity_does_not_repeat_the_plan_summary(self) -> None:
         with open(LICENSE_PAGE, "r", encoding="utf-8") as handle:

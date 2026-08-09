@@ -781,6 +781,22 @@ class LoomCliContractTests(unittest.TestCase):
             self.assertFalse(os.path.exists(session_path))
             self.assertEqual(diagnostic["code"], "pid_not_running")
 
+    @unittest.skipUnless(os.name == "nt", "Windows process probing contract")
+    def test_windows_process_probe_handles_live_and_exited_child(self) -> None:
+        import loom_cli
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            self.assertTrue(loom_cli._process_is_alive(child.pid))
+        finally:
+            child.terminate()
+            child.wait(timeout=10)
+
+        self.assertFalse(loom_cli._process_is_alive(child.pid))
+
     def test_bridge_session_rejects_mismatched_live_process_identity(self) -> None:
         import loom_cli
 

@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/colorBgSecondary"
+    android:orientation="vertical">
+
+    <com.apk.claw.android.widget.CommonToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="56pt" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipToPadding="false"
+        android:paddingHorizontal="16pt"
+        android:paddingTop="16pt">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="24pt">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/skill_center_intro"
+                android:textColor="@color/colorTextSecondary"
+                android:textSize="14pt" />
+
+            <androidx.cardview.widget.CardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16pt"
+                app:cardBackgroundColor="@color/colorContainerBrighten"
+                app:cardCornerRadius="14pt"
+                app:cardElevation="1pt">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16pt">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/skill_runtime_title"
+                        android:textColor="@color/colorTextPrimary"
+                        android:textSize="17pt"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvLinuxRuntimeStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6pt"
+                        android:text="@string/skill_runtime_checking"
+                        android:textColor="@color/colorTextSecondary"
+                        android:textSize="14pt" />
+
+                    <Button
+                        android:id="@+id/btnLinuxRuntimeAction"
+                        android:layout_width="match_parent"
+                        android:layout_height="48pt"
+                        android:layout_marginTop="12pt"
+                        android:text="@string/skill_runtime_install" />
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+
+            <TextView
+                android:id="@+id/tvSkillSummary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20pt"
+                android:layout_marginBottom="10pt"
+                android:textColor="@color/colorTextPrimary"
+                android:textSize="16pt"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/skillList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

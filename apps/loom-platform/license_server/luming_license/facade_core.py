@@ -33,6 +33,7 @@ from luming_license.config import (
 )
 from luming_license.errors import ActivationError
 from luming_license.domains import (
+    account_entitlements,
     accounts,
     activations,
     licenses,
@@ -473,6 +474,7 @@ __all__ = [
     "bounded_int_env",
     "ActivationError",
     "accounts",
+    "account_entitlements",
     "activations",
     "licenses",
     "plans",

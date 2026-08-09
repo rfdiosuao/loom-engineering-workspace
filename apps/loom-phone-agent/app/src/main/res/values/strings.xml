@@ -88,6 +88,7 @@
     <!-- Settings -->
     <string name="settings_title">Settings</string>
     <string name="settings_group_channel">Channels</string>
+    <string name="settings_group_connection">Connect to LOOM</string>
     <string name="settings_group_model">Model</string>
     <string name="settings_group_display">Display</string>
     <string name="settings_group_publish">Publish</string>
@@ -153,8 +154,9 @@
     <string name="menu_discord">Discord</string>
     <string name="menu_telegram">Telegram</string>
     <string name="menu_wechat">WeChat</string>
-    <string name="menu_lan_config">LAN Config</string>
+    <string name="menu_lan_config">Connection &amp; LAN</string>
     <string name="menu_pc_pairing">Pair with LOOM</string>
+    <string name="menu_connection_diagnostics">Connection diagnostics</string>
     <string name="menu_publish_relay">Publish Relay</string>
     <string name="menu_floating_circle_size">Floating Ball Size</string>
     <string name="menu_floating_click_enabled">Clickable and draggable overlay</string>
@@ -164,13 +166,27 @@
     <string name="floating_size_medium">Medium</string>
     <string name="floating_size_large">Large</string>
     <string name="floating_size_saved">Floating ball size: %s</string>
-    <string name="lan_config_stopped">Off</string>
+    <string name="lan_config_stopped">Service off</string>
+    <string name="lan_config_starting">Starting…</string>
+    <string name="lan_config_stopping">Stopping…</string>
+    <string name="lan_config_error">Service error. Try again.</string>
+    <string name="lan_config_switching">Switching…</string>
+    <string name="lan_config_usb_ready">USB available</string>
+    <string name="lan_config_lan_ready">LAN available: %1$s</string>
+    <string name="lan_config_hotspot_ready">Hotspot available: %1$s</string>
     <string name="lan_config_no_wifi">Please connect to Wi-Fi or enable phone hotspot</string>
+    <string name="connection_diagnostics_title">Connection diagnostics</string>
+    <string name="connection_diagnostics_action">View</string>
+    <string name="connection_diagnostics_no_lan">No LAN candidate; USB forwarding remains independently available</string>
+    <string name="connection_diagnostics_summary">Pairing: %1$s\nService: %2$s\nNetwork mode: %3$s\nCandidates:\n%4$s</string>
 
     <!-- LOOM pairing -->
     <string name="pc_pairing_title">Pair with LOOM</string>
     <string name="pc_pairing_tip_usb">For USB pairing, enter the 6-digit code in LOOM or copy the full pairing payload. Long-lived credentials are never shown.</string>
     <string name="pc_pairing_tip_lan">For LAN pairing, scan or paste the full pairing payload in LOOM. The 6-digit code is USB-only, and long-lived credentials are never shown.</string>
+    <string name="pc_pairing_tip_lan_unavailable">LAN pairing is unavailable. Switch to USB pairing or check the network, then try again.</string>
+    <string name="pc_pairing_transport_usb">USB</string>
+    <string name="pc_pairing_transport_lan">LAN</string>
     <string name="pc_pairing_code">USB only: 6-digit pairing code</string>
     <string name="pc_pairing_expiry">Expires in %1$d seconds</string>
     <string name="pc_pairing_refresh">Refresh pairing payload</string>
@@ -180,6 +196,7 @@
     <string name="pc_pairing_server_failed">Phone connection service failed to start. Return and retry.</string>
     <string name="pc_pairing_usb_ready">USB pairing is ready. Connect this phone to the PC and enter the code in LOOM.</string>
     <string name="pc_pairing_lan_ready">LAN pairing is ready. Scan or copy the payload in LOOM.</string>
+    <string name="pc_pairing_lan_unavailable">No LAN address is available. Switch to USB pairing or check the network, then try again.</string>
     <string name="pc_pairing_status_paired">Paired</string>
     <string name="pc_pairing_status_unpaired">Not paired</string>
 
@@ -329,4 +346,68 @@
     <string name="input_dialog_need_more">Enter at least %d characters</string>
     <string name="input_dialog_need_less">Enter at most %d characters</string>
     <string name="input_dialog_no_zero">Please enter a non-zero value</string>
+
+    <!-- Optional enhanced device capabilities -->
+    <string name="settings_group_enhanced_capabilities">Enhanced device capabilities</string>
+    <string name="menu_enhanced_capability">Shizuku enhanced capability</string>
+    <string name="enhanced_status_not_installed">Not installed · standard mode</string>
+    <string name="enhanced_status_disabled">Off · standard mode</string>
+    <string name="enhanced_status_service_stopped">Service unavailable · standard mode</string>
+    <string name="enhanced_status_permission_required">Authorization required</string>
+    <string name="enhanced_status_permission_denied">Authorization denied · standard mode</string>
+    <string name="enhanced_status_ready">Ready</string>
+    <string name="enhanced_status_root_disabled">Root/Sui disabled</string>
+    <string name="enhanced_status_standard">Standard mode</string>
+    <string name="enhanced_dialog_title">Shizuku enhanced capability</string>
+    <string name="enhanced_not_installed_message">Shizuku is not installed. LumiAgent will remain fully usable in standard mode. You can open the official Shizuku guide to install it.</string>
+    <string name="enhanced_open_official_guide">Open official guide</string>
+    <string name="enhanced_keep_standard">Keep standard mode</string>
+    <string name="enhanced_enable_message">Enable local Shizuku detection and authorization? This does not grant access automatically, and standard mode remains available at all times.</string>
+    <string name="enhanced_enable_action">Enable detection</string>
+    <string name="enhanced_service_stopped_message">The Shizuku service is stopped or its binder is unavailable. Start Shizuku, then return here. LumiAgent has already fallen back to standard mode.</string>
+    <string name="enhanced_open_shizuku">Open Shizuku</string>
+    <string name="enhanced_permission_message">Shizuku is running, but LumiAgent has not been authorized. Android will show the official authorization dialog.</string>
+    <string name="enhanced_request_permission">Request authorization</string>
+    <string name="enhanced_request_failed">Unable to request Shizuku authorization</string>
+    <string name="enhanced_permission_denied_message">Shizuku authorization is unavailable or was denied. Review it in Shizuku, or keep using standard mode.</string>
+    <string name="enhanced_ready_message">Shizuku authorization is ready. Only explicitly allowlisted typed capabilities may use it; arbitrary shell commands and remote command execution are not exposed.</string>
+    <string name="enhanced_disable_action">Disable and use standard mode</string>
+    <string name="enhanced_root_disabled_message">A root/Sui identity was detected. Root/Sui integration is disabled in this release, so LumiAgent will stay in standard mode.</string>
+    <string name="enhanced_standard_message">LumiAgent is using standard mode. Enhanced capability failure never blocks pairing, LAN/USB connectivity, or ordinary Agent tasks.</string>
+    <string name="enhanced_open_failed">Unable to open Shizuku or its official guide</string>
+
+    <!-- Skill Center and optional Linux companion -->
+    <string name="menu_skill_center">Skill Center</string>
+    <string name="skill_center_title">Skill Center</string>
+    <string name="skill_center_count">%1$d Skills</string>
+    <string name="skill_center_intro">Successful deterministic tasks are retained as reusable Skills. Read-only direct tasks can run fast on their second use; side effects keep the strict validation gate.</string>
+    <string name="skill_center_summary">%1$d of %2$d Skills are callable</string>
+    <string name="skill_runtime_title">Linux Runtime</string>
+    <string name="skill_runtime_checking">Checking companion and runtime integrity…</string>
+    <string name="skill_runtime_ready">PRoot 5.1.107.89 + Alpine 3.22.5 is ready · network denied by default</string>
+    <string name="skill_runtime_installing">Installing and running the offline health check…</string>
+    <string name="skill_runtime_downloading">Downloading and verifying the signed Linux companion…</string>
+    <string name="skill_runtime_missing">Optional Linux companion is not installed or initialized</string>
+    <string name="skill_runtime_damaged">Runtime integrity check failed; reinstall is required</string>
+    <string name="skill_runtime_disabled">Linux runtime is disabled; standard Agent capabilities remain available</string>
+    <string name="skill_runtime_install">Install and verify Linux runtime</string>
+    <string name="skill_runtime_recheck">Recheck Linux runtime</string>
+    <string name="skill_runtime_install_success">Linux runtime is ready</string>
+    <string name="skill_runtime_install_failed">Linux runtime setup failed: %1$s</string>
+    <string name="skill_runtime_unknown_sources">Allow Lumi Agent Phone to install this verified companion, then return here.</string>
+    <string name="skill_runtime_confirm_install">The Linux companion passed package, hash and signature checks. Confirm installation in the Android system window.</string>
+    <string name="skill_runtime_install_cancelled">Linux companion installation was not completed. No runtime changes were made.</string>
+    <string name="skill_status_ready">Ready · Agent can call it</string>
+    <string name="skill_status_needs_validation">Learned · validation required before automatic reuse</string>
+    <string name="skill_status_degraded">Paused after runtime mismatch</string>
+    <string name="skill_status_disabled">Disabled</string>
+    <string name="skill_status_runtime_required">Linux companion required</string>
+    <string name="skill_test_action">Test this Skill</string>
+    <string name="skill_agent_callable">Agent can call automatically</string>
+    <string name="skill_test_result_title">Skill test result</string>
+    <string name="skill_test_result_success">Runtime: %1$s\nDuration: %2$d ms\n\n%3$s</string>
+    <string name="skill_test_result_failed">Test failed: %1$s</string>
+    <string name="skill_delete_title">Delete learned Skill?</string>
+    <string name="skill_delete_message">Delete “%1$s”? This cannot be undone.</string>
+    <string name="skill_delete_action">Delete</string>
 </resources>

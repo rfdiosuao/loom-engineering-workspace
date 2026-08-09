@@ -36,6 +36,8 @@ export const loomClient = {
       call(() => accountApi.bindTicket(params), 'Failed to bind account ticket'),
     sync: () => call(() => accountApi.sync(), 'Failed to sync account models'),
     subscription: () => call(() => accountApi.subscription(), 'Failed to read subscription'),
+    redeemEntitlement: (params: Parameters<typeof accountApi.redeemEntitlement>[0]) =>
+      call(() => accountApi.redeemEntitlement(params), '商业矩阵授权绑定失败'),
     selectModels: (params: Parameters<typeof accountApi.selectModels>[0]) =>
       call(() => accountApi.selectModels(params), 'Failed to save model selection'),
     logout: () => call(() => accountApi.logout(), 'Failed to logout account'),

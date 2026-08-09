@@ -21,11 +21,42 @@ PROTECTED_TAURI_CONFIG = os.path.join(LAUNCHER_ROOT, "src-tauri", "tauri.protect
 TAURI_CONFIG = os.path.join(LAUNCHER_ROOT, "src-tauri", "tauri.conf.json")
 DESKTOP_UPDATE_PUBLIC_KEY = os.path.join(LAUNCHER_ROOT, "desktop-update-public-key.txt")
 MAC_ONLINE_PACKAGER = os.path.join(LAUNCHER_ROOT, "scripts", "package-mac-online.mjs")
+CI_VERSION_GATE_STEP_LINES = (
+    "      - name: Verify version consistency",
+    "        working-directory: apps/loom-platform",
+    "        env:",
+    '          LOOM_RELEASE_CONTRACT_VERSION: "2.4.11"',
+    r"        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-version-consistency.ps1 -ExpectedVersion $env:LOOM_RELEASE_CONTRACT_VERSION",
+    "",
+)
 
 
 def read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def assert_ci_version_gate_contract(test_case: unittest.TestCase, source: str) -> None:
+    lines = source.splitlines()
+    name_line = CI_VERSION_GATE_STEP_LINES[0]
+    env_line = CI_VERSION_GATE_STEP_LINES[3]
+    run_line = CI_VERSION_GATE_STEP_LINES[4]
+
+    test_case.assertEqual(lines.count(name_line), 1)
+    test_case.assertEqual(lines.count(env_line), 1)
+    test_case.assertEqual(lines.count(run_line), 1)
+
+    start = lines.index(name_line)
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].startswith("      - name: ")
+        ),
+        len(lines),
+    )
+    test_case.assertEqual(tuple(lines[start:end]), CI_VERSION_GATE_STEP_LINES)
+    test_case.assertLess(start, lines.index("      - name: Install frontend dependencies"))
 
 
 class ReleaseSourceOfTruthTests(unittest.TestCase):
@@ -271,6 +302,46 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
         pull_request_block = source.split("  pull_request:", 1)[1].split("  workflow_dispatch:", 1)[0]
         self.assertNotIn("branches:", pull_request_block)
 
+    def test_ci_runs_literal_version_gate_before_installing_dependencies(self) -> None:
+        source = read_text(CI_WORKFLOW)
+        assert_ci_version_gate_contract(self, source)
+
+    def test_ci_version_gate_contract_rejects_mutations(self) -> None:
+        source = read_text(CI_WORKFLOW)
+        step = "\n".join(CI_VERSION_GATE_STEP_LINES[:-1])
+        env_line = CI_VERSION_GATE_STEP_LINES[3]
+        run_line = CI_VERSION_GATE_STEP_LINES[4]
+        run_command = run_line.removeprefix("        run: ")
+        mutations = {
+            "runtime reassignment": source.replace(
+                run_line,
+                "\n".join(
+                    (
+                        "        run: |",
+                        '          $env:LOOM_RELEASE_CONTRACT_VERSION = "${{ github.ref_name }}"',
+                        f"          {run_command}",
+                    )
+                ),
+                1,
+            ),
+            "duplicate run": source.replace(run_line, f"{run_line}\n{run_line}", 1),
+            "duplicate literal env": source.replace(env_line, f"{env_line}\n{env_line}", 1),
+            "duplicate step name": source.replace(step, f"{step}\n\n{step}", 1),
+            "continue on error": source.replace(run_line, f"{run_line}\n        continue-on-error: true", 1),
+            "comment decoy": source.replace(run_line, f"{run_line}\n        # version gate decoy", 1),
+            "dynamic env": source.replace(
+                env_line,
+                '          LOOM_RELEASE_CONTRACT_VERSION: "${{ github.ref_name }}"',
+                1,
+            ),
+        }
+
+        for name, mutated_source in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated_source, source)
+                with self.assertRaises(AssertionError):
+                    assert_ci_version_gate_contract(self, mutated_source)
+
     def test_ci_runs_frontend_node_and_rust_behavior_tests(self) -> None:
         source = read_text(CI_SCRIPT)
         self.assertIn("npm run test:platform-contracts", source)
@@ -326,12 +397,51 @@ class ReleaseSourceOfTruthTests(unittest.TestCase):
             rf'(?s)\[\[package\]\]\s*name\s*=\s*"app"\s*version\s*=\s*"{escaped_version}"',
         )
 
-    def test_release_body_uses_the_versioned_product_notes_when_available(self) -> None:
+    def test_release_body_requires_nonempty_versioned_product_notes(self) -> None:
         release = read_text(RELEASE_WORKFLOW)
+        notes_step_name = "- name: Prepare product release notes"
 
-        self.assertIn('RELEASE_NOTES_$version.md', release)
-        self.assertIn('Get-Content -LiteralPath $notesPath -Raw', release)
+        self.assertIn(notes_step_name, release)
+        notes_step = release.split(notes_step_name, 1)[1].split("- name:", 1)[0]
+        self.assertIn("working-directory: apps/loom-platform", notes_step)
+        self.assertIn(
+            '$notesPath = Join-Path $PWD "openclaw_new_launcher\\docs\\RELEASE_NOTES_$version.md"',
+            notes_step,
+        )
+        self.assertIn(
+            "if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {",
+            notes_step,
+        )
+        self.assertIn('throw "Product release notes are missing: $notesPath"', notes_step)
+        self.assertIn('$body = (Get-Content -LiteralPath $notesPath -Raw).Trim()', notes_step)
+        self.assertIn("if ([string]::IsNullOrWhiteSpace($body)) {", notes_step)
+        self.assertIn('throw "Product release notes are empty: $notesPath"', notes_step)
+        self.assertEqual(notes_step.count("$body ="), 1)
+        self.assertNotIn("else {", notes_step)
+        self.assertNotIn("# LOOM $version 更新说明", release)
+        self.assertNotIn("本次版本包含稳定性、兼容性与使用体验改进。", release)
         self.assertIn('body_path: apps/loom-platform/ci_artifacts/RELEASE_BODY.md', release)
+
+    def test_release_runs_version_contract_after_install_and_before_build_or_publish(self) -> None:
+        release = read_text(RELEASE_WORKFLOW)
+        install_step = "- name: Install frontend dependencies"
+        contract_step = "- name: Verify release version contract"
+        first_build_step = "- name: Build and verify bundled Skill library"
+        publish_step = "- name: Publish GitHub Release"
+
+        self.assertIn(contract_step, release)
+        contract_block = release.split(contract_step, 1)[1].split("- name:", 1)[0]
+        self.assertIn(
+            "working-directory: apps/loom-platform/openclaw_new_launcher",
+            contract_block,
+        )
+        self.assertIn(
+            "run: node --test --test-concurrency=1 scripts/tests/release-version-contract.test.mjs",
+            contract_block,
+        )
+        self.assertLess(release.index(install_step), release.index(contract_step))
+        self.assertLess(release.index(contract_step), release.index(first_build_step))
+        self.assertLess(release.index(contract_step), release.index(publish_step))
 
 
 if __name__ == "__main__":

@@ -32,6 +32,30 @@ class PhonePairingBootstrapTest {
     }
 
     @Test
+    fun explicit_usb_selection_with_a_lan_ip_creates_a_loopback_six_digit_code_session() {
+        val readiness = PcPairingReadinessPolicy.evaluate(
+            lanIp = "192.168.1.8",
+            serverRunning = true,
+            serverPort = 9527,
+            transportMode = PairingTransportMode.USB
+        )
+        val session = PhonePairingBootstrap.createSession(
+            baseUrl = readiness.baseUrl,
+            deviceInstanceId = "lumi-phone-a",
+            deviceName = "Pixel",
+            transportHint = readiness.transportHint
+        )
+        val query = parseQuery(session.payload)
+
+        assertTrue(readiness.ready)
+        assertEquals("http://127.0.0.1:9527", readiness.baseUrl)
+        assertEquals("usb", readiness.transportHint)
+        assertTrue(session.code.matches(Regex("\\d{6}")))
+        assertEquals("usb", query["x"])
+        assertEquals(session.code, query["c"])
+    }
+
+    @Test
     fun creates_lan_payload_with_short_lived_bootstrap_secret_only() {
         val session = createLanSession()
         val query = parseQuery(session.payload)
@@ -176,6 +200,31 @@ class PhonePairingBootstrapTest {
 
         assertEquals("phone_pairing_transport_invalid", result.errorCode)
         assertTrue(promoted.isEmpty())
+    }
+
+    @Test
+    fun revoked_lan_session_is_rejected_while_a_replacement_usb_session_can_claim() {
+        val revoked = createLanSession()
+        PhonePairingBootstrap.revokeSession(revoked.sessionId)
+
+        val revokedClaim = PhonePairingBootstrap.claim(
+            lanClaim(revoked, "nonce-revoked-0000000"),
+            remoteAddress = "192.168.1.30"
+        )
+        val replacement = PhonePairingBootstrap.createSession(
+            baseUrl = "http://127.0.0.1:19527",
+            deviceInstanceId = "lumi-phone-a",
+            deviceName = "Pixel",
+            transportHint = "usb"
+        )
+        val replacementClaim = PhonePairingBootstrap.claim(
+            usbClaim(replacement),
+            remoteAddress = "127.0.0.1"
+        )
+
+        assertFalse(revokedClaim.success)
+        assertEquals("phone_pairing_code_invalid", revokedClaim.errorCode)
+        assertTrue(replacementClaim.success)
     }
 
     @Test

@@ -176,8 +176,8 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         self.assertIn("data-agent-model-apply", source)
         self.assertNotIn("if (!oneClickLocked) onApply();", source)
         self.assertIn("选择模型不会修改本机", source)
-        self.assertIn("只有点击“写入配置”后才会更新 Codex / Claude Code", source)
-        self.assertIn("Codex / Claude Code 模型", source)
+        self.assertIn("只有点击“写入配置”后才会更新当前智能体", source)
+        self.assertIn("`${component.name} 模型`", source)
 
     def test_model_config_visibly_protects_existing_agent_sessions(self) -> None:
         with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
@@ -252,7 +252,7 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn("new Set(['codex-desktop', 'claude-code', 'opencode', 'openclaw-companion'])", source)
+        self.assertIn("new Set(['codex-desktop', 'claude-code', 'opencode', 'openclaw-companion', 'pi', 'grok-build'])", source)
         self.assertIn("data-agent-open-web-button", source)
         self.assertIn("openWeb(selected)", source)
         self.assertIn("isOpenClawComponent(selected)", source)
@@ -453,17 +453,52 @@ class AgentInstallerPageContractTests(unittest.TestCase):
         self.assertIn("const COMPONENT_START_TIMEOUT_MS = 45_000", api_source)
         self.assertIn("timeoutMs: COMPONENT_START_TIMEOUT_MS", api_source)
 
-    def test_codex_card_is_the_official_chatgpt_app_and_does_not_require_python(self) -> None:
+    def test_openai_products_keep_one_codex_desktop_card_and_independent_cli(self) -> None:
         with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn("ChatGPT Codex 原版", source)
+        self.assertIn("Codex Desktop", source)
+        self.assertIn("Codex CLI", source)
+        self.assertNotIn("ChatGPT Desktop", source)
+        self.assertNotIn("'chatgpt-desktop'", source)
+        self.assertIn("data-agent-detection-evidence", source)
+        self.assertIn("为什么认为可用", source)
+        self.assertIn("下一步", source)
         self.assertIn("Microsoft Store", source)
         self.assertIn("'codex-desktop': new Set()", source)
+        self.assertIn("'codex-cli': new Set(['python_runtime', 'node', 'npm', 'data_dir'])", source)
         self.assertIn("安装原版", source)
         self.assertIn("等待 Microsoft Store 完成安装", source)
         self.assertIn("原版应用请在 Windows 设置中卸载", source)
         self.assertNotIn("'codex-desktop': new Set(['python_runtime'])", source)
+
+    def test_agent_catalog_heading_does_not_advertise_a_removed_chatgpt_product(self) -> None:
+        with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertNotIn("Codex / ChatGPT", source)
+        self.assertIn("Codex / Claude / Grok Build / Pi / Goose / Gemini CLI 等", source)
+
+    def test_installer_summary_and_detection_details_are_novice_friendly(self) -> None:
+        with open(AGENT_PAGE, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn("const upgradeCount =", source)
+        self.assertIn("data-agent-readiness-summary", source)
+        self.assertIn("可升级", source)
+        self.assertIn("whitespace-nowrap", source)
+        self.assertIn('label="安装来源"', source)
+        self.assertIn('label="已安装版本"', source)
+        self.assertIn('label="安装包大小"', source)
+        self.assertIn('label="组件类型"', source)
+        self.assertIn("displayComponentType", source)
+        self.assertIn("data-agent-advanced-detection", source)
+        self.assertIn("查看检测详情", source)
+        self.assertIn("displayDetectionStatus", source)
+        self.assertIn("detectionIdentityNote", source)
+        self.assertIn("OpenAI.Codex", source)
+        self.assertIn("程序入口名可能为 ChatGPT.exe", source)
+        self.assertNotIn("ChatGPT 桌面应用（内含 Codex）", source)
 
 
 if __name__ == "__main__":

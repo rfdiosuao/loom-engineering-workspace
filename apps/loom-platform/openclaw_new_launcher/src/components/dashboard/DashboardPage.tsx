@@ -363,11 +363,20 @@ export const DashboardPage: React.FC = () => {
                 </button>
                 <button
                   type="button"
-                  aria-label="查看可做的事"
-                  onClick={() => setCurrentPage('workbench')}
+                  aria-label="连接手机"
+                  onClick={() => setCurrentPage('phone')}
                   className="inline-flex h-11 items-center gap-2 rounded-xl border border-white/15 bg-white/[0.06] px-5 text-sm font-bold text-white transition hover:border-white/30 hover:bg-white/10"
                 >
                   <Phone className="h-4 w-4" aria-hidden="true" />
+                  连接手机
+                </button>
+                <button
+                  type="button"
+                  aria-label="打开矩阵工作台"
+                  onClick={() => setCurrentPage('workbench')}
+                  className="inline-flex h-11 items-center gap-2 rounded-xl border border-white/15 bg-white/[0.06] px-5 text-sm font-bold text-white transition hover:border-white/30 hover:bg-white/10"
+                >
+                  <Workflow className="h-4 w-4" aria-hidden="true" />
                   让 AI 带着手机干活
                 </button>
               </div>

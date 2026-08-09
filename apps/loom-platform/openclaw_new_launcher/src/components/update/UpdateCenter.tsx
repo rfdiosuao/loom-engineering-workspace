@@ -33,6 +33,10 @@ const SKIPPED_VERSION_KEY = 'loom.update.skippedVersion';
 const LAST_CHECK_KEY = 'loom.update.lastAutomaticCheckAt';
 const AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const OFFICIAL_RELEASES_URL = 'https://github.com/rfdiosuao/loom-engineering-workspace/releases/latest';
+// The native handoff may spend up to five seconds publishing its ready marker
+// before the six-second forced-exit deadline starts. Keep a small UI margin so
+// a valid slow handoff is not presented as a failure just before the app exits.
+export const RESTART_EXIT_WATCHDOG_MS = 15_000;
 
 type UpdatePhase =
   | 'idle'
@@ -113,6 +117,7 @@ export const UpdateCenter: React.FC = () => {
   const requestSequence = React.useRef(0);
   const phaseRef = React.useRef<UpdatePhase>('idle');
   const visibleRef = React.useRef(false);
+  const restartWatchdogRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     phaseRef.current = phase;
@@ -121,6 +126,12 @@ export const UpdateCenter: React.FC = () => {
   React.useEffect(() => {
     visibleRef.current = visible;
   }, [visible]);
+
+  React.useEffect(() => () => {
+    if (restartWatchdogRef.current !== null) {
+      window.clearTimeout(restartWatchdogRef.current);
+    }
+  }, []);
 
   const checkForUpdate = React.useCallback(async (manual: boolean) => {
     if (!manual && shouldReuseUpdateSession(phaseRef.current)) return;
@@ -293,13 +304,31 @@ export const UpdateCenter: React.FC = () => {
 
   const restartAndInstall = async () => {
     if (!installerPath) return;
+    if (restartWatchdogRef.current !== null) {
+      window.clearTimeout(restartWatchdogRef.current);
+    }
     setPhase('restarting');
     setErrorMessage('');
     setErrorCode('');
     setRemediation([]);
+    restartWatchdogRef.current = window.setTimeout(() => {
+      if (phaseRef.current !== 'restarting') return;
+      setErrorMessage('旧版本未能自动退出，更新接力尚未开始安装。');
+      setErrorCode('update_restart_timeout');
+      setRemediation([
+        '已下载并验证的安装包仍然保留，当前版本和数据未被修改。',
+        `请完全退出 ${APP_DISPLAY_NAME} 后运行：${installerPath}`,
+      ]);
+      setPhase('failed');
+      restartWatchdogRef.current = null;
+    }, RESTART_EXIT_WATCHDOG_MS);
     try {
       await updateApi.prepareInstall(installerPath);
     } catch (error) {
+      if (restartWatchdogRef.current !== null) {
+        window.clearTimeout(restartWatchdogRef.current);
+        restartWatchdogRef.current = null;
+      }
       setErrorMessage(parseErrorText(error) || '无法启动安全更新接力。');
       setErrorCode('update_handoff_failed');
       setRemediation([

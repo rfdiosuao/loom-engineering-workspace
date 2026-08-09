@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import http.cookiejar
 import copy
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -14,6 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from core.account_entitlement import AccountEntitlementError, AccountEntitlementManager
 from core.license_manager import LicenseManager
 from core.model_catalog import (
     ModelDescriptor,
@@ -28,9 +31,18 @@ from core.wire_config import WireService, clear_agent_user_env_keys
 
 
 class NewApiAccountError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str = "",
+        details: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.code = str(code or "").strip().lower()
+        self.details = dict(details) if isinstance(details, dict) else {}
 
 
 DEFAULT_BASE_URL = "https://api.heang.top"
@@ -40,6 +52,8 @@ LEGACY_API_BASE = "https://api.heang.top/v1"
 DEFAULT_ACCOUNT_CENTER_PATH = "/wallet"
 ACCOUNT_SOURCE = "newapi_account"
 LEGACY_ACCOUNT_SOURCE = "heang_account"
+LEGACY_PRODUCT_DIRECTORY_NAMES = ("Luming AI Matrix Acquisition Workbench",)
+MAX_LEGACY_SESSION_BYTES = 1024 * 1024
 SESSION_GRACE_DAYS = 14
 DEFAULT_TEXT_MODEL = "glm-5.2-coding"
 DEFAULT_PHONE_MODEL = "qwen3.7-plus"
@@ -88,8 +102,26 @@ SESSION_SECRET_PATHS = (
 )
 DEFAULT_RUNTIME_SYNC_TARGETS = ("openclaw", "opencode", "claude", "image", "desktop", "phone")
 FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS = 5
+ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS = 20
 NATIVE_PASSWORD_LOGIN_TIMEOUT_SECONDS = 10
 AUTH_CAPABILITIES_CACHE_SECONDS = 300
+SUBSCRIPTION_REQUEST_BUDGET_SECONDS = 3.0
+PERMANENT_ENTITLEMENT_ERROR_CODES = frozenset({
+    "account_entitlement_not_found",
+    "account_entitlement_revoked",
+    "account_mismatch",
+    "account_session_mismatch",
+    "authorization_code_disabled",
+    "authorization_code_expired",
+    "authorization_code_revoked",
+    "authorization_required",
+    "entitlement_required",
+    "lease_expired",
+    "lease_revoked",
+    "license_disabled",
+    "license_expired",
+    "license_invalid",
+})
 
 
 def _utc_now() -> datetime:
@@ -108,6 +140,41 @@ def _pick_text(*values: Any) -> str:
         if text and text.lower() != "none":
             return text
     return ""
+
+
+def _error_payload_fields(payload: Any) -> tuple[str, str, dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return "", "", {}
+    nested = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    code = _pick_text(payload.get("code"), nested.get("code")).lower()
+    message = _pick_text(
+        payload.get("message"),
+        nested.get("message"),
+        payload.get("error") if isinstance(payload.get("error"), str) else "",
+    )
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = nested.get("details")
+    return code, message, dict(details) if isinstance(details, dict) else {}
+
+
+def _inactive_entitlement_snapshot(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    source = str(value.get("source") or "").strip().lower()
+    plan = str(value.get("plan") or "").strip().lower()
+    if source not in PERMANENT_ENTITLEMENT_ERROR_CODES and plan != "inactive":
+        return None
+    return {
+        "source": source or "authorization_required",
+        "plan": "inactive",
+        "features": [],
+        "limits": {
+            "devices": 0,
+            "concurrentTasks": 0,
+            "unlimitedDevices": False,
+        },
+    }
 
 
 def _looks_like_email(value: Any) -> bool:
@@ -780,7 +847,6 @@ def _extract_subscription_snapshot(payload: Any, *, base_url: str, fallback: dic
         account.get("group"),
         data.get("plan"),
         fallback.get("plan"),
-        "default",
     )
     balance = _pick_text(
         subscription.get("balance"),
@@ -818,6 +884,22 @@ def _extract_subscription_snapshot(payload: Any, *, base_url: str, fallback: dic
         ),
         base_url=base_url,
     )
+    invite_code = _pick_text(
+        subscription.get("inviteCode"),
+        subscription.get("invitationCode"),
+        subscription.get("referralCode"),
+        account.get("inviteCode"),
+        account.get("affCode"),
+        account.get("aff_code"),
+        data.get("inviteCode"),
+        data.get("invitationCode"),
+        data.get("referralCode"),
+        data.get("affCode"),
+        data.get("aff_code"),
+        fallback_usage.get("inviteCode"),
+        fallback_usage.get("affCode"),
+        fallback_usage.get("aff_code"),
+    )
     return {
         "mode": "native",
         "plan": plan,
@@ -833,6 +915,7 @@ def _extract_subscription_snapshot(payload: Any, *, base_url: str, fallback: dic
                 fallback_usage.get("requestCount"),
             ),
         },
+        "inviteCode": invite_code,
         "purchaseUrl": purchase_url,
         "updatedAt": _iso(_utc_now()),
     }
@@ -884,12 +967,44 @@ def _allows_legacy_fallback(url: str, method: str) -> bool:
     return path in LEGACY_FALLBACK_POST_PATHS
 
 
+def _account_session_identity(session: Any) -> str:
+    if not isinstance(session, dict) or session.get("source") != ACCOUNT_SOURCE:
+        return ""
+    entitlement = session.get("accountEntitlement") if isinstance(session.get("accountEntitlement"), dict) else {}
+    newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
+    account_id = _pick_text(
+        entitlement.get("accountId"),
+        session.get("memberId"),
+        newapi.get("userId"),
+        newapi.get("account"),
+        session.get("memberName"),
+    )
+    if account_id.startswith("newapi:"):
+        account_id = account_id.partition(":")[2]
+    if not account_id:
+        member_token = _pick_text(
+            session.get("memberToken"),
+            newapi.get("apiToken"),
+        )
+        if member_token:
+            account_id = "token-sha256:" + hashlib.sha256(
+                member_token.encode("utf-8")
+            ).hexdigest()
+    base_url = str(newapi.get("baseUrl") or "").strip().rstrip("/").lower()
+    return f"{ACCOUNT_SOURCE}\0{base_url}\0{account_id}" if account_id else ""
+
+
 class NewApiAccountManager:
     def __init__(self, paths: AppPaths, append_log=None):
         self.paths = paths
         self.license_mgr = LicenseManager(paths)
+        self.account_entitlement = AccountEntitlementManager(
+            paths,
+            legacy_license_manager=self.license_mgr,
+        )
         self.append_log = append_log or (lambda _text: None)
         self._auth_capabilities_cache: tuple[float, str, dict[str, Any]] | None = None
+        self._session_transaction_lock = threading.RLock()
 
     @property
     def session_path(self) -> str:
@@ -942,13 +1057,17 @@ class NewApiAccountManager:
                 try:
                     raw = error.read().decode("utf-8", errors="replace")
                     payload = json.loads(raw) if raw.strip() else {}
-                    message = _pick_text(
-                        payload.get("message") if isinstance(payload, dict) else "",
-                        payload.get("error") if isinstance(payload, dict) else "",
-                    )
+                    code, message, details = _error_payload_fields(payload)
                 except Exception:
+                    code = ""
                     message = ""
-                raise NewApiAccountError(message or f"http_{error.code}", status_code=error.code) from error
+                    details = {}
+                raise NewApiAccountError(
+                    message or f"http_{error.code}",
+                    status_code=error.code,
+                    code=code,
+                    details=details,
+                ) from error
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
                 if index + 1 < len(candidates):
                     self.append_log("NewAPI 国内加速线路连接失败，正在切换兼容线路。")
@@ -958,7 +1077,12 @@ class NewApiAccountManager:
                 raise NewApiAccountError(f"newapi_network_error:{error}") from error
 
         if isinstance(payload, dict) and payload.get("success") is False:
-            raise NewApiAccountError(_pick_text(payload.get("message"), payload.get("error"), "newapi_request_failed"))
+            code, message, details = _error_payload_fields(payload)
+            raise NewApiAccountError(
+                message or "newapi_request_failed",
+                code=code,
+                details=details,
+            )
         return payload if isinstance(payload, dict) else {"data": payload}
 
     def _auth_headers(self, access_token: str = "", user_id: str = "") -> dict[str, str]:
@@ -968,6 +1092,25 @@ class NewApiAccountManager:
         if user_id:
             headers["New-Api-User"] = user_id
         return headers
+
+    def _lease_identity_payload(self) -> dict[str, str]:
+        host_device_id = self.license_mgr.device_id()
+        return {
+            "installId": self.license_mgr.get_install_id(),
+            "deviceId": host_device_id,
+            "hostDeviceId": host_device_id,
+        }
+
+    @staticmethod
+    def _entitlement_meta(data: Any) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+        lease = data.get("entitlementLease")
+        entitlement = data.get("entitlement")
+        return {
+            "entitlementLease": dict(lease) if isinstance(lease, dict) else None,
+            "entitlement": dict(entitlement) if isinstance(entitlement, dict) else None,
+        }
 
     def _request_launcher_token_bridge(
         self,
@@ -982,6 +1125,7 @@ class NewApiAccountManager:
             username,
             password,
             timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
+            extra_body=self._lease_identity_payload(),
         )
         data = _unwrap(payload)
         token = _extract_best_api_key(payload)
@@ -1007,6 +1151,7 @@ class NewApiAccountManager:
             "remainQuota": data.get("remainQuota") if isinstance(data, dict) else None,
             "sessionCookie": _pick_text(data.get("sessionCookie") if isinstance(data, dict) else ""),
             "apiBaseUrl": _pick_text(api.get("baseUrl")),
+            **self._entitlement_meta(data),
         }
         legacy_contract_missing = bool(
             token_meta.get("tokenKind") == "launcher"
@@ -1038,7 +1183,7 @@ class NewApiAccountManager:
             opener,
             f"{base_url}/api/openclaw/launcher-token/ensure",
             method="POST",
-            body={},
+            body=self._lease_identity_payload(),
             headers={"Authorization": f"Bearer {api_token}"},
             timeout=FAST_PASSWORD_BRIDGE_TIMEOUT_SECONDS,
         )
@@ -1066,6 +1211,7 @@ class NewApiAccountManager:
             "account": _pick_text(data.get("account") if isinstance(data, dict) else ""),
             "group": _pick_text(data.get("group") if isinstance(data, dict) else "", "default"),
             "apiBaseUrl": _pick_text(api.get("baseUrl")),
+            **self._entitlement_meta(data),
         }
         if not _launcher_permission_contract_satisfied(token_meta):
             raise NewApiAccountError("launcher_token_permission_contract_invalid")
@@ -1079,13 +1225,15 @@ class NewApiAccountManager:
         password: str,
         *,
         timeout: int = 20,
+        extra_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        extra = dict(extra_body or {})
         try:
             return self._request_json(
                 opener,
                 url,
                 method="POST",
-                body={"username": username, "password": password},
+                body={"username": username, "password": password, **extra},
                 timeout=timeout,
             )
         except NewApiAccountError as error:
@@ -1096,7 +1244,7 @@ class NewApiAccountManager:
                 opener,
                 url,
                 method="POST",
-                body={"email": username, "password": password},
+                body={"email": username, "password": password, **extra},
                 timeout=timeout,
             )
 
@@ -1110,7 +1258,7 @@ class NewApiAccountManager:
             opener,
             f"{base_url}/api/openclaw/bind/claim",
             method="POST",
-            body={"ticket": ticket},
+            body={"ticket": ticket, **self._lease_identity_payload()},
             timeout=35,
         )
         data = _unwrap(payload)
@@ -1125,6 +1273,7 @@ class NewApiAccountManager:
             "data": data if isinstance(data, dict) else {},
             "token": token,
             "models": models,
+            **self._entitlement_meta(data),
         }
 
     def _request_openclaw_auth_endpoint(
@@ -1393,6 +1542,7 @@ class NewApiAccountManager:
             "tokenName": data.get("tokenName") or "",
             "tokenKind": data.get("tokenKind") or "",
             "models": flat_models,
+            **self._entitlement_meta(data),
         }
         session = self._build_session(
             session_base_url,
@@ -1488,6 +1638,7 @@ class NewApiAccountManager:
                     "authType": "email_code_login",
                     "product": "LOOM",
                     "app": "LOOM",
+                    **self._lease_identity_payload(),
                 },
             )
         except NewApiAccountError as error:
@@ -1534,6 +1685,7 @@ class NewApiAccountManager:
                 "verification_code": code,
                 "product": "LOOM",
                 "app": "LOOM",
+                **self._lease_identity_payload(),
             },
         )
         try:
@@ -1570,7 +1722,6 @@ class NewApiAccountManager:
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
         base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
         opener = urllib.request.build_opener()
-        headers = self._session_headers(session)
         fallback = {
             "plan": session.get("plan"),
             "expiresAt": session.get("expiresAt") or session.get("leaseExpiresAt"),
@@ -1578,9 +1729,30 @@ class NewApiAccountManager:
             "leaseExpiresAt": session.get("leaseExpiresAt"),
         }
         errors: list[str] = []
-        for path in OPENCLAW_SUBSCRIPTION_PATHS:
+        native_paths = tuple(
+            path for path in OPENCLAW_SUBSCRIPTION_PATHS
+            if not path.startswith("/api/openclaw/")
+        )
+        managed_paths = tuple(
+            path for path in OPENCLAW_SUBSCRIPTION_PATHS
+            if path.startswith("/api/openclaw/")
+        )
+        paths = (
+            native_paths + managed_paths
+            if _pick_text(newapi.get("sessionCookie"))
+            else managed_paths + native_paths
+        )
+        deadline = time.monotonic() + SUBSCRIPTION_REQUEST_BUDGET_SECONDS
+        for path in paths:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                payload = self._request_json(opener, f"{base_url}{path}", headers=headers, timeout=20)
+                headers = self._session_headers(
+                    session,
+                    include_api_token=path.startswith("/api/openclaw/"),
+                )
+                payload = self._request_json(opener, f"{base_url}{path}", headers=headers, timeout=remaining)
                 snapshot = _extract_subscription_snapshot(payload, base_url=base_url, fallback=fallback)
                 snapshot["loggedIn"] = True
                 snapshot["offline"] = False
@@ -1730,9 +1902,15 @@ class NewApiAccountManager:
                 continue
         return model_ids
 
-    def _session_headers(self, session: dict[str, Any]) -> dict[str, str]:
+    def _session_headers(
+        self,
+        session: dict[str, Any],
+        *,
+        include_api_token: bool = False,
+    ) -> dict[str, str]:
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
-        headers = self._auth_headers("", _pick_text(newapi.get("userId")))
+        access_token = _pick_text(session.get("memberToken")) if include_api_token else ""
+        headers = self._auth_headers(access_token, _pick_text(newapi.get("userId")))
         cookie = _pick_text(newapi.get("sessionCookie"))
         if cookie:
             headers["Cookie"] = cookie
@@ -1842,6 +2020,16 @@ class NewApiAccountManager:
             },
             "updatedAt": _iso(now),
             "managedBy": ACCOUNT_SOURCE,
+            "_entitlementLease": (
+                dict(token_meta["entitlementLease"])
+                if isinstance(token_meta.get("entitlementLease"), dict)
+                else None
+            ),
+            "_accountEntitlement": (
+                dict(token_meta["entitlement"])
+                if isinstance(token_meta.get("entitlement"), dict)
+                else None
+            ),
         }
 
     @staticmethod
@@ -1891,7 +2079,7 @@ class NewApiAccountManager:
             "username": account,
             "email": account if _looks_like_email(account) else "",
             "group": group,
-            "quota": token_meta.get("remainQuota"),
+            "quota": token_meta.get("accountBalance"),
         }
         payload = {"success": True, "data": user_data}
         models = token_meta.get("models") if isinstance(token_meta.get("models"), list) else []
@@ -2014,12 +2202,75 @@ class NewApiAccountManager:
         session = self._build_session(base_url, username, api_token_value, login_payload, self_payload, token_meta, models, cookie_jar)
         return self._persist_authenticated_session(session, sync_runtime=sync_runtime)
 
-    def _persist_authenticated_session(self, session: dict[str, Any], *, sync_runtime: bool) -> dict[str, Any]:
-        session["managedGatewayMigrationVersion"] = MANAGED_GATEWAY_MIGRATION_VERSION
-        self._write_session(session)
-        if sync_runtime:
-            self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
-        return session
+    def _apply_entitlement_lease(
+        self,
+        session: dict[str, Any],
+        entitlement_lease: dict[str, Any],
+    ) -> None:
+        try:
+            verified = self.account_entitlement.accept_lease(
+                entitlement_lease,
+                session=session,
+            )
+        except AccountEntitlementError as error:
+            raise NewApiAccountError(
+                f"账号登录成功，但矩阵权益校验失败：{error}",
+                status_code=error.status_code,
+            ) from error
+        session["accountEntitlement"] = {
+            "source": "signed_lease",
+            "accountId": entitlement_lease.get("accountId"),
+            "features": verified["features"],
+            "limits": verified["limits"],
+            "plan": verified["plan"],
+            "expiresAt": verified["expiresAt"],
+            "offlineGraceUntil": verified["offlineGraceUntil"],
+            "entitlementVersion": verified["entitlementVersion"],
+        }
+
+    def _migrate_legacy_entitlement_for_session(
+        self,
+        session: dict[str, Any],
+    ) -> bool:
+        del session
+        return False
+
+    def _persist_authenticated_session(
+        self,
+        session: dict[str, Any],
+        *,
+        sync_runtime: bool,
+        expected_identity: str | None = None,
+    ) -> dict[str, Any]:
+        with self._session_transaction_lock:
+            if expected_identity is not None:
+                self._assert_current_session_identity(expected_identity)
+            session["managedGatewayMigrationVersion"] = MANAGED_GATEWAY_MIGRATION_VERSION
+            entitlement_lease = session.pop("_entitlementLease", None)
+            entitlement_snapshot = session.pop("_accountEntitlement", None)
+            if isinstance(entitlement_lease, dict):
+                self._apply_entitlement_lease(session, entitlement_lease)
+            elif isinstance(entitlement_snapshot, dict):
+                session["accountEntitlement"] = {
+                    "source": str(
+                        entitlement_snapshot.get("source")
+                        or "authorization_required"
+                    ),
+                    "plan": str(entitlement_snapshot.get("plan") or "inactive"),
+                    "features": [],
+                    "limits": {
+                        "devices": 0,
+                        "concurrentTasks": 0,
+                        "unlimitedDevices": False,
+                    },
+                }
+            self._write_session(session)
+            if sync_runtime:
+                self.sync_targets(
+                    session,
+                    targets=DEFAULT_RUNTIME_SYNC_TARGETS,
+                )
+            return session
 
     def bind_ticket(self, ticket: str, *, base_url: str = "") -> dict[str, Any]:
         ticket = ticket.strip()
@@ -2054,11 +2305,10 @@ class NewApiAccountManager:
             "tokenName": data.get("tokenName") or "",
             "tokenKind": data.get("tokenKind") or "",
             "models": models,
+            **self._entitlement_meta(data),
         }
         session = self._build_session(base_url, username, api_token_value, login_payload, self_payload, token_meta, models, cookie_jar)
-        self._write_session(session)
-        self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
-        return session
+        return self._persist_authenticated_session(session, sync_runtime=True)
 
     def ensure_launcher_token(
         self,
@@ -2069,6 +2319,7 @@ class NewApiAccountManager:
         session = self.current()
         if not session or session.get("source") != ACCOUNT_SOURCE:
             raise NewApiAccountError("not_logged_in")
+        expected_identity = _account_session_identity(session)
         current_token = _pick_text(session.get("memberToken"))
         if not current_token:
             raise NewApiAccountError("managed_session_missing_api_token")
@@ -2086,6 +2337,9 @@ class NewApiAccountManager:
             current_token,
         )
         models = token_meta["models"]
+        entitlement_lease = token_meta.get("entitlementLease")
+        if isinstance(entitlement_lease, dict):
+            session["_entitlementLease"] = entitlement_lease
         classified = _classify_models(models)
         now = _utc_now()
         api_base_url = _trusted_managed_api_base(token_meta.get("apiBaseUrl"), base_url)
@@ -2164,15 +2418,181 @@ class NewApiAccountManager:
         })
         session["newApi"] = newapi
         session["updatedAt"] = _iso(now)
-        self._write_session(session)
-        if sync_runtime:
-            self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
-        return session
+        return self._persist_authenticated_session(
+            session,
+            sync_runtime=sync_runtime,
+            expected_identity=expected_identity,
+        )
+
+    def redeem_entitlement_code(self, code: str) -> dict[str, Any]:
+        normalized_code = str(code or "").strip()
+        if not normalized_code:
+            raise NewApiAccountError("请输入商业授权码", status_code=400)
+        if len(normalized_code) > 256:
+            raise NewApiAccountError("授权码格式无效", status_code=400)
+
+        session = self.current()
+        if not session:
+            raise NewApiAccountError("尚未登录模型账号", status_code=401)
+        expected_identity = _account_session_identity(session)
+        newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
+        base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
+        api_token = _pick_text(session.get("memberToken"))
+        if not api_token:
+            raise NewApiAccountError("本机会话缺少 API Token，请重新登录", status_code=401)
+
+        payload = self._request_json(
+            urllib.request.build_opener(),
+            f"{base_url}/api/openclaw/entitlements/redeem",
+            method="POST",
+            body={
+                "code": normalized_code,
+                **self._lease_identity_payload(),
+            },
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
+        )
+        data = _unwrap(payload)
+        lease = data.get("entitlementLease") if isinstance(data, dict) else None
+        if not isinstance(lease, dict):
+            raise NewApiAccountError(
+                "授权服务未返回可验证的账号权益，请稍后重试",
+                status_code=502,
+            )
+        session["_entitlementLease"] = dict(lease)
+        session["updatedAt"] = _iso(_utc_now())
+        return self._persist_authenticated_session(
+            session,
+            sync_runtime=False,
+            expected_identity=expected_identity,
+        )
+
+    def _payment_bridge_request(
+        self,
+        path: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        session = self.current()
+        if not session:
+            raise NewApiAccountError("尚未登录模型账号", status_code=401)
+        expected_identity = _account_session_identity(session)
+        newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
+        base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
+        api_token = _pick_text(session.get("memberToken"))
+        if not api_token:
+            raise NewApiAccountError("本机会话缺少 API Token，请重新登录", status_code=401)
+        payload = self._request_json(
+            urllib.request.build_opener(),
+            f"{base_url}{path}",
+            method="POST",
+            body=body,
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
+        )
+        self._assert_current_session_identity(expected_identity)
+        data = _unwrap(payload)
+        if not isinstance(data, dict):
+            raise NewApiAccountError(
+                "支付服务响应格式无效，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        return data
+
+    def payment_plans(self) -> dict[str, Any]:
+        data = self._payment_bridge_request(
+            "/api/openclaw/payments/plans",
+            {},
+        )
+        plans = data.get("plans")
+        payment = data.get("payment")
+        if not isinstance(plans, list) or not isinstance(payment, dict):
+            raise NewApiAccountError(
+                "支付服务未返回可用套餐，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        raw_channels = payment.get("channels")
+        if isinstance(raw_channels, str):
+            raw_channels = [raw_channels]
+        if not isinstance(raw_channels, list):
+            raise NewApiAccountError(
+                "支付服务返回的支付方式无效，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        channels: list[str] = []
+        for raw_channel in raw_channels:
+            channel = str(raw_channel or "").strip().lower()
+            if channel in {"alipay", "wxpay"} and channel not in channels:
+                channels.append(channel)
+        payment = dict(payment)
+        payment["channels"] = channels
+        return {"plans": plans, "payment": payment}
+
+    def create_payment_order(
+        self,
+        plan_key: str,
+        payment_type: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        normalized_plan = str(plan_key or "").strip().lower()
+        normalized_type = str(payment_type or "").strip().lower()
+        normalized_request = str(request_id or "").strip()
+        if not normalized_plan or len(normalized_plan) > 80:
+            raise NewApiAccountError("请选择有效套餐", status_code=400)
+        if normalized_type not in {"alipay", "wxpay"}:
+            raise NewApiAccountError("请选择支付方式", status_code=400)
+        if not normalized_request or len(normalized_request) > 128:
+            raise NewApiAccountError("支付请求标识无效，请重试", status_code=400)
+        data = self._payment_bridge_request(
+            "/api/openclaw/payments/orders/create",
+            {
+                "planKey": normalized_plan,
+                "paymentType": normalized_type,
+                "requestId": normalized_request,
+            },
+        )
+        if not isinstance(data.get("order"), dict):
+            raise NewApiAccountError(
+                "支付服务未返回订单，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        return {"order": data["order"]}
+
+    def payment_order_status(
+        self, order_id: str, *, reconcile: bool = False
+    ) -> dict[str, Any]:
+        normalized_order = str(order_id or "").strip()
+        if not normalized_order or len(normalized_order) > 128:
+            raise NewApiAccountError("订单编号无效", status_code=400)
+        data = self._payment_bridge_request(
+            "/api/openclaw/payments/orders/status",
+            {"orderId": normalized_order, "reconcile": reconcile is True},
+        )
+        if not isinstance(data.get("order"), dict):
+            raise NewApiAccountError(
+                "支付服务未返回订单状态，请稍后重试",
+                status_code=502,
+                code="payment_service_invalid_response",
+            )
+        return {"order": data["order"]}
+
+    def migrate_legacy_entitlement(self) -> dict[str, Any]:
+        session = self.current()
+        if not session:
+            raise NewApiAccountError("尚未登录模型账号", status_code=401)
+        raise NewApiAccountError(
+            "旧版静态授权不能自动迁移，请在当前账号中输入原授权码完成绑定。",
+            status_code=410,
+        )
 
     def refresh_current(self) -> dict[str, Any]:
         session = self.current()
         if not session:
             raise NewApiAccountError("尚未登录模型账号")
+        expected_identity = _account_session_identity(session)
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
         base_url = self.normalize_base_url(newapi.get("baseUrl") or DEFAULT_BASE_URL)
         api_token = _pick_text(session.get("memberToken"))
@@ -2181,6 +2601,62 @@ class NewApiAccountManager:
 
         opener = urllib.request.build_opener()
         headers = self._session_headers(session)
+        try:
+            entitlement_payload = self._request_json(
+                opener,
+                f"{base_url}/api/openclaw/entitlements/refresh",
+                method="POST",
+                body=self._lease_identity_payload(),
+                headers={"Authorization": f"Bearer {api_token}"},
+                timeout=ENTITLEMENT_BRIDGE_TIMEOUT_SECONDS,
+            )
+            entitlement_data = _unwrap(entitlement_payload)
+            refreshed_lease = (
+                entitlement_data.get("entitlementLease")
+                if isinstance(entitlement_data, dict)
+                else None
+            )
+            if isinstance(refreshed_lease, dict):
+                session["_entitlementLease"] = refreshed_lease
+            else:
+                entitlement_snapshot = (
+                    entitlement_data.get("entitlement")
+                    if isinstance(entitlement_data, dict)
+                    else None
+                )
+                inactive_snapshot = _inactive_entitlement_snapshot(
+                    entitlement_snapshot
+                )
+                if inactive_snapshot is not None:
+                    self.account_entitlement.clear_active()
+                    session.pop("_entitlementLease", None)
+                    session["_accountEntitlement"] = inactive_snapshot
+                    self.append_log(
+                        "[Account] entitlement was permanently deactivated; "
+                        "local phone and matrix access has been removed.\n"
+                    )
+        except NewApiAccountError as error:
+            if error.code in PERMANENT_ENTITLEMENT_ERROR_CODES:
+                self.account_entitlement.clear_active()
+                session.pop("_entitlementLease", None)
+                session["_accountEntitlement"] = {
+                    "source": error.code or "authorization_required",
+                    "plan": "inactive",
+                    "features": [],
+                    "limits": {
+                        "devices": 0,
+                        "concurrentTasks": 0,
+                        "unlimitedDevices": False,
+                    },
+                }
+                self.append_log(
+                    "[Account] entitlement refresh confirmed a permanent "
+                    f"deactivation ({error.code}); local access has been removed.\n"
+                )
+            else:
+                self.append_log(
+                    f"[Account] entitlement refresh unavailable; keeping verified offline lease: {_redact_secret_text(error)}\n"
+                )
         try:
             self_payload = self._request_json(opener, f"{base_url}/api/user/self", headers=headers)
         except NewApiAccountError:
@@ -2260,6 +2736,8 @@ class NewApiAccountManager:
             newapi.update({
                 "lastOnlineAt": _iso(now),
                 "graceExpiresAt": _iso(now + timedelta(days=SESSION_GRACE_DAYS)),
+                "offline": False,
+                "stale": False,
             })
             session["lastGoodModels"] = {
                 "models": models,
@@ -2277,15 +2755,23 @@ class NewApiAccountManager:
         })
         session["newApi"] = newapi
         session["updatedAt"] = _iso(now)
-        self._write_session(session)
-        self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
-        return session
+        return self._persist_authenticated_session(
+            session,
+            sync_runtime=True,
+            expected_identity=expected_identity,
+        )
 
     def _write_session(self, session: dict[str, Any]) -> None:
-        os.makedirs(os.path.dirname(self.session_path), exist_ok=True)
-        write_json(self.session_path, self._protected_session(session))
+        with self._session_transaction_lock:
+            os.makedirs(os.path.dirname(self.session_path), exist_ok=True)
+            write_json(self.session_path, self._protected_session(session))
 
     def current(self) -> dict[str, Any] | None:
+        with self._session_transaction_lock:
+            return self._current_session_locked()
+
+    def _current_session_locked(self) -> dict[str, Any] | None:
+        self._migrate_legacy_product_session_if_missing()
         session = read_json(self.session_path, None)
         if isinstance(session, dict) and session.get("source") == ACCOUNT_SOURCE:
             current = self._unprotected_session(session)
@@ -2303,6 +2789,81 @@ class NewApiAccountManager:
                 self._write_session(current)
             return current
         return None
+
+    def _migrate_legacy_product_session_if_missing(self) -> None:
+        if os.path.exists(self.session_path):
+            return
+        install_parent = os.path.dirname(os.path.abspath(self.paths.base_path))
+        target_key = os.path.normcase(os.path.realpath(self.session_path))
+        for directory_name in LEGACY_PRODUCT_DIRECTORY_NAMES:
+            candidate = AppPaths(
+                os.path.join(install_parent, directory_name)
+            ).member_session_file
+            if os.path.normcase(os.path.realpath(candidate)) == target_key:
+                continue
+            if os.path.islink(candidate) or not os.path.isfile(candidate):
+                continue
+            try:
+                size = os.path.getsize(candidate)
+                if size <= 0 or size > MAX_LEGACY_SESSION_BYTES:
+                    continue
+                with open(candidate, "rb") as source_file:
+                    raw = source_file.read(MAX_LEGACY_SESSION_BYTES + 1)
+                if len(raw) != size or len(raw) > MAX_LEGACY_SESSION_BYTES:
+                    continue
+                protected = json.loads(raw.decode("utf-8"))
+                if (
+                    not isinstance(protected, dict)
+                    or protected.get("source") != ACCOUNT_SOURCE
+                ):
+                    continue
+                session = self._unprotected_session(protected)
+                if not _account_session_identity(session):
+                    continue
+
+                os.makedirs(os.path.dirname(self.session_path), exist_ok=True)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_BINARY"):
+                    flags |= os.O_BINARY
+                try:
+                    file_descriptor = os.open(self.session_path, flags, 0o600)
+                except FileExistsError:
+                    return
+                try:
+                    with os.fdopen(file_descriptor, "wb") as target_file:
+                        target_file.write(raw)
+                        target_file.flush()
+                        os.fsync(target_file.fileno())
+                except Exception:
+                    try:
+                        os.remove(self.session_path)
+                    except OSError:
+                        pass
+                    raise
+                self.append_log(
+                    "[Account] migrated the protected account session from the prior product directory.\n"
+                )
+                return
+            except Exception as error:
+                self.append_log(
+                    "[Account] legacy product session migration skipped: "
+                    f"{_redact_secret_text(error)}\n"
+                )
+
+    def _assert_current_session_identity(self, expected_identity: str) -> None:
+        stored = read_json(self.session_path, None)
+        current = (
+            self._unprotected_session(stored)
+            if isinstance(stored, dict) and stored.get("source") == ACCOUNT_SOURCE
+            else None
+        )
+        actual_identity = _account_session_identity(current)
+        if not expected_identity or actual_identity != expected_identity:
+            raise NewApiAccountError(
+                "账号已切换，旧账号操作结果已丢弃，请在当前账号重试。",
+                status_code=409,
+                code="account_session_changed",
+            )
 
     def _protected_session(self, session: dict[str, Any]) -> dict[str, Any]:
         return self._transform_session_secrets(session, protect_secret)
@@ -2338,6 +2899,16 @@ class NewApiAccountManager:
                 "models": {"text": [], "image": [], "video": []},
                 "selectedModels": {"text": "", "image": "", "videoDraft": ""},
                 "usage": {},
+                "accountEntitlement": {
+                    "source": "authorization_required",
+                    "plan": "inactive",
+                    "features": [],
+                    "limits": {
+                        "devices": 0,
+                        "concurrentTasks": 0,
+                        "unlimitedDevices": False,
+                    },
+                },
                 "lastSyncResults": [],
             }
         newapi = session.get("newApi") if isinstance(session.get("newApi"), dict) else {}
@@ -2365,7 +2936,7 @@ class NewApiAccountManager:
             "source": ACCOUNT_SOURCE,
             "account": _pick_text(newapi.get("account"), session.get("memberName")),
             "memberId": _pick_text(session.get("memberId")),
-            "plan": _pick_text(session.get("plan"), "default"),
+            "plan": _pick_text(session.get("plan")),
             "status": _pick_text(session.get("status"), "active"),
             "baseUrl": _pick_text(newapi.get("baseUrl"), DEFAULT_BASE_URL),
             "gatewayBaseUrl": _pick_text(session.get("gatewayBaseUrl")),
@@ -2393,6 +2964,20 @@ class NewApiAccountManager:
                 ),
             },
             "usage": session.get("usage") if isinstance(session.get("usage"), dict) else {},
+            "accountEntitlement": (
+                dict(session.get("accountEntitlement"))
+                if isinstance(session.get("accountEntitlement"), dict)
+                else {
+                    "source": "authorization_required",
+                    "plan": "inactive",
+                    "features": [],
+                    "limits": {
+                        "devices": 0,
+                        "concurrentTasks": 0,
+                        "unlimitedDevices": False,
+                    },
+                }
+            ),
             "subscription": subscription,
             "purchaseUrl": subscription.get("purchaseUrl"),
             "lastOnlineAt": _pick_text(newapi.get("lastOnlineAt")),
@@ -2413,6 +2998,7 @@ class NewApiAccountManager:
         session = self.current()
         if not session:
             raise NewApiAccountError("尚未登录模型账号")
+        expected_identity = _account_session_identity(session)
         classes = self._session_model_classes(session)
         text_model = text_model.strip()
         phone_model = phone_model.strip()
@@ -2443,8 +3029,11 @@ class NewApiAccountManager:
         gateway.pop("videoModel", None)
         session["gateway"] = gateway
         session["updatedAt"] = _iso(_utc_now())
-        self._write_session(session)
-        self.sync_targets(session, targets=DEFAULT_RUNTIME_SYNC_TARGETS)
+        self._persist_authenticated_session(
+            session,
+            sync_runtime=True,
+            expected_identity=expected_identity,
+        )
         return self.public_session()
 
     @staticmethod
@@ -2543,27 +3132,49 @@ class NewApiAccountManager:
         })
         write_json(path, current)
 
-    def sync_targets(self, session: dict[str, Any] | None = None, *, targets: tuple[str, ...] = DEFAULT_RUNTIME_SYNC_TARGETS) -> list[dict[str, Any]]:
+    def sync_targets(
+        self,
+        session: dict[str, Any] | None = None,
+        *,
+        targets: tuple[str, ...] = DEFAULT_RUNTIME_SYNC_TARGETS,
+        expected_identity: str | None = None,
+    ) -> list[dict[str, Any]]:
         session = session or self.current()
         if not session:
             raise NewApiAccountError("not_logged_in")
-        result = WireService(self.paths, self.append_log).sync_from_session(session, targets=targets)
-        results = result["syncResults"] if isinstance(result.get("syncResults"), list) else []
-        session["lastSyncResults"] = results
-        if isinstance(session, dict) and session.get("source") == ACCOUNT_SOURCE:
-            self._write_session(session)
-        return results
+        identity = (
+            expected_identity
+            if expected_identity is not None
+            else _account_session_identity(session)
+        )
+        guard_account_session = (
+            isinstance(session, dict)
+            and session.get("source") == ACCOUNT_SOURCE
+        )
+        with self._session_transaction_lock:
+            if guard_account_session:
+                self._assert_current_session_identity(identity)
+            result = WireService(self.paths, self.append_log).sync_from_session(session, targets=targets)
+            if guard_account_session:
+                self._assert_current_session_identity(identity)
+            results = result["syncResults"] if isinstance(result.get("syncResults"), list) else []
+            session["lastSyncResults"] = results
+            if isinstance(session, dict) and session.get("source") == ACCOUNT_SOURCE:
+                self._write_session(session)
+            return results
 
     def logout(self) -> bool:
-        session = self.current()
-        if not session:
-            return False
-        try:
-            os.remove(self.session_path)
-        except FileNotFoundError:
-            pass
-        self._clear_synced_configs()
-        return True
+        with self._session_transaction_lock:
+            session = self.current()
+            if not session:
+                return False
+            try:
+                os.remove(self.session_path)
+            except FileNotFoundError:
+                pass
+            self.account_entitlement.clear_active()
+            self._clear_synced_configs()
+            return True
 
     def _clear_synced_configs(self) -> None:
         profiles = read_json(self.paths.auth_profiles, {"models": {"providers": {}}})
