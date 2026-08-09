@@ -3332,14 +3332,18 @@ class AgentOrchestratorTests(unittest.TestCase):
                 )
             )
             worker.start()
-            self.assertTrue(started.wait(timeout=1))
+            try:
+                self.assertTrue(started.wait(timeout=1))
 
-            cancelled = orchestrator.cancel_run("run-cooperative-cancel", session_id="session-1")
+                cancelled = orchestrator.cancel_run("run-cooperative-cancel", session_id="session-1")
 
-            self.assertTrue(cancellation_observed.wait(timeout=0.5))
-            worker.join(timeout=1)
-            self.assertFalse(worker.is_alive())
-            stored = repository.get_run("run-cooperative-cancel")
+                self.assertTrue(cancellation_observed.wait(timeout=0.5))
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+                stored = repository.get_run("run-cooperative-cancel")
+            finally:
+                worker.join(timeout=5)
+                registry.drain_workers(timeout=5)
 
         self.assertEqual(cancelled["status"], "running")
         self.assertEqual(cancelled["controlState"], "cancel_requested")

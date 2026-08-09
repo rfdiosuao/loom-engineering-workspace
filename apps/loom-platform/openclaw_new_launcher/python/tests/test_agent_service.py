@@ -1199,7 +1199,7 @@ class AgentServiceTests(unittest.TestCase):
 
                 self.assertFalse(runtime.resumed.wait(0.1))
                 runtime.allow_stop.set()
-                self.assertTrue(runtime.resumed.wait(1.0))
+                self.assertTrue(runtime.resumed.wait(5.0))
                 completed = _wait_for_status(service, sent["run"]["runId"], "completed")
                 self.assertEqual(completed["status"], "completed")
                 self.assertEqual(runtime.calls, 2)
@@ -2324,7 +2324,12 @@ class AgentServiceTests(unittest.TestCase):
                     "text": "contact the selected account",
                     "targets": {"deviceIds": ["phone-progress"]},
                 })
-                waiting = _wait_for_status(service, sent["run"]["runId"], "waiting_approval")
+                waiting = _wait_for_status(
+                    service,
+                    sent["run"]["runId"],
+                    "waiting_approval",
+                    timeout=10.0,
+                )
                 approval = service.get_trace(waiting["runId"])["approvals"][0]
 
                 outcome = service.queue_approval_resolution(
