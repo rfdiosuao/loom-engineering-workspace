@@ -4,6 +4,7 @@ import { licenseApi, matrixApi, parseErrorText } from '../../services/api';
 import { useAppStore } from '../../stores/appStore';
 import { showConfirm, showToast } from '../common';
 import { LicensePaywall, type MatrixEntitlementSurface } from './LicensePaywall';
+import { createSingleFlight, resolvePhoneMatrixAccess } from './phoneMatrixAccess';
 
 interface PhoneMatrixAccessGateProps {
   children: React.ReactNode;
@@ -32,40 +33,29 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
   const [featureError, setFeatureError] = React.useState('');
   const [stopping, setStopping] = React.useState(false);
 
-  const refreshFeatureAccess = React.useCallback(async (): Promise<boolean> => {
-    const currentGate = useAppStore.getState().licenseGate;
-    if (!currentGate.authorized) {
-      setFeatureAuthorized(false);
-      return false;
-    }
-
+  const refreshFeatureAccess = React.useMemo(() => createSingleFlight(async (): Promise<boolean> => {
     setFeatureAuthorized(null);
     setFeatureError('');
     try {
-      const result = await licenseApi.authorized('matrix.devices');
-      const granted = Boolean(result.authorized);
-      setFeatureAuthorized(granted);
-      return granted;
+      const result = await resolvePhoneMatrixAccess({
+        refreshLicense: checkLicense,
+        readLicense: () => useAppStore.getState().licenseGate,
+        checkFeature: () => licenseApi.authorized('matrix.devices'),
+      });
+      setFeatureAuthorized(result.authorized);
+      return result.authorized;
     } catch (error) {
       setFeatureAuthorized(false);
       setFeatureError(surfaceAccessError(error, surface));
       return false;
     }
-  }, [surface]);
+  }), [checkLicense, surface]);
 
   React.useEffect(() => {
-    if (!licenseGate.authorized) {
-      setFeatureAuthorized(false);
-      setFeatureError('');
-      return;
-    }
     void refreshFeatureAccess();
-  }, [licenseGate.authorized, licenseGate.license?.signature, refreshFeatureAccess]);
+  }, [refreshFeatureAccess]);
 
-  const refreshAllAccess = React.useCallback(async (): Promise<boolean> => {
-    await checkLicense();
-    return refreshFeatureAccess();
-  }, [checkLicense, refreshFeatureAccess]);
+  const refreshAllAccess = refreshFeatureAccess;
 
   const emergencyStop = React.useCallback(async () => {
     const accepted = await showConfirm({
@@ -95,8 +85,8 @@ export const PhoneMatrixAccessGate: React.FC<PhoneMatrixAccessGateProps> = ({ ch
         scope="phone-matrix"
         matrixSurface={surface}
         accountBindingOnly
-        featureDenied={licenseGate.authorized && featureAuthorized === false}
-        featureChecking={licenseGate.authorized && featureAuthorized === null}
+        featureDenied={featureAuthorized === false}
+        featureChecking={featureAuthorized === null}
         gateError={featureError}
         onAccessRefresh={refreshFeatureAccess}
         onEmergencyStop={emergencyStop}
