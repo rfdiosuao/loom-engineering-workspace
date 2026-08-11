@@ -261,7 +261,11 @@ class ComponentRouteResolutionTests(unittest.TestCase):
 
         with patch(
             "api.routes_components._model_config_status",
-            return_value={"installed": True, "componentStatus": "ready"},
+            return_value={
+                "installed": True,
+                "componentStatus": "ready",
+                "availableModels": ["glm-5.2-coding"],
+            },
         ):
             response = client.post(
                 "/api/components/model-config/apply",
@@ -269,7 +273,7 @@ class ComponentRouteResolutionTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(calls, ["ensure:True", "write:True"])
+        self.assertEqual(calls, ["ensure:True", "write:False"])
         self.assertEqual(response.json()["status"]["transactionId"], "tx-test")
 
     def test_model_config_apply_rejects_model_removed_from_refreshed_catalog(self) -> None:
@@ -513,7 +517,7 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             calls,
-            ["ensure:True", "write:deepseek-v3.2:True"],
+            ["ensure:True", "write:deepseek-v3.2:False"],
         )
         self.assertEqual(response.json()["status"]["transactionId"], "tx-cached-catalog")
 

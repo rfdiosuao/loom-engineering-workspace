@@ -359,6 +359,7 @@ def register_component_routes(app, ctx) -> None:
         current = _model_config_status(ctx, component_id)
         if current.get("installed") is False:
             return ctx.fastapi_json({"error": "请先安装或检测该智能体", "status": current}, 400)
+        managed_account_model_verified = False
         account_manager_getter = getattr(ctx, "get_newapi_account_mgr", None)
         if callable(account_manager_getter):
             try:
@@ -395,6 +396,7 @@ def register_component_routes(app, ctx) -> None:
                                 "status": current,
                             }, 409)
                         model = matched_model
+                        managed_account_model_verified = True
             except NewApiAccountError as exc:
                 append_log = getattr(ctx, "append_log", None)
                 if callable(append_log):
@@ -437,6 +439,7 @@ def register_component_routes(app, ctx) -> None:
                 use_cached_catalog = bool(upstream_unavailable and cached_model)
                 if use_cached_catalog:
                     model = cached_model
+                    managed_account_model_verified = True
                     if callable(append_log):
                         append_log(
                             "[ModelConfig] transient catalog refresh failure; "
@@ -475,7 +478,10 @@ def register_component_routes(app, ctx) -> None:
                 wire_service.sync_agent_model_config,
                 component_id,
                 model=model,
-                validate_remote=component_id in {"codex-desktop", "pi", "grok-build"},
+                validate_remote=(
+                    component_id in {"codex-desktop", "pi", "grok-build"}
+                    and not managed_account_model_verified
+                ),
             )
         except WireConfigError as exc:
             error_payload = _model_config_error_payload(exc)
