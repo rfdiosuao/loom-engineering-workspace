@@ -671,6 +671,13 @@ class WireServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)
             service = WireService(paths)
+            user_config_path = wire_config_module._user_codex_config_path(paths)
+            catalog_path = os.path.join(os.path.dirname(user_config_path), "models.json")
+            os.makedirs(os.path.dirname(catalog_path), exist_ok=True)
+            with open(catalog_path, "w", encoding="utf-8") as handle:
+                handle.write('{"models":[{"slug":"official-local"}]}\n')
+            with open(catalog_path, "r", encoding="utf-8") as handle:
+                original_catalog = json.load(handle)
             service.sync_custom_provider(
                 provider="DeepSeek",
                 base_url="https://api.deepseek.com",
@@ -705,6 +712,9 @@ class WireServiceTests(unittest.TestCase):
                 [item["slug"] for item in catalog["models"]],
                 ["deepseek-v4-flash", "deepseek-v4-pro"],
             )
+            service.disable_agent_model_config("codex-desktop")
+            with open(catalog_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), original_catalog)
 
     def test_codex_transaction_reports_and_preserves_existing_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

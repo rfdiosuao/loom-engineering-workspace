@@ -1160,6 +1160,7 @@ class WireService:
                 _atomic_write_text(user_config_path, user_text)
                 if _is_deepseek_provider(provider, base_url):
                     _atomic_write_text(user_models_path, _deepseek_codex_models_text())
+                    journal["appliedUserModelsSha256"] = _sha256_file(user_models_path)
                 existing_user_env = _read_text(user_env_path) if os.path.isfile(user_env_path) else ""
                 _atomic_write_text(
                     user_env_path,
@@ -1439,11 +1440,13 @@ class WireService:
             managed_path = self._agent_config_path(component_id)
             user_path = _user_codex_config_path(self.paths)
             user_env_path = _user_codex_env_path(self.paths)
+            user_models_path = os.path.join(os.path.dirname(user_path), "models.json")
             metadata_path = self._agent_config_metadata_path(component_id)
             auth_path = os.path.join(os.path.dirname(user_path), "auth.json")
             managed_text = _read_text(managed_path) if os.path.isfile(managed_path) else ""
             user_text = _read_text(user_path) if os.path.isfile(user_path) else ""
             user_env_text = _read_text(user_env_path) if os.path.isfile(user_env_path) else ""
+            user_models_snapshot = _snapshot_text_file(user_models_path)
             journal = read_json(self._codex_transaction_journal_path(), {})
             if not isinstance(journal, dict):
                 journal = {}
@@ -1477,6 +1480,11 @@ class WireService:
                 expected_key,
             )
             user_env_changed = restored_user_env_text != user_env_text
+            restore_user_models = False
+            baseline_user_models = baseline_snapshots.get("userModels")
+            applied_models_sha256 = _pick_text(journal.get("appliedUserModelsSha256"))
+            if previous_committed and isinstance(baseline_user_models, dict) and applied_models_sha256:
+                restore_user_models = _sha256_file(user_models_path) == applied_models_sha256
             applied_environment = journal.get("appliedEnvironment") if isinstance(journal.get("appliedEnvironment"), dict) else {}
             if previous_committed and not applied_environment:
                 persist_registry = _should_persist_user_env(self.paths)
@@ -1503,6 +1511,7 @@ class WireService:
                     "managedConfig": _snapshot_text_file(managed_path),
                     "userConfig": _snapshot_text_file(user_path),
                     "userEnv": _snapshot_text_file(user_env_path),
+                    "userModels": user_models_snapshot,
                     "metadata": _snapshot_text_file(metadata_path),
                 },
                 "environment": {name: _snapshot_environment_value(self.paths, name) for name in environment_names},
@@ -1534,6 +1543,8 @@ class WireService:
                         _atomic_write_text(user_env_path, restored_user_env_text)
                     elif os.path.exists(user_env_path):
                         os.remove(user_env_path)
+                if restore_user_models:
+                    _restore_text_file_snapshot(baseline_user_models)
                 environment_changed = False
                 if previous_committed:
                     for name, original in baseline_environment.items():
@@ -2616,10 +2627,10 @@ def _is_deepseek_provider(provider: str, base_url: str) -> bool:
 
 def _deepseek_codex_models_text() -> str:
     models = []
-    for slug, display_name in (
+    for priority, (slug, display_name) in enumerate((
         ("deepseek-v4-flash", "DeepSeek-V4-Flash"),
         ("deepseek-v4-pro", "DeepSeek-V4-Pro"),
-    ):
+    ), start=1):
         models.append({
             "slug": slug,
             "display_name": display_name,
@@ -2638,12 +2649,40 @@ def _deepseek_codex_models_text() -> str:
             "visibility": "list",
             "supported_in_api": True,
             "minimal_client_version": "0.144.0",
+            "priority": priority,
+            "supports_image_detail_original": False,
+            "truncation_policy": {"mode": "tokens", "limit": 10000},
+            "tool_mode": None,
+            "multi_agent_version": "v2",
+            "use_responses_lite": False,
+            "include_skills_usage_instructions": False,
+            "auto_review_model_override": None,
+            "auto_compact_token_limit": None,
+            "comp_hash": "3000",
+            "reasoning_summary_format": "experimental",
+            "default_reasoning_summary": "none",
+            "availability_nux": None,
+            "upgrade": None,
             "default_reasoning_level": "high",
             "supported_reasoning_levels": [
                 {"effort": "low", "description": "Fast responses with lighter reasoning"},
                 {"effort": "high", "description": "Extra reasoning depth"},
                 {"effort": "max", "description": "Maximum reasoning depth"},
             ],
+            "model_messages": {
+                "instructions_template": "You are Codex, a coding agent working with the user in their workspace.",
+                "instructions_variables": {
+                    "personality_default": "",
+                    "personality_friendly": "",
+                    "personality_pragmatic": "",
+                },
+                "approvals": None,
+            },
+            "experimental_supported_tools": [],
+            "supports_search_tool": True,
+            "default_service_tier": None,
+            "supports_reasoning_summaries": False,
+            "base_instructions": "You are Codex, a coding agent working with the user in their workspace.",
         })
     return json.dumps({"models": models}, ensure_ascii=False, indent=2) + "\n"
 
