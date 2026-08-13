@@ -1082,6 +1082,7 @@ class WireService:
             config_path = self._agent_config_path("codex-desktop")
             user_config_path = _user_codex_config_path(self.paths)
             user_env_path = _user_codex_env_path(self.paths)
+            user_models_path = os.path.join(os.path.dirname(user_config_path), "models.json")
             metadata_path = self._agent_config_metadata_path("codex-desktop")
             auth_path = os.path.join(os.path.dirname(user_config_path), "auth.json")
             session_home = os.path.dirname(user_config_path)
@@ -1090,13 +1091,17 @@ class WireService:
                 home_path=session_home,
             )
             existing_user_config = _read_text(user_config_path) if os.path.isfile(user_config_path) else ""
-            managed_text = _codex_config_text(base_url, provider, selected_model, managed_by)
+            managed_text = _codex_config_text(
+                base_url, provider, selected_model, managed_by,
+                model_catalog_path=user_models_path,
+            )
             user_text = _codex_user_config_text(
                 existing_user_config,
                 base_url,
                 provider,
                 selected_model,
                 managed_by,
+                model_catalog_path=user_models_path,
             )
             provider_id = _codex_provider_id(provider, managed_by)
             _validate_codex_config_text(managed_text, provider_id, base_url, selected_model)
@@ -1106,6 +1111,7 @@ class WireService:
                 "managedConfig": _snapshot_text_file(config_path),
                 "userConfig": _snapshot_text_file(user_config_path),
                 "userEnv": _snapshot_text_file(user_env_path),
+                "userModels": _snapshot_text_file(user_models_path),
                 "metadata": _snapshot_text_file(metadata_path),
             }
             environment_names = (*AGENT_STALE_MODEL_ENV_KEYS, "LOOM_CODEX_API_KEY")
@@ -1152,6 +1158,8 @@ class WireService:
             try:
                 _atomic_write_text(config_path, managed_text)
                 _atomic_write_text(user_config_path, user_text)
+                if _is_deepseek_provider(provider, base_url):
+                    _atomic_write_text(user_models_path, _deepseek_codex_models_text())
                 existing_user_env = _read_text(user_env_path) if os.path.isfile(user_env_path) else ""
                 _atomic_write_text(
                     user_env_path,
@@ -1791,7 +1799,14 @@ class WireService:
         base_url = _pick_text(wire.get("baseUrl")).rstrip("/")
         provider = _pick_text(wire.get("provider"), "LOOM")
         if component_id == "codex-desktop":
-            return _codex_config_text(base_url, provider, model, _wire_managed_by(wire))
+            user_config_path = _user_codex_config_path(self.paths)
+            return _codex_config_text(
+                base_url,
+                provider,
+                model,
+                _wire_managed_by(wire),
+                model_catalog_path=os.path.join(os.path.dirname(user_config_path), "models.json"),
+            )
         if component_id == "claude-code":
             return _claude_settings_text(base_url, provider, model)
         if component_id == "pi":
@@ -2146,7 +2161,7 @@ def _restore_environment_snapshot_if_unchanged(
 
 def _restore_codex_transaction_snapshot(journal: dict[str, Any]) -> None:
     snapshots = journal.get("snapshots") if isinstance(journal.get("snapshots"), dict) else {}
-    for key in ("managedConfig", "userConfig", "userEnv", "metadata"):
+    for key in ("managedConfig", "userConfig", "userEnv", "userModels", "metadata"):
         snapshot = snapshots.get(key)
         if isinstance(snapshot, dict):
             _restore_text_file_snapshot(snapshot)
@@ -2534,31 +2549,103 @@ def _codex_provider_block(base_url: str, provider: str, provider_id: str) -> lis
     ]
 
 
-def _codex_config_text(base_url: str, provider: str, model: str, managed_by: str = "") -> str:
+def _codex_config_text(
+    base_url: str,
+    provider: str,
+    model: str,
+    managed_by: str = "",
+    *,
+    model_catalog_path: str = "",
+) -> str:
     provider_id = _codex_provider_id(provider, managed_by)
-    return "\n".join([
+    lines = [
         "# Managed by LOOM. The real token is injected at launch time.",
         "# Only model/provider fields are managed; personal Codex plugins and MCP stay in user config.",
         f'model = "{_toml_string(model)}"',
         f'model_provider = "{provider_id}"',
-        "",
+    ]
+    if _is_deepseek_provider(provider, base_url):
+        lines.extend([
+            'preferred_auth_method = "apikey"',
+            'forced_login_method = "api"',
+            'model_reasoning_effort = "high"',
+            f'model_catalog_json = "{_toml_string(os.path.abspath(model_catalog_path).replace(chr(92), "/"))}"',
+        ])
+    return "\n".join([*lines, "",
         *_codex_provider_block(base_url, provider, provider_id),
         "",
     ])
 
 
-def _codex_user_config_text(existing_text: str, base_url: str, provider: str, model: str, managed_by: str = "") -> str:
+def _codex_user_config_text(
+    existing_text: str,
+    base_url: str,
+    provider: str,
+    model: str,
+    managed_by: str = "",
+    *,
+    model_catalog_path: str = "",
+) -> str:
     if not _pick_text(existing_text):
-        return _codex_config_text(base_url, provider, model, managed_by)
+        return _codex_config_text(
+            base_url, provider, model, managed_by,
+            model_catalog_path=model_catalog_path,
+        )
     provider_id = _codex_provider_id(provider, managed_by)
     lines = existing_text.splitlines()
     lines = _upsert_top_level_toml_value(lines, "model", model)
     lines = _upsert_top_level_toml_value(lines, "model_provider", provider_id)
+    if _is_deepseek_provider(provider, base_url):
+        for key, value in (
+            ("preferred_auth_method", "apikey"),
+            ("forced_login_method", "api"),
+            ("model_reasoning_effort", "high"),
+            ("model_catalog_json", os.path.abspath(model_catalog_path).replace("\\", "/")),
+        ):
+            lines = _upsert_top_level_toml_value(lines, key, value)
     lines = _remove_toml_table(lines, f"[model_providers.{provider_id}]")
     while lines and not lines[-1].strip():
         lines.pop()
     lines.extend(["", *_codex_provider_block(base_url, provider, provider_id), ""])
     return "\n".join(lines)
+
+
+def _is_deepseek_provider(provider: str, base_url: str) -> bool:
+    return "deepseek" in _pick_text(provider).lower() or urllib.parse.urlsplit(base_url).hostname == "api.deepseek.com"
+
+
+def _deepseek_codex_models_text() -> str:
+    models = []
+    for slug, display_name in (
+        ("deepseek-v4-flash", "DeepSeek-V4-Flash"),
+        ("deepseek-v4-pro", "DeepSeek-V4-Pro"),
+    ):
+        models.append({
+            "slug": slug,
+            "display_name": display_name,
+            "description": "DeepSeek Responses API coding model.",
+            "context_window": 1048576,
+            "max_context_window": 1048576,
+            "effective_context_window_percent": 95,
+            "input_modalities": ["text"],
+            "prefer_websockets": False,
+            "supports_parallel_tool_calls": True,
+            "support_verbosity": True,
+            "default_verbosity": "low",
+            "apply_patch_tool_type": "freeform",
+            "web_search_tool_type": "text",
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": True,
+            "minimal_client_version": "0.144.0",
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Fast responses with lighter reasoning"},
+                {"effort": "high", "description": "Extra reasoning depth"},
+                {"effort": "max", "description": "Maximum reasoning depth"},
+            ],
+        })
+    return json.dumps({"models": models}, ensure_ascii=False, indent=2) + "\n"
 
 
 def _upsert_top_level_toml_value(lines: list[str], key: str, value: str) -> list[str]:

@@ -72,7 +72,7 @@ const CUSTOM_PROVIDER_OPTIONS: CustomProviderOption[] = [
   { id: 'anthropic', label: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1' },
   { id: 'gemini', label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
   { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
-  { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
+  { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com' },
   { id: 'moonshot', label: 'Moonshot - Kimi', baseUrl: 'https://api.moonshot.cn/v1' },
 ];
 
@@ -811,6 +811,7 @@ const AgentModelConfigPanel: React.FC<{
     setCustomProviderId(providerId);
     setCustomProvider(option.label);
     if (option.baseUrl) setCustomBaseUrl(option.baseUrl);
+    if (option.id === 'deepseek') onDraftModelChange('deepseek-v4-flash');
   };
 
   return (
