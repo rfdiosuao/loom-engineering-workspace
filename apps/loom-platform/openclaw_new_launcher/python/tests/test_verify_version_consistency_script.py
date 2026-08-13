@@ -132,11 +132,11 @@ class VerifyVersionConsistencyScriptTests(unittest.TestCase):
         self.assertIn(f"Version consistency check passed: {version}", output)
 
     def test_expected_version_accepts_release_contract_literal(self) -> None:
-        result = _run_script("-ExpectedVersion", "2.4.11")
+        result = _run_script("-ExpectedVersion", "2.4.14")
 
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("Version consistency check passed: 2.4.11", output)
+        self.assertIn("Version consistency check passed: 2.4.14", output)
 
     def test_expected_version_rejects_non_exact_values(self) -> None:
         version = _current_version()
