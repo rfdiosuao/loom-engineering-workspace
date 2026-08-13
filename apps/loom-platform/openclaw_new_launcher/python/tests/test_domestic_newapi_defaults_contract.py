@@ -41,6 +41,24 @@ class CanonicalNewApiDefaultsContractTests(unittest.TestCase):
         self.assertIn('"https://api.heang.top/v1"', source)
         self.assertNotIn('"https://api-cn.heang.top/v1"', source)
 
+    def test_deepseek_presets_use_current_official_models(self) -> None:
+        sources = {
+            "api_config": self._read("src", "components", "dialogs", "ApiConfigDialog.tsx"),
+            "agent_installer": self._read("src", "components", "agents", "AgentInstallerPage.tsx"),
+            "providers": self._read("python", "core", "constants.py"),
+        }
+
+        for name, source in sources.items():
+            with self.subTest(source=name):
+                self.assertIn("https://api.deepseek.com", source)
+
+        combined = "\n".join(sources.values())
+        self.assertIn("deepseek-v4-flash", combined)
+        self.assertIn("deepseek-v4-pro", combined)
+        self.assertNotIn("deepseek-coder", combined)
+        self.assertIn("option.id === 'deepseek'", sources["agent_installer"])
+        self.assertIn("onDraftModelChange('deepseek-v4-flash')", sources["agent_installer"])
+
 
 if __name__ == "__main__":
     unittest.main()

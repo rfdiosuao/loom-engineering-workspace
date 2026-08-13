@@ -1036,8 +1036,20 @@ class AgentService:
     def _resolve_run_model(self, session: Mapping[str, Any]) -> tuple[str, str]:
         session_model_id = str(session.get("modelId") or "").strip()
         if session_model_id:
-            self._ensure_model_available(session_model_id)
-            return session_model_id, "session"
+            catalog, _default_model_id = self._model_catalog()
+            available_ids = {
+                str(item.get("modelId") or "")
+                for item in catalog
+                if item.get("available") is True
+            }
+            resolved_model_id = {
+                "deepseek-chat": "deepseek-v4-flash",
+                "deepseek-reasoner": "deepseek-v4-pro",
+                "deepseek-coder": "deepseek-v4-flash",
+            }.get(session_model_id, session_model_id)
+            if resolved_model_id not in available_ids:
+                raise ValueError(f"AGENT_MODEL_NOT_AVAILABLE: {session_model_id}")
+            return resolved_model_id, "session"
         _catalog, default_model_id = self._model_catalog()
         if default_model_id:
             self._ensure_model_available(default_model_id)

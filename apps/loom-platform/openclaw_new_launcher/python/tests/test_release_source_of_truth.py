@@ -25,7 +25,7 @@ CI_VERSION_GATE_STEP_LINES = (
     "      - name: Verify version consistency",
     "        working-directory: apps/loom-platform",
     "        env:",
-    '          LOOM_RELEASE_CONTRACT_VERSION: "2.4.13"',
+    '          LOOM_RELEASE_CONTRACT_VERSION: "2.4.14"',
     r"        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-version-consistency.ps1 -ExpectedVersion $env:LOOM_RELEASE_CONTRACT_VERSION",
     "",
 )

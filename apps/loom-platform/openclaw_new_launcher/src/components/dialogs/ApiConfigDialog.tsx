@@ -19,8 +19,8 @@ const PROVIDERS: Record<string, ProviderPreset> = {
     models: ['gpt-4o', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-3.5-turbo'],
   },
   DeepSeek: {
-    url: 'https://api.deepseek.com/v1',
-    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-coder'],
+    url: 'https://api.deepseek.com',
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
   },
   MiniMax: {
     url: 'https://api.minimaxi.com/v1',
@@ -65,7 +65,7 @@ function providerIdFromUrl(baseUrl: string, fallback: string): string {
 function modelDefinition(id: string) {
   // Qwen thinking parameters differ across OpenAI-compatible gateways; keeping
   // qwen3 plain avoids invalid thinking_budget/max_completion_tokens payloads.
-  const reasoning = /^(claude|o1|o3|o4|deepseek-reasoner)/i.test(id);
+  const reasoning = /^(claude|o1|o3|o4|deepseek-(reasoner|v4-pro))/i.test(id);
   const contextWindow = id.startsWith('qwen3') ? 16000000 : id.startsWith('claude') ? 200000 : 128000;
   const maxTokens = id.startsWith('qwen3') ? 4096000 : 32000;
   return {

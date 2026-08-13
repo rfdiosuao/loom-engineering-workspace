@@ -667,6 +667,55 @@ class WireServiceTests(unittest.TestCase):
             self.assertEqual(parsed["model"], "gpt-4o")
             self.assertEqual(parsed["model_providers"]["heang"]["env_key"], "LOOM_CODEX_API_KEY")
 
+    def test_deepseek_codex_config_writes_responses_auth_and_model_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            user_config_path = wire_config_module._user_codex_config_path(paths)
+            catalog_path = os.path.join(os.path.dirname(user_config_path), "models.json")
+            os.makedirs(os.path.dirname(catalog_path), exist_ok=True)
+            with open(catalog_path, "w", encoding="utf-8") as handle:
+                handle.write('{"models":[{"slug":"official-local"}]}\n')
+            with open(catalog_path, "r", encoding="utf-8") as handle:
+                original_catalog = json.load(handle)
+            service.sync_custom_provider(
+                provider="DeepSeek",
+                base_url="https://api.deepseek.com",
+                api_key="sk-test-not-real",
+                text_model="deepseek-v4-flash",
+                targets=(),
+            )
+            compatibility = {
+                "baseUrl": "https://api.deepseek.com",
+                "endpoint": "https://api.deepseek.com/responses",
+                "model": "deepseek-v4-flash",
+                "protocols": ["responses"],
+                "toolCall": True,
+            }
+            status = service.sync_agent_model_config(
+                "codex-desktop",
+                model="deepseek-v4-flash",
+                validate_remote=True,
+                remote_validation=compatibility,
+            )
+
+            with open(status["userConfigPath"], "rb") as handle:
+                parsed = tomllib.loads(handle.read().decode("utf-8"))
+            self.assertEqual(parsed["preferred_auth_method"], "apikey")
+            self.assertEqual(parsed["forced_login_method"], "api")
+            self.assertEqual(parsed["model_reasoning_effort"], "high")
+            catalog_path = parsed["model_catalog_json"]
+            self.assertTrue(os.path.isabs(catalog_path))
+            with open(catalog_path, "r", encoding="utf-8") as handle:
+                catalog = json.load(handle)
+            self.assertEqual(
+                [item["slug"] for item in catalog["models"]],
+                ["deepseek-v4-flash", "deepseek-v4-pro"],
+            )
+            service.disable_agent_model_config("codex-desktop")
+            with open(catalog_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), original_catalog)
+
     def test_codex_transaction_reports_and_preserves_existing_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)

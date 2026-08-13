@@ -954,6 +954,39 @@ class AgentServiceTests(unittest.TestCase):
             finally:
                 service.shutdown()
 
+    def test_legacy_deepseek_session_keeps_history_and_uses_current_model_alias(self) -> None:
+        from services.agent_service import AgentService
+
+        account = FakeAccount(
+            _managed_session(model="deepseek-v4-flash"),
+            text_models=["deepseek-v4-flash", "deepseek-v4-pro"],
+        )
+        runtime = BlockingRuntime()
+        with tempfile.TemporaryDirectory() as root:
+            service = AgentService(
+                AppPaths(root),
+                runtime=runtime,
+                account_manager=account,
+                capabilities=_registry(),
+            )
+            try:
+                session = service.repository.create_session(
+                    title="Legacy DeepSeek",
+                    model_id="deepseek-chat",
+                )
+                sent = service.send_message(
+                    session["sessionId"],
+                    {"clientMessageId": "deepseek-alias-1", "text": "continue history"},
+                )
+                self.assertEqual(sent["run"]["modelId"], "deepseek-v4-flash")
+                self.assertEqual(
+                    service.repository.get_session(session["sessionId"])["modelId"],
+                    "deepseek-chat",
+                )
+            finally:
+                runtime.release.set()
+                service.shutdown()
+
     def test_send_message_returns_immediately_and_persists_under_data_agent(self) -> None:
         from services.agent_service import AgentService
 
