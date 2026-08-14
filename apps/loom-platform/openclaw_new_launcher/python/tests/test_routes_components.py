@@ -606,6 +606,16 @@ class ComponentRouteResolutionTests(unittest.TestCase):
         self.assertIn("刷新", payload["error"])
         self.assertNotIn("selected_model_not_listed", payload["error"])
 
+    def test_model_config_apply_translates_windows_sandbox_failure(self) -> None:
+        payload = _model_config_error_payload(
+            WireConfigError("codex_windows_sandbox_unusable: CreateProcessAsUserW failed: 5")
+        )
+
+        self.assertEqual(payload["code"], "codex_windows_sandbox_unusable")
+        self.assertEqual(payload["action"], "review_codex_sandbox")
+        self.assertIn("Windows 沙盒", payload["error"])
+        self.assertNotIn("CreateProcessAsUserW", payload["error"])
+
     def test_model_config_disable_requires_confirmation(self) -> None:
         calls: list[str] = []
 

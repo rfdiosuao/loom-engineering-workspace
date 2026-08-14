@@ -716,6 +716,73 @@ class WireServiceTests(unittest.TestCase):
             with open(catalog_path, "r", encoding="utf-8") as handle:
                 self.assertEqual(json.load(handle), original_catalog)
 
+    def test_disable_deepseek_restores_every_official_root_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            user_path = wire_config_module._user_codex_config_path(paths)
+            os.makedirs(os.path.dirname(user_path), exist_ok=True)
+            official_config = "\n".join([
+                'model = "gpt-5.2-codex"',
+                'model_provider = "openai"',
+                'model_reasoning_effort = "low"',
+                '[windows]',
+                'sandbox = "elevated"',
+                '',
+            ])
+            with open(user_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(official_config)
+            service.sync_custom_provider(
+                provider="DeepSeek",
+                base_url="https://api.deepseek.com",
+                api_key="sk-test-not-real",
+                text_model="deepseek-v4-flash",
+                targets=(),
+            )
+            service.sync_agent_model_config(
+                "codex-desktop",
+                model="deepseek-v4-flash",
+                remote_validation={
+                    "baseUrl": "https://api.deepseek.com",
+                    "endpoint": "https://api.deepseek.com/responses",
+                    "model": "deepseek-v4-flash",
+                    "protocols": ["responses"],
+                    "toolCall": True,
+                },
+            )
+
+            service.disable_agent_model_config("codex-desktop")
+
+            with open(user_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), official_config)
+
+    def test_codex_transaction_rejects_unusable_unelevated_windows_sandbox_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppPaths(temp_dir)
+            service = WireService(paths)
+            service.sync_from_session(session_snapshot(), targets=())
+            user_path = wire_config_module._user_codex_config_path(paths)
+            os.makedirs(os.path.dirname(user_path), exist_ok=True)
+            original_config = "\n".join([
+                'model = "gpt-5.2-codex"',
+                '[windows]',
+                'sandbox = "unelevated"',
+                '',
+            ])
+            with open(user_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(original_config)
+
+            failed_probe = mock.Mock(returncode=1, stdout="", stderr="CreateProcessAsUserW failed: 5")
+            with (
+                mock.patch("core.wire_config._find_codex_cli", return_value="codex.exe"),
+                mock.patch("core.wire_config.subprocess.run", return_value=failed_probe),
+            ):
+                with self.assertRaisesRegex(WireConfigError, "codex_windows_sandbox_unusable"):
+                    service.sync_agent_model_config("codex-desktop", model="gpt-4o")
+
+            with open(user_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), original_config)
+
     def test_codex_transaction_reports_and_preserves_existing_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = AppPaths(temp_dir)

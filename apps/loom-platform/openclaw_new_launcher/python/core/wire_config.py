@@ -8,6 +8,8 @@ import ipaddress
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -1091,6 +1093,7 @@ class WireService:
                 home_path=session_home,
             )
             existing_user_config = _read_text(user_config_path) if os.path.isfile(user_config_path) else ""
+            _validate_codex_windows_sandbox(existing_user_config)
             managed_text = _codex_config_text(
                 base_url, provider, selected_model, managed_by,
                 model_catalog_path=user_models_path,
@@ -1158,6 +1161,7 @@ class WireService:
             try:
                 _atomic_write_text(config_path, managed_text)
                 _atomic_write_text(user_config_path, user_text)
+                journal["appliedUserConfigSha256"] = _sha256_file(user_config_path)
                 if _is_deepseek_provider(provider, base_url):
                     _atomic_write_text(user_models_path, _deepseek_codex_models_text())
                     journal["appliedUserModelsSha256"] = _sha256_file(user_models_path)
@@ -1464,7 +1468,11 @@ class WireService:
 
             if previous_committed:
                 baseline_user_text = _snapshot_text(baseline_snapshots.get("userConfig"))
-                restored_user_text = _restore_codex_user_config_from_baseline(user_text, baseline_user_text)
+                applied_user_config_sha256 = _pick_text(journal.get("appliedUserConfigSha256"))
+                if applied_user_config_sha256 and _sha256_file(user_path) == applied_user_config_sha256:
+                    restored_user_text = baseline_user_text
+                else:
+                    restored_user_text = _restore_codex_user_config_from_baseline(user_text, baseline_user_text)
                 user_changed = restored_user_text != user_text
             else:
                 restored_user_text, user_changed = _remove_loom_codex_provider(user_text)
@@ -2687,6 +2695,66 @@ def _deepseek_codex_models_text() -> str:
     return json.dumps({"models": models}, ensure_ascii=False, indent=2) + "\n"
 
 
+def _find_codex_cli() -> str:
+    explicit = _pick_text(os.environ.get("CODEX_CLI_PATH"))
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    local_app_data = _pick_text(os.environ.get("LOCALAPPDATA"))
+    if local_app_data:
+        bin_root = os.path.join(local_app_data, "OpenAI", "Codex", "bin")
+        candidates: list[str] = []
+        if os.path.isdir(bin_root):
+            for root, _dirs, files in os.walk(bin_root):
+                if "codex.exe" in files:
+                    candidates.append(os.path.join(root, "codex.exe"))
+        if candidates:
+            return max(candidates, key=lambda path: os.path.getmtime(path))
+    discovered = shutil.which("codex")
+    return discovered or ""
+
+
+def _validate_codex_windows_sandbox(config_text: str) -> None:
+    if os.name != "nt" or not _pick_text(config_text):
+        return
+    try:
+        parsed = tomllib.loads(config_text)
+    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        raise WireConfigError(f"invalid_codex_toml: {exc}") from exc
+    windows = parsed.get("windows") if isinstance(parsed.get("windows"), dict) else {}
+    sandbox = _pick_text(windows.get("sandbox"))
+    if not sandbox:
+        return
+    if sandbox not in {"elevated", "unelevated"}:
+        raise WireConfigError(f"codex_windows_sandbox_invalid: {sandbox}")
+    codex_cli = _find_codex_cli()
+    if not codex_cli:
+        return
+    try:
+        result = subprocess.run(
+            [
+                codex_cli,
+                "sandbox",
+                "-c",
+                f'windows.sandbox="{sandbox}"',
+                "cmd.exe",
+                "/d",
+                "/c",
+                "exit",
+                "0",
+            ],
+            cwd=tempfile.gettempdir(),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WireConfigError(f"codex_windows_sandbox_unusable: {_redact_secret_text(exc)}") from exc
+    if result.returncode != 0:
+        detail = _redact_secret_text(result.stderr or result.stdout) or f"exit={result.returncode}"
+        raise WireConfigError(f"codex_windows_sandbox_unusable: {detail}")
+
+
 def _upsert_top_level_toml_value(lines: list[str], key: str, value: str) -> list[str]:
     result: list[str] = []
     replaced = False
@@ -2708,6 +2776,20 @@ def _upsert_top_level_toml_value(lines: list[str], key: str, value: str) -> list
         result.append(line)
     if in_top_level and not replaced:
         result.append(assignment)
+    return result
+
+
+def _remove_top_level_toml_value(lines: list[str], key: str) -> list[str]:
+    result: list[str] = []
+    in_top_level = True
+    key_pattern = re.compile(rf"^{re.escape(key)}\s*=")
+    for line in lines:
+        stripped = line.strip()
+        if in_top_level and stripped.startswith("[") and stripped.endswith("]"):
+            in_top_level = False
+        if in_top_level and key_pattern.match(stripped):
+            continue
+        result.append(line)
     return result
 
 
@@ -2838,6 +2920,18 @@ def _restore_codex_user_config_from_baseline(current_text: str, baseline_text: s
     baseline_provider_id = _pick_text(baseline.get("model_provider"))
     if isinstance(baseline_model, str) and baseline_model.strip():
         lines = _upsert_top_level_toml_value(lines, "model", baseline_model.strip())
+    managed_root_keys = (
+        "preferred_auth_method",
+        "forced_login_method",
+        "model_reasoning_effort",
+        "model_catalog_json",
+    )
+    for key in managed_root_keys:
+        baseline_value = baseline.get(key)
+        if isinstance(baseline_value, str) and baseline_value.strip():
+            lines = _upsert_top_level_toml_value(lines, key, baseline_value.strip())
+        else:
+            lines = _remove_top_level_toml_value(lines, key)
     if baseline_provider_id:
         lines = _upsert_top_level_toml_value(lines, "model_provider", baseline_provider_id)
         lines = _remove_toml_table(lines, f'[model_providers."{baseline_provider_id}"]')
