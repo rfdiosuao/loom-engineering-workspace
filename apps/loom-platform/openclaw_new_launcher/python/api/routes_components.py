@@ -232,6 +232,12 @@ def _model_config_error_payload(error: Exception, *, custom_provider: bool = Fal
             "code": "codex_config_busy",
             "action": "retry_model_config",
         }
+    if detail.startswith(("codex_windows_sandbox_unusable", "codex_windows_sandbox_invalid")):
+        return {
+            "error": "Codex 当前的 Windows 沙盒无法创建。麓鸣没有写入模型配置；请在 Codex 设置中恢复可用的 Windows 沙盒模式后重试。",
+            "code": "codex_windows_sandbox_unusable",
+            "action": "review_codex_sandbox",
+        }
     if detail.startswith("codex_config_recovery_required"):
         return {
             "error": "Codex 配置失败且自动恢复未完成，请保留日志并重新启动麓鸣后再试。",
